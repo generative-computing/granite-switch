@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 
-| [**Browse Adapters**](https://huggingface.co/collections/ibm-granite/granite-libraries) | [Models on HF](https://huggingface.co/collections/ibm-granite/granite-switch-6801b533a3a9dbb4e836e498) | [Tutorials](tutorials/README.md) |
+| [**Browse Adapters**](https://huggingface.co/collections/ibm-granite/granite-libraries) | [Models on HF](https://huggingface.co/ibm-granite/granite-switch-4.1-8b-preview) | [Tutorials](tutorials/README.md) |
 
 Task-specific fine-tuning delivers large accuracy gains on small models — but shipping a separate model per task is operationally painful. Granite Switch gives you the accuracy of many models with the footprint of one: compose a single checkpoint from our adapter library in minutes, then swap or upgrade individual capabilities as your needs change.
 
