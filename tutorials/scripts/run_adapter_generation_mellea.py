@@ -391,11 +391,10 @@ def start_vllm_server(
 
 
 def strip_adapter_suffix(name: str) -> str:
-    """Strip _alora or _lora suffix from adapter name to get base intrinsic name."""
-    if name.endswith("_alora"):
-        return name[:-6]
-    if name.endswith("_lora"):
-        return name[:-5]
+    """Strip ``_alora`` / ``_lora`` suffix to get the base intrinsic name."""
+    for suffix in ("_alora", "_lora"):
+        if name.endswith(suffix):
+            return name.removesuffix(suffix)
     return name
 
 

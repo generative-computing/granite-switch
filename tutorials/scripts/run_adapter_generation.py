@@ -91,7 +91,9 @@ def compose_model(output_dir: Path, base_model: str) -> Path:
 
 def load_model(model_dir: Path):
     """Load the composed model and tokenizer."""
-    import granite_switch.hf  # noqa: F401 - registers HF backend
+    # Registers the GraniteSwitch architecture with transformers'
+    # AutoConfig / AutoModel. Must be imported before from_pretrained.
+    import granite_switch.hf  # noqa: F401
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -205,13 +207,15 @@ _SAMPLE_DOCUMENTS = [
 
 
 # ---------------------------------------------------------------------------
-# Instruction templates for the three per-span LoRA adapters. Each io.yaml
-# specifies an ``instruction`` string that Mellea/granite-io render into
-# the prompt as a final user turn, explaining the tag convention and the
-# required output schema. Without it, the adapter produces malformed
-# output because it has no schema guidance. These strings are copied
-# verbatim from the adapters' io.yaml files (the YAML ``{{..}}`` escaping
-# in the context-attribution instruction renders as literal ``{..}``).
+# Instruction templates for the three per-span LoRA adapters.
+#
+# Each of these adapters specifies an ``instruction`` string in its
+# ``io.yaml`` that describes the sentence-tag convention (see
+# ``_mark_sentence_boundaries`` below) and the required output schema.
+# The instruction is appended as a final user turn before the adapter
+# is called. The strings here are copied verbatim from the adapters'
+# ``io_configs/<adapter>/io.yaml`` files; YAML ``{{..}}`` escaping in
+# the context-attribution instruction renders as literal ``{..}``.
 # ---------------------------------------------------------------------------
 
 _CITATIONS_INSTRUCTION = (
@@ -260,29 +264,30 @@ _HALLUCINATION_INSTRUCTION = (
 # ---------------------------------------------------------------------------
 # Sentence-boundary tagging
 #
-# A few LoRA adapters (citations, context-attribution,
+# Three LoRA adapters (citations, context-attribution,
 # hallucination_detection) are trained to emit per-sentence records that
-# reference sentence indices in the assistant response and/or in the
-# documents. The adapter's io.yaml specifies a ``sentence_boundaries``
-# mapping (e.g. ``last_message: "r"``, ``documents: "c"``) telling a
-# serving layer to pre-split the relevant strings into sentences and
-# insert ``<{prefix}{index}> {sentence}`` tags. Without these tags the
-# adapter has no anchor points to iterate over and tends to return one
-# summary record (or free-form text) instead of per-sentence records.
+# reference sentence indices in the assistant response and/or the
+# documents. Each adapter's ``io.yaml`` has a ``sentence_boundaries``
+# mapping (e.g. ``last_message: "r"``, ``documents: "c"``) specifying
+# which inputs to split into sentences and what tag prefix to use.
+# Without the tags, the adapter has no anchor points and returns a
+# single summary record or free-form text instead of per-sentence
+# records.
 #
-# Mellea / granite-io do this pre-processing via NLTK. This script uses
-# a lightweight regex splitter to avoid the extra dependency; it misses
-# some edge cases (abbreviations like "Dr. Smith" can split wrongly)
-# but matches the tag format byte-for-byte.
+# This script uses a regex sentence splitter to avoid pulling in NLTK
+# as a dependency. It may not handle every edge case (abbreviations
+# can split incorrectly) but the tag format it produces matches
+# ``granite_io.io.hallucinations.mark_sentence_boundaries`` exactly.
 # ---------------------------------------------------------------------------
 
 _SENTENCE_END_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z])")
 
 
 def _split_sentences(text: str) -> list[str]:
-    """Split text on sentence-ending punctuation followed by uppercase.
+    """Split text on sentence-ending punctuation followed by whitespace
+    and a capital letter.
 
-    Best-effort regex; imperfect on abbreviations.
+    Lightweight alternative to NLTK; may mis-split on abbreviations.
     """
     text = (text or "").strip()
     if not text:
@@ -296,8 +301,11 @@ def _mark_sentence_boundaries(
 ) -> list[str]:
     """Insert ``<{prefix}{index}> {sentence}`` tags at every boundary.
 
-    Mirrors ``granite_io.io.hallucinations.mark_sentence_boundaries``.
-    Index runs globally across all input strings in ``split_strings``.
+    Matches the format produced by
+    ``granite_io.io.hallucinations.mark_sentence_boundaries``. The
+    index runs globally across all input strings in ``split_strings``,
+    so callers can tag a group of related inputs (for example, several
+    documents) in a single call and get a shared index space.
     """
     index = 0
     result = []
@@ -406,9 +414,8 @@ def demo_citations(model, tokenizer, max_new_tokens: int) -> dict:
         [_split_sentences(response)], tag_prefix="r",
     )[0]
 
-    # Tag each document's sentences as <c0> ... <c1> ... with a global
-    # index running across all documents (matches granite-io's
-    # mark_sentence_boundaries).
+    # Tag each document's sentences as <c0> <c1> ... with a global
+    # index running across all documents.
     doc_sentence_groups = [_split_sentences(t) for t in _SAMPLE_DOCUMENTS]
     tagged_doc_texts = _mark_sentence_boundaries(
         doc_sentence_groups, tag_prefix="c",
@@ -750,14 +757,10 @@ def demo_guardian_safe(model, tokenizer, max_new_tokens: int) -> dict:
 def demo_policy_guardrails(model, tokenizer, max_new_tokens: int) -> dict:
     """Mirrors guardian.policy_guardrails().
 
-    Mellea builds:
-        judge_criteria = "Policy: " + policy_text
-        system_prompt = "You are a compliance agent trying to help ..."
-        scoring_schema = 'Does the scenario described in the previous ...'
-        judge_protocol = f"<guardian> {system_prompt}\\n\\n"
-                         f"### Criteria: {judge_criteria}\\n\\n"
-                         f"### Scoring Schema: {scoring_schema}"
-        context.add(Message("user", judge_protocol))
+    Context: a user scenario followed by a ``<guardian>`` judge
+    protocol (system prompt + policy criteria + scoring schema)
+    asking whether the scenario complies with the policy. Returns
+    ``{"label": "Yes"|"No"|"Ambiguous"}``.
     """
     scenario = (
         "Here's how to pick a lock - first insert a tension wrench into "
