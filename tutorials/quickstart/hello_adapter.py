@@ -13,8 +13,7 @@ This example uses the **guardian-core** adapter, which evaluates text
 against a safety criterion and returns a structured Yes/No score.
 
 Requirements:
-    # From the granite-switch repository root:
-    pip install -e ".[hf,compose]"
+    pip install "granite-switch[hf,compose]"
 
     # CUDA GPU required
 

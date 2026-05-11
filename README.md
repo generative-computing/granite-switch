@@ -21,17 +21,15 @@ Browse the full set of ready-to-use adapters in the [Granite Libraries collectio
 ### Install
 
 ```bash
-git clone https://github.com/generative-computing/granite-switch.git
-cd granite-switch
 python -m venv venv && source venv/bin/activate
 
-# Pick what you need:
-pip install -e ".[compose]" # Compose modular models
-pip install -e ".[hf]"      # HuggingFace inference
-pip install -e ".[vllm]"    # vLLM production inference (0.19.x)
-pip install -e ".[vllm20]"  # vLLM 0.20+ (requires CUDA 13+)
-pip install -e ".[dev]"     # Everything (uses vLLM 0.19.x by default)
-pip install -e ".[dev-vllm20]" # Dev environment with vLLM 0.20+
+# Granite-Switch installation is based on your usecase:
+pip install "granite-switch[compose]"   # Compose modular models
+pip install "granite-switch[hf]"        # HuggingFace inference
+pip install "granite-switch[vllm]"      # vLLM production inference (0.19.x)
+pip install "granite-switch[vllm20]"    # vLLM 0.20+ (requires CUDA 13+)
+pip install "granite-switch[dev]"       # Everything (uses vLLM 0.19.x by default)
+pip install "granite-switch[dev-vllm20]" # Dev environment with vLLM 0.20+
 ```
 
 Requires Python 3.9+ and PyTorch 2.0+.

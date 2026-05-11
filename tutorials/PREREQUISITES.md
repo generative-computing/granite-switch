@@ -20,8 +20,7 @@ Python 3.10+ is required.
 ### Base Installation
 
 ```bash
-# From the granite-switch repository root:
-pip install -e .
+pip install granite-switch
 ```
 
 ### HuggingFace Backend
@@ -43,7 +42,7 @@ This includes:
 For production inference with vLLM:
 
 ```bash
-pip install "git+https://github.com/generative-computing/granite-switch.git@main"
+pip install "granite-switch[vllm]"
 ```
 
 This includes:

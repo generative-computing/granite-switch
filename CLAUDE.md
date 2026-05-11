@@ -78,7 +78,7 @@ granite-switch/
 └── README.md
 ```
 
-## Installation
+## Installation (local/dev)
 
 ```bash
 # Core package only (config)
