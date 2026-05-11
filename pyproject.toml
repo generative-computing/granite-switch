@@ -14,6 +14,10 @@ dependencies = [
     "transformers>=5.5.1",
 ]
 
+[project.urls]
+Repository = "https://github.com/generative-computing/granite-switch"
+Documentation = "https://github.com/generative-computing/granite-switch/tree/main/tutorials"
+
 [project.optional-dependencies]
 hf = ["accelerate>=0.20.0"]
 vllm = ["vllm>=0.19.1,<0.20.0"]
