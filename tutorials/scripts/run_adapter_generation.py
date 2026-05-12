@@ -14,7 +14,7 @@ Usage:
     python run_adapter_generation.py [--output results.json] [--max-tokens 1024]
     python run_adapter_generation.py --model-dir /path/to/model
 
-Requires: CUDA GPU, granite-switch[hf] installed.
+Requires: granite-switch[hf] installed. GPU recommended (CPU works but is slow).
 """
 
 import argparse
@@ -985,8 +985,7 @@ def main():
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
-        print("ERROR: CUDA GPU required but not available")
-        sys.exit(1)
+        print("WARNING: no CUDA GPU detected — running on CPU will be slow.")
 
     print("=" * 60)
     print("Granite Switch Adapter Generation Demo")
