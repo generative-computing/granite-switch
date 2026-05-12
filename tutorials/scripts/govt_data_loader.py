@@ -11,6 +11,7 @@ import io
 import json
 import os
 import time
+import warnings
 import zipfile
 
 import chromadb
@@ -37,7 +38,12 @@ class GraniteEmbeddingFunction(EmbeddingFunction):
         self._model     = AutoModel.from_pretrained(model_id).to(device).eval()
         print(f"Granite embedding model ready on {device}  ({model_id})")
         if device == "cpu":
-            print("Notice: running Embedding & indexing step on a cpu might take a very long time.")
+            warnings.warn(
+                "Embedding ~49k passages on CPU will take hours. "
+                "Expected runtime is ~10 min on a single consumer GPU. "
+                "Consider running on a GPU host, or sharing a pre-built ./govt_chroma directory.",
+                stacklevel=2,
+            )
 
     def __call__(self, input: Documents) -> Embeddings:
         all_embs = []
@@ -81,13 +87,28 @@ def load_or_build_govt_chroma(
     if not os.path.exists(jsonl_path):
         print(f"Downloading {jsonl_url} …")
         t0 = time.time()
-        with httpx.Client(follow_redirects=True, timeout=120.0) as c:
-            resp = c.get(jsonl_url)
-            resp.raise_for_status()
-        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+        # Stream into memory with a progress bar — the zip is ~50MB and the
+        # unblocked .get() used to leave users staring at a silent cell for minutes.
+        # Split timeout: fail fast on connect (10s), allow slow reads (300s).
+        timeout = httpx.Timeout(300.0, connect=10.0)
+        buf = io.BytesIO()
+        with httpx.Client(follow_redirects=True, timeout=timeout) as c:
+            with c.stream("GET", jsonl_url) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("Content-Length", 0)) or None
+                with tqdm(total=total, unit="B", unit_scale=True, desc="download") as bar:
+                    for chunk in resp.iter_bytes(chunk_size=65536):
+                        buf.write(chunk)
+                        bar.update(len(chunk))
+        buf.seek(0)
+        # Atomic write: extract to a .tmp path then os.replace, so a kill/crash
+        # mid-write can't leave a truncated jsonl that later runs silently use.
+        tmp_path = jsonl_path + ".tmp"
+        with zipfile.ZipFile(buf) as zf:
             inner = next(n for n in zf.namelist() if n.endswith(".jsonl"))
-            with zf.open(inner) as src, open(jsonl_path, "wb") as dst:
+            with zf.open(inner) as src, open(tmp_path, "wb") as dst:
                 dst.write(src.read())
+        os.replace(tmp_path, jsonl_path)
         print(f"Saved {jsonl_path} in {time.time() - t0:.1f}s.")
 
     print(f"Reading {jsonl_path} → {chroma_path}…")
@@ -102,6 +123,12 @@ def load_or_build_govt_chroma(
             ids.append(doc.get("_id", doc.get("id", str(len(ids)))))
             texts.append(text)
             metas.append({"title": doc.get("title", ""), "url": doc.get("url", "")})
+    if not ids:
+        raise RuntimeError(
+            f"{jsonl_path} yielded zero documents — the file may be empty, truncated, "
+            f"or schema-drifted (expected a 'text' field per line). Delete it and rerun "
+            f"to re-download."
+        )
     print(f"Read {len(ids):,} docs in {time.time() - t0:.1f}s.  Embedding & indexing…")
 
     t1 = time.time()
