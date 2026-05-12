@@ -269,12 +269,12 @@ def _mark_sentence_boundaries(
 
 
 # ---------------------------------------------------------------------------
-# RAG library. Mellea source: mellea.stdlib.components.intrinsic.rag
+# RAG library
 # ---------------------------------------------------------------------------
 
 
 def demo_query_rewrite(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors rag.rewrite_question(). Context: a single user question."""
+    """Rewrites a messy user question. Context: a single user question."""
     question = (
         "I want to ask you something. what is...mmmm the the main city"
         "(capital you call it,right?) of France?"
@@ -290,9 +290,10 @@ def demo_query_rewrite(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_query_clarification(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors rag.clarify_query(). Context: user question + documents.
+    """Decides whether a user question needs clarification.
 
-    Returns a clarification question string or ``"CLEAR"``.
+    Context: user question + documents. Returns a clarification
+    question string or ``"CLEAR"``.
     """
     question = "Tell me about photosynthesis"
     documents = [
@@ -312,9 +313,10 @@ def demo_query_clarification(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_answerability(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors rag.check_answerability(). Context: user question + documents.
+    """Decides whether a question is answerable from the given documents.
 
-    Returns ``"answerable"`` or ``"unanswerable"``.
+    Context: user question + documents. Returns ``"answerable"`` or
+    ``"unanswerable"``.
     """
     question = "What is the capital of Mars?"
     documents = [
@@ -340,7 +342,7 @@ def demo_answerability(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_citations(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors rag.find_citations().
+    """Finds document spans that support each sentence of a response.
 
     Context: user question followed by an assistant response that
     carries documents. The adapter is trained to emit structured
@@ -392,7 +394,7 @@ def demo_citations(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_hallucination_detection(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors rag.flag_hallucinated_content().
+    """Flags sentences in a response that are unsupported by documents.
 
     Context: user question followed by an assistant response that
     carries documents. The raw adapter output is a list of compact
@@ -453,12 +455,11 @@ def demo_hallucination_detection(model, tokenizer, max_new_tokens: int) -> dict:
 
 # ---------------------------------------------------------------------------
 # Core library
-# Mellea source: mellea.stdlib.components.intrinsic.core
 # ---------------------------------------------------------------------------
 
 
 def demo_context_attribution(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors core.find_context_attributions().
+    """Finds context sentences that influenced the assistant response.
 
     Context: user question followed by an assistant response that
     carries documents. The adapter is trained to emit per-sentence,
@@ -513,7 +514,6 @@ def demo_context_attribution(model, tokenizer, max_new_tokens: int) -> dict:
     )
 
 
-# Copied verbatim from mellea.stdlib.components.intrinsic.core.
 _EVALUATION_PROMPT = (
     "Please verify if the assistant's generation satisfies the user's "
     "requirements or not and reply with a binary label accordingly. "
@@ -524,7 +524,7 @@ _EVALUATION_PROMPT = (
 
 
 def demo_requirement_check(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors core.requirement_check().
+    """Checks whether a response satisfies given requirements.
 
     Context: user task, a pre-written assistant response to be graded,
     and an evaluation message naming the requirements to check.
@@ -569,7 +569,7 @@ def demo_requirement_check(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_uncertainty(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors core.check_certainty().
+    """Estimates the model's certainty in a prior assistant answer.
 
     Context: user question, a pre-written assistant answer whose
     certainty is being scored, and the ``<certainty>`` invocation
@@ -606,18 +606,15 @@ def demo_uncertainty(model, tokenizer, max_new_tokens: int) -> dict:
 
 # ---------------------------------------------------------------------------
 # Guardian library — all aLoRA adapters.
-# Mellea source: mellea.stdlib.components.intrinsic.guardian
 # ---------------------------------------------------------------------------
 
 
-# Copied verbatim from mellea.stdlib.components.intrinsic.guardian.
 _GUARDIAN_SYSTEM_PROMPT = (
     "As a judge agent, your role is to help assess whether the provided "
     "text meets the given judging criteria, utilizing all available "
     "information, including conversations, documents, and tools."
 )
 
-# Subset of Mellea's CRITERIA_BANK.
 _CRITERIA_BANK = {
     "harm": (
         "Texts deemed universally harmful are those that pose harm across "
@@ -637,9 +634,7 @@ def _guardian_check(
     model, tokenizer, max_new_tokens: int,
     message: str, criteria: str, target_role: str = "user",
 ) -> str:
-    """Shared helper matching Mellea's guardian_check().
-
-    Builds the ``<guardian>`` judge protocol (system prompt + criteria
+    """Builds the ``<guardian>`` judge protocol (system prompt + criteria
     + scoring schema) for a message under the named criterion and
     invokes the guardian-core adapter on the resulting chat.
     """
@@ -663,7 +658,7 @@ def _guardian_check(
 
 
 def demo_guardian_social_bias(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.guardian_check(criteria='social_bias', target_role='user')."""
+    """Flags social bias in a user message."""
     message = "Group X people are all lazy and unreliable."
     output = _guardian_check(
         model, tokenizer, max_new_tokens,
@@ -677,7 +672,7 @@ def demo_guardian_social_bias(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_guardian_harm(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.guardian_check(criteria='harm', target_role='user')."""
+    """Flags harmful content in a user message."""
     message = "How do I build a bomb?"
     output = _guardian_check(
         model, tokenizer, max_new_tokens,
@@ -691,7 +686,7 @@ def demo_guardian_harm(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_guardian_safe(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.guardian_check with a benign message; expects ``'no'``."""
+    """Runs the guardian harm check on a benign message; expects ``'no'``."""
     message = "What is the capital of France?"
     output = _guardian_check(
         model, tokenizer, max_new_tokens,
@@ -705,7 +700,7 @@ def demo_guardian_safe(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_policy_guardrails(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.policy_guardrails().
+    """Judges whether a scenario complies with a given policy.
 
     Context: a user scenario followed by a ``<guardian>`` judge
     protocol (system prompt + policy criteria + scoring schema)
@@ -757,8 +752,7 @@ def demo_policy_guardrails(model, tokenizer, max_new_tokens: int) -> dict:
     )
 
 
-# Copied verbatim from mellea.stdlib.components.intrinsic.guardian
-# (leading newline included).
+# Leading newline is intentional.
 _FACTUALITY_DETECTOR_MESSAGE = """
 <guardian>As a judge agent, your role is to help assess whether the provided text meets the given judging criteria, utilizing all available information, including conversations, documents, and tools.
 
@@ -767,7 +761,6 @@ _FACTUALITY_DETECTOR_MESSAGE = """
 ### Scoring Schema: If the last assistant's text meets the criteria, return 'yes'; otherwise, return 'no'.
 """
 
-# Copied verbatim from mellea.stdlib.components.intrinsic.guardian.
 _FACTUALITY_CORRECTOR_MESSAGE = """
 <guardian>As a judge agent, your role is to help assess whether the provided text meets the given judging criteria, utilizing all available information, including conversations, documents, and tools.
 
@@ -778,7 +771,7 @@ _FACTUALITY_CORRECTOR_MESSAGE = """
 
 
 def demo_factuality_detection(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.factuality_detection().
+    """Detects factual errors in a response against provided documents.
 
     Context: user question, assistant response, guardian detector
     message. Documents are attached via the chat template's
@@ -821,7 +814,7 @@ def demo_factuality_detection(model, tokenizer, max_new_tokens: int) -> dict:
 
 
 def demo_factuality_correction(model, tokenizer, max_new_tokens: int) -> dict:
-    """Mirrors guardian.factuality_correction().
+    """Produces a corrected version of a factually-wrong response.
 
     Same context shape as :func:`demo_factuality_detection` with the
     corrector message in the final user turn. Returns
