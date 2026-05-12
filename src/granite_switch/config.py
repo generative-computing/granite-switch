@@ -19,15 +19,21 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         num_adapters (int): Number of LoRA adapters available. Default: 0 (no adapters).
             This counts real LoRA adapters only (not base). Index 0 always means "base / no adapter".
         adapter_token_ids (List[int]): Token IDs for adapter control.
-            Length: num_adapters (one token per real adapter).
+            Length: num_adapters (one token per real adapter). Must be unique.
             adapter_token_ids[i] activates adapter i+1 (1-indexed output).
             Output 0 = base (implicit default, no token needed to return to base).
             NOTE: SingleSwitch cannot transition back to base mid-sequence.
+        adapter_substitute_token_ids (List[int]): Token IDs whose embeddings replace
+            the control-token embeddings before the decoder runs (token-exchange mode).
+            Length: num_adapters. When provided together with control_dims=0, the model
+            uses token exchange instead of KV hiding.
 
         SingleSwitch parameters:
             control_token_gain (float): Attention gain for control/non-control separation. Default: 15.0.
             switch_head_dim (int): Dimension of Q/K/V vectors in switch attention. Default: 32.
-            control_dims (int): Extra dimensions for K/V to mask control tokens. Must be >= 0. Default: 32.
+            control_dims (int): Extra dimensions for K/V to mask control tokens. Must be >= 0.
+                Default: 0 (token-exchange mode — adapter_substitute_token_ids must be provided).
+                Set >= 1 to enable the legacy KV-hiding path.
 
         adapter_names (List[str]): Ordered adapter names for name-to-index mapping.
             Used by hiding_groups and hiding_policy to resolve names to indices.
@@ -55,10 +61,11 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self,
         num_adapters: int = 0,
         adapter_token_ids: Optional[List[int]] = None,
+        adapter_substitute_token_ids: Optional[List[int]] = None,
         # SingleSwitch parameters
         control_token_gain: float = 15.0,
         switch_head_dim: int = 32,
-        control_dims: int = 32,
+        control_dims: int = 0,
         # Hiding groups and policy
         adapter_names: Optional[List[str]] = None,
         hiding_groups: Optional[Dict[str, List[str]]] = None,
@@ -109,7 +116,32 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     f"adapter_token_ids length ({len(adapter_token_ids)}) must equal "
                     f"num_adapters ({num_adapters})."
                 )
+            # Token-exchange builds the control→substitute LUT keyed by adapter token id;
+            # duplicates would silently collapse to a single slot.
+            if len(set(adapter_token_ids)) != len(adapter_token_ids):
+                raise ValueError(
+                    f"adapter_token_ids must be unique; got {adapter_token_ids}"
+                )
         self.adapter_token_ids = adapter_token_ids
+
+        # Validate adapter_substitute_token_ids if provided
+        if num_adapters > 0 and adapter_substitute_token_ids is not None:
+            if len(adapter_substitute_token_ids) != num_adapters:
+                raise ValueError(
+                    f"adapter_substitute_token_ids length ({len(adapter_substitute_token_ids)}) "
+                    f"must equal num_adapters ({num_adapters})."
+                )
+            if any(sid < 0 for sid in adapter_substitute_token_ids):
+                raise ValueError(
+                    f"adapter_substitute_token_ids must all be >= 0 (real token ids); "
+                    f"got {adapter_substitute_token_ids}"
+                )
+            if adapter_token_ids is None:
+                raise ValueError(
+                    "adapter_token_ids is required when adapter_substitute_token_ids "
+                    "is provided (token-exchange mode maps control ids to substitute ids)."
+                )
+        self.adapter_substitute_token_ids = adapter_substitute_token_ids
 
         # SingleSwitch parameters
         self.control_token_gain = control_token_gain
@@ -122,6 +154,20 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             )
         self.control_dims = control_dims
         self.fused_add_norm = fused_add_norm
+
+        # Control tokens need one of two handling paths when adapters are present:
+        # legacy KV hiding (control_dims > 0) or token exchange (substitute ids present).
+        # The combination of neither would leak raw control-token embeddings into attention.
+        if (
+            num_adapters > 0
+            and control_dims == 0
+            and adapter_substitute_token_ids is None
+        ):
+            raise ValueError(
+                "When num_adapters > 0, either control_dims > 0 (legacy KV hiding) "
+                "or adapter_substitute_token_ids (token exchange) must be provided. "
+                "Neither is set, which would leave control tokens unhandled."
+            )
 
         # Hiding groups and policy
         self.adapter_names = adapter_names
@@ -199,6 +245,15 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         if self.num_adapters > 0 and self.control_dims > 0:
             return self.projection_head_dim + self.control_dims
         return self.projection_head_dim
+
+    @property
+    def use_token_exchange(self) -> bool:
+        """True when control tokens are replaced with substitute embeddings (vs. KV hiding)."""
+        return (
+            self.num_adapters > 0
+            and self.control_dims == 0
+            and self.adapter_substitute_token_ids is not None
+        )
 
     @property
     def num_hiding_groups(self) -> int:

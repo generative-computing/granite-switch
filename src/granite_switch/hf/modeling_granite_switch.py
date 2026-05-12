@@ -188,6 +188,27 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                     torch.zeros(config.num_adapters, dtype=torch.long),
                 )
 
+            # --- Token-exchange buffers ---
+            # control_to_substitute_lut: [vocab_size], -1 for non-control token ids
+            # and the substitute token id at each control slot. Lets the embedding
+            # swap run as a single gather + masked scatter without allocating an
+            # [B, S, num_adapters] intermediate.
+            if config.use_token_exchange:
+                sub_ids = config.adapter_substitute_token_ids
+                self.register_buffer(
+                    "adapter_substitute_token_ids",
+                    torch.tensor(sub_ids, dtype=torch.long),
+                )
+                max_ctrl_id = max(config.adapter_token_ids)
+                lut_size = max(config.vocab_size, max_ctrl_id + 1)
+                lut = torch.full((lut_size,), -1, dtype=torch.long)
+                for ctrl_id, sub_id in zip(config.adapter_token_ids, sub_ids):
+                    lut[ctrl_id] = sub_id
+                self.register_buffer("control_to_substitute_lut", lut)
+            else:
+                self.adapter_substitute_token_ids = None
+                self.control_to_substitute_lut = None
+
             # --- Hiding group buffers ---
             # token_to_group_mask: [vocab_size, num_groups] lookup table.
             # For each token ID, True at group g if that token belongs to group g.
@@ -224,6 +245,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         else:
             self.switch = None
             self.adapter_token_ids = None
+            self.adapter_substitute_token_ids = None
+            self.control_to_substitute_lut = None
             self.token_to_group_mask = None
             self.adapter_hiding_matrix = None
 
@@ -287,8 +310,25 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             )
             use_cache = False
 
+        inputs_embeds_owned = inputs_embeds is None
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
+
+        # Token exchange: replace each control token's embedding with the
+        # substitute token's embedding before the embedding multiplier so
+        # both paths receive the same scaling. The LUT maps control token
+        # ids to substitute ids; non-control positions produce -1.
+        if self.config.use_token_exchange and input_ids is not None:
+            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+            is_control = sub_id_per_pos >= 0
+            if is_control.any():
+                flat_sub_ids = sub_id_per_pos[is_control]
+                sub_embeds = self.embed_tokens(flat_sub_ids)
+                # Only clone when the caller owns the tensor; if we just
+                # allocated it via embed_tokens(input_ids), mutating is safe.
+                if not inputs_embeds_owned:
+                    inputs_embeds = inputs_embeds.clone()
+                inputs_embeds[is_control] = sub_embeds
 
         inputs_embeds = inputs_embeds * self.embedding_multiplier
 
@@ -339,7 +379,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             # Compute hidden_count for position correction (SingleSwitch).
             # SingleSwitch fires once: hidden_count is 0 before the control
             # token and 1 at/after it, which is exactly (adapter_indices > 0).
-            if hidden_count is None:
+            # In token-exchange mode control tokens become real positions, so
+            # the correction is a no-op — skip it rather than subtract zeros.
+            if hidden_count is None and not self.config.use_token_exchange:
                 hidden_count = (adapter_indices > 0).long()
         else:
             batch_size, seq_length = inputs_embeds.shape[:2]

@@ -20,7 +20,7 @@ from granite_switch.hf import GraniteSwitchForCausalLM
 
 @pytest.fixture
 def mode_a_config():
-    """Mode A (native): built-in adapters only, control_dims=0."""
+    """Mode A (native): built-in adapters only, control_dims=0, token-exchange."""
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -30,6 +30,8 @@ def mode_a_config():
         num_key_value_heads=4,
         num_adapters=2,
         adapter_token_ids=[250, 251],
+        # Built-in adapters: substitute = BOS (arbitrary id 1 for tests).
+        adapter_substitute_token_ids=[1, 1],
         adapter_names=["router", "planner"],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
@@ -244,7 +246,13 @@ class TestNegative:
             )
 
     def test_hiding_groups_require_control_dims(self):
-        """Hiding groups with control_dims=0 should be rejected."""
+        """Hiding groups require control_dims >= num_hiding_groups.
+
+        A build with 1 hiding group and control_dims=1 works; with 2 groups and
+        control_dims=1 it must fail. Substitute ids are supplied only to get
+        past the newer "no-hiding-and-no-exchange" validator; the assertion is
+        specifically about the hiding-vs-control_dims arithmetic.
+        """
         with pytest.raises(ValueError, match="control_dims.*must be >= number of hiding groups"):
             GraniteSwitchConfig(
                 vocab_size=300,
@@ -255,9 +263,10 @@ class TestNegative:
                 num_key_value_heads=4,
                 num_adapters=2,
                 adapter_token_ids=[250, 251],
+                adapter_substitute_token_ids=[1, 2],
                 adapter_names=["a", "b"],
-                hiding_groups={"all_controls": ["a", "b"]},
+                hiding_groups={"g1": ["a"], "g2": ["b"]},  # 2 groups > control_dims=1
                 max_lora_rank=4,
                 adapter_ranks=[4, 4],
-                control_dims=0,  # Too few for 1 hiding group
+                control_dims=1,
             )

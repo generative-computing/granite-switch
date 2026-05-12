@@ -62,6 +62,7 @@ from granite_switch.composer.adapter_discovery import (
 from granite_switch.composer.tokenizer_setup import (
     add_control_tokens,
     configure_chat_template,
+    get_alora_first_invocation_token_id,
 )
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 
@@ -453,7 +454,17 @@ Examples:
         "--control-dims",
         type=int,
         default=None,
-        help="Extra dims for K/V to mask control tokens in decoder layers",
+        help="Extra dims for K/V to mask control tokens in decoder layers. "
+             "Default: 0 (token-exchange mode). Set to >=1 and pass --legacy-hiding "
+             "only if a specific adapter regresses under token exchange.",
+    )
+    parser.add_argument(
+        "--legacy-hiding",
+        action="store_true",
+        default=False,
+        help="Use the legacy KV-hiding path (control_dims=32, no embedding "
+             "substitution). Escape hatch for adapters that regress under the "
+             "default token-exchange mode.",
     )
     parser.add_argument(
         "--built-in-adapters",
@@ -750,26 +761,52 @@ def build():
     if args.control_dims is not None:
         optional_kwargs["control_dims"] = args.control_dims
 
-    # Per-mode hiding configuration
-    if build_mode == "native":
-        # Mode A (native): no hiding, control_dims=0 (unless overridden)
+    # Control-token handling mode: token-exchange by default, legacy hiding on opt-in.
+    if args.legacy_hiding:
+        # Legacy: keep today's KV-hiding scheme. control_dims must be > 0.
+        if optional_kwargs.get("control_dims", 0) == 0:
+            optional_kwargs["control_dims"] = 32
+        adapter_substitute_token_ids = None
+        # Hiding groups only apply in third-party mode; native mode still
+        # has no hiding and no substitution, but --legacy-hiding forces
+        # control_dims > 0 so the config validator accepts it.
+        if build_mode == "native":
+            hiding_groups = None
+            hiding_policy = None
+            adapter_third_party = None
+        else:
+            hiding_groups = {"all_controls": list(adapter_names)}
+            hiding_policy = {name: ["all_controls"] for name in adapter_names}
+            hiding_policy["base"] = ["all_controls"]
+            adapter_third_party = list(external_names)
+    else:
+        # Default: token-exchange. control_dims=0; every adapter needs a substitute id.
+        # ALoRA adapters substitute with the first token of their invocation sequence;
+        # LoRA/builtin adapters substitute with BOS (only required when at least one
+        # non-ALoRA adapter is present — ALoRA-only builds don't need BOS).
+        adapter_substitute_token_ids = []
+        for adapter_path, _name, technology, _source in all_discovered:
+            if technology == "alora":
+                sub_id = get_alora_first_invocation_token_id(adapter_path)
+            else:
+                if tokenizer.bos_token_id is None:
+                    raise ValueError(
+                        "Tokenizer has no bos_token_id; required for LoRA/builtin "
+                        "token exchange. Pass --legacy-hiding to use the KV-hiding "
+                        "path instead."
+                    )
+                sub_id = tokenizer.bos_token_id
+            adapter_substitute_token_ids.append(sub_id)
+        # Token-exchange supersedes KV hiding — no hiding config needed.
         hiding_groups = None
         hiding_policy = None
         adapter_third_party = None
-        if "control_dims" not in optional_kwargs:
-            optional_kwargs["control_dims"] = 0
-    else:
-        # Mode B (third-party): full hiding for external adapters
-        hiding_groups = {"all_controls": list(adapter_names)}
-        hiding_policy = {name: ["all_controls"] for name in adapter_names}
-        hiding_policy["base"] = ["all_controls"]
-        # Only external adapters are third-party
-        adapter_third_party = list(external_names)
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
         adapter_paths=adapter_paths,
         adapter_token_ids=adapter_token_ids,
+        adapter_substitute_token_ids=adapter_substitute_token_ids,
         adapter_names=adapter_names,
         hiding_groups=hiding_groups,
         hiding_policy=hiding_policy,

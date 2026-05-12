@@ -12,7 +12,12 @@ from granite_switch.config import GraniteSwitchConfig
 # ── Helper ────────────────────────────────────────────────────────────
 
 def _valid_kwargs(num_adapters=2, **overrides):
-    """Return kwargs for a valid SingleSwitch config, with optional overrides."""
+    """Return kwargs for a valid SingleSwitch config, with optional overrides.
+
+    Default mode: legacy KV hiding (control_dims=32) so existing shape/hiding
+    tests keep their original contract. Token-exchange tests override
+    control_dims=0 and pass adapter_substitute_token_ids.
+    """
     adapter_names = [f"adapter_{i}" for i in range(num_adapters)]
     base = dict(
         vocab_size=300,
@@ -26,6 +31,7 @@ def _valid_kwargs(num_adapters=2, **overrides):
         adapter_names=adapter_names,
         max_lora_rank=8,
         adapter_ranks=[8] * num_adapters,
+        control_dims=32,
     )
     base.update(overrides)
     return base

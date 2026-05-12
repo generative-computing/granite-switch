@@ -11,12 +11,8 @@ import re
 from typing import Dict, List, Optional, Tuple
 
 
-def _decode_alora_invocation_text(adapter_path: str, tokenizer) -> str:
-    """Decode alora_invocation_tokens from adapter_config.json to a string.
-
-    The activation control token must be inserted immediately before the first
-    token of the invocation sequence. Decoding the full sequence gives the text
-    span to search for in the rendered message content.
+def _load_alora_invocation_token_ids(adapter_path: str) -> List[int]:
+    """Load alora_invocation_tokens from adapter_config.json.
 
     Raises:
         FileNotFoundError: If adapter_config.json is not found at adapter_path.
@@ -31,8 +27,27 @@ def _decode_alora_invocation_text(adapter_path: str, tokenizer) -> str:
         raise ValueError(
             f"alora_invocation_tokens is missing or empty in {config_path}"
         )
+    return token_ids
 
+
+def _decode_alora_invocation_text(adapter_path: str, tokenizer) -> str:
+    """Decode alora_invocation_tokens from adapter_config.json to a string.
+
+    The activation control token must be inserted immediately before the first
+    token of the invocation sequence. Decoding the full sequence gives the text
+    span to search for in the rendered message content.
+    """
+    token_ids = _load_alora_invocation_token_ids(adapter_path)
     return tokenizer.decode(token_ids, skip_special_tokens=False)
+
+
+def get_alora_first_invocation_token_id(adapter_path: str) -> int:
+    """Return the first token ID of an ALoRA adapter's invocation sequence.
+
+    Used by token-exchange mode to substitute this embedding for the adapter's
+    control token before the decoder runs.
+    """
+    return _load_alora_invocation_token_ids(adapter_path)[0]
 
 
 def add_control_tokens(

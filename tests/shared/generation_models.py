@@ -49,7 +49,12 @@ ADAPTER_RANK = 8
 
 
 def single_overrides(base_cfg):
-    """SingleSwitch overrides for the given base config."""
+    """SingleSwitch overrides for the given base config.
+
+    Pinned to the legacy KV-hiding path (control_dims=32) so existing
+    generation tests exercise hiding semantics even after the default
+    flipped to token-exchange.
+    """
     base_layers = base_cfg["layer_types"]
     return {
         "num_adapters": NUM_ADAPTERS,
@@ -63,6 +68,7 @@ def single_overrides(base_cfg):
             "adapter_1": ["all_controls"],
         },
         "adapter_third_party": ["adapter_0", "adapter_1"],
+        "control_dims": 32,
         "num_hidden_layers": len(base_layers) + 1,
         "layer_types": ["attention"] + base_layers,
     }

@@ -155,6 +155,25 @@ class GraniteSwitchModel(nn.Module):
                     torch.zeros(num_adapters, dtype=torch.long),
                 )
 
+            # --- Token-exchange LUT ---
+            # See the HF model for the shared rationale. -1 indicates "not a
+            # control token"; other positions map control id → substitute id.
+            if config.use_token_exchange:
+                sub_ids = config.adapter_substitute_token_ids
+                self.register_buffer(
+                    "adapter_substitute_token_ids",
+                    torch.tensor(sub_ids, dtype=torch.long),
+                )
+                max_ctrl_id = max(config.adapter_token_ids)
+                lut_size = max(config.vocab_size, max_ctrl_id + 1)
+                lut = torch.full((lut_size,), -1, dtype=torch.long)
+                for ctrl_id, sub_id in zip(config.adapter_token_ids, sub_ids):
+                    lut[ctrl_id] = sub_id
+                self.register_buffer("control_to_substitute_lut", lut)
+            else:
+                self.adapter_substitute_token_ids = None
+                self.control_to_substitute_lut = None
+
             # Initialize compile-friendly LoRA metadata handler
             # This replaces vLLM's LoRAKernelMeta with a torch.compile-compatible version
             # that avoids data-dependent branching
@@ -193,6 +212,8 @@ class GraniteSwitchModel(nn.Module):
         else:
             self.switch = None
             self.adapter_token_ids = None
+            self.adapter_substitute_token_ids = None
+            self.control_to_substitute_lut = None
             self.lora_meta = None
             self.token_to_group_mask = None
             self.adapter_hiding_matrix = None
@@ -355,8 +376,10 @@ class GraniteSwitchModel(nn.Module):
                 token_group_membership = None
                 query_group_suppression = None
 
-            # Compute hidden_count for position correction (SingleSwitch)
-            if hidden_count is None:
+            # Compute hidden_count for position correction (SingleSwitch).
+            # In token-exchange mode control tokens are real positions, so
+            # skip the correction entirely rather than subtract zeros.
+            if hidden_count is None and not self.config.use_token_exchange:
                 hidden_count = (adapter_indices > 0).long()
 
             # Position correction: adjust positions to close gaps from hidden tokens.
@@ -402,8 +425,9 @@ class GraniteSwitchModel(nn.Module):
                             intermediate_tensors, "query_group_suppression",
                         )
                     )
-                hidden_count = (adapter_indices > 0).long()
-                positions = torch.clamp(positions - hidden_count, min=0)
+                if not self.config.use_token_exchange:
+                    hidden_count = (adapter_indices > 0).long()
+                    positions = torch.clamp(positions - hidden_count, min=0)
             else:
                 # Fallback: no metadata available (should not happen in normal operation)
                 num_tokens = input_ids.shape[0] if input_ids is not None else 0
@@ -419,8 +443,23 @@ class GraniteSwitchModel(nn.Module):
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+                hidden_states_owned = False
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
+                hidden_states_owned = True
+
+            # Token exchange: mirror of the HF path. vLLM tensors are flat
+            # [num_tokens, hidden]; the gather + masked scatter runs pre-
+            # multiplier so both raw and substitute embeddings are scaled once.
+            if self.config.use_token_exchange and input_ids is not None:
+                sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+                is_control = sub_id_per_pos >= 0
+                if is_control.any():
+                    flat_sub_ids = sub_id_per_pos[is_control]
+                    sub_embeds = self.get_input_embeddings(flat_sub_ids)
+                    if not hidden_states_owned:
+                        hidden_states = hidden_states.clone()
+                    hidden_states[is_control] = sub_embeds
 
             hidden_states *= self.config.embedding_multiplier
             residual = None

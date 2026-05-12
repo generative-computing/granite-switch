@@ -15,7 +15,10 @@ from granite_switch.config import GraniteSwitchConfig
 
 
 def _valid_kwargs(num_adapters=2, **overrides):
-    """Return kwargs for a valid SingleSwitch config, with optional overrides."""
+    """Return kwargs for a valid SingleSwitch config, with optional overrides.
+
+    Default mode: legacy KV hiding (control_dims=32).
+    """
     adapter_names = [f"adapter_{i}" for i in range(num_adapters)]
     base = dict(
         vocab_size=300,
@@ -29,6 +32,7 @@ def _valid_kwargs(num_adapters=2, **overrides):
         adapter_names=adapter_names,
         max_lora_rank=8,
         adapter_ranks=[8] * num_adapters,
+        control_dims=32,
     )
     base.update(overrides)
     return base
@@ -65,10 +69,18 @@ class TestControlDimsValidation:
         with pytest.raises(ValueError, match="control_dims must be >= 0"):
             GraniteSwitchConfig(**_valid_kwargs(control_dims=-1))
 
-    def test_zero_control_dims_valid(self):
-        """Zero control_dims is valid (native mode, no KV hiding)."""
-        cfg = GraniteSwitchConfig(**_valid_kwargs(control_dims=0))
+    def test_zero_control_dims_valid_with_substitute_ids(self):
+        """Zero control_dims is valid when substitute ids are provided (token exchange)."""
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(control_dims=0, adapter_substitute_token_ids=[1, 2])
+        )
         assert cfg.control_dims == 0
+        assert cfg.use_token_exchange is True
+
+    def test_zero_control_dims_no_substitute_ids_raises(self):
+        """Zero control_dims without substitute ids must fail: no hiding and no exchange."""
+        with pytest.raises(ValueError, match="either control_dims > 0"):
+            GraniteSwitchConfig(**_valid_kwargs(control_dims=0))
 
     def test_positive_control_dims_valid(self):
         """Positive control_dims is valid."""

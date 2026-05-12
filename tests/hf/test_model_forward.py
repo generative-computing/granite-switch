@@ -361,7 +361,7 @@ class TestActivatingTokenSwitch:
 
 @pytest.fixture
 def tiny_native_config():
-    """Minimal config for native mode (control_dims=0, no hiding)."""
+    """Minimal config for native mode (control_dims=0, token-exchange)."""
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -371,6 +371,7 @@ def tiny_native_config():
         num_key_value_heads=4,
         num_adapters=2,
         adapter_token_ids=[250, 251],
+        adapter_substitute_token_ids=[1, 1],
         adapter_names=["router", "planner"],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
