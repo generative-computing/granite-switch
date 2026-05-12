@@ -11,8 +11,8 @@ Adapters are activated by passing ``adapter_name=...`` to
 ``tokenizer.apply_chat_template``, following the granite-switch README.
 
 Usage:
-    python run_adapter_generation.py [--output results.json] [--max-tokens 1024]
-    python run_adapter_generation.py --model-dir /path/to/model
+    python run_adapter_generation_direct.py [--output results.json] [--max-tokens 1024]
+    python run_adapter_generation_direct.py --model-dir /path/to/model
 
 Requires: granite-switch[hf] installed. GPU recommended (CPU works but is slow).
 """
