@@ -56,6 +56,7 @@ from granite_switch.composer.adapter_discovery import (
     filter_adapters,
     is_adapter_library,
     list_available_adapters,
+    list_repo_adapters_remote,
     resolve_repo_path,
 )
 from granite_switch.composer.tokenizer_setup import (
@@ -530,15 +531,30 @@ def build():
             print("ERROR: --list-adapters requires --adapters")
             return 1
         for entry in args.adapters:
-            try:
-                resolved_path = resolve_repo_path(entry)
-            except Exception as e:
-                print(f"Failed to resolve {entry}: {e}")
-                return 1
-            if not is_adapter_library(resolved_path):
-                print(f"\n{entry} is a single adapter, not a library.")
-                continue
-            available = list_available_adapters(resolved_path, args.target_model)
+            # For HF repos, use metadata-only listing (no download)
+            local = Path(entry)
+            if "/" in entry and not local.exists():
+                try:
+                    available = list_repo_adapters_remote(
+                        entry, args.target_model
+                    )
+                except Exception as e:
+                    print(f"Failed to list adapters from {entry}: {e}")
+                    return 1
+            else:
+                # Local path — resolve and scan
+                try:
+                    resolved_path = resolve_repo_path(entry)
+                except Exception as e:
+                    print(f"Failed to resolve {entry}: {e}")
+                    return 1
+                if not is_adapter_library(resolved_path):
+                    print(f"\n{entry} is a single adapter, not a library.")
+                    continue
+                available = list_available_adapters(
+                    resolved_path, args.target_model
+                )
+
             if not available:
                 print(f"\nNo adapters found in {entry} for target '{args.target_model}'")
                 continue
@@ -587,7 +603,12 @@ def build():
         for entry in args.adapters:
             print(f"\nResolving: {entry}")
             try:
-                resolved_path = resolve_repo_path(entry)
+                resolved_path = resolve_repo_path(
+                    entry,
+                    target_model_name=args.target_model,
+                    include_adapters=args.include_adapters,
+                    exclude_adapters=args.exclude_adapters,
+                )
             except Exception as e:
                 print(f"Failed to resolve {entry}: {e}")
                 return 1
