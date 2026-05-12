@@ -66,7 +66,8 @@ For convenience, you can find already composed Granite Switch models for the Gra
 
 ```bash
 pip install mellea
-python -m vllm.entrypoints.openai.api_server --model ./my-model --port 8000
+# Example with the 3B model (also available: ibm-granite/granite-switch-4.1-8b-preview, ibm-granite/granite-switch-4.1-30b-preview)
+python -m vllm.entrypoints.openai.api_server --model ibm-granite/granite-switch-4.1-3b-preview --port 8000
 ```
 
 ```python
