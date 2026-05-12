@@ -2,31 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 """Granite Switch Adapter Generation Demo (HuggingFace transformers).
 
-Composes a Granite Switch model with the RAG, core, and guardian
-adapter libraries, then runs one demo per adapter and saves the results
-to a JSON file.
+Loads the open-source Granite Switch model and runs one demo per
+embedded adapter, saving the results to a JSON file.
 
 Each adapter has a dedicated ``demo_<adapter>`` function that owns its
-demo inputs and the message/document layout the adapter expects. The
-layouts mirror Mellea's intrinsic wrappers (one-to-one with the
-``rewrite_question`` / ``check_answerability`` / ``guardian_check`` /
-... functions in ``mellea.stdlib.components.intrinsic``). Adapters are
-activated by passing ``adapter_name=...`` to
+demo inputs and the message/document layout the adapter expects.
+Adapters are activated by passing ``adapter_name=...`` to
 ``tokenizer.apply_chat_template``, following the granite-switch README.
 
 Usage:
     python run_adapter_generation.py [--output results.json] [--max-tokens 1024]
-    python run_adapter_generation.py --model-dir /path/to/composed/model
+    python run_adapter_generation.py --model-dir /path/to/model
 
-Requires: CUDA GPU, granite-switch[hf,compose] installed.
+Requires: CUDA GPU, granite-switch[hf] installed.
 """
 
 import argparse
 import json
 import re
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -37,75 +31,31 @@ import torch
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASE_MODEL = "ibm-granite/granite-4.1-3b"
-
-LIBRARIES = [
-    "ibm-granite/granitelib-rag-r1.0",
-    "ibm-granite/granitelib-core-r1.0",
-    "ibm-granite/granitelib-guardian-r1.0",
-]
-
-BUILD_TIMEOUT = 3600  # 60 minutes for compose
+DEFAULT_MODEL = "ibm-granite/granite-switch-4.1-3b-preview"
 
 
 # ---------------------------------------------------------------------------
-# Compose / load / generate helpers
+# Load / generate helpers
 # ---------------------------------------------------------------------------
 
 
-def compose_model(output_dir: Path, base_model: str) -> Path:
-    """Compose a model with all adapter libraries."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "granite_switch.composer.compose_granite_switch",
-        "--base-model",
-        base_model,
-        "--adapters",
-        *LIBRARIES,
-        "--output",
-        str(output_dir),
-    ]
-
-    print(f"Base model: {base_model}")
-    print(f"Composing model with libraries: {', '.join(LIBRARIES)}")
-    print(f"Output directory: {output_dir}")
-    print("This may take several minutes...")
-    print()
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=BUILD_TIMEOUT,
-    )
-
-    if result.returncode != 0:
-        print("Compose failed!")
-        print(result.stderr[-3000:] if result.stderr else result.stdout[-3000:])
-        sys.exit(1)
-
-    print("Compose completed successfully.")
-    return output_dir
-
-
-def load_model(model_dir: Path):
-    """Load the composed model and tokenizer."""
+def load_model(model_dir: str):
+    """Load the Granite Switch model and tokenizer."""
     # Registers the GraniteSwitch architecture with transformers'
     # AutoConfig / AutoModel. Must be imported before from_pretrained.
     import granite_switch.hf  # noqa: F401
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
     print(f"Loading model from {model_dir}...")
 
-    tokenizer = AutoTokenizer.from_pretrained(str(model_dir), fix_mistral_regex=True)
-    model = AutoModelForCausalLM.from_pretrained(str(model_dir), trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, fix_mistral_regex=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        model_dir, trust_remote_code=True, device_map="auto"
+    )
     model.eval()
-    model.to("cuda")
 
-    with open(model_dir / "config.json") as f:
-        config = json.load(f)
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True).to_dict()
 
     print(f"Loaded model with {len(config.get('adapter_names', []))} adapters")
     return model, tokenizer, config
@@ -982,14 +932,13 @@ def run_adapter_generation(
 
 def save_results(
     results: dict, config: dict, output_path: Path,
-    max_new_tokens: int, base_model: str,
+    max_new_tokens: int, model_dir: str,
 ):
     """Save results to JSON file."""
     output = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
-            "base_model": base_model,
-            "libraries": LIBRARIES,
+            "model": model_dir,
             "max_new_tokens": max_new_tokens,
             "num_adapters": len(config.get("adapter_names", [])),
             "adapter_names": config.get("adapter_names", []),
@@ -1027,12 +976,11 @@ def main():
         ),
     )
     parser.add_argument(
-        "--model-dir", type=str, default=None,
-        help="Path to pre-composed model (skips compose step)",
-    )
-    parser.add_argument(
-        "--base-model", type=str, default=DEFAULT_BASE_MODEL,
-        help=f"Base model for compose (default: {DEFAULT_BASE_MODEL})",
+        "--model-dir", type=str, default=DEFAULT_MODEL,
+        help=(
+            f"Model repo id or local path "
+            f"(default: {DEFAULT_MODEL})"
+        ),
     )
     args = parser.parse_args()
 
@@ -1045,18 +993,7 @@ def main():
     print("=" * 60)
     print()
 
-    if args.model_dir:
-        model_dir = Path(args.model_dir)
-        if not model_dir.exists():
-            print(f"ERROR: Model directory not found: {model_dir}")
-            sys.exit(1)
-    else:
-        tmp_dir = tempfile.mkdtemp(prefix="granite_switch_demo_")
-        model_dir = Path(tmp_dir) / "model"
-        compose_model(model_dir, args.base_model)
-
-    print()
-    model, tokenizer, config = load_model(model_dir)
+    model, tokenizer, config = load_model(args.model_dir)
     print()
 
     print("=" * 60)
@@ -1082,7 +1019,7 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Path(f"results_{timestamp}.json")
 
-    save_results(results, config, output_path, args.max_tokens, args.base_model)
+    save_results(results, config, output_path, args.max_tokens, args.model_dir)
 
 
 if __name__ == "__main__":

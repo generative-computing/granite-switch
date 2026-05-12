@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Granite Switch Adapter Generation Demo (Mellea + vLLM).
 
-Composes a Granite Switch model with the RAG, core, and guardian
-adapter libraries, starts a vLLM server for the composed model, and
-runs one demo per adapter through Mellea's intrinsic wrappers.
+Starts a vLLM server for the open-source Granite Switch model and runs
+one demo per embedded adapter through Mellea's intrinsic wrappers.
 
 Each adapter has a dedicated ``demo_<adapter>`` function that calls
 the corresponding function in ``mellea.stdlib.components.intrinsic``
@@ -13,9 +12,9 @@ end.
 
 Usage:
     python run_adapter_generation_mellea.py [--output results.json]
-    python run_adapter_generation_mellea.py --model-dir /path/to/composed/model
+    python run_adapter_generation_mellea.py --model-dir /path/to/model
 
-Requires: CUDA GPU, granite-switch[vllm,compose], mellea.
+Requires: CUDA GPU, granite-switch[vllm], mellea.
 """
 
 import argparse
@@ -24,7 +23,6 @@ import json
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -33,15 +31,8 @@ from pathlib import Path
 # Configuration
 # ---------------------------------------------------------------------------
 
-DEFAULT_BASE_MODEL = "ibm-granite/granite-4.1-3b"
+DEFAULT_MODEL = "ibm-granite/granite-switch-4.1-3b-preview"
 
-LIBRARIES = [
-    "ibm-granite/granitelib-rag-r1.0",
-    "ibm-granite/granitelib-core-r1.0",
-    "ibm-granite/granitelib-guardian-r1.0",
-]
-
-BUILD_TIMEOUT = 3600  # 60 minutes for compose
 VLLM_STARTUP_TIMEOUT = 300  # 5 minutes for vLLM to start
 VLLM_PORT = 8765  # Use non-standard port to avoid conflicts
 
@@ -254,48 +245,6 @@ CORE_DEMOS = {
 
 
 # ---------------------------------------------------------------------------
-# Model Composition
-# ---------------------------------------------------------------------------
-
-
-def compose_model(output_dir: Path, base_model: str) -> Path:
-    """Compose a model with all adapter libraries."""
-    cmd = [
-        sys.executable,
-        "-m",
-        "granite_switch.composer.compose_granite_switch",
-        "--base-model",
-        base_model,
-        "--adapters",
-        *LIBRARIES,
-        "--output",
-        str(output_dir),
-    ]
-
-    print(f"Base model: {base_model}")
-    print(f"Composing model with libraries: {', '.join(LIBRARIES)}")
-    print(f"Output directory: {output_dir}")
-    print("This may take several minutes...")
-    print()
-
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=BUILD_TIMEOUT,
-    )
-
-    if result.returncode != 0:
-        print("Compose failed!")
-        err = result.stderr[-3000:] if result.stderr else result.stdout[-3000:]
-        print(err)
-        sys.exit(1)
-
-    print("Compose completed successfully.")
-    return output_dir
-
-
-# ---------------------------------------------------------------------------
 # vLLM Server Management
 # ---------------------------------------------------------------------------
 
@@ -321,7 +270,7 @@ def wait_for_server(url: str, timeout: int = VLLM_STARTUP_TIMEOUT) -> bool:
 
 
 def start_vllm_server(
-    model_dir: Path,
+    model_dir: str,
     port: int,
     gpu_memory_utilization: float | None = None,
     max_model_len: int | None = None,
@@ -332,7 +281,7 @@ def start_vllm_server(
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
-        str(model_dir),
+        model_dir,
         "--port",
         str(port),
         "--trust-remote-code",
@@ -879,16 +828,12 @@ def run_all_demos(backend, available_adapters: set) -> dict:
     return results
 
 
-def save_results(
-    results: dict, output_path: Path, base_model: str, model_dir: str
-):
+def save_results(results: dict, output_path: Path, model_dir: str):
     """Save results to JSON file."""
     output = {
         "metadata": {
             "timestamp": datetime.now().isoformat(),
-            "base_model": base_model,
-            "libraries": LIBRARIES,
-            "model_dir": model_dir,
+            "model": model_dir,
             "framework": "mellea + vllm",
         },
         "results": results,
@@ -918,14 +863,8 @@ def main():
     parser.add_argument(
         "--model-dir",
         type=str,
-        default=None,
-        help="Path to pre-composed model (skips compose step)",
-    )
-    parser.add_argument(
-        "--base-model",
-        type=str,
-        default=DEFAULT_BASE_MODEL,
-        help=f"Base model for compose (default: {DEFAULT_BASE_MODEL})",
+        default=DEFAULT_MODEL,
+        help=f"Model repo id or local path (default: {DEFAULT_MODEL})",
     )
     parser.add_argument(
         "--port",
@@ -952,24 +891,12 @@ def main():
     print("=" * 60)
     print()
 
-    # Compose or use existing model
-    if args.model_dir:
-        model_dir = Path(args.model_dir)
-        if not model_dir.exists():
-            print(f"ERROR: Model directory not found: {model_dir}")
-            sys.exit(1)
-        print(f"Using pre-composed model: {model_dir}")
-    else:
-        # Create temp directory for composed model
-        tmp_dir = tempfile.mkdtemp(prefix="granite_switch_mellea_demo_")
-        model_dir = Path(tmp_dir) / "model"
-        compose_model(model_dir, args.base_model)
-
+    print(f"Using model: {args.model_dir}")
     print()
 
     # Start vLLM server
     _ = start_vllm_server(
-        model_dir,
+        args.model_dir,
         args.port,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
@@ -979,7 +906,7 @@ def main():
 
     # Setup Mellea backend
     try:
-        backend, adapters = setup_backend(vllm_url, str(model_dir))
+        backend, adapters = setup_backend(vllm_url, args.model_dir)
     except Exception as e:
         print(f"ERROR: Failed to setup Mellea backend: {e}")
         sys.exit(1)
@@ -1012,7 +939,7 @@ def main():
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = Path(f"results_mellea_{timestamp}.json")
 
-    save_results(results, output_path, args.base_model, str(model_dir))
+    save_results(results, output_path, args.model_dir)
 
 
 if __name__ == "__main__":
