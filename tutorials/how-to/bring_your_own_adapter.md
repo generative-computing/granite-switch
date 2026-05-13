@@ -257,3 +257,10 @@ response = client.chat.completions.create(
 )
 print(response.choices[0].message.content)
 ```
+
+## Next Steps
+
+- **[Hello Mellea](../quickstart/hello_mellea.ipynb)** - run your composed checkpoint through Mellea's intrinsic wrappers
+- **[Compose Granite Switch](../notebooks/03_compose_granite_switch.ipynb)** - compose a full model from the IBM adapter libraries
+- **[Government RAG Pipeline](../notebooks/02_govt_rag_pipeline.ipynb)** - wire your adapter into an end-to-end RAG loop
+- **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
