@@ -235,11 +235,28 @@ def configure_chat_template(
     # Pass 2: runs inside the main message loop after content.val is assembled.
     # rsplit(..., 1) splits on the last occurrence so the token lands in the
     # right place when the invocation text appears more than once in the message.
-    alora_pass2 = """    {#- ALoRA Pass 2: inject activation token before invocation text in the target message -#}
+    #
+    # Token drop (mirrors the <|start_of_role|> skip-once flag used for LoRA /
+    # assistant-boundary ALoRA): we also omit the FIRST CHARACTER of the
+    # invocation text. The runtime embedding swap replaces the control-token
+    # embedding with the first-invocation-token's embedding; writing the full
+    # invocation text after the control token would then produce two copies
+    # of that first-invocation-token back to back — an OOD pattern at the
+    # swap site.
+    #
+    # For every ALoRA invocation text in the standard Granite adapter library
+    # (<requirements>, <certainty>, <guardian>, <context>, etc.) the first
+    # character is a single '<' that the tokenizer emits as its own token,
+    # and the tail of the string retokenizes identically to the tail of the
+    # full string. So dropping the first character on the string side is
+    # equivalent to dropping exactly the first token on the tokenized side —
+    # no re-merging, no change to what follows.
+    alora_pass2 = """    {#- ALoRA Pass 2: inject activation token AND drop the first char of
+         the invocation text so the runtime-swapped embedding doesn't duplicate. -#}
     {%- if loop.index0 == ns.alora_target_idx %}
         {%- set _parts = content.val.rsplit(ns.adapter_invocation_text, 1) %}
         {%- if _parts | length > 1 %}
-            {%- set content.val = _parts[0] + ns.adapter_token + ns.adapter_invocation_text + _parts[1] %}
+            {%- set content.val = _parts[0] + ns.adapter_token + ns.adapter_invocation_text[1:] + _parts[1] %}
         {%- endif %}
     {%- endif %}
 """
