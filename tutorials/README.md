@@ -9,7 +9,9 @@ Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
 | [00_hello_adapter.ipynb](notebooks/00_hello_adapter.ipynb) | Minimal adapter invocation with HuggingFace | 5 min |
 | [01_hello_mellea.ipynb](notebooks/01_hello_mellea.ipynb) | Mellea intrinsics intro with vLLM | 5 min |
 | [02_granite_switch_with_hf.ipynb](notebooks/02_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 20 min |
-| [03_govt_rag_pipeline.ipynb](notebooks/03_govt_rag_pipeline.ipynb) | Full RAG pipeline, ChromaDB, Guardian | 30 min |
+| [03_01_govt_rag_pipeline_simple.ipynb](notebooks/03_01_govt_rag_pipeline_simple.ipynb) | Simple RAG pipeline without guardians (rewrite, answerability, citations) | 30 min |
+| [03_02_govt_rag_pipeline_sequential.ipynb](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) | Full RAG pipeline with guardian checks (harm + scope) | 30 min |
+| [03_03_govt_rag_pipeline_loops.ipynb](notebooks/03_03_govt_rag_pipeline_loops.ipynb) | Complex RAG pipeline with retry loops for scope and answerability | 30 min |
 | [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
 
 ## How-To Guides
@@ -58,15 +60,6 @@ Best for: Custom adapter development
 
 1. [Bring Your Own Adapter Guide](how-to/bring_your_own_adapter.md)
 
-## Notebooks
-
-Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
-
-| Notebook | Topics | Duration |
-|----------|--------|----------|
-| [01_granite_switch_with_hf.ipynb](notebooks/01_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 20 min |
-| [02_govt_rag_pipeline.ipynb](notebooks/02_govt_rag_pipeline.ipynb) | Full RAG pipeline, ChromaDB, Guardian | 30 min |
-| [03_compose_granite_switch.ipynb](notebooks/03_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
 
 ## Adapter Libraries
 
