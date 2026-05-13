@@ -12,7 +12,7 @@ Browse the full set of ready-to-use adapters in the [Granite Libraries collectio
 ## Key Features
 
 - **Composable** — Combine independently trained adapters into one checkpoint, whether IBM's or yours. Swap, upgrade, or customize without retraining.
-- **Fast** — Built on IBM's Activated LoRA technology for efficient KV cache reuse, low latency, and high inference throughput.
+- **Fast** — Built on IBM's Activated LoRA technology for efficient KV cache reuse, low latency, and [high inference throughput](https://github.com/lastras/granite-switch/tree/alora-vs-lora-race/tutorials/alora_vs_lora_race).
 - **Accurate** — Task-specific adapters can match and even surpass the accuracy of significantly larger generalist models, while requiring only a fraction of the serving cost. See the [adapter catalog](https://generative-computing.github.io/granite-switch/adapter_catalog.html#hallucination-detection) for benchmark comparisons across all 12 adapters.
 - **Inference-ready** — Support for Hugging Face and vLLM.
 
@@ -66,7 +66,8 @@ For convenience, you can find already composed Granite Switch models for the Gra
 
 ```bash
 pip install mellea
-python -m vllm.entrypoints.openai.api_server --model ./my-model --port 8000
+# Example with the 3B model 
+python -m vllm.entrypoints.openai.api_server --model ibm-granite/granite-switch-4.1-3b-preview --port 8000
 ```
 
 ```python
@@ -75,11 +76,11 @@ from mellea.stdlib.components.intrinsic import rag
 from mellea.stdlib.context import ChatContext
 
 backend = OpenAIBackend(
-    model_id="./my-model",
+    model_id="ibm-granite/granite-switch-4.1-3b-preview",
     base_url="http://localhost:8000/v1",
     api_key="unused",
 )
-backend.register_embedded_adapter_model("./my-model")
+backend.register_embedded_adapter_model("ibm-granite/granite-switch-4.1-3b-preview")
 
 query = "I want to ask you something. what is...mmmm the the main city(capital you call it,right?) of France?"
 ctx = ChatContext()
@@ -97,8 +98,8 @@ import granite_switch.hf  # Register HF backend
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model = AutoModelForCausalLM.from_pretrained("./my-model", device_map="auto")
-tokenizer = AutoTokenizer.from_pretrained("./my-model")
+model = AutoModelForCausalLM.from_pretrained("ibm-granite/granite-switch-4.1-3b-preview", device_map="auto")
+tokenizer = AutoTokenizer.from_pretrained("ibm-granite/granite-switch-4.1-3b-preview")
 
 messages = [{"role": "user", "content": "What is the capital of France?"}]
 documents = [{"doc_id": "1", "text": "Paris is the capital of France."}]

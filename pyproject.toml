@@ -26,7 +26,7 @@ compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 dev = ["pytest", "granite-switch[hf,vllm,compose]"]
 dev-vllm20 = ["pytest", "granite-switch[hf,vllm20,compose]"]
-test = ["pytest"]
+test = ["pytest", "bitsandbytes", "optimum-quanto"]
 
 [project.entry-points."vllm.general_plugins"]
 register_granite_switch = "granite_switch.vllm:register"
