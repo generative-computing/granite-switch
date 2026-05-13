@@ -249,6 +249,8 @@ print(f"Citations: {citations}")
 
 - **[Hello Mellea Notebook](../quickstart/hello_mellea.ipynb)** - Interactive walkthrough
 - **[RAG Pipeline Notebook](../notebooks/02_govt_rag_pipeline.ipynb)** - Full RAG with ChromaDB
+- **[Compose Granite Switch](../notebooks/03_compose_granite_switch.ipynb)** - Build a checkpoint from the IBM adapter libraries
+- **[Bring Your Own Adapter](bring_your_own_adapter.md)** - Train a custom adapter and compose it in
 - **[Mellea Repository](https://github.com/generative-computing/mellea)** - Full documentation
 
 ## Links

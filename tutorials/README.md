@@ -4,7 +4,7 @@
 
 | Tutorial | Format | Description |
 |----------|--------|-------------|
-| [Hello Adapter](quickstart/hello_adapter.ipynb) | Notebook ([script](quickstart/hello_adapter.py)) | Minimal adapter invocation (HuggingFace) |
+| [Hello Adapter](quickstart/hello_adapter.ipynb) | Notebook | Minimal adapter invocation (HuggingFace) |
 | [Hello Mellea](quickstart/hello_mellea.ipynb) | Notebook | Mellea intrinsics intro (vLLM) |
 
 ## How-To Guides
@@ -25,7 +25,7 @@ for understanding the underlying mechanics, but **for actual inference, use Mell
 which provides constrained decoding, prompt formatting, and proper input/output processing.
 
 1. [Prerequisites](PREREQUISITES.md#huggingface-backend)
-2. [Hello Adapter](quickstart/hello_adapter.ipynb) — see control tokens in action ([script version](quickstart/hello_adapter.py))
+2. [Hello Adapter](quickstart/hello_adapter.ipynb) — see control tokens in action
 3. [Granite Switch with HuggingFace](notebooks/01_granite_switch_with_hf.ipynb) — detailed walkthrough
 
 ### Path 2: Inference with Mellea (Recommended)
