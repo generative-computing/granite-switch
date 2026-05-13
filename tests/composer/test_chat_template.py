@@ -49,7 +49,15 @@ def _render(tokenizer, **kwargs):
 class TestConfigureChatTemplate:
 
     def test_lora_prefix_path(self):
-        """LoRA: activation token emitted at the very start of the sequence."""
+        """LoRA: activation token emitted at the very start of the sequence.
+
+        The skip-once flag set by lora_prefix_insertion suppresses the very
+        next <|start_of_role|>, so the rendered output is
+        '<|ctx_rel|>user<|end_of_role|>...', not
+        '<|ctx_rel|><|start_of_role|>user<|end_of_role|>...'. This keeps the
+        runtime embedding-swap from producing two identical consecutive
+        embeddings (see tokenizer_setup.py lora_prefix_insertion comment).
+        """
         tokenizer = _make_tokenizer()
         configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
 
@@ -59,7 +67,12 @@ class TestConfigureChatTemplate:
             add_generation_prompt=True,
             adapter_name="ctx_rel",
         )
-        assert result.startswith("<|ctx_rel|>")
+        assert result.startswith("<|ctx_rel|>user<|end_of_role|>"), (
+            f"expected <|ctx_rel|> followed by 'user<|end_of_role|>' "
+            f"(skip-once suppressed <|start_of_role|>), got {result[:80]!r}"
+        )
+        # Exactly one <|start_of_role|> should survive: the assistant turn.
+        assert result.count("<|start_of_role|>") == 1
 
     def test_alora_pass1_pass2_path(self):
         """ALoRA Pass 1+2: token inserted in last user message before invocation text.
@@ -109,12 +122,22 @@ class TestConfigureChatTemplate:
             adapter_name="answerability",
         )
         assert "<|answerability|>" in result
-        # Token appears immediately before the generation prompt
+        # Token appears immediately before what would have been the generation
+        # prompt's <|start_of_role|>. The skip-once flag set by alora_insertion
+        # suppresses that <|start_of_role|>, so the rendered output has
+        # "<|answerability|>assistant<|end_of_role|>" — no role marker between
+        # the control token and the role name. Prevents a duplicate-embedding
+        # OOD at position 1 after the runtime swap (see tokenizer_setup.py
+        # alora_insertion comment).
         token = "<|answerability|>"
-        gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         token_pos = result.index(token)
-        gen_pos = result.index(gen_prompt, token_pos)
-        assert result[token_pos + len(token):gen_pos].strip() == ""
+        after = result[token_pos + len(token):]
+        assert after.startswith("assistant<|end_of_role|>"), (
+            f"expected 'assistant<|end_of_role|>' immediately after "
+            f"{token!r}, got {after[:60]!r}"
+        )
+        # Only one <|start_of_role|> should survive: the one before the user turn.
+        assert result.count("<|start_of_role|>") == 1
 
     def test_alora_pass1_pass2_iterable_content(self):
         """ALoRA Pass 1+2: token inserted correctly when message content is a list of parts.
@@ -152,6 +175,33 @@ class TestConfigureChatTemplate:
         gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         last_gen_pos = result.rindex(gen_prompt)
         assert result[last_gen_pos - len("<|req_check|>"):last_gen_pos] != "<|req_check|>"
+
+    def test_skip_once_is_single_shot(self):
+        """Skip-once flag consumes itself: only the first <|start_of_role|>
+        after a LoRA control token is suppressed; later role markers emit."""
+        tokenizer = _make_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "my_lora", "lora")])
+
+        # Two user turns so the template emits <|start_of_role|> three times:
+        # once per user turn + once for the generation prompt. Only the very
+        # first one should be suppressed.
+        result = _render(
+            tokenizer,
+            messages=[
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "second"},
+            ],
+            add_generation_prompt=True,
+            adapter_name="my_lora",
+        )
+        assert result.startswith("<|my_lora|>user<|end_of_role|>"), (
+            f"first <|start_of_role|> should be suppressed; got {result[:80]!r}"
+        )
+        # Four role markers would be emitted normally (first user, assistant,
+        # second user, assistant-generation-prompt). Skip-once removes the
+        # first → exactly three survive.
+        assert result.count("<|start_of_role|>") == 3
 
     def test_no_adapter_no_tokens(self):
         """Without adapter_name the rendered output is identical to the original template."""
@@ -210,13 +260,19 @@ class TestEndToEndAdapterConfigToRender:
             add_generation_prompt=True,
             adapter_name="answerability",
         )
-        # Fallback: token immediately before generation prompt
+        # Fallback: token immediately before generation prompt, with the
+        # generation-prompt <|start_of_role|> suppressed by the skip-once flag
+        # armed in alora_insertion. Output is "<|answerability|>assistant<|end_of_role|>".
         token = "<|answerability|>"
-        gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         assert token in result
         token_pos = result.index(token)
-        gen_pos = result.index(gen_prompt, token_pos)
-        assert result[token_pos + len(token):gen_pos].strip() == ""
+        after = result[token_pos + len(token):]
+        assert after.startswith("assistant<|end_of_role|>"), (
+            f"expected 'assistant<|end_of_role|>' immediately after "
+            f"{token!r}, got {after[:60]!r}"
+        )
+        # Only the user-turn <|start_of_role|> should survive.
+        assert result.count("<|start_of_role|>") == 1
 
     def test_alora_invocation_at_start_of_user_message(self):
         """ALoRA: invocation text is the first thing in the user message."""
@@ -300,6 +356,11 @@ class TestEndToEndAdapterConfigToRender:
             adapter_name="summarization",
         )
         assert result.startswith("<|summarization|>")
+        # Skip-once suppresses the user-turn <|start_of_role|>: output is
+        # "<|summarization|>user<|end_of_role|>...", not
+        # "<|summarization|><|start_of_role|>user...". Keeps the adapter
+        # substitute token from duplicating at runtime.
+        assert result.startswith("<|summarization|>user<|end_of_role|>")
 
     def test_mixed_adapters_from_adapter_config(self):
         """All three adapter types composed together, each activated independently."""
@@ -322,16 +383,16 @@ class TestEndToEndAdapterConfigToRender:
         )
         assert "<|context_relevance|><context>" in result
 
-        # Activate answerability → fallback
+        # Activate answerability → fallback (skip-once suppresses the
+        # generation-prompt <|start_of_role|>).
         result = _render(
             tokenizer, messages=messages,
             add_generation_prompt=True, adapter_name="answerability",
         )
         token = "<|answerability|>"
-        gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         token_pos = result.index(token)
-        gen_pos = result.index(gen_prompt, token_pos)
-        assert result[token_pos + len(token):gen_pos].strip() == ""
+        after = result[token_pos + len(token):]
+        assert after.startswith("assistant<|end_of_role|>")
 
         # Activate summarization → prefix
         result = _render(

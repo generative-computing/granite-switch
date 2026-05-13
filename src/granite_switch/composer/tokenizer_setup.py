@@ -192,9 +192,16 @@ def configure_chat_template(
 
 """
 
+    # LoRA prefix: emit the control token at the sequence start AND arm
+    # skip_next_start_of_role so the template's very next <|start_of_role|>
+    # emission is suppressed. This avoids a duplicate-embedding OOD at runtime:
+    # the runtime swap replaces the control token's embedding with
+    # <|start_of_role|>'s embedding, and without this drop the sequence
+    # would carry two identical embeddings back-to-back.
     lora_prefix_insertion = """{#- For lora adapters: insert activation token at the very beginning -#}
 {%- if adapter_token and adapter_type == 'lora' %}
 {{- adapter_token }}
+{%- set ns.skip_next_start_of_role = true %}
 {%- endif %}
 
 """
@@ -239,12 +246,18 @@ def configure_chat_template(
 
     # Fallback for adapters whose invocation sequence is the assistant role tokens:
     # Pass 1 never sets alora_target_idx >= 0 for those, so we emit here instead.
+    # Also arm skip_next_start_of_role so the generation-prompt <|start_of_role|>
+    # that would immediately follow is suppressed — mirrors the LoRA rationale:
+    # the runtime swap replaces the control token's embedding with the first
+    # invocation token's embedding (<|start_of_role|>), so without this drop the
+    # sequence would carry two identical embeddings back-to-back.
     alora_insertion = """{#- ALoRA fallback: insert activation token right before generation prompt.
      Only fires when Pass 1 found no user message with the invocation text
      (alora_target_idx == -1), meaning the adapter activates at the assistant
      role token boundary rather than inside a user message. -#}
 {%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 %}
 {{- ns.adapter_token }}
+{%- set ns.skip_next_start_of_role = true %}
 {%- endif %}
 """
 
@@ -286,7 +299,8 @@ def configure_chat_template(
             "\n                       adapter_token=adapter_token,"
             "\n                       adapter_type=adapter_type,"
             "\n                       adapter_invocation_text=adapter_invocation_text,"
-            "\n                       alora_target_idx=-1"
+            "\n                       alora_target_idx=-1,"
+            "\n                       skip_next_start_of_role=false"
             "\n                       )"
         )
         modified_chat_template = (
@@ -336,6 +350,61 @@ def configure_chat_template(
         )
     else:
         modified_chat_template += "\n" + alora_insertion
+
+    # Skip-once wrapper for every <|start_of_role|> emission in the template.
+    # ns.skip_next_start_of_role is set to true immediately after a LoRA or
+    # assistant-boundary ALoRA control token is emitted; the very next role
+    # marker consumes the flag and is suppressed. Prevents a duplicate
+    # embedding at position 1 (see lora_prefix_insertion / alora_insertion
+    # comments).
+    #
+    # Every <|start_of_role|> in the base template appears inside a string
+    # literal, either merged with the following role text ('<|start_of_role|>user<|end_of_role|>')
+    # or standalone ('<|start_of_role|>' + message.role + ...). We split at
+    # the '<|start_of_role|>' boundary and route only that fragment through
+    # the skip-once Jinja block.
+    skip_once_block = (
+        "{%- if ns.skip_next_start_of_role %}"
+        "{%- set ns.skip_next_start_of_role = false %}"
+        "{%- else %}"
+        "{{- '<|start_of_role|>' }}"
+        "{%- endif %}"
+    )
+    # Case A: '<|start_of_role|>' as a standalone literal, possibly at the
+    # start of a concatenation ({{- '<|start_of_role|>' + expr + ... }}).
+    # Replace the literal emission with the skip block; the rest of the
+    # expression stays.  Handles sites 77 and 79 directly.
+    modified_chat_template = re.sub(
+        r"\{\{-\s*'<\|start_of_role\|>'\s*\+\s*",
+        skip_once_block + "\n        {{- ",
+        modified_chat_template,
+    )
+    # Case B: '<|start_of_role|>ROLE<|end_of_role|>' merged literal (with or
+    # without trailing concatenation). Split the literal so only the
+    # '<|start_of_role|>' prefix goes through the skip block and the rest
+    # ('ROLE<|end_of_role|>' + anything) emits normally.
+    # Pattern: {{- 'literal_starting_with_start_of_role' (+ expr | ) }}
+    def _split_merged(match: "re.Match") -> str:
+        remainder = match.group(1)  # text after <|start_of_role|> up to end of literal
+        tail = match.group(2)        # trailing + expr or empty
+        return (
+            skip_once_block
+            + "\n        {{- '"
+            + remainder
+            + "'"
+            + tail
+            + " }}"
+        )
+
+    # Merged literal like '<|start_of_role|>system<|end_of_role|>' followed by
+    # optional " + expr + ...". The first group captures everything inside the
+    # literal after <|start_of_role|>; the second captures any trailing
+    # concatenation up to the closing }}.
+    modified_chat_template = re.sub(
+        r"\{\{-\s*'<\|start_of_role\|>([^']*)'((?:\s*\+\s*[^}]+?)?)\s*\}\}",
+        _split_merged,
+        modified_chat_template,
+    )
 
     tokenizer.chat_template = modified_chat_template
     print(
