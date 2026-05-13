@@ -1,11 +1,16 @@
 # Granite Switch Tutorials
 
-## Quick Start (5 minutes)
+## Notebooks
 
-| Tutorial | Format | Description |
-|----------|--------|-------------|
-| [Hello Adapter](quickstart/hello_adapter.ipynb) | Notebook ([script](quickstart/hello_adapter.py)) | Minimal adapter invocation (HuggingFace) |
-| [Hello Mellea](quickstart/hello_mellea.ipynb) | Notebook | Mellea intrinsics intro (vLLM) |
+Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
+
+| Notebook | Topics | Duration |
+|----------|--------|----------|
+| [00_hello_adapter.ipynb](notebooks/00_hello_adapter.ipynb) | Minimal adapter invocation with HuggingFace | 5 min |
+| [01_hello_mellea.ipynb](notebooks/01_hello_mellea.ipynb) | Mellea intrinsics intro with vLLM | 5 min |
+| [02_granite_switch_with_hf.ipynb](notebooks/02_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 20 min |
+| [03_govt_rag_pipeline.ipynb](notebooks/03_govt_rag_pipeline.ipynb) | Full RAG pipeline, ChromaDB, Guardian | 30 min |
+| [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
 
 ## How-To Guides
 
@@ -25,8 +30,8 @@ for understanding the underlying mechanics, but **for actual inference, use Mell
 which provides constrained decoding, prompt formatting, and proper input/output processing.
 
 1. [Prerequisites](PREREQUISITES.md#huggingface-backend)
-2. [Hello Adapter](quickstart/hello_adapter.ipynb) — see control tokens in action ([script version](quickstart/hello_adapter.py))
-3. [Granite Switch with HuggingFace](notebooks/01_granite_switch_with_hf.ipynb) — detailed walkthrough
+2. [Hello Adapter](notebooks/00_hello_adapter.ipynb) — see control tokens in action
+3. [Granite Switch with HuggingFace](notebooks/02_granite_switch_with_hf.ipynb) — detailed walkthrough
 
 ### Path 2: Inference with Mellea (Recommended)
 
@@ -37,31 +42,21 @@ prompt rewriting, and input/output processing automatically. Currently supports 
 support coming soon.
 
 1. [Prerequisites](PREREQUISITES.md#vllm-backend)
-2. [Hello Mellea](quickstart/hello_mellea.ipynb)
-3. [RAG Pipeline](notebooks/02_govt_rag_pipeline.ipynb) — full RAG with ChromaDB
+2. [Hello Mellea](notebooks/01_hello_mellea.ipynb)
+3. [RAG Pipeline](notebooks/03_govt_rag_pipeline.ipynb) — full RAG with ChromaDB
 
 ### Composing Models
 
 Before running inference, you need a composed Granite Switch model. Options:
 
 1. **Use pre-composed models** from [HuggingFace](https://huggingface.co/ibm-granite/granite-switch-4.1-3b-preview) (recommended for getting started)
-2. **Compose your own** — see [Compose Your Checkpoint](notebooks/03_compose_granite_switch.ipynb)
+2. **Compose your own** — see [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb)
 
 ### Path 3: Bring Your Own Adapter
 
 Best for: Custom adapter development
 
 1. [Bring Your Own Adapter Guide](how-to/bring_your_own_adapter.md)
-
-## Notebooks
-
-Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
-
-| Notebook | Topics | Duration |
-|----------|--------|----------|
-| [01_granite_switch_with_hf.ipynb](notebooks/01_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 20 min |
-| [02_govt_rag_pipeline.ipynb](notebooks/02_govt_rag_pipeline.ipynb) | Full RAG pipeline, ChromaDB, Guardian | 30 min |
-| [03_compose_granite_switch.ipynb](notebooks/03_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
 
 ## External Resources
 
