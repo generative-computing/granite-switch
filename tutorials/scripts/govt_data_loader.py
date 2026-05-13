@@ -85,9 +85,9 @@ def load_or_build_govt_chroma(
         return collection
 
     if not os.path.exists(jsonl_path):
-        print(f"Downloading {jsonl_url} …")
+        print(f"Downloading {jsonl_url} ...")
         t0 = time.time()
-        # Stream into memory with a progress bar — the zip is ~50MB and the
+        # Stream into memory with a progress bar - the zip is ~50MB and the
         # unblocked .get() used to leave users staring at a silent cell for minutes.
         # Split timeout: fail fast on connect (10s), allow slow reads (300s).
         timeout = httpx.Timeout(300.0, connect=10.0)
@@ -111,7 +111,7 @@ def load_or_build_govt_chroma(
         os.replace(tmp_path, jsonl_path)
         print(f"Saved {jsonl_path} in {time.time() - t0:.1f}s.")
 
-    print(f"Reading {jsonl_path} → {chroma_path}…")
+    print(f"Reading {jsonl_path} -> {chroma_path}...")
     t0 = time.time()
     ids, texts, metas = [], [], []
     with open(jsonl_path) as f:
@@ -125,11 +125,11 @@ def load_or_build_govt_chroma(
             metas.append({"title": doc.get("title", ""), "url": doc.get("url", "")})
     if not ids:
         raise RuntimeError(
-            f"{jsonl_path} yielded zero documents — the file may be empty, truncated, "
+            f"{jsonl_path} yielded zero documents - the file may be empty, truncated, "
             f"or schema-drifted (expected a 'text' field per line). Delete it and rerun "
             f"to re-download."
         )
-    print(f"Read {len(ids):,} docs in {time.time() - t0:.1f}s.  Embedding & indexing…")
+    print(f"Read {len(ids):,} docs in {time.time() - t0:.1f}s.  Embedding & indexing...")
 
     t1 = time.time()
     batch = 500
