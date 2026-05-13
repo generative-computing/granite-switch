@@ -45,7 +45,7 @@ support coming soon.
 
 1. [Prerequisites](PREREQUISITES.md#vllm-backend)
 2. [Hello Mellea](notebooks/01_hello_mellea.ipynb)
-3. [RAG Pipeline](notebooks/03_govt_rag_pipeline.ipynb) — full RAG with ChromaDB
+3. [RAG Pipeline](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — full RAG with ChromaDB
 
 ### Composing Models
 
@@ -67,9 +67,9 @@ Granite Switch checkpoints embed adapters drawn from IBM's granitelib libraries.
 
 | Adapter | Purpose | Where used in tutorials | HF repo |
 |---------|---------|-------------------------|---------|
-| Core | Foundational post-generation intrinsics: certainty scoring, requirement checking, and response attribution. | [01](notebooks/01_granite_switch_with_hf.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) |
-| RAG | Retrieval-augmented generation intrinsics: query rewrite, answerability, hallucination detection, and citation generation. | [hello_mellea](quickstart/hello_mellea.ipynb), [02](notebooks/02_govt_rag_pipeline.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) |
-| Guardian | Safety and risk detection: harm, social bias, jailbreaking, factuality, and policy compliance checks. | [hello_adapter](quickstart/hello_adapter.ipynb), [hello_mellea](quickstart/hello_mellea.ipynb), [01](notebooks/01_granite_switch_with_hf.ipynb), [02](notebooks/02_govt_rag_pipeline.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) |
+| Core | Foundational post-generation intrinsics: certainty scoring, requirement checking, and response attribution. | [02](notebooks/02_granite_switch_with_hf.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) |
+| RAG | Retrieval-augmented generation intrinsics: query rewrite, answerability, hallucination detection, and citation generation. | [01](notebooks/01_hello_mellea.ipynb), [03_01](notebooks/03_01_govt_rag_pipeline_simple.ipynb), [03_02](notebooks/03_02_govt_rag_pipeline_sequential.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) |
+| Guardian | Safety and risk detection: harm, social bias, jailbreaking, factuality, and policy compliance checks. | [00](notebooks/00_hello_adapter.ipynb), [01](notebooks/01_hello_mellea.ipynb), [02](notebooks/02_granite_switch_with_hf.ipynb), [03_02](notebooks/03_02_govt_rag_pipeline_sequential.ipynb), [03_03](notebooks/03_03_govt_rag_pipeline_loops.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) |
 
 ## External Resources
 
