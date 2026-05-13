@@ -138,6 +138,6 @@ curl http://localhost:8000/v1/models
 
 Once prerequisites are installed, proceed to:
 
-1. **[Hello Adapter](quickstart/hello_adapter.py)** — Minimal HuggingFace example
-2. **[Hello Mellea](quickstart/hello_mellea.ipynb)** — Mellea intrinsics with vLLM
-3. **[Learning Paths](README.md#learning-paths)** — Choose your path based on use case
+1. **[Hello Adapter](quickstart/hello_adapter.ipynb)** - Minimal HuggingFace example
+2. **[Hello Mellea](quickstart/hello_mellea.ipynb)** - Mellea intrinsics with vLLM
+3. **[Learning Paths](README.md#learning-paths)** - Choose your path based on use case

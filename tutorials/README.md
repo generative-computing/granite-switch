@@ -58,6 +58,26 @@ Best for: Custom adapter development
 
 1. [Bring Your Own Adapter Guide](how-to/bring_your_own_adapter.md)
 
+## Notebooks
+
+Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
+
+| Notebook | Topics | Duration |
+|----------|--------|----------|
+| [01_granite_switch_with_hf.ipynb](notebooks/01_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 20 min |
+| [02_govt_rag_pipeline.ipynb](notebooks/02_govt_rag_pipeline.ipynb) | Full RAG pipeline, ChromaDB, Guardian | 30 min |
+| [03_compose_granite_switch.ipynb](notebooks/03_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
+
+## Adapter Libraries
+
+Granite Switch checkpoints embed adapters drawn from IBM's granitelib libraries. The three libraries below are featured throughout these tutorials:
+
+| Adapter | Purpose | Where used in tutorials | HF repo |
+|---------|---------|-------------------------|---------|
+| Core | Foundational post-generation intrinsics: certainty scoring, requirement checking, and response attribution. | [01](notebooks/01_granite_switch_with_hf.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) |
+| RAG | Retrieval-augmented generation intrinsics: query rewrite, answerability, hallucination detection, and citation generation. | [hello_mellea](quickstart/hello_mellea.ipynb), [02](notebooks/02_govt_rag_pipeline.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) |
+| Guardian | Safety and risk detection: harm, social bias, jailbreaking, factuality, and policy compliance checks. | [hello_adapter](quickstart/hello_adapter.ipynb), [hello_mellea](quickstart/hello_mellea.ipynb), [01](notebooks/01_granite_switch_with_hf.ipynb), [02](notebooks/02_govt_rag_pipeline.ipynb), [03](notebooks/03_compose_granite_switch.ipynb) | [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) |
+
 ## External Resources
 
 | Resource | Description |

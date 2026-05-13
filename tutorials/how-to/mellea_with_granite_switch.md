@@ -6,7 +6,7 @@ This guide shows how to use **Mellea** to invoke embedded adapters in a Granite 
 
 **Mellea** is a Python framework that exposes a programming model for LLMs with an opinionated view on how modern software design practices and LLMs ought to be cross-leveraged to maximize accuracy, control and robustness in applications leveraging LLMs. In the context of Granite Switch, Mellea provides high-level intrinsic functions (Guardian, RAG, Core) that automatically route through the correct control tokens. Instead of manually constructing prompts with control tokens, you call simple Python functions.
 
-**Granite Switch** is the model architecture — an instruction-following model from the Granite Family with multiple LoRA adapters embedded as a single checkpoint.
+**Granite Switch** is the model architecture - an instruction-following model from the Granite Family with multiple LoRA adapters embedded as a single checkpoint.
 
 **vLLM** is a high-performance inference engine for LLMs. Granite Switch currently supports vLLM as the inference backend; other inference engines may be supported in the future.
 
@@ -247,9 +247,11 @@ print(f"Citations: {citations}")
 
 ## Next Steps
 
-- **[Hello Mellea Notebook](../quickstart/hello_mellea.ipynb)** — Interactive walkthrough
-- **[RAG Pipeline Notebook](../notebooks/02_govt_rag_pipeline.ipynb)** — Full RAG with ChromaDB
-- **[Mellea Repository](https://github.com/generative-computing/mellea)** — Full documentation
+- **[Hello Mellea Notebook](../quickstart/hello_mellea.ipynb)** - Interactive walkthrough
+- **[RAG Pipeline Notebook](../notebooks/02_govt_rag_pipeline.ipynb)** - Full RAG with ChromaDB
+- **[Compose Granite Switch](../notebooks/03_compose_granite_switch.ipynb)** - Build a checkpoint from the IBM adapter libraries
+- **[Bring Your Own Adapter](bring_your_own_adapter.md)** - Train a custom adapter and compose it in
+- **[Mellea Repository](https://github.com/generative-computing/mellea)** - Full documentation
 
 ## Links
 
