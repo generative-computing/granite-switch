@@ -153,6 +153,23 @@ class TestBuildAllowPatterns:
             )
         assert patterns == ["answerability/granite-4.1-3b/alora/**"]
 
+    def test_technology_filter_overrides_alora_preference(self, default_tree):
+        """``technology_filter='lora'`` must force lora paths even for
+        adapters that have an alora variant — otherwise discovery (which
+        also respects the filter) drops them and the final model is missing
+        adapters."""
+        with patch("huggingface_hub.list_repo_tree", side_effect=default_tree):
+            patterns = _build_allow_patterns(
+                "org/repo",
+                target_model_name="granite-4.1-3b",
+                technology_filter="lora",
+            )
+        assert patterns == [
+            "answerability/granite-4.1-3b/lora/**",
+            "citations/granite-4.1-3b/lora/**",
+            "query_rewrite/granite-4.1-3b/lora/**",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # resolve_repo_path — integration with snapshot_download

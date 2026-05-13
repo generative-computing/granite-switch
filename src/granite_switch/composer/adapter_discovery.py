@@ -339,6 +339,7 @@ def _build_allow_patterns(
     target_model_name: Optional[str] = None,
     include_adapters: Optional[List[str]] = None,
     exclude_adapters: Optional[List[str]] = None,
+    technology_filter: Optional[str] = None,
 ) -> Optional[List[str]]:
     """Build ``allow_patterns`` for selective ``snapshot_download``.
 
@@ -346,7 +347,10 @@ def _build_allow_patterns(
     fnmatch-based include/exclude filtering and target model constraints to
     construct download patterns.  When both adapter names and target model
     are known, also resolves the preferred technology (alora > lora) so
-    only the needed technology variant is downloaded.
+    only the needed technology variant is downloaded.  If ``technology_filter``
+    is set, it overrides the alora>lora preference so downstream discovery
+    (which respects the same filter) does not reject adapters whose alora
+    variant was downloaded while the caller asked for lora only.
 
     Returns:
         List of glob patterns, or ``None`` if no filtering is possible.
@@ -371,6 +375,13 @@ def _build_allow_patterns(
     if adapter_names and target_model_name:
         patterns = []
         for name in adapter_names:
+            if technology_filter:
+                # Caller explicitly asked for a specific technology; download
+                # only that variant so discovery doesn't later skip the adapter.
+                patterns.append(
+                    f"{name}/{target_model_name}/{technology_filter}/**"
+                )
+                continue
             tech = _resolve_technology(repo_id, name, target_model_name)
             if tech:
                 patterns.append(f"{name}/{target_model_name}/{tech}/**")
@@ -441,6 +452,7 @@ def resolve_repo_path(
     target_model_name: Optional[str] = None,
     include_adapters: Optional[List[str]] = None,
     exclude_adapters: Optional[List[str]] = None,
+    technology_filter: Optional[str] = None,
 ) -> str:
     """Resolve a local path or HuggingFace repo ID to a local directory.
 
@@ -455,6 +467,9 @@ def resolve_repo_path(
         include_adapters: Only download adapters matching these fnmatch
             patterns.
         exclude_adapters: Skip adapters matching these fnmatch patterns.
+        technology_filter: If set to ``"alora"`` or ``"lora"``, download only
+            that technology variant (aligns with ``discover_adapters``'
+            ``technology_filter`` so both phases agree).
 
     Returns:
         Absolute local path to the directory.
@@ -471,13 +486,15 @@ def resolve_repo_path(
 
         # Build selective download patterns
         allow_patterns = None
-        if target_model_name or include_adapters or exclude_adapters:
+        if (target_model_name or include_adapters or exclude_adapters
+                or technology_filter):
             try:
                 allow_patterns = _build_allow_patterns(
                     path_or_repo,
                     target_model_name=target_model_name,
                     include_adapters=include_adapters,
                     exclude_adapters=exclude_adapters,
+                    technology_filter=technology_filter,
                 )
                 if allow_patterns:
                     print(f"  Selective download patterns: {allow_patterns}")

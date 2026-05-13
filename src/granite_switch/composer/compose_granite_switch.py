@@ -608,6 +608,7 @@ def build():
                     target_model_name=args.target_model,
                     include_adapters=args.include_adapters,
                     exclude_adapters=args.exclude_adapters,
+                    technology_filter=args.technology_filter,
                 )
             except Exception as e:
                 print(f"Failed to resolve {entry}: {e}")
