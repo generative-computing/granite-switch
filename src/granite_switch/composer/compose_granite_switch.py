@@ -781,21 +781,32 @@ def build():
             adapter_third_party = list(external_names)
     else:
         # Default: token-exchange. control_dims=0; every adapter needs a substitute id.
-        # ALoRA adapters substitute with the first token of their invocation sequence;
-        # LoRA/builtin adapters substitute with BOS (only required when at least one
-        # non-ALoRA adapter is present — ALoRA-only builds don't need BOS).
+        #
+        # Substitute choice (must mirror the token that appears right after the
+        # control token in the rendered chat prompt, so the swap keeps the
+        # residual stream in-distribution):
+        #   - ALoRA: first token of the adapter's alora_invocation_tokens.
+        #   - LoRA/builtin: <|start_of_role|>. The chat template places the
+        #     LoRA control token at sequence start, immediately followed by
+        #     <|start_of_role|>user<|end_of_role|>... — so <|start_of_role|>
+        #     is the deterministic "what comes right after" for every LoRA
+        #     adapter. Granite's bos_token_id is an alias for <|end_of_text|>
+        #     (EOS), so we cannot use it here: injecting EOS mid-prompt is a
+        #     stop-generation signal.
+        _LORA_SUBSTITUTE_TOKEN = "<|start_of_role|>"
         adapter_substitute_token_ids = []
         for adapter_path, _name, technology, _source in all_discovered:
             if technology == "alora":
                 sub_id = get_alora_first_invocation_token_id(adapter_path)
             else:
-                if tokenizer.bos_token_id is None:
+                sub_id = tokenizer.convert_tokens_to_ids(_LORA_SUBSTITUTE_TOKEN)
+                if sub_id is None or sub_id == tokenizer.unk_token_id:
                     raise ValueError(
-                        "Tokenizer has no bos_token_id; required for LoRA/builtin "
-                        "token exchange. Pass --legacy-hiding to use the KV-hiding "
-                        "path instead."
+                        f"Tokenizer does not contain the LoRA substitute token "
+                        f"{_LORA_SUBSTITUTE_TOKEN!r}; required for LoRA/builtin "
+                        "token exchange. Pass --legacy-hiding to use the "
+                        "KV-hiding path instead."
                     )
-                sub_id = tokenizer.bos_token_id
             adapter_substitute_token_ids.append(sub_id)
         # Token-exchange supersedes KV hiding — no hiding config needed.
         hiding_groups = None
