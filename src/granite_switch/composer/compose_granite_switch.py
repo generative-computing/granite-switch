@@ -77,6 +77,60 @@ def _load_tokenizer(model_name_or_path):
     return AutoTokenizer.from_pretrained(model_name_or_path)
 
 
+def _probe_lora_substitute_token_id(tokenizer) -> int:
+    """Ask the tokenizer which token naturally appears at the start of a
+    rendered no-adapter chat.
+
+    The LoRA prefix insertion prepends the adapter control token at the very
+    beginning of the rendered output, so whatever the template emits first
+    for a normal user turn is exactly what sits at position 1 after the
+    control token — and therefore the right substitute whose embedding
+    should land at the swap site.
+
+    By deriving this from the tokenizer's own chat template at compose
+    time, we avoid hard-coding a Granite-4.1-specific token string
+    (<|start_of_role|>). Other base models with different chat templates
+    get the correct substitute for their template by construction.
+
+    Raises ``ValueError`` if the template cannot be rendered or the first
+    tokenized id cannot be determined. Callers should suggest
+    ``--legacy-hiding`` as the fallback.
+    """
+    if tokenizer.chat_template is None:
+        raise ValueError(
+            "Tokenizer has no chat_template; cannot probe the LoRA "
+            "substitute token. Pass --legacy-hiding to use the KV-hiding "
+            "path instead."
+        )
+    try:
+        probe_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "probe"}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception as e:
+        raise ValueError(
+            "Failed to render a probe chat via tokenizer.apply_chat_template "
+            f"while detecting the LoRA substitute token: {e!r}. "
+            "Pass --legacy-hiding to use the KV-hiding path instead."
+        ) from e
+    ids = tokenizer(probe_text, add_special_tokens=False).input_ids
+    if not ids:
+        raise ValueError(
+            "Probe chat tokenized to an empty id list; cannot determine the "
+            "LoRA substitute token. Pass --legacy-hiding to use the "
+            "KV-hiding path instead."
+        )
+    sub_id = ids[0]
+    if sub_id == tokenizer.unk_token_id:
+        raise ValueError(
+            "First token of the rendered probe chat is <unk>; the template "
+            "appears to emit content outside the tokenizer's vocabulary. "
+            "Pass --legacy-hiding to use the KV-hiding path instead."
+        )
+    return sub_id
+
+
 def _get_directory_size(directory):
     """Return ``(total_size in GBs, file_count)`` for *directory*."""
     if Path(directory).exists():
@@ -786,27 +840,18 @@ def build():
         # control token in the rendered chat prompt, so the swap keeps the
         # residual stream in-distribution):
         #   - ALoRA: first token of the adapter's alora_invocation_tokens.
-        #   - LoRA/builtin: <|start_of_role|>. The chat template places the
-        #     LoRA control token at sequence start, immediately followed by
-        #     <|start_of_role|>user<|end_of_role|>... — so <|start_of_role|>
-        #     is the deterministic "what comes right after" for every LoRA
-        #     adapter. Granite's bos_token_id is an alias for <|end_of_text|>
-        #     (EOS), so we cannot use it here: injecting EOS mid-prompt is a
-        #     stop-generation signal.
-        _LORA_SUBSTITUTE_TOKEN = "<|start_of_role|>"
+        #   - LoRA/builtin: whatever the tokenizer's chat template emits at
+        #     the very start of a no-adapter user turn. For Granite 4.x
+        #     that's <|start_of_role|>; the probe derives this from the
+        #     template at compose time so other base models work by
+        #     construction.
+        lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
         adapter_substitute_token_ids = []
         for adapter_path, _name, technology, _source in all_discovered:
             if technology == "alora":
                 sub_id = get_alora_first_invocation_token_id(adapter_path)
             else:
-                sub_id = tokenizer.convert_tokens_to_ids(_LORA_SUBSTITUTE_TOKEN)
-                if sub_id is None or sub_id == tokenizer.unk_token_id:
-                    raise ValueError(
-                        f"Tokenizer does not contain the LoRA substitute token "
-                        f"{_LORA_SUBSTITUTE_TOKEN!r}; required for LoRA/builtin "
-                        "token exchange. Pass --legacy-hiding to use the "
-                        "KV-hiding path instead."
-                    )
+                sub_id = lora_sub_id
             adapter_substitute_token_ids.append(sub_id)
         # Token-exchange supersedes KV hiding — no hiding config needed.
         hiding_groups = None
