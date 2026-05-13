@@ -58,6 +58,50 @@ def _tree_response(tree_map):
 
 
 # ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def default_tree():
+    """Three-adapter library with an alora/lora mix for granite-4.1-3b."""
+    return _tree_response({
+        "": ["answerability", "citations", "query_rewrite"],
+        "answerability/granite-4.1-3b": ["alora", "lora"],
+        "citations/granite-4.1-3b": ["lora"],
+        "query_rewrite/granite-4.1-3b": ["alora"],
+    })
+
+
+@pytest.fixture
+def core_tree():
+    """ibm-granite/granitelib-core-r1.0-like layout with an 8b variant."""
+    return _tree_response({
+        "": ["context-attribution", "requirement-check", "uncertainty"],
+        "context-attribution/granite-4.1-3b": ["lora"],
+        "context-attribution/granite-4.1-8b": ["lora"],
+        "requirement-check/granite-4.1-3b": ["alora"],
+        "uncertainty/granite-4.1-3b": ["alora"],
+    })
+
+
+@pytest.fixture
+def rag_tree():
+    """ibm-granite/granitelib-rag-r1.0-like layout with an 8b variant."""
+    return _tree_response({
+        "": [
+            "query_rewrite", "answerability",
+            "citations", "hallucination_detection",
+        ],
+        "query_rewrite/granite-4.1-3b": ["alora"],
+        "query_rewrite/granite-4.1-8b": ["alora"],
+        "answerability/granite-4.1-3b": ["alora"],
+        "citations/granite-4.1-3b": ["lora"],
+        "hallucination_detection/granite-4.1-3b": ["lora"],
+    })
+
+
+# ---------------------------------------------------------------------------
 # _resolve_technology — alora is preferred over lora
 # ---------------------------------------------------------------------------
 
@@ -73,10 +117,13 @@ class TestResolveTechnology:
             ) == "alora"
 
     def test_returns_none_when_target_model_missing(self):
-        tree = _tree_response({})
+        # Adapter exists, but only for a different model size.
+        tree = _tree_response({
+            "answerability/granite-4.1-8b": ["alora"],
+        })
         with patch("huggingface_hub.list_repo_tree", side_effect=tree):
             assert _resolve_technology(
-                "org/repo", "answerability", "granite-99b"
+                "org/repo", "answerability", "granite-4.1-3b"
             ) is None
 
 
@@ -86,19 +133,8 @@ class TestResolveTechnology:
 
 
 class TestBuildAllowPatterns:
-    def _default_tree(self):
-        return _tree_response({
-            "": ["answerability", "citations", "query_rewrite"],
-            "answerability/granite-4.1-3b": ["alora", "lora"],
-            "citations/granite-4.1-3b": ["lora"],
-            "query_rewrite/granite-4.1-3b": ["alora"],
-        })
-
-    def test_all_adapters_with_target_model(self):
-        with patch(
-            "huggingface_hub.list_repo_tree",
-            side_effect=self._default_tree(),
-        ):
+    def test_all_adapters_with_target_model(self, default_tree):
+        with patch("huggingface_hub.list_repo_tree", side_effect=default_tree):
             patterns = _build_allow_patterns(
                 "org/repo", target_model_name="granite-4.1-3b",
             )
@@ -108,11 +144,8 @@ class TestBuildAllowPatterns:
             "query_rewrite/granite-4.1-3b/alora/**",
         ]
 
-    def test_include_filter_applies(self):
-        with patch(
-            "huggingface_hub.list_repo_tree",
-            side_effect=self._default_tree(),
-        ):
+    def test_include_filter_applies(self, default_tree):
+        with patch("huggingface_hub.list_repo_tree", side_effect=default_tree):
             patterns = _build_allow_patterns(
                 "org/repo",
                 target_model_name="granite-4.1-3b",
@@ -138,23 +171,18 @@ class TestResolveRepoPathSelectiveDownload:
         mock_dl.assert_not_called()
         assert result == str(tmp_path)
 
-    def test_hf_repo_passes_allow_patterns(self, tmp_path):
-        tree = _tree_response({
-            "": ["answerability", "citations"],
-            "answerability/granite-4.1-3b": ["alora"],
-            "citations/granite-4.1-3b": ["lora"],
-        })
+    def test_hf_repo_passes_allow_patterns(self, tmp_path, default_tree):
         mock_dl = MagicMock(return_value=str(tmp_path))
         with patch(
-            "huggingface_hub.list_repo_tree", side_effect=tree,
+            "huggingface_hub.list_repo_tree", side_effect=default_tree,
         ), patch("huggingface_hub.snapshot_download", mock_dl):
             resolve_repo_path(
                 "org/repo", target_model_name="granite-4.1-3b",
             )
-        kwargs = mock_dl.call_args.kwargs
-        assert kwargs["allow_patterns"] == [
+        assert mock_dl.call_args.kwargs["allow_patterns"] == [
             "answerability/granite-4.1-3b/alora/**",
             "citations/granite-4.1-3b/lora/**",
+            "query_rewrite/granite-4.1-3b/alora/**",
         ]
 
     def test_hf_repo_without_filters_downloads_full(self, tmp_path):
@@ -162,6 +190,7 @@ class TestResolveRepoPathSelectiveDownload:
         mock_dl = MagicMock(return_value=str(tmp_path))
         with patch("huggingface_hub.snapshot_download", mock_dl):
             resolve_repo_path("org/repo")
+        mock_dl.assert_called_once()
         assert "allow_patterns" not in mock_dl.call_args.kwargs
 
     def test_pattern_build_failure_falls_back_to_full_download(self, tmp_path):
@@ -178,58 +207,19 @@ class TestResolveRepoPathSelectiveDownload:
             )
         assert "allow_patterns" not in mock_dl.call_args.kwargs
 
-
-# ---------------------------------------------------------------------------
-# End-to-end: exact scenario from issue #3
-# ---------------------------------------------------------------------------
-
-
-class TestIssue3ReproScenario:
-    """Mirrors the "Steps to reproduce" from issue #3 verbatim.
-
-    Invocation::
-
-        python -m granite_switch.composer.compose_granite_switch \\
-          --base-model ibm-granite/granite-4.1-3b \\
-          --adapters ibm-granite/granitelib-core-r1.0 \\
-                     ibm-granite/granitelib-rag-r1.0 \\
-          --include-adapters query_rewrite context-attribution
-
-    Verifies that each ``snapshot_download`` call carries ``allow_patterns``
-    restricted to exactly the requested adapter/model paths — no 8b/30b
-    variants, only the correct technology per adapter.
-    """
-
-    def _core_tree(self):
-        return _tree_response({
-            "": ["context-attribution", "requirement-check", "uncertainty"],
-            "context-attribution/granite-4.1-3b": ["lora"],
-            "context-attribution/granite-4.1-8b": ["lora"],
-            "requirement-check/granite-4.1-3b": ["alora"],
-            "uncertainty/granite-4.1-3b": ["alora"],
-        })
-
-    def _rag_tree(self):
-        return _tree_response({
-            "": [
-                "query_rewrite", "answerability",
-                "citations", "hallucination_detection",
-            ],
-            "query_rewrite/granite-4.1-3b": ["alora"],
-            "query_rewrite/granite-4.1-8b": ["alora"],
-            "answerability/granite-4.1-3b": ["alora"],
-            "citations/granite-4.1-3b": ["lora"],
-            "hallucination_detection/granite-4.1-3b": ["lora"],
-        })
-
-    def test_only_requested_adapter_model_paths_are_downloaded(self, tmp_path):
+    def test_shared_include_filter_across_repos_downloads_disjoint_subsets(
+        self, tmp_path, core_tree, rag_tree,
+    ):
+        """Issue #3 scenario: the same ``--include-adapters`` applied to two
+        repos downloads only each repo's matching subset (no 8b variants, and
+        the correct technology per adapter)."""
         target_model = "granite-4.1-3b"
         include = ["query_rewrite", "context-attribution"]
 
         mock_dl = MagicMock(return_value=str(tmp_path))
 
         with patch(
-            "huggingface_hub.list_repo_tree", side_effect=self._core_tree(),
+            "huggingface_hub.list_repo_tree", side_effect=core_tree,
         ), patch("huggingface_hub.snapshot_download", mock_dl):
             resolve_repo_path(
                 "ibm-granite/granitelib-core-r1.0",
@@ -242,7 +232,7 @@ class TestIssue3ReproScenario:
 
         mock_dl.reset_mock()
         with patch(
-            "huggingface_hub.list_repo_tree", side_effect=self._rag_tree(),
+            "huggingface_hub.list_repo_tree", side_effect=rag_tree,
         ), patch("huggingface_hub.snapshot_download", mock_dl):
             resolve_repo_path(
                 "ibm-granite/granitelib-rag-r1.0",
