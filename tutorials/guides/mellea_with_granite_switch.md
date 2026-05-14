@@ -247,14 +247,9 @@ print(f"Citations: {citations}")
 
 ## Next Steps
 
-- **[Hello Mellea Notebook](../notebooks/01_hello_mellea.ipynb)** - Interactive walkthrough
-- **[RAG Pipeline Notebook](../notebooks/02_govt_rag_pipeline.ipynb)** - Full RAG with ChromaDB
-- **[Compose Granite Switch](../notebooks/03_compose_granite_switch.ipynb)** - Build a checkpoint from the IBM adapter libraries
+- **[Hello Adapter](../notebooks/00_hello_adapter.ipynb)** - Minimal embedded-adapter invocation via the HuggingFace backend
 - **[Bring Your Own Adapter](bring_your_own_adapter.md)** - Train a custom adapter and compose it in
+- **[Compare Inference Throughput](compare_inference_throughput.md)** - Benchmark ALORA vs LoRA on a 6-step RAG pipeline
 - **[Mellea Repository](https://github.com/generative-computing/mellea)** - Full documentation
-
-## Links
-
-- [Mellea Repository](https://github.com/generative-computing/mellea)
-- [Granite Models](https://huggingface.co/ibm-granite)
-- [vLLM Documentation](https://docs.vllm.ai/)
+- **[Granite Models](https://huggingface.co/ibm-granite)**
+- **[vLLM Documentation](https://docs.vllm.ai/)**

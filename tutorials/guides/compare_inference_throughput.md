@@ -91,3 +91,9 @@ raced simultaneously.
 |-----|------|------|------|
 | A100 (Colab) | 16 | 8 | 10 |
 | H100 | 32 | 24 | 15 |
+
+## Next Steps
+
+- **[Hello Adapter](../notebooks/00_hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
+- **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
+- **[Bring Your Own Adapter](bring_your_own_adapter.md)** - train a custom adapter and compose it in
