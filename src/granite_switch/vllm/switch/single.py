@@ -198,15 +198,16 @@ class SingleSwitch(nn.Module):
 
         # Token-exchange rewrite: see the HF switch for the rationale.
         # Skipped only when no LUT was built (no substitute ids configured).
+        # No data-dependent gate here — the surrounding decoder is wrapped in
+        # @support_torch_compile, which forbids `tensor.any()` branching.
+        # `torch.where` runs every step; the cost is one indexed gather and
+        # one elementwise select on the flat input.
         if self.control_to_substitute_lut is not None:
             sub_id_per_pos = self.control_to_substitute_lut[input_ids]
             is_control = sub_id_per_pos >= 0
-            if is_control.any():
-                modified_input_ids = torch.where(
-                    is_control, sub_id_per_pos, input_ids
-                )
-            else:
-                modified_input_ids = input_ids
+            modified_input_ids = torch.where(
+                is_control, sub_id_per_pos, input_ids
+            )
         else:
             modified_input_ids = input_ids
 

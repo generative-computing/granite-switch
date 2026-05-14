@@ -234,16 +234,14 @@ class SingleSwitch(nn.Module):
         # so the decoder sees a clean, unified input_ids and never has to
         # know about substitutes. Skipped only when the LUT was not built
         # (no substitute ids configured — e.g. a non-token-exchange test
-        # fixture).
+        # fixture). Kept symmetric with the vLLM switch, which forbids the
+        # `tensor.any()` short-circuit under @support_torch_compile.
         if self.control_to_substitute_lut is not None:
             sub_id_per_pos = self.control_to_substitute_lut[input_ids]
             is_control = sub_id_per_pos >= 0
-            if is_control.any():
-                modified_input_ids = torch.where(
-                    is_control, sub_id_per_pos, input_ids
-                )
-            else:
-                modified_input_ids = input_ids
+            modified_input_ids = torch.where(
+                is_control, sub_id_per_pos, input_ids
+            )
         else:
             modified_input_ids = input_ids
 
