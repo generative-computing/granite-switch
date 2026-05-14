@@ -11,7 +11,7 @@ from collections.abc import Sequence
 import requests
 
 
-MAX_MODEL_LEN = "32768"  # 32k, fits comfortably on an A100 (40/80 GiB).
+DEFAULT_MAX_MODEL_LEN = 32768  # 32k, fits comfortably on an A100 (40/80 GiB).
 
 
 def launch_vllm(
@@ -19,6 +19,7 @@ def launch_vllm(
     port: int,
     log_file: str,
     extra_args: Sequence[str] | None = None,
+    max_model_len: int = DEFAULT_MAX_MODEL_LEN,
 ) -> subprocess.Popen:
     cmd = [
         "python",
@@ -29,7 +30,7 @@ def launch_vllm(
         "--port",
         str(port),
         "--max-model-len",
-        MAX_MODEL_LEN,
+        str(max_model_len),
     ]
     if extra_args:
         cmd += extra_args
