@@ -60,6 +60,12 @@ logging.getLogger("mellea").setLevel(logging.ERROR)
 logging.getLogger("fancy_logger").setLevel(logging.ERROR)
 
 
+from IPython.utils import coloransi
+if not hasattr(coloransi.TermColors, 'Green'):
+    coloransi.TermColors.Green = '\033[0;32m'
+    coloransi.TermColors.Blue = '\033[0;34m'
+    coloransi.TermColors.Normal = '\033[0m'
+
 def _detect_notebook():
     """Return True when running inside Jupyter / Colab."""
     try:
