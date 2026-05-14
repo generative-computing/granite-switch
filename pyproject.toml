@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "granite-switch"
-version = "0.1.0"
+version = "0.0.3"
 description = "Granite Switch: Composable model building"
 readme = "README.md"
 license = "Apache-2.0"
@@ -24,6 +24,16 @@ vllm = ["vllm>=0.19.1,<0.20.0"]
 vllm20 = ["vllm>=0.20.0,<0.21.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
+tutorials = [
+    "granite-switch[hf,vllm,compose]",
+    "chromadb>=0.4.0",
+    "httpx>=0.24.0",
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "mellea>=0.1.0",
+    "ipython>=8.10.0",
+    "python-dotenv>=1.0.0",
+]
 dev = ["pytest", "granite-switch[hf,vllm,compose]"]
 dev-vllm20 = ["pytest", "granite-switch[hf,vllm20,compose]"]
 test = ["pytest", "bitsandbytes", "optimum-quanto"]
