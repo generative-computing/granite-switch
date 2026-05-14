@@ -33,16 +33,7 @@ The notebook runs both servers sequentially on a single A100 GPU and produces
   ```bash
   python build_govt_chroma.py
   ```
-- Compose the LoRA-only model:
-  ```bash
-  python -m granite_switch.composer.compose_granite_switch \
-    --base-model ibm-granite/granite-4.1-3b \
-    --adapters ibm-granite/granitelib-rag-r1.0 \
-               ibm-granite/granitelib-core-r1.0 \
-               ibm-granite/granitelib-guardian-r1.0 \
-    --technology-filter lora \
-    --output ./granite-switch-lora-only
-  ```
+- Compose the LoRA-only model. See [`../notebooks/04_compose_granite_switch.ipynb`](../notebooks/04_compose_granite_switch.ipynb) — pass the three libraries (`granitelib-rag-r1.0`, `granitelib-core-r1.0`, `granitelib-guardian-r1.0`) with `--technology-filter lora` to force every adapter to its standard LoRA variant, and set `--output ./granite-switch-lora-only`.
 
 ### Simultaneous race (two H100 GPUs)
 

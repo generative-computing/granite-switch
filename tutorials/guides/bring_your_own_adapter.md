@@ -152,18 +152,7 @@ parameters:
 sentence_boundaries: ~
 ```
 
-**Run the composer:**
-
-```bash
-python -m granite_switch.composer.compose_granite_switch \
-    --base-model ibm-granite/granite-4.1-3b \
-    --adapters \
-        ibm-granite/granitelib-rag-r1.0 \
-        ./uncertainty-adapter/uncertainty/granite-4.1-3b/alora \
-    --output ./composed-model
-```
-
-The first `--adapters` entry is the RAG library — the composer auto-discovers all 6 adapters inside. The second entry is the local path to the "built-by-us" adapter; the composer walks up from `alora/` and uses the grandparent-directory name (`uncertainty`) as the adapter name.
+**Run the composer.** See [`../notebooks/04_compose_granite_switch.ipynb`](../notebooks/04_compose_granite_switch.ipynb) for the end-to-end walkthrough. For the BYO case here, pass two entries to `--adapters`: `ibm-granite/granitelib-rag-r1.0` (the composer auto-discovers all 6 adapters in the library) and `./uncertainty-adapter/uncertainty/granite-4.1-3b/alora` (the local "built-by-us" adapter — the composer walks up from `alora/` and uses the grandparent-directory name `uncertainty` as the adapter name). Set `--output ./composed-model`.
 
 ### Compose output
 

@@ -4,14 +4,9 @@
 # ALORA server: pre-built Granite Switch checkpoint (port 8111)
 # LoRA server:  compose your own with --technology-filter lora (port 8112)
 #
-# To build the LoRA-only model:
-#   python -m granite_switch.composer.compose_granite_switch \
-#     --base-model ibm-granite/granite-4.1-3b \
-#     --adapters ibm-granite/granitelib-rag-r1.0 \
-#                ibm-granite/granitelib-core-r1.0 \
-#                ibm-granite/granitelib-guardian-r1.0 \
-#     --technology-filter lora \
-#     --output ./granite-switch-lora-only
+# To build the LoRA-only model: see tutorials/notebooks/04_compose_granite_switch.ipynb
+# (pass the three granitelib libraries with --technology-filter lora and
+# --output ./granite-switch-lora-only).
 
 LORA_MODEL="${1:-./granite-switch-lora-only}"
 
