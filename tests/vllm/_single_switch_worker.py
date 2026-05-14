@@ -213,7 +213,7 @@ def _run(harness, seq, num_adapters, control_token_gain):
 
     try:
         with override_forward_context(forward_ctx):
-            result = switch.forward(
+            adapter_indices, _modified_input_ids = switch.forward(
                 input_ids=input_ids,
                 adapter_token_ids=adapter_token_ids,
             )
@@ -223,7 +223,7 @@ def _run(harness, seq, num_adapters, control_token_gain):
         switch.effective_gain = orig_effective_gain
         switch.num_adapters = orig_num_adapters
 
-    return result.cpu().tolist()
+    return adapter_indices.cpu().tolist()
 
 
 def _query_geometry(harness):
