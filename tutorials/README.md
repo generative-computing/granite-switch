@@ -45,15 +45,15 @@ prompt rewriting, and input/output processing automatically. Currently supports 
 support coming soon.
 
 1. [Prerequisites](PREREQUISITES.md#vllm-backend)
-2. [Hello Mellea](notebooks/01_hello_mellea.ipynb)
-3. [RAG Pipeline](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — full RAG with ChromaDB
+2. [Hello Mellea](notebooks/01_hello_mellea.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/01_hello_mellea.ipynb)
+3. [RAG Pipeline](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — full RAG with ChromaDB [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_02_govt_rag_pipeline_sequential.ipynb)
 
 ### Composing Models
 
 Before running inference, you need a composed Granite Switch model. Options:
 
 1. **Use pre-composed models** from [HuggingFace](https://huggingface.co/ibm-granite/granite-switch-4.1-3b-preview) (recommended for getting started)
-2. **Compose your own** — see [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb)
+2. **Compose your own** — see [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_compose_granite_switch.ipynb)
 
 ### Path 3: Bring Your Own Adapter
 
@@ -65,9 +65,9 @@ Best for: Custom adapter development
 
 Best for: Seeing how adapters compose into multi-step applications
 
-1. [Simple RAG Pipeline](notebooks/03_01_govt_rag_pipeline_simple.ipynb) — rewrite, answerability, citations
-2. [Sequential RAG with Guardians](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — harm + scope checks
-3. [RAG with Retry Loops](notebooks/03_03_govt_rag_pipeline_loops.ipynb) — scope and answerability retries
+1. [Simple RAG Pipeline](notebooks/03_01_govt_rag_pipeline_simple.ipynb) — rewrite, answerability, citations [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_govt_rag_pipeline_simple.ipynb)
+2. [Sequential RAG with Guardians](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — harm + scope checks [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_02_govt_rag_pipeline_sequential.ipynb)
+3. [RAG with Retry Loops](notebooks/03_03_govt_rag_pipeline_loops.ipynb) — scope and answerability retries [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_03_govt_rag_pipeline_loops.ipynb)
 
 ### Reference Scripts
 
