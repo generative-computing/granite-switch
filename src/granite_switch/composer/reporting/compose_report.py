@@ -325,11 +325,6 @@ def _print_summary(
             if len(base_source_not_connected) > 10:
                 print(f"  ... and {len(base_source_not_connected) - 10} more")
 
-    # Hiding constant safety margin
-    if model is not None:
-        from .hiding_constant_report import print_hiding_constant_safety
-        print_hiding_constant_safety(model.dtype)
-
     print(f"\nDetailed report saved to: {report_path}")
     print("="*80)
 
