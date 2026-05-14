@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "granite-switch"
-version = "0.0.3"
+version = "0.1.0"
 description = "Granite Switch: Composable model building"
 readme = "README.md"
 license = "Apache-2.0"
