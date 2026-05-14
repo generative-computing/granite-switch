@@ -1,8 +1,10 @@
 # Granite Switch Tutorials
 
+Granite Switch facilitates a modular architecture by consolidating multiple LoRA adapters into a single, unified checkpoint. The following tutorials explore the underlying mechanics and usability, detailing adapter invocation, multi-step pipelines with guardrails, and checkpoint composition.
+
 ## Notebooks
 
-Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
+Step-by-step walkthroughs covering adapter invocation, pipeline construction, and model composition.
 
 | Notebook | Topics | Duration |
 |----------|--------|----------|
@@ -14,12 +16,13 @@ Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
 | [03_03_govt_rag_pipeline_loops.ipynb](notebooks/03_03_govt_rag_pipeline_loops.ipynb) | Complex RAG pipeline with retry loops for scope and answerability | 30 min |
 | [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |
 
-## How-To Guides
+## Guides
 
 | Guide | Description |
 |-------|-------------|
-| [Using Mellea with Granite Switch](how-to/mellea_with_granite_switch.md) | Connect Mellea to a Granite Switch model |
-| [Bring Your Own Adapter](how-to/bring_your_own_adapter.md) | Train, compose, and use custom adapters |
+| [Using Mellea with Granite Switch](guides/mellea_with_granite_switch.md) | Connect Mellea to a Granite Switch model |
+| [Bring Your Own Adapter](guides/bring_your_own_adapter.md) | Train, compose, and use custom adapters |
+| [Compare Inference Throughput](guides/compare_inference_throughput.md) | Compare LoRA vs aLoRA based models in an inference race setup |
 
 ## Learning Paths
 
@@ -27,9 +30,7 @@ Interactive Jupyter tutorials in [`notebooks/`](notebooks/):
 
 Best for: Understanding how Granite Switch works at the control-token level
 
-The HuggingFace examples show how adapters are activated via control tokens. This is useful
-for understanding the underlying mechanics, but **for actual inference, use Mellea** (Path 2),
-which provides constrained decoding, prompt formatting, and proper input/output processing.
+HuggingFace inference examples demonstrate how adapters are activated via control tokens, providing insight into the underlying mechanics. For most applications, we recommend running inference with Mellea (Part 2).
 
 1. [Prerequisites](PREREQUISITES.md#huggingface-backend)
 2. [Hello Adapter](notebooks/00_hello_adapter.ipynb) — see control tokens in action
@@ -58,7 +59,24 @@ Before running inference, you need a composed Granite Switch model. Options:
 
 Best for: Custom adapter development
 
-1. [Bring Your Own Adapter Guide](how-to/bring_your_own_adapter.md)
+1. [Bring Your Own Adapter Guide](guides/bring_your_own_adapter.md)
+
+### Path 4: Real-World Pipelines (Usability)
+
+Best for: Seeing how adapters compose into multi-step applications
+
+1. [Simple RAG Pipeline](notebooks/03_01_govt_rag_pipeline_simple.ipynb) — rewrite, answerability, citations
+2. [Sequential RAG with Guardians](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) — harm + scope checks
+3. [RAG with Retry Loops](notebooks/03_03_govt_rag_pipeline_loops.ipynb) — scope and answerability retries
+
+### Reference Scripts
+
+Runnable scripts in [`scripts/`](scripts/) for common tasks:
+
+| Script | Description |
+|--------|-------------|
+| [run_adapter_generation_direct.py](scripts/reference/run_adapter_generation_direct.py) | Direct adapter invocation via control tokens |
+| [run_adapter_generation_mellea.py](scripts/reference/run_adapter_generation_mellea.py) | Adapter invocation through Mellea |
 
 
 ## Adapter Libraries
