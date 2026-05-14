@@ -33,7 +33,6 @@ def _make_config(qk_norm: bool, num_adapters: int = 0) -> GraniteSwitchConfig:
         adapter_token_ids=[],
         adapter_names=[],
         adapter_ranks=[],
-        control_dims=0,
         qk_norm=qk_norm,
     )
     config._attn_implementation = "sdpa"
@@ -110,12 +109,10 @@ class TestQKNormForward:
         with torch.no_grad():
             out_off, _, _ = attn_off(
                 hidden, adapter_indices,
-                token_group_membership=None, query_group_suppression=None,
                 position_embeddings=pos_emb,
             )
             out_on, _, _ = attn_on(
                 hidden, adapter_indices,
-                token_group_membership=None, query_group_suppression=None,
                 position_embeddings=pos_emb,
             )
 
@@ -137,7 +134,6 @@ class TestQKNormForward:
         with torch.no_grad():
             out, _, _ = attn(
                 hidden, adapter_indices,
-                token_group_membership=None, query_group_suppression=None,
                 position_embeddings=pos_emb,
             )
 

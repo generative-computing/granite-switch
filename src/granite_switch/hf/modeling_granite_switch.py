@@ -82,8 +82,6 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         position_embeddings: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
         adapter_indices: Optional[torch.Tensor] = None,
-        token_group_membership: Optional[torch.Tensor] = None,
-        query_group_suppression: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> tuple:
         residual = hidden_states
@@ -93,8 +91,6 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         hidden_states, self_attn_weights, present_key_values = self.self_attn(
             hidden_states=hidden_states,
             adapter_indices=adapter_indices,
-            token_group_membership=token_group_membership,
-            query_group_suppression=query_group_suppression,
             position_embeddings=position_embeddings,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
@@ -193,44 +189,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             # forward pass, so this model class no longer needs a decoder-
             # side substitute table.
 
-            # --- Hiding group buffers ---
-            # token_to_group_mask: [vocab_size, num_groups] lookup table.
-            # For each token ID, True at group g if that token belongs to group g.
-            # Enables O(1) per-token group membership via: mask = table[input_ids]
-            num_groups = config.num_hiding_groups
-            if num_groups > 0:
-                group_token_ids = config.get_hiding_group_token_ids()
-                # Size must cover all token IDs including added control tokens
-                # which may have IDs >= config.vocab_size.
-                all_known_ids = [tid for tids in group_token_ids.values() for tid in tids]
-                if config.adapter_token_ids:
-                    all_known_ids.extend(config.adapter_token_ids)
-                max_tid = max(all_known_ids) if all_known_ids else -1
-                table_size = max(config.vocab_size, max_tid + 1)
-                token_to_group_mask = torch.zeros(
-                    table_size, num_groups, dtype=torch.bool
-                )
-                for g, tids in group_token_ids.items():
-                    for tid in tids:
-                        token_to_group_mask[tid, g] = True
-                self.register_buffer("token_to_group_mask", token_to_group_mask)
-
-                # adapter_hiding_matrix: [num_adapter_slots, num_groups] boolean.
-                # Index 0 = base, 1+ = adapters. True if adapter hides group g.
-                policy_matrix = config.get_adapter_hiding_policy_matrix()
-                self.register_buffer(
-                    "adapter_hiding_matrix",
-                    torch.tensor(policy_matrix, dtype=torch.bool),
-                )
-            else:
-                self.token_to_group_mask = None
-                self.adapter_hiding_matrix = None
-
         else:
             self.switch = None
             self.adapter_token_ids = None
-            self.token_to_group_mask = None
-            self.adapter_hiding_matrix = None
 
         # Decoder layers
         if config.num_adapters > 0:
@@ -335,7 +296,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # The switch also returns modified_input_ids: input_ids with each
         # control token rewritten to its substitute id, so the decoder can
         # embed once without any token-exchange awareness.
-        hidden_count = None
         modified_input_ids = input_ids
         if self.switch is not None:
             adapter_indices, modified_input_ids = self.switch(
@@ -345,30 +305,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 past_key_values=past_key_values,
                 cache_position=cache_position,
             )
-
-            # Compute group-based hiding masks from lookup tables.
-            if self.token_to_group_mask is not None:
-                # token_group_membership: True at [b, i, g] if token i is a member of group g
-                token_group_membership = self.token_to_group_mask[input_ids]
-                # query_group_suppression: True at [b, i, g] if token i's adapter suppresses group g
-                query_group_suppression = self.adapter_hiding_matrix[adapter_indices]
-            else:
-                token_group_membership = None
-                query_group_suppression = None
-
-            # Compute hidden_count for position correction (SingleSwitch).
-            # SingleSwitch fires once: hidden_count is 0 before the control
-            # token and 1 at/after it, which is exactly (adapter_indices > 0).
-            # In token-exchange mode control tokens become real positions, so
-            # the correction is a no-op — skip it rather than subtract zeros.
-            if hidden_count is None and not self.config.use_token_exchange:
-                hidden_count = (adapter_indices > 0).long()
         else:
             adapter_indices = torch.zeros(
                 (batch_size, seq_length), dtype=torch.long, device=device,
             )
-            token_group_membership = None
-            query_group_suppression = None
 
         # Embed once, on the (possibly-rewritten) input_ids. The decoder is
         # token-exchange-agnostic — it just embeds whatever the switch
@@ -380,20 +320,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Expose adapter_indices for tests and debugging.
         self._last_adapter_indices = adapter_indices
 
-        # Position correction: adjust position_ids to close gaps from hidden tokens.
-        # Clamp to >= 0: pre-init tokens have no hidden tokens in their causal
-        # past, but the counting mechanism returns capacity-1 when all attention
-        # keys are masked, which would produce negative positions and OOB RoPE
-        # cache indices.
-        if hidden_count is not None:
-            adjusted_position_ids = torch.clamp(position_ids - hidden_count, min=0)
-        else:
-            adjusted_position_ids = position_ids
-
-        # Position embeddings (only if RoPE is configured)
+        # Position embeddings (only if RoPE is configured). Control tokens
+        # in token-exchange mode count as real positions, so position_ids
+        # is used directly — no hidden_count subtraction.
         position_embeddings = None
         if self.rotary_emb is not None:
-            position_embeddings = self.rotary_emb(inputs_embeds, position_ids=adjusted_position_ids)
+            position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
 
         # Decoder layers
         hidden_states = inputs_embeds
@@ -414,8 +346,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
                 adapter_indices=adapter_indices,
-                token_group_membership=token_group_membership,
-                query_group_suppression=query_group_suppression,
                 **kwargs,
             )
 

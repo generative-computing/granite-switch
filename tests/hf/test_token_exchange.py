@@ -1,16 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """HF backend tests for token-exchange mode.
 
-Three properties under test:
+Two properties under test:
 1. The embedding at each control-token position equals the embedding of its
    substitute token (scaled by embedding_multiplier), not the original
    control-token embedding.
-2. The KV cache head_dim is the native projection_head_dim (not expanded) —
-   this is the load-bearing correctness property that proves control_dims=0
-   actually eliminates KV-cache overhead.
-3. Legacy hiding mode is untouched: same inputs, but the embedding at the
-   control position matches the raw control-token embedding and the KV cache
-   head_dim is projection_head_dim + control_dims.
+2. The KV cache head_dim is the native projection_head_dim — token-exchange
+   does not expand the KV cache.
 """
 
 import pytest
@@ -20,8 +16,8 @@ from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
 
 
-def _build(num_adapters=2, control_dims=0, substitute_ids=(1, 7)):
-    kwargs = dict(
+def _build(num_adapters=2, substitute_ids=(1, 7)):
+    return GraniteSwitchConfig(
         vocab_size=200,
         hidden_size=32,
         num_attention_heads=4,
@@ -37,12 +33,9 @@ def _build(num_adapters=2, control_dims=0, substitute_ids=(1, 7)):
         max_lora_rank=4,
         adapter_token_ids=[100, 101][:num_adapters],
         adapter_names=["a", "b"][:num_adapters],
-        control_dims=control_dims,
+        adapter_substitute_token_ids=list(substitute_ids[:num_adapters]),
         torch_dtype=torch.float32,
     )
-    if control_dims == 0:
-        kwargs["adapter_substitute_token_ids"] = list(substitute_ids[:num_adapters])
-    return GraniteSwitchConfig(**kwargs)
 
 
 @torch.no_grad()
@@ -55,7 +48,7 @@ class TestTokenExchangeEmbeddingSwap:
     """The control position's residual-stream input is the substitute embedding."""
 
     def test_swap_picks_substitute_embedding(self):
-        config = _build(control_dims=0, substitute_ids=(5, 7))
+        config = _build(substitute_ids=(5, 7))
         model, _ = _forward(
             config,
             torch.tensor([[10, 20, 100, 40]], dtype=torch.long),  # adapter 0 control at pos 2
@@ -70,7 +63,7 @@ class TestTokenExchangeEmbeddingSwap:
         assert lut[40].item() == -1
 
     def test_swap_is_not_applied_on_non_control_positions(self):
-        config = _build(control_dims=0, substitute_ids=(5, 7))
+        config = _build(substitute_ids=(5, 7))
         model = GraniteSwitchForCausalLM(config).eval()
         # Run once through the model with a control token and once without;
         # verify the non-control embedding rows are identical.
@@ -83,10 +76,11 @@ class TestTokenExchangeEmbeddingSwap:
 
 
 class TestKVCacheHeadDim:
-    """The load-bearing correctness property: control_dims=0 collapses KV head_dim."""
+    """The load-bearing correctness property: KV cache head_dim equals
+    the native projection_head_dim — no expansion."""
 
     def test_token_exchange_native_head_dim(self):
-        config = _build(control_dims=0, substitute_ids=(5, 7))
+        config = _build(substitute_ids=(5, 7))
         _, out = _forward(
             config,
             torch.tensor([[10, 20, 100, 40]], dtype=torch.long),
@@ -94,24 +88,13 @@ class TestKVCacheHeadDim:
         # layers[0] is the switch; layers[1] is the first decoder layer.
         decoder_key = out.past_key_values.layers[1].keys
         assert decoder_key.shape[-1] == config.projection_head_dim
-        assert config.use_token_exchange is True
-
-    def test_legacy_hiding_expanded_head_dim(self):
-        config = _build(control_dims=32)
-        _, out = _forward(
-            config,
-            torch.tensor([[10, 20, 100, 40]], dtype=torch.long),
-        )
-        decoder_key = out.past_key_values.layers[1].keys
-        assert decoder_key.shape[-1] == config.projection_head_dim + 32
-        assert config.use_token_exchange is False
 
 
 class TestSwitchStillDetectsAdapter:
     """Swap must happen AFTER the switch reads input_ids, so detection is unaffected."""
 
     def test_adapter_indices_still_activate(self):
-        config = _build(control_dims=0, substitute_ids=(5, 7))
+        config = _build(substitute_ids=(5, 7))
         model, _ = _forward(
             config,
             torch.tensor([[10, 20, 100, 40, 50]], dtype=torch.long),
@@ -131,7 +114,7 @@ class TestPositionCorrectionSkipped:
 
     def test_no_position_shift_in_te_mode(self):
         """RoPE positions should equal the input positions (no hidden_count subtraction)."""
-        config = _build(control_dims=0, substitute_ids=(5, 7))
+        config = _build(substitute_ids=(5, 7))
         model = GraniteSwitchForCausalLM(config).eval()
         input_ids = torch.tensor([[10, 100, 20, 30]], dtype=torch.long)
         # Forward runs without error; the guarded branch would otherwise fire

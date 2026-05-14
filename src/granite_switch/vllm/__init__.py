@@ -52,10 +52,12 @@ def register():
     except Exception:
         pass
 
-    # Register custom ModelArchConfigConvertor so vLLM sees the correct
-    # KV cache head size.  When adapters use control_dims, the decoder
-    # attention stores expanded vectors (projection_head_dim + control_dims)
-    # in the KV cache.
+    # Register custom ModelArchConfigConvertor so vLLM sees:
+    #   1. The correct decoder layer count (excluding the switch's KV-cache
+    #      placeholder slot).
+    #   2. The native KV cache head size (projection_head_dim). Token
+    #      exchange does not expand the head dim, so this is just the base
+    #      model's head_dim.
     try:
         from vllm.transformers_utils.model_arch_config_convertor import (
             MODEL_ARCH_CONFIG_CONVERTORS,
@@ -76,15 +78,7 @@ def register():
 
             def get_head_size(self) -> int:
                 cfg = self.hf_text_config
-                if hasattr(cfg, 'expanded_head_dim'):
-                    return cfg.expanded_head_dim
-                # Fallback for configs without the property
-                base = super().get_head_size()
-                num_adapters = getattr(cfg, "num_adapters", 0)
-                control_dims = getattr(cfg, "control_dims", 32)
-                if num_adapters > 0 and control_dims > 0:
-                    return base + control_dims
-                return base
+                return getattr(cfg, "projection_head_dim", super().get_head_size())
 
         MODEL_ARCH_CONFIG_CONVERTORS["granite_switch"] = (
             _GraniteSwitchArchConfigConvertor

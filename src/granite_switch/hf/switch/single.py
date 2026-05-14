@@ -57,11 +57,14 @@ class SingleSwitch(nn.Module):
         self.control_token_gain = control_token_gain
         self.config = config
 
-        # Use expanded_head_dim to align with decoder layers across both backends.
-        if config is not None and hasattr(config, 'expanded_head_dim') and getattr(config, 'num_adapters', 0) > 0:
-            self.head_dim = config.expanded_head_dim
-        elif config is not None:
-            self.head_dim = config.hidden_size // config.num_attention_heads
+        # Align with the decoder's native head_dim. (Under token exchange the
+        # KV cache no longer carries any expansion, so this is just the
+        # base-model projection_head_dim.)
+        if config is not None:
+            self.head_dim = getattr(
+                config, "projection_head_dim",
+                config.hidden_size // config.num_attention_heads,
+            )
         else:
             self.head_dim = switch_head_dim
 

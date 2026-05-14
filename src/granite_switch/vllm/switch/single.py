@@ -2,7 +2,7 @@
 """SingleSwitch using replicated one-hot attention for adapter selection.
 
 This switch uses the backbone's full head geometry (num_attention_heads,
-num_key_value_heads, expanded_head_dim, attention_multiplier) so that all
+num_key_value_heads, projection_head_dim, attention_multiplier) so that all
 attention layers share one FlashAttentionMetadataBuilder configuration.
 
 The same one-hot dim-0 pattern is replicated identically across every head:
@@ -65,7 +65,7 @@ class SingleSwitch(nn.Module):
                 self.num_kv_heads = total_kv // tp_size
             else:
                 self.num_kv_heads = max(1, total_kv // tp_size)
-            self.head_dim = config.expanded_head_dim
+            self.head_dim = config.projection_head_dim
             self.scaling = config.attention_multiplier
             self.effective_gain = control_token_gain / self.scaling
         else:

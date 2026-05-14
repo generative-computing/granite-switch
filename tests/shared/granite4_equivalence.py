@@ -186,16 +186,10 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     cfg["adapter_token_ids"] = [
         _ADAPTER_TOKEN_BASE + i for i in range(num_adapters)
     ]
-
-    # Default hiding config: all adapters in a single group, all hide it.
-    cfg["hiding_groups"] = {"all_controls": list(adapter_names)}
-    cfg["hiding_policy"] = {
-        name: ["all_controls"] for name in ["base"] + list(adapter_names)
-    }
-    cfg["adapter_third_party"] = list(adapter_names)
-    # These equivalence tests specifically exercise the legacy KV-hiding path.
-    # Pin control_dims=32 so they keep running after the default flipped to 0.
-    cfg.setdefault("control_dims", 32)
+    # Token-exchange substitute ids — use a benign shared id (the BOS-or-
+    # equivalent doesn't matter for these synthetic equivalence tests since
+    # all LoRA weights are zero, so the embedding is what feeds the decoder).
+    cfg["adapter_substitute_token_ids"] = [1] * num_adapters
 
     return cfg
 

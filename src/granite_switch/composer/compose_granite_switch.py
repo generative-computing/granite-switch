@@ -88,19 +88,17 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
     should land at the swap site.
 
     By deriving this from the tokenizer's own chat template at compose
-    time, we avoid hard-coding a Granite-4.1-specific token string
+    time, we avoid hard-coding a Granite-4.x-specific token string
     (<|start_of_role|>). Other base models with different chat templates
     get the correct substitute for their template by construction.
 
-    Raises ``ValueError`` if the template cannot be rendered or the first
-    tokenized id cannot be determined. Callers should suggest
-    ``--legacy-hiding`` as the fallback.
+    Raises ``ValueError`` if the template is missing, fails to render, or
+    emits an unknown token.
     """
     if tokenizer.chat_template is None:
         raise ValueError(
             "Tokenizer has no chat_template; cannot probe the LoRA "
-            "substitute token. Pass --legacy-hiding to use the KV-hiding "
-            "path instead."
+            "substitute token."
         )
     try:
         probe_text = tokenizer.apply_chat_template(
@@ -111,22 +109,19 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
     except Exception as e:
         raise ValueError(
             "Failed to render a probe chat via tokenizer.apply_chat_template "
-            f"while detecting the LoRA substitute token: {e!r}. "
-            "Pass --legacy-hiding to use the KV-hiding path instead."
+            f"while detecting the LoRA substitute token: {e!r}."
         ) from e
     ids = tokenizer(probe_text, add_special_tokens=False).input_ids
     if not ids:
         raise ValueError(
             "Probe chat tokenized to an empty id list; cannot determine the "
-            "LoRA substitute token. Pass --legacy-hiding to use the "
-            "KV-hiding path instead."
+            "LoRA substitute token."
         )
     sub_id = ids[0]
     if sub_id == tokenizer.unk_token_id:
         raise ValueError(
             "First token of the rendered probe chat is <unk>; the template "
-            "appears to emit content outside the tokenizer's vocabulary. "
-            "Pass --legacy-hiding to use the KV-hiding path instead."
+            "appears to emit content outside the tokenizer's vocabulary."
         )
     return sub_id
 
@@ -505,22 +500,6 @@ Examples:
         help="Dimension of Q/K/V vectors in switch attention",
     )
     parser.add_argument(
-        "--control-dims",
-        type=int,
-        default=None,
-        help="Extra dims for K/V to mask control tokens in decoder layers. "
-             "Default: 0 (token-exchange mode). Set to >=1 and pass --legacy-hiding "
-             "only if a specific adapter regresses under token exchange.",
-    )
-    parser.add_argument(
-        "--legacy-hiding",
-        action="store_true",
-        default=False,
-        help="Use the legacy KV-hiding path (control_dims=32, no embedding "
-             "substitution). Escape hatch for adapters that regress under the "
-             "default token-exchange mode.",
-    )
-    parser.add_argument(
         "--built-in-adapters",
         type=str,
         nargs="*",
@@ -743,9 +722,8 @@ def build():
     has_external = len(external_discovered) > 0
     has_built_in = len(built_in_discovered) > 0
 
-    # Mode detection:
-    #   Mode A (native): built-in only → no hiding, control_dims=0
-    #   Mode B (third-party): externals present → full hiding
+    # Mode detection (informational only — token-exchange handles both
+    # native and third-party adapter builds uniformly).
     if has_built_in and not has_external:
         build_mode = "native"
     elif has_external:
@@ -757,7 +735,6 @@ def build():
     # Extract fields from 4-tuples (path, name, tech, source)
     adapter_paths = [t[0] for t in all_discovered if t[0] is not None]
     adapter_names = [t[1] for t in all_discovered]
-    external_names = [t[1] for t in external_discovered]
     built_in_names = [name for name in (args.built_in_adapters or [])]
 
     print(f"\nBuild mode: {build_mode}")
@@ -812,51 +789,23 @@ def build():
     optional_kwargs = {}
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
-    if args.control_dims is not None:
-        optional_kwargs["control_dims"] = args.control_dims
 
-    # Control-token handling mode: token-exchange by default, legacy hiding on opt-in.
-    if args.legacy_hiding:
-        # Legacy: keep today's KV-hiding scheme. control_dims must be > 0.
-        if optional_kwargs.get("control_dims", 0) == 0:
-            optional_kwargs["control_dims"] = 32
-        adapter_substitute_token_ids = None
-        # Hiding groups only apply in third-party mode; native mode still
-        # has no hiding and no substitution, but --legacy-hiding forces
-        # control_dims > 0 so the config validator accepts it.
-        if build_mode == "native":
-            hiding_groups = None
-            hiding_policy = None
-            adapter_third_party = None
+    # Token-exchange substitute choice (must mirror the token that appears
+    # right after the control token in the rendered chat prompt, so the
+    # swap keeps the residual stream in-distribution):
+    #   - ALoRA: first token of the adapter's alora_invocation_tokens.
+    #   - LoRA/builtin: whatever the tokenizer's chat template emits at
+    #     the very start of a no-adapter user turn. For Granite 4.x that's
+    #     <|start_of_role|>; the probe derives this from the template at
+    #     compose time so other base models work by construction.
+    lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
+    adapter_substitute_token_ids = []
+    for adapter_path, _name, technology, _source in all_discovered:
+        if technology == "alora":
+            sub_id = get_alora_first_invocation_token_id(adapter_path)
         else:
-            hiding_groups = {"all_controls": list(adapter_names)}
-            hiding_policy = {name: ["all_controls"] for name in adapter_names}
-            hiding_policy["base"] = ["all_controls"]
-            adapter_third_party = list(external_names)
-    else:
-        # Default: token-exchange. control_dims=0; every adapter needs a substitute id.
-        #
-        # Substitute choice (must mirror the token that appears right after the
-        # control token in the rendered chat prompt, so the swap keeps the
-        # residual stream in-distribution):
-        #   - ALoRA: first token of the adapter's alora_invocation_tokens.
-        #   - LoRA/builtin: whatever the tokenizer's chat template emits at
-        #     the very start of a no-adapter user turn. For Granite 4.x
-        #     that's <|start_of_role|>; the probe derives this from the
-        #     template at compose time so other base models work by
-        #     construction.
-        lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
-        adapter_substitute_token_ids = []
-        for adapter_path, _name, technology, _source in all_discovered:
-            if technology == "alora":
-                sub_id = get_alora_first_invocation_token_id(adapter_path)
-            else:
-                sub_id = lora_sub_id
-            adapter_substitute_token_ids.append(sub_id)
-        # Token-exchange supersedes KV hiding — no hiding config needed.
-        hiding_groups = None
-        hiding_policy = None
-        adapter_third_party = None
+            sub_id = lora_sub_id
+        adapter_substitute_token_ids.append(sub_id)
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
@@ -864,9 +813,6 @@ def build():
         adapter_token_ids=adapter_token_ids,
         adapter_substitute_token_ids=adapter_substitute_token_ids,
         adapter_names=adapter_names,
-        hiding_groups=hiding_groups,
-        hiding_policy=hiding_policy,
-        adapter_third_party=adapter_third_party,
         built_in_adapter_names=built_in_names,
         built_in_lora_rank=args.lora_rank,
         built_in_lora_alpha=args.lora_alpha if args.lora_alpha is not None else float(args.lora_rank),

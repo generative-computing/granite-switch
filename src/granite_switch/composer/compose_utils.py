@@ -117,10 +117,6 @@ class GraniteSwitchComposer:
                 source_analysis = {}
 
         # --- Step 4: Build switch config from arch descriptor ---
-        hiding_groups = kwargs.pop("hiding_groups", None)
-        hiding_policy = kwargs.pop("hiding_policy", None)
-        adapter_third_party = kwargs.pop("adapter_third_party", None)
-
         # Copy config fields driven by architecture descriptor
         config_kwargs: Dict = {}
 
@@ -158,9 +154,6 @@ class GraniteSwitchComposer:
                 "adapter_token_ids": adapter_token_ids,
                 "adapter_substitute_token_ids": adapter_substitute_token_ids,
                 "adapter_names": adapter_names,
-                "hiding_groups": hiding_groups,
-                "hiding_policy": hiding_policy,
-                "adapter_third_party": adapter_third_party,
                 "max_lora_rank": lora_rank,
                 "adapter_ranks": adapter_ranks,
                 "lora_target_modules": lora_target_modules,
