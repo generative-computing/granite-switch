@@ -14,7 +14,7 @@ of a 32-conversation race (no setup required).
 
 ## Reproduce in Google Colab
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_alora_vs_lora_race.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb)
 
 The notebook runs both servers sequentially on a single A100 GPU and produces
 `race_live.html` (animated replay) and `race_report.html` (static summary).
