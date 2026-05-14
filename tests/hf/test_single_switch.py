@@ -135,8 +135,12 @@ class _HFSingleSwitchBase:
         switch = _make_switch(self._backend, num_adapters, control_token_gain)
         token_ids = torch.tensor(ADAPTER_TOKEN_IDS_LIST[:num_adapters])
         input_ids = torch.tensor([seq])
-        result = switch.forward(input_ids=input_ids, adapter_token_ids=token_ids)
-        return result[0].tolist()
+        # Switch returns (adapter_indices, modified_input_ids); these tests
+        # only check adapter selection so we drop the rewritten ids here.
+        adapter_indices, _modified = switch.forward(
+            input_ids=input_ids, adapter_token_ids=token_ids,
+        )
+        return adapter_indices[0].tolist()
 
 
 # ── Shared test classes (from mixin) ────────────────────────────────
@@ -177,6 +181,8 @@ class TestBatchProcessing:
             [TEXT_TOKEN, ADAPTER_TOKEN_IDS_LIST[0], TEXT_TOKEN, TEXT_TOKEN, TEXT_TOKEN],
             [TEXT_TOKEN, ADAPTER_TOKEN_IDS_LIST[3], TEXT_TOKEN, TEXT_TOKEN, TEXT_TOKEN],
         ])
-        result = switch.forward(input_ids=input_ids, adapter_token_ids=token_ids)
-        assert (result[0, 2:] == 1).all()
-        assert (result[1, 2:] == 4).all()
+        adapter_indices, _modified = switch.forward(
+            input_ids=input_ids, adapter_token_ids=token_ids,
+        )
+        assert (adapter_indices[0, 2:] == 1).all()
+        assert (adapter_indices[1, 2:] == 4).all()

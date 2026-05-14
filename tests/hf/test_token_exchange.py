@@ -60,8 +60,9 @@ class TestTokenExchangeEmbeddingSwap:
             config,
             torch.tensor([[10, 20, 100, 40]], dtype=torch.long),  # adapter 0 control at pos 2
         )
-        # The LUT maps control id 100 → substitute 5.
-        lut = model.model.control_to_substitute_lut
+        # The LUT lives on the switch (it performs the rewrite during its
+        # forward); maps control id 100 → substitute 5.
+        lut = model.model.switch.control_to_substitute_lut
         assert lut[100].item() == 5
         assert lut[101].item() == 7
         # Positions without control tokens map to -1.
