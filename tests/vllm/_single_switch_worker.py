@@ -54,7 +54,7 @@ def _setup():
     mock_config = SimpleNamespace(
         num_attention_heads=4,
         num_key_value_heads=2,
-        expanded_head_dim=64,
+        projection_head_dim=64,
         attention_multiplier=0.125,
     )
 

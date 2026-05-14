@@ -9,8 +9,8 @@ ever resident on GPU at a time::
     python worker.py compare --work-dir <dir> --label <model_name>
 
 **build**: Loads config for dtype/vocab, generates a deterministic 64-token prompt,
-builds a GraniteSwitch model with 1 built-in adapter (zero LoRA weights) and
-control_dims=32.  Saves the switch model and inputs to ``<work-dir>/``.
+builds a GraniteSwitch model with 1 built-in adapter (zero LoRA weights).
+Saves the switch model and inputs to ``<work-dir>/``.
 
 **run**: Loads inputs from ``<work-dir>/inputs.json``, loads model in vLLM, runs
 greedy autoregressive generation (temperature=0, max_tokens=32), saves generated
@@ -83,17 +83,14 @@ def cmd_build(args):
     print(f"  saved inputs to {inputs_path}")
 
     # Build switch model with 1 built-in adapter
-    print(f"\nBuilding GraniteSwitch (1 built-in adapter, control_dims=32)...")
+    print(f"\nBuilding GraniteSwitch (1 built-in adapter)...")
     skin_dir = os.path.join(work_dir, "switch")
     model = GraniteSwitchComposer.from_base_and_adapters(
         model_name,
         built_in_adapter_names=["test"],
         adapter_names=["test"],
         adapter_token_ids=[adapter_token_id],
-        control_dims=32,
-        hiding_groups={"all_controls": ["test"]},
-        hiding_policy={"base": ["all_controls"], "test": ["all_controls"]},
-        adapter_third_party=["test"],
+        adapter_substitute_token_ids=[1],
         torch_dtype=dtype,
     )
 

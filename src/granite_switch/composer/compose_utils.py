@@ -50,9 +50,8 @@ class GraniteSwitchComposer:
             adapter_token_ids: Token IDs for adapter control.  Required when
                 ``adapter_paths`` is non-empty.
             adapter_substitute_token_ids: Token IDs whose embeddings replace
-                control-token embeddings in token-exchange mode. One per adapter.
-                Pass ``None`` to run the legacy KV-hiding path (requires
-                ``control_dims > 0`` in ``**kwargs``).
+                control-token embeddings at the switch. Required when
+                ``adapter_paths`` is non-empty; one per adapter.
             adapter_names: Display names for each adapter (external + built-in).
                 When ``None``, derived from the directory structure.
             built_in_adapter_names: Names for built-in (empty LoRA) adapter slots.
@@ -160,7 +159,7 @@ class GraniteSwitchComposer:
             }
         )
 
-        # Merge caller-provided overrides (switch_head_dim, control_dims, etc.)
+        # Merge caller-provided overrides (switch_head_dim, etc.)
         config_kwargs.update(kwargs)
 
         switch_config = GraniteSwitchConfig(**config_kwargs)
