@@ -78,19 +78,34 @@ def _load_tokenizer(model_name_or_path):
 
 
 def _probe_lora_substitute_token_id(tokenizer) -> int:
-    """Ask the tokenizer which token naturally appears at the start of a
-    rendered no-adapter chat.
+    """Ask the tokenizer which token naturally appears at sequence position 0
+    of a rendered no-adapter chat.
 
-    The LoRA prefix insertion prepends the adapter control token at the very
-    beginning of the rendered output, so whatever the template emits first
-    for a normal user turn is exactly what sits at position 1 after the
-    control token — and therefore the right substitute whose embedding
-    should land at the swap site.
+    The LoRA prefix insertion places the adapter control token at sequence
+    position 0 of the rendered output. Whatever token would otherwise have
+    occupied position 0 (in a no-adapter render) is the right substitute
+    whose embedding should land at the swap site so the post-swap sequence
+    is indistinguishable from a no-adapter render.
 
-    By deriving this from the tokenizer's own chat template at compose
-    time, we avoid hard-coding a Granite-4.x-specific token string
-    (<|start_of_role|>). Other base models with different chat templates
-    get the correct substitute for their template by construction.
+    Assumption (Granite 4.x): the chat template emits a constant
+    ``input_ids[0]`` regardless of message content, system prompt presence,
+    or generation-prompt flag. Empirically verified — every realistic render
+    of the Granite 4.1 template yields ``<|start_of_role|>`` (id 100264) at
+    position 0. The probe renders a single minimal chat to read that
+    constant out of the template.
+
+    A future model whose chat template branches on inputs at position 0
+    (e.g. emits BOS only when no system message is present) would break
+    this assumption: the probe would still return *some* valid id, but it
+    might not match position 0 in another render mode at runtime, leaving
+    the LoRA control token swapped to an embedding the model doesn't
+    expect at that position. ``tests/composer/test_lora_substitute_probe.py``
+    pins the Granite 4.x behavior; if you port to another base model with
+    a more dynamic template, extend the probe to render multiple shapes
+    and verify they all agree.
+
+    By deriving the substitute from the tokenizer's own chat template at
+    compose time we avoid hard-coding a Granite-specific token string.
 
     Raises ``ValueError`` if the template is missing, fails to render, or
     emits an unknown token.
