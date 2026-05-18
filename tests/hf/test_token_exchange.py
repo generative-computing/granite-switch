@@ -107,19 +107,3 @@ class TestSwitchStillDetectsAdapter:
         assert adapter_indices[0, 2].item() == 1
         assert adapter_indices[0, 3].item() == 1
         assert adapter_indices[0, 4].item() == 1
-
-
-class TestPositionCorrectionSkipped:
-    """In token-exchange mode, position correction is a no-op."""
-
-    def test_no_position_shift_in_te_mode(self):
-        """RoPE positions should equal the input positions (no hidden_count subtraction)."""
-        config = _build(substitute_ids=(5, 7))
-        model = GraniteSwitchForCausalLM(config).eval()
-        input_ids = torch.tensor([[10, 100, 20, 30]], dtype=torch.long)
-        # Forward runs without error; the guarded branch would otherwise fire
-        # and shift positions by 1 for tokens 2/3.
-        with torch.no_grad():
-            out = model(input_ids=input_ids)
-        # Sanity: logits shape matches input_ids shape.
-        assert out.logits.shape[:2] == input_ids.shape

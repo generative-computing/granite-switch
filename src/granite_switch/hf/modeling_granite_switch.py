@@ -292,10 +292,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             position_ids=position_ids,
         )
 
-        # Compute adapter_indices using switch (BEFORE RoPE for position correction).
-        # The switch also returns modified_input_ids: input_ids with each
-        # control token rewritten to its substitute id, so the decoder can
-        # embed once without any token-exchange awareness.
+        # The switch returns adapter_indices alongside modified_input_ids:
+        # input_ids with each control token rewritten to its substitute id,
+        # so the decoder can embed once without any token-exchange awareness.
         modified_input_ids = input_ids
         if self.switch is not None:
             adapter_indices, modified_input_ids = self.switch(
@@ -320,9 +319,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Expose adapter_indices for tests and debugging.
         self._last_adapter_indices = adapter_indices
 
-        # Position embeddings (only if RoPE is configured). Control tokens
-        # in token-exchange mode count as real positions, so position_ids
-        # is used directly — no hidden_count subtraction.
         position_embeddings = None
         if self.rotary_emb is not None:
             position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
