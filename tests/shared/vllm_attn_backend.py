@@ -85,22 +85,58 @@ def force_compatible_attn_backend() -> Callable[[], None] | None:
         ) from exc
 
     forced_cls = backend_enum.get_class()
-    original = _sel.get_attn_backend
 
     def _patched_get_attn_backend(*args, **kwargs):
         return forced_cls
 
-    _sel.get_attn_backend = _patched_get_attn_backend
+    # vLLM's Attention layer and friends do
+    #   from vllm.v1.attention.selector import get_attn_backend
+    # at module import time, so patching only `selector.get_attn_backend`
+    # leaves their already-bound local references untouched. Patch each
+    # known consumer's module namespace too. Missing modules (older/newer
+    # vLLM) are ignored — at least one of these will be the live one.
+    consumer_modules = [
+        "vllm.v1.attention.selector",
+        "vllm.model_executor.layers.attention.attention",
+        "vllm.model_executor.layers.attention.chunked_local_attention",
+        "vllm.model_executor.layers.attention.cross_attention",
+        "vllm.model_executor.layers.attention.encoder_only_attention",
+        "vllm.model_executor.layers.attention.mla_attention",
+        "vllm.model_executor.layers.attention.static_sink_attention",
+    ]
+
+    import importlib
+
+    originals: list[tuple[object, object]] = []
+    for mod_name in consumer_modules:
+        try:
+            mod = importlib.import_module(mod_name)
+        except ImportError:
+            continue
+        if hasattr(mod, "get_attn_backend"):
+            originals.append((mod, mod.get_attn_backend))
+            mod.get_attn_backend = _patched_get_attn_backend
+
+    if not originals:
+        # Nothing to patch — vLLM internals must have moved.
+        sys.stderr.write(
+            "[vllm_attn_backend] WARNING: no get_attn_backend symbols found "
+            "in known vLLM modules; backend override is a no-op. The test "
+            "will likely still hit the FA3 kernel-image crash.\n"
+        )
+        sys.stderr.flush()
+        return None
 
     sys.stderr.write(
         f"[vllm_attn_backend] GPU compute capability {capability} < (9, 0): "
-        f"forcing {backend_name} attention backend (set "
-        f"GS_TEST_FORCE_ATTN_BACKEND=0 to disable, GS_TEST_ATTN_BACKEND=<NAME> "
-        f"to pick a different one).\n"
+        f"forcing {backend_name} attention backend in "
+        f"{len(originals)} vLLM module(s) (set GS_TEST_FORCE_ATTN_BACKEND=0 "
+        f"to disable, GS_TEST_ATTN_BACKEND=<NAME> to pick a different one).\n"
     )
     sys.stderr.flush()
 
     def _restore() -> None:
-        _sel.get_attn_backend = original
+        for mod, original in originals:
+            mod.get_attn_backend = original
 
     return _restore
