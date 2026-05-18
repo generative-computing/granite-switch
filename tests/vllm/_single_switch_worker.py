@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
-from tests.shared.vllm_attn_backend import force_compatible_attn_backend
 from tests.shared.vllm_distributed import ensure_distributed
 
 
@@ -63,7 +62,6 @@ def _setup():
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
 
-    restore_attn_backend = force_compatible_attn_backend()
     try:
         vllm_config = VllmConfig()
         ensure_distributed(vllm_config)
@@ -76,8 +74,6 @@ def _setup():
             )
     finally:
         torch.set_default_dtype(old_dtype)
-        if restore_attn_backend is not None:
-            restore_attn_backend()
 
     attn = switch.attn
     attn.kv_cache_torch_dtype = torch.bfloat16
@@ -259,12 +255,12 @@ def _probe_attention(harness):
         msg = f"{type(exc).__name__}: {exc}"
         hint = (
             "Auto-selected attention backend "
-            f"{harness['backend_name']!r} cannot launch on this GPU. "
-            "If 'no kernel image is available' appears above, the installed "
-            "vllm-flash-attn was built for a different SM than the runtime GPU. "
-            "Either rebuild vllm-flash-attn with TORCH_CUDA_ARCH_LIST covering "
-            "this GPU, or set VLLM_ATTENTION_BACKEND to FLASHINFER / TRITON_ATTN "
-            "/ FLEX_ATTENTION before running the suite."
+            f"{harness['backend_name']!r} crashed during the startup smoke "
+            "test. If 'no kernel image is available' appears above, the FA "
+            "kernels in this venv were compiled for a different SM than the "
+            "runtime GPU. Common cause: a stale standalone 'vllm-flash-attn' "
+            "PyPI package shadowing vLLM's bundled FA kernels — try "
+            "`pip uninstall vllm-flash-attn` and re-run."
         )
         return {"fatal": msg, "hint": hint, "backend_name": harness["backend_name"]}
     return None
