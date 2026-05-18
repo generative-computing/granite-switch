@@ -3,6 +3,11 @@
 
 Protocol (JSON-line over stdin/stdout):
   Startup: prints {"ready": true, "backend_name": "..."} to stdout
+       OR  prints {"fatal": "...", "hint": "...", "backend_name": "..."} and exits
+           when the auto-selected attention backend's kernel image is incompatible
+           with this GPU (e.g. FA3 Hopper-only kernels on a non-Hopper card). The
+           parent reads this and converts it into one clear pytest failure instead
+           of letting hundreds of subsequent tests cascade into BrokenPipeErrors.
   Request: {"seq": [...], "num_adapters": N, "control_token_gain": G}
   Response: {"result": [...]}
   Error: {"error": "..."}
@@ -22,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import torch
 
+from tests.shared.vllm_attn_backend import force_compatible_attn_backend
 from tests.shared.vllm_distributed import ensure_distributed
 
 
@@ -57,6 +63,7 @@ def _setup():
     old_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.bfloat16)
 
+    restore_attn_backend = force_compatible_attn_backend()
     try:
         vllm_config = VllmConfig()
         ensure_distributed(vllm_config)
@@ -69,6 +76,8 @@ def _setup():
             )
     finally:
         torch.set_default_dtype(old_dtype)
+        if restore_attn_backend is not None:
+            restore_attn_backend()
 
     attn = switch.attn
     attn.kv_cache_torch_dtype = torch.bfloat16
@@ -232,8 +241,56 @@ def _query_geometry(harness):
     }
 
 
+def _probe_attention(harness):
+    """Run a 1-token forward to verify the auto-selected attention kernel is usable.
+
+    vLLM picks FLASH_ATTN by default. If the installed vllm-flash-attn was built
+    only for Hopper (SM 9.0) but this GPU is a different architecture, the very
+    first kernel launch raises "no kernel image is available for execution on
+    the device" — and in some builds this kills the worker process at the C
+    layer before any Python handler runs. Catching it here, on a tiny synthetic
+    input, lets us emit a structured fatal message before signaling ready.
+
+    Returns None on success, or a dict {"fatal": ..., "hint": ...} on failure.
+    """
+    try:
+        _run(harness, seq=[0], num_adapters=1, control_token_gain=15.0)
+    except Exception as exc:
+        msg = f"{type(exc).__name__}: {exc}"
+        hint = (
+            "Auto-selected attention backend "
+            f"{harness['backend_name']!r} cannot launch on this GPU. "
+            "If 'no kernel image is available' appears above, the installed "
+            "vllm-flash-attn was built for a different SM than the runtime GPU. "
+            "Either rebuild vllm-flash-attn with TORCH_CUDA_ARCH_LIST covering "
+            "this GPU, or set VLLM_ATTENTION_BACKEND to FLASHINFER / TRITON_ATTN "
+            "/ FLEX_ATTENTION before running the suite."
+        )
+        return {"fatal": msg, "hint": hint, "backend_name": harness["backend_name"]}
+    return None
+
+
 def main():
-    harness = _setup()
+    try:
+        harness = _setup()
+    except Exception as exc:
+        # Setup itself blew up — surface it on stdout so the parent can show a
+        # clean failure instead of "Worker failed to start: <empty>".
+        msg = {
+            "fatal": f"{type(exc).__name__}: {exc}",
+            "hint": "Worker setup failed before attention probe.",
+            "backend_name": "unknown",
+        }
+        sys.stdout.write(json.dumps(msg) + "\n")
+        sys.stdout.flush()
+        traceback.print_exc(file=sys.stderr)
+        return
+
+    probe_failure = _probe_attention(harness)
+    if probe_failure is not None:
+        sys.stdout.write(json.dumps(probe_failure) + "\n")
+        sys.stdout.flush()
+        return
 
     # Signal ready
     ready_msg = {"ready": True, "backend_name": harness["backend_name"]}

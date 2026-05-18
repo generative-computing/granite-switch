@@ -47,6 +47,12 @@ if _VLLM_AVAILABLE:
     from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
     from granite_switch.vllm.core.decoder import GraniteLoRAEmbeddedAttention
 
+    # Force a working attention backend on non-Hopper GPUs (FA3 build is
+    # Hopper-only in this environment). One-shot patch for the whole module
+    # — the subprocess exits when this file's tests finish so no restore.
+    from tests.shared.vllm_attn_backend import force_compatible_attn_backend
+    force_compatible_attn_backend()
+
 from tests.shared.vllm_distributed import ensure_distributed as _ensure_distributed
 
 BLOCK_SIZE = 16

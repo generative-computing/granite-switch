@@ -47,11 +47,19 @@ _WORKER_PATH = Path(__file__).parent / "_single_switch_worker.py"
 _worker_proc = None
 _worker_lock = threading.Lock()
 _backend_name = None
+# Sticky error: once the worker reports a fatal startup condition (e.g. a
+# kernel-image mismatch in the auto-selected attention backend), we keep the
+# message here and re-raise it on every subsequent test instead of re-spawning
+# a worker that will hit the same crash. This converts what used to be ~hundreds
+# of cascading BrokenPipeErrors into one clear, actionable failure per test.
+_fatal_startup_error = None
 
 
 def _ensure_worker():
     """Lazily start the long-lived worker subprocess."""
-    global _worker_proc, _backend_name
+    global _worker_proc, _backend_name, _fatal_startup_error
+    if _fatal_startup_error is not None:
+        pytest.fail(_fatal_startup_error, pytrace=False)
     if _worker_proc is not None and _worker_proc.poll() is None:
         return
     proc = subprocess.Popen(
@@ -68,6 +76,23 @@ def _ensure_worker():
         stderr = proc.stderr.read()
         raise RuntimeError(f"Worker failed to start:\n{stderr}")
     ready = json.loads(ready_line)
+    if "fatal" in ready:
+        # Worker detected a non-recoverable environment problem (e.g. the
+        # auto-selected attention backend has no kernel image for this GPU).
+        # Drain stderr for context, mark this poison sticky, and fail.
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        stderr_tail = (proc.stderr.read() or "")[-2000:]
+        backend = ready.get("backend_name", "unknown")
+        _fatal_startup_error = (
+            f"vLLM worker cannot start: {ready['fatal']}\n"
+            f"Backend: {backend}\n"
+            f"Hint: {ready.get('hint', '')}\n"
+            f"--- worker stderr (tail) ---\n{stderr_tail}"
+        )
+        pytest.fail(_fatal_startup_error, pytrace=False)
     assert ready.get("ready"), f"Unexpected ready message: {ready}"
     _backend_name = ready.get("backend_name", "unknown")
     _worker_proc = proc
