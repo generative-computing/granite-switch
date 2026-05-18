@@ -123,27 +123,32 @@ def _build_metadata(harness, seq_len):
     if backend_name == "FLASH_ATTN":
         from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
-        # FA3 requires scheduler_metadata; compute it when available.
+        # scheduler_metadata is FA3-only — passing it on FA2 (Ampere/A100)
+        # forces FA3 kernel dispatch and crashes with "no kernel image
+        # is available". Only compute it when get_flash_attn_version() == 3
+        # (Hopper SM90+).
         scheduler_metadata = None
         try:
             from vllm.v1.attention.backends.fa_utils import (
+                get_flash_attn_version,
                 get_scheduler_metadata,
             )
-            switch = harness["switch"]
-            scheduler_metadata = get_scheduler_metadata(
-                batch_size=1,
-                max_seqlen_q=seq_len,
-                max_seqlen_k=seq_len,
-                num_heads_q=switch.num_heads,
-                num_heads_kv=switch.num_kv_heads,
-                headdim=switch.head_dim,
-                cache_seqlens=seq_lens,
-                qkv_dtype=torch.bfloat16,
-                cu_seqlens_q=query_start_loc,
-                page_size=block_size,
-                causal=True,
-                num_splits=0,
-            )
+            if get_flash_attn_version() == 3:
+                switch = harness["switch"]
+                scheduler_metadata = get_scheduler_metadata(
+                    batch_size=1,
+                    max_seqlen_q=seq_len,
+                    max_seqlen_k=seq_len,
+                    num_heads_q=switch.num_heads,
+                    num_heads_kv=switch.num_kv_heads,
+                    headdim=switch.head_dim,
+                    cache_seqlens=seq_lens,
+                    qkv_dtype=torch.bfloat16,
+                    cu_seqlens_q=query_start_loc,
+                    page_size=block_size,
+                    causal=True,
+                    num_splits=0,
+                )
         except ImportError:
             pass
 

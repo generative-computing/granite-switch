@@ -265,27 +265,32 @@ class _VLLMModelTestBase:
         if backend_name == "FLASH_ATTN":
             from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
-            # FA3 requires scheduler_metadata; compute it when available.
+            # scheduler_metadata is FA3-only — passing it on FA2 (Ampere/A100)
+            # forces FA3 kernel dispatch and crashes with "no kernel image
+            # is available". Only compute it when get_flash_attn_version() == 3
+            # (Hopper SM90+).
             scheduler_metadata = None
             try:
                 from vllm.v1.attention.backends.fa_utils import (
+                    get_flash_attn_version,
                     get_scheduler_metadata,
                 )
-                first_attn = list(self._attention_map.values())[0]
-                scheduler_metadata = get_scheduler_metadata(
-                    batch_size=1,
-                    max_seqlen_q=seq_len,
-                    max_seqlen_k=seq_len,
-                    num_heads_q=first_attn.num_heads,
-                    num_heads_kv=first_attn.num_kv_heads,
-                    headdim=first_attn.head_size,
-                    cache_seqlens=seq_lens,
-                    qkv_dtype=torch.bfloat16,
-                    cu_seqlens_q=query_start_loc,
-                    page_size=BLOCK_SIZE,
-                    causal=True,
-                    num_splits=0,
-                )
+                if get_flash_attn_version() == 3:
+                    first_attn = list(self._attention_map.values())[0]
+                    scheduler_metadata = get_scheduler_metadata(
+                        batch_size=1,
+                        max_seqlen_q=seq_len,
+                        max_seqlen_k=seq_len,
+                        num_heads_q=first_attn.num_heads,
+                        num_heads_kv=first_attn.num_kv_heads,
+                        headdim=first_attn.head_size,
+                        cache_seqlens=seq_lens,
+                        qkv_dtype=torch.bfloat16,
+                        cu_seqlens_q=query_start_loc,
+                        page_size=BLOCK_SIZE,
+                        causal=True,
+                        num_splits=0,
+                    )
             except ImportError:
                 pass
 
