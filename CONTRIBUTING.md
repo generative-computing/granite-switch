@@ -12,7 +12,7 @@ Thank you for your interest in contributing to Granite Switch!
    uv sync --extra dev
    ```
 3. Create a feature branch and make your changes
-4. Run tests: `pytest tests/ -v`
+4. Run tests: `uv run pytest tests/ -v`
 5. Submit a pull request
 
 ## Contribution Guidelines

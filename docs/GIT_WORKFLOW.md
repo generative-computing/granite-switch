@@ -62,7 +62,7 @@ Fixes #123
 
 Before committing:
 
-1. **Run tests**: `pytest tests/ -v`
+1. **Run tests**: `uv run pytest tests/ -v`
 2. **Check comments match code** — stale comments are worse than no comments
 3. **Update docs** if behavior changed
 
