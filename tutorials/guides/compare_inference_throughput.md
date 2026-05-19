@@ -26,8 +26,8 @@ The notebook runs both servers sequentially on a single A100 GPU and produces
 - Two GPUs (one per server) for simultaneous mode, or one GPU for sequential mode
 - Install dependencies:
   ```bash
-  pip install -e ".[vllm]"
-  pip install mellea chromadb rich tqdm transformers httpx
+  uv sync --extra vllm
+  uv pip install mellea chromadb rich tqdm transformers httpx
   ```
 - Build the ChromaDB index (once):
   ```bash

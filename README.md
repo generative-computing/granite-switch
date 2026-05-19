@@ -51,7 +51,11 @@ pip install "granite-switch[vllm20]"    # vLLM 0.20+ (requires CUDA 13+)
 pip install "granite-switch[dev]"       # Everything
 ```
 
-Requires Python 3.9+ and PyTorch 2.0+. Two vLLM backends are available: `.[vllm]` for broad CUDA 12.x compatibility (0.19.x), and `.[vllm20]` for the latest performance improvements (CUDA 13+).
+Requires Python 3.10+ and PyTorch 2.0+.
+
+> **vLLM version note:** This project currently defaults to vLLM 0.19.1 due to vLLM 0.20's
+> dependency on CUDA 13.0+ (via PyTorch 2.11), which is incompatible with many existing
+> environments running CUDA 12.x drivers. Use `.[vllm20]` if your environment supports CUDA 13+.
 
 ### Compose a Model
 
