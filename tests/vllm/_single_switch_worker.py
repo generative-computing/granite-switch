@@ -81,6 +81,14 @@ def _setup():
                 control_token_gain=15.0,
                 config=mock_config,
             )
+        # Move buffers to CUDA so the LUT (registered as a CPU buffer in
+        # SingleSwitch.__init__) can index the CUDA input_ids during forward.
+        # The Q/K/V tensors in SingleSwitch.forward() are constructed directly
+        # on CUDA so they don't otherwise force a .to() call.
+        if switch.control_to_substitute_lut is not None:
+            switch.control_to_substitute_lut = (
+                switch.control_to_substitute_lut.to(device)
+            )
     finally:
         torch.set_default_dtype(old_dtype)
 
