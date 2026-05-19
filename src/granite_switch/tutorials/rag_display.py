@@ -14,6 +14,9 @@ different `show_intermediates` variant to match its pipeline shape:
 import json
 
 from IPython.display import Markdown, display
+from mellea.stdlib.components import Document as MelleaDocument
+from mellea.stdlib.components.chat import Message as MelleaMessage
+from mellea.stdlib.context import ChatContext
 
 
 def _is_clear(clarification):
@@ -40,14 +43,16 @@ def show_answer(r):
 
 def show_history(conv):
     """Render a Conversation's history as formatted Markdown."""
-    if not conv.history:
+    messages = conv.ctx.as_list()
+    if not messages:
         display(Markdown("*(conversation history is empty)*"))
         return
-    md = ["---", f"### Conversation history — {len(conv.history)//2} turn(s)", "---"]
-    for m in conv.history:
-        role = "👤 **User**" if m["role"] == "user" else "🤖 **Assistant**"
-        doc_note = f" *({len(m['documents'])} docs)*" if m.get("documents") else ""
-        md.append(f"{role}{doc_note}\n\n> {m['content']}")
+    md = ["---", f"### Conversation history — {len(messages)//2} turn(s)", "---"]
+    for m in messages:
+        role = "👤 **User**" if m.role == "user" else "🤖 **Assistant**"
+        docs = m._docs or []
+        doc_note = f" *({len(docs)} docs)*" if docs else ""
+        md.append(f"{role}{doc_note}\n\n> {m.content}")
     display(Markdown("\n\n".join(md)))
 
 
@@ -252,17 +257,22 @@ def show_intermediates_loops(r, top_k):
 class Conversation:
     """Stateful chat wrapper — calls `run_pipeline` and prints the answer.
 
-    The pipeline function differs across tutorials (simple/sequential/loops),
-    so it's injected at construction time. `show_answer` is shared.
+    Holds a mellea `ChatContext` directly (no parallel dict-list); each turn
+    builds `ctx_with_query` from the prior context and hands both to the
+    pipeline. The pipeline function differs across tutorials, so it's injected
+    at construction time. `show_answer` is shared.
     """
 
     def __init__(self, run_pipeline):
         self.run_pipeline = run_pipeline
-        self.history = []
+        self.ctx = ChatContext()
 
     def ask(self, query):
-        print(f"[turn {len(self.history)//2 + 1}  |  history: {len(self.history)} msg(s)]")
-        r = self.run_pipeline(query, self.history)
+        prior = self.ctx.as_list()
+        print(f"[turn {len(prior)//2 + 1}  |  history: {len(prior)} msg(s)]")
+
+        ctx_with_query = self.ctx.add(MelleaMessage("user", query))
+        r = self.run_pipeline(query, self.ctx, ctx_with_query)
         show_answer(r)
 
         if r.get("blocked"):
@@ -275,7 +285,9 @@ class Conversation:
         else:
             reply = r.get("answer", "")
 
-        self.history.append({"role": "user",      "content": query, "documents": r.get("documents")})
-        self.history.append({"role": "assistant", "content": reply})
-        print(f"→ history now has {len(self.history)} message(s)")
+        docs = r.get("documents") or []
+        mellea_docs = [MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(docs)] or None
+        ctx_after_user = self.ctx.add(MelleaMessage("user", query, documents=mellea_docs))
+        self.ctx = ctx_after_user.add(MelleaMessage("assistant", reply))
+        print(f"→ history now has {len(self.ctx.as_list())} message(s)")
         return r
