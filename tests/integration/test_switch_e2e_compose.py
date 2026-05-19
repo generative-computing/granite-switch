@@ -327,6 +327,16 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     # prompt_logprobs has no entry for position 0: see
     # tests/shared/vllm_equivalence.py:174-189).
     short_seq_len = 8  # short context for the vLLM equivalence loop
+
+    # Baseline: no control token — pure base-model comparison.
+    # If HF and vLLM disagree here too, the argmax comparison is unreliable
+    # for this model (backend drift, not a switch bug).
+    _baseline_seq = [50] * short_seq_len
+    with torch.no_grad():
+        _baseline_out = hf_model(input_ids=torch.tensor([_baseline_seq], device="cuda"))
+    _hf_baseline_logprobs = torch.log_softmax(_baseline_out.logits[0].float(), dim=-1)[:-1].cpu()
+    del _baseline_out
+
     hf_logprobs_by_position = {}
     input_ids_by_position = {}
     for position_name in _CONTROL_POSITION_NAMES:
@@ -372,6 +382,23 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     )
 
     try:
+        # Baseline vLLM run: no control token.
+        _baseline_prompt = TokensPrompt(prompt_token_ids=_baseline_seq)
+        _baseline_vllm = extract_logprobs_tensor(
+            llm.generate(_baseline_prompt, sampling_params=sampling_params), vocab_size
+        )
+        _baseline_argmax_hf = _hf_baseline_logprobs.argmax(dim=-1)
+        _baseline_argmax_vllm = _baseline_vllm.argmax(dim=-1)
+        _baseline_mismatches = (
+            _baseline_argmax_hf != _baseline_argmax_vllm
+        ).nonzero(as_tuple=False).flatten().tolist()
+        print(
+            f"\n  [baseline-no-ctrl] argmax mismatch positions: {_baseline_mismatches}"
+            f"\n    HF  : {_baseline_argmax_hf.tolist()}"
+            f"\n    vLLM: {_baseline_argmax_vllm.tolist()}"
+            f"\n  NOTE: any mismatch here = backend drift, not a switch bug"
+        )
+
         failures = []
         for position_name in _CONTROL_POSITION_NAMES:
             seq = input_ids_by_position[position_name]
@@ -387,8 +414,7 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
                 f"mean={abs_diff.mean().item():.4f}  "
                 f"(base_model={base_model})"
             )
-            # Diagnostic: gap between the two competing tokens at each position.
-            # Tiny gap (<0.1) → base drift. Large gap → real computation divergence.
+
             tok_a, tok_b = 596, 337
             hf_gap = hf_logprobs_aligned[:, tok_a] - hf_logprobs_aligned[:, tok_b]
             vl_gap = vllm_logprobs[:, tok_a] - vllm_logprobs[:, tok_b]
@@ -404,6 +430,24 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
             mismatches = (hf_argmax != vllm_argmax).nonzero(
                 as_tuple=False,
             ).flatten().tolist()
+
+            pre_ctrl  = [i for i in mismatches if i < ctrl_pos]
+            post_ctrl = [i for i in mismatches if i >= ctrl_pos]
+            hf_top2   = torch.topk(hf_logprobs_aligned, k=2, dim=-1).values
+            vllm_top2 = torch.topk(vllm_logprobs, k=2, dim=-1).values
+            hf_margin   = hf_top2[:, 0] - hf_top2[:, 1]
+            vllm_margin = vllm_top2[:, 0] - vllm_top2[:, 1]
+            print(
+                f"  [{position_name}] mismatch split: "
+                f"pre_ctrl={pre_ctrl}, post_ctrl={post_ctrl}"
+            )
+            if mismatches:
+                print(
+                    f"  [{position_name}] top1-top2 margins at mismatches"
+                    f"\n    HF  : {[f'{hf_margin[i].item():.4f}' for i in mismatches]}"
+                    f"\n    vLLM: {[f'{vllm_margin[i].item():.4f}' for i in mismatches]}"
+                )
+
             if mismatches:
                 failures.append((position_name, mismatches, hf_argmax.tolist(),
                                  vllm_argmax.tolist()))
