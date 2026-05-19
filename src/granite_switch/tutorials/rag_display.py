@@ -1,20 +1,18 @@
 """Display helpers for the govt RAG pipeline tutorials (03_01, 03_02).
 
-Mostly formatting / pretty-printing — plus one tiny driver, `ask`, that runs a
-single conversation turn against a `ChatContext`. Each tutorial uses a different
+Formatting / pretty-printing only. Each tutorial uses a different
 `show_intermediates` variant to match its pipeline shape:
 
-  - `show_intermediates_simple`     — 03_01 (no guardian, no retries)
-  - `show_intermediates_sequential` — 03_02 (harm + scope guardian, no retries)
+  - `show_intermediates_simple`     - 03_01 (no guardian, no retries)
+  - `show_intermediates_sequential` - 03_02 (harm + scope guardian, no retries)
 
-`show_answer`, `show_history`, and `ask` work for both pipelines
+`show_answer` and `show_history` work for both pipelines
 (blocked-state branches are no-ops when `r["blocked"]` is absent).
 """
 
 import json
 
 from IPython.display import Markdown, display
-from mellea.stdlib.components import Document as MelleaDocument
 from mellea.stdlib.components.chat import Message as MelleaMessage
 
 
@@ -251,41 +249,3 @@ def show_intermediates_loops(r, top_k):
         md.append("\n*(none)*")
 
     display(Markdown("\n\n".join(md)))
-
-
-def ask(ctx, query, run_pipeline):
-    """Run one conversation turn: call `run_pipeline(query, ctx)`, print the
-    answer, and return the updated `ChatContext` plus the result dict.
-
-    Blocked turns are not recorded in history; all others append a user message
-    (with retrieved documents, when present) and an assistant reply derived from
-    the pipeline's terminal state.
-
-    Usage:
-        ctx = ChatContext()
-        ctx, r = ask(ctx, "How do I file my taxes?", run_pipeline)
-    """
-    n_msgs = len(ctx.as_list())
-    print(f"[turn {n_msgs//2 + 1}  |  history: {n_msgs} msg(s)]")
-    r = run_pipeline(query, ctx)
-    show_answer(r)
-
-    if r.get("blocked"):
-        return ctx, r  # blocked turns are not recorded
-
-    if r.get("unanswerable"):
-        reply = "I don't have enough information in my knowledge base to answer that."
-    elif r.get("needs_clarification"):
-        reply = r["clarification"]
-    else:
-        reply = r.get("answer", "")
-
-    docs = r.get("documents") or None
-    mellea_docs = (
-        [MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(docs)]
-        if docs else None
-    )
-    ctx = ctx.add(MelleaMessage("user", query, documents=mellea_docs))
-    ctx = ctx.add(MelleaMessage("assistant", reply))
-    print(f"→ history now has {len(ctx.as_list())} message(s)")
-    return ctx, r
