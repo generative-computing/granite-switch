@@ -4,7 +4,7 @@ This guide shows how to use **Mellea** to invoke embedded adapters in a Granite 
 
 ## Overview
 
-**Mellea** is a Python framework that exposes a programming model for LLMs with an opinionated view on how modern software design practices and LLMs ought to be cross-leveraged to maximize accuracy, control and robustness in applications leveraging LLMs. In the context of Granite Switch, Mellea provides high-level intrinsic functions (Guardian, RAG, Core) that automatically route through the correct control tokens. Instead of manually constructing prompts with control tokens, you call simple Python functions.
+**Mellea** is a Python framework that exposes a programming model for LLMs with an opinionated view on how modern software design practices and LLMs ought to be cross-leveraged to maximize accuracy, control and robustness in applications leveraging LLMs. In the context of Granite Switch, Mellea provides high-level adapter wrappers (Guardian, RAG, Core) that automatically route through the correct control tokens. Instead of manually constructing prompts with control tokens, you call simple Python functions.
 
 **Granite Switch** is the model architecture - an instruction-following model from the Granite Family with multiple LoRA adapters embedded as a single checkpoint.
 
@@ -17,7 +17,7 @@ Together, Mellea + Granite Switch + vLLM provide a production-ready inference st
 ```
 ┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
 │   Your Code     │────>│     Mellea      │────>│  vLLM Server    │
-│                 │     │  (intrinsics)   │     │ (Granite Switch)│
+│                 │     │   (wrappers)    │     │ (Granite Switch)│
 └─────────────────┘     └─────────────────┘     └─────────────────┘
                               │                        │
                               │ Adds control tokens    │ Routes to
@@ -67,11 +67,11 @@ score = guardian_check(ctx, backend, "harm", target_role="user")
 print(f"Harm score: {score:.3f}")  # 0.0 = safe, 1.0 = harmful
 ```
 
-## Available Intrinsics
+## Available Adapter Wrappers
 
-Mellea provides wrappers for three categories of intrinsics:
+Mellea provides wrappers for three categories of adapters:
 
-### Guardian Intrinsics
+### Guardian Adapters
 
 ```python
 from mellea.stdlib.components.intrinsic.guardian import (
@@ -91,7 +91,7 @@ score = guardian_check(ctx, backend, custom_criteria, target_role="user")
 
 **Pre-baked criteria** (from `CRITERIA_BANK`): `harm`, `social_bias`, `jailbreak`, `profanity`, `unethical_behavior`, `violence`, `groundedness`, `answer_relevance`, `context_relevance`, `function_call`
 
-### RAG Intrinsics
+### RAG Adapters
 
 ```python
 from mellea.stdlib.components.intrinsic import rag
@@ -122,7 +122,7 @@ citations = rag.find_citations(answer, documents, ctx, backend)
 # Output: [{"doc_id": "0", "span": "Paris is the capital of France."}]
 ```
 
-### Core Intrinsics
+### Core Adapters
 
 ```python
 from mellea.stdlib.components.intrinsic.core import (
@@ -164,7 +164,7 @@ print(result)
 
 ## Generating with the Base Model
 
-For non-intrinsic generation (regular chat), use `mfuncs.act` with a message:
+For non-adapter generation (regular chat), use `mfuncs.act` with a message:
 
 ```python
 import mellea.stdlib.functional as mfuncs

@@ -51,7 +51,7 @@ This includes:
 
 ### Mellea Integration
 
-Mellea provides high-level intrinsic functions for adapter invocation:
+Mellea provides high-level wrapper functions for adapter invocation:
 
 ```bash
 pip install mellea
@@ -84,9 +84,9 @@ Official IBM Granite adapter libraries (r1.0):
 
 | Library | Adapters | Purpose |
 |---------|----------|---------|
-| [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) | 5 | RAG intrinsics (rewrite, answerability, citations, etc.) |
-| [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) | 3 | Core intrinsics (certainty, requirements, attributions) |
-| [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) | 4 | Guardian intrinsics (harm check, policy, factuality, etc.) |
+| [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) | 5 | RAG adapters (rewrite, answerability, citations, etc.) |
+| [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) | 3 | Core adapters (certainty, requirements, attributions) |
+| [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) | 4 | Guardian adapters (harm check, policy, factuality, etc.) |
 
 ### HuggingFace Authentication
 
@@ -129,7 +129,7 @@ curl http://localhost:8000/v1/models
 
 | Resource | URL | Description |
 |----------|-----|-------------|
-| Mellea | https://github.com/generative-computing/mellea | Intrinsics framework for adapter invocation |
+| Mellea | https://github.com/generative-computing/mellea | Framework for adapter invocation |
 | Granite Models | https://huggingface.co/ibm-granite | Official IBM Granite models |
 | Granite Libraries | https://huggingface.co/collections/ibm-granite/granite-libraries | Adapter libraries collection |
 | vLLM Docs | https://docs.vllm.ai/ | vLLM documentation |
@@ -138,6 +138,6 @@ curl http://localhost:8000/v1/models
 
 Once prerequisites are installed, proceed to:
 
-1. **[Hello Mellea](notebooks/hello_mellea.ipynb)** - Mellea intrinsics with vLLM (recommended start)
+1. **[Hello Mellea](notebooks/hello_mellea.ipynb)** - Mellea adapters with vLLM (recommended start)
 2. **[Hello Adapter](notebooks/hello_adapter.ipynb)** - Minimal HuggingFace example
 3. **[Learning Paths](README.md#learning-paths)** - Choose your path based on use case
