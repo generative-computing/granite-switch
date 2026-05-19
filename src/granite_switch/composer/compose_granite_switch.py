@@ -944,11 +944,17 @@ def save_and_validate_model_artifacts(
 
 
 def main():
+    result = build()
+
+    # Early exit (e.g. --list-adapters) returns an int exit code
+    if isinstance(result, int):
+        return result
+
     (
         model, tokenizer, args, base_model_local_path, base_model_size_gb,
         adapter_paths, all_discovered, adapter_token_ids,
         start_time, new_vocab_size, original_vocab_size,
-    ) = build()
+    ) = result
 
     save_and_validate_model_artifacts(
         model=model,
