@@ -1,13 +1,13 @@
-"""Display helpers for the govt RAG pipeline tutorials (03_01, 03_02, 03_03).
+"""Display helpers for the govt RAG pipeline tutorials (03_01, 03_02).
 
-Pure formatting / pretty-printing only — no pipeline logic. Each tutorial uses a
-different `show_intermediates` variant to match its pipeline shape:
+Mostly formatting / pretty-printing — plus one tiny driver, `ask`, that runs a
+single conversation turn against a `ChatContext`. Each tutorial uses a different
+`show_intermediates` variant to match its pipeline shape:
 
   - `show_intermediates_simple`     — 03_01 (no guardian, no retries)
   - `show_intermediates_sequential` — 03_02 (harm + scope guardian, no retries)
-  - `show_intermediates_loops`      — 03_03 (harm guardian + scope/answer retry loops)
 
-`show_answer`, `show_history`, and `Conversation` work for all three pipelines
+`show_answer`, `show_history`, and `ask` work for both pipelines
 (blocked-state branches are no-ops when `r["blocked"]` is absent).
 """
 
@@ -16,7 +16,6 @@ import json
 from IPython.display import Markdown, display
 from mellea.stdlib.components import Document as MelleaDocument
 from mellea.stdlib.components.chat import Message as MelleaMessage
-from mellea.stdlib.context import ChatContext
 
 
 def _is_clear(clarification):
@@ -41,9 +40,9 @@ def show_answer(r):
     display(Markdown("\n\n".join(lines)))
 
 
-def show_history(conv):
-    """Render a Conversation's history as formatted Markdown."""
-    messages = conv.ctx.as_list()
+def show_history(ctx):
+    """Render a Mellea `ChatContext` as formatted Markdown."""
+    messages = [m for m in ctx.as_list() if isinstance(m, MelleaMessage)]
     if not messages:
         display(Markdown("*(conversation history is empty)*"))
         return
@@ -254,40 +253,39 @@ def show_intermediates_loops(r, top_k):
     display(Markdown("\n\n".join(md)))
 
 
-class Conversation:
-    """Stateful chat wrapper — calls `run_pipeline` and prints the answer.
+def ask(ctx, query, run_pipeline):
+    """Run one conversation turn: call `run_pipeline(query, ctx)`, print the
+    answer, and return the updated `ChatContext` plus the result dict.
 
-    Holds a mellea `ChatContext` directly (no parallel dict-list); each turn
-    builds `ctx_with_query` from the prior context and hands both to the
-    pipeline. The pipeline function differs across tutorials, so it's injected
-    at construction time. `show_answer` is shared.
+    Blocked turns are not recorded in history; all others append a user message
+    (with retrieved documents, when present) and an assistant reply derived from
+    the pipeline's terminal state.
+
+    Usage:
+        ctx = ChatContext()
+        ctx, r = ask(ctx, "How do I file my taxes?", run_pipeline)
     """
+    n_msgs = len(ctx.as_list())
+    print(f"[turn {n_msgs//2 + 1}  |  history: {n_msgs} msg(s)]")
+    r = run_pipeline(query, ctx)
+    show_answer(r)
 
-    def __init__(self, run_pipeline):
-        self.run_pipeline = run_pipeline
-        self.ctx = ChatContext()
+    if r.get("blocked"):
+        return ctx, r  # blocked turns are not recorded
 
-    def ask(self, query):
-        prior = self.ctx.as_list()
-        print(f"[turn {len(prior)//2 + 1}  |  history: {len(prior)} msg(s)]")
+    if r.get("unanswerable"):
+        reply = "I don't have enough information in my knowledge base to answer that."
+    elif r.get("needs_clarification"):
+        reply = r["clarification"]
+    else:
+        reply = r.get("answer", "")
 
-        ctx_with_query = self.ctx.add(MelleaMessage("user", query))
-        r = self.run_pipeline(query, self.ctx, ctx_with_query)
-        show_answer(r)
-
-        if r.get("blocked"):
-            return r  # blocked turns are not recorded
-
-        if r.get("unanswerable"):
-            reply = "I don't have enough information in my knowledge base to answer that."
-        elif r.get("needs_clarification"):
-            reply = r["clarification"]
-        else:
-            reply = r.get("answer", "")
-
-        docs = r.get("documents") or []
-        mellea_docs = [MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(docs)] or None
-        ctx_after_user = self.ctx.add(MelleaMessage("user", query, documents=mellea_docs))
-        self.ctx = ctx_after_user.add(MelleaMessage("assistant", reply))
-        print(f"→ history now has {len(self.ctx.as_list())} message(s)")
-        return r
+    docs = r.get("documents") or None
+    mellea_docs = (
+        [MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(docs)]
+        if docs else None
+    )
+    ctx = ctx.add(MelleaMessage("user", query, documents=mellea_docs))
+    ctx = ctx.add(MelleaMessage("assistant", reply))
+    print(f"→ history now has {len(ctx.as_list())} message(s)")
+    return ctx, r
