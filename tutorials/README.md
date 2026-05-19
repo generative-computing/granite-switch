@@ -13,7 +13,7 @@ Step-by-step walkthroughs covering adapter invocation, pipeline construction, an
 | [02_granite_switch_with_hf.ipynb](notebooks/02_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/02_granite_switch_with_hf.ipynb) |
 | [03_01_govt_rag_pipeline_simple.ipynb](notebooks/03_01_govt_rag_pipeline_simple.ipynb) | Simple RAG pipeline without guardians (rewrite, answerability, citations) | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_govt_rag_pipeline_simple.ipynb) |
 | [03_02_govt_rag_pipeline_sequential.ipynb](notebooks/03_02_govt_rag_pipeline_sequential.ipynb) | Full RAG pipeline with guardian checks (harm + scope) | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_02_govt_rag_pipeline_sequential.ipynb) |
-| [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_compose_granite_switch.ipynb) |
+| [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |  |
 | [05_alora_vs_lora_race.ipynb](notebooks/05_alora_vs_lora_race.ipynb) | ALORA vs LoRA race: side-by-side throughput comparison on a multi-step RAG pipeline | 20 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb) |
 
 ## Guides
@@ -44,8 +44,6 @@ support coming soon.
 
 
 
-
-
 ### Path 2: Real-World Pipelines (Usability)
 
 Best for: Seeing how adapters compose into multi-step applications
@@ -62,20 +60,15 @@ Best for: Seeing how adapters compose into multi-step applications
 Best for: Custom adapter development
 
 1. [Bring Your Own Adapter Guide](guides/bring_your_own_adapter.md)
+2. [Configure Your Own Adapter Guide](guides/configure_your_own_adapter.md)
+3. [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb) 
 
-### Composing Models
-**Compose your own** — see [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_compose_granite_switch.ipynb)
 
-
-### Low-Level Understanding (HuggingFace)
+### Path 4: Low-Level Understanding (HuggingFace)
 
 Best for: Understanding how Granite Switch works at the control-token level
 
 HuggingFace inference examples demonstrate how adapters are activated via control tokens, providing insight into the underlying mechanics. For most applications, we recommend running inference with Mellea (Part 2).
-
-
-
-
 1. [Prerequisites](PREREQUISITES.md#huggingface-backend)
 2. [Hello Adapter](notebooks/00_hello_adapter.ipynb) — see control tokens in action [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/00_hello_adapter.ipynb)
 3. [Granite Switch with HuggingFace](notebooks/02_granite_switch_with_hf.ipynb) — detailed walkthrough [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/02_granite_switch_with_hf.ipynb)

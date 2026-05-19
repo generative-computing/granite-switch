@@ -37,7 +37,7 @@ def launch_vllm(
 
     with open(log_file, "w") as log_handle:
         proc = subprocess.Popen(cmd, stdout=log_handle, stderr=subprocess.STDOUT)
-    print(f"Launched {model} on :{port} (pid {proc.pid}, log -> {log_file})")
+    print(f"Launching {model} on :{port} (pid {proc.pid}, log -> {log_file})")
     return proc
 
 
@@ -47,7 +47,7 @@ def wait_for_server(port: int, timeout: int = 300) -> bool:
     while time.time() - t0 < timeout:
         try:
             if requests.get(f"http://localhost:{port}/health", timeout=2).status_code == 200:
-                print(f"\n  ready in {int(time.time() - t0)}s")
+                print(f"\n  Server ready on :{port} in {int(time.time() - t0)}s")
                 return True
         except Exception:
             pass
