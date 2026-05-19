@@ -76,6 +76,17 @@ This downloads the base model, embeds compatible LoRA adapters (with a preferenc
 
 ### Run Inference
 
+> **Tip: pre-download the model for faster startup.** The first run will download several GB from Hugging Face, which can be slow. To download in advance using the fast transfer backend:
+> ```bash
+> pip install "huggingface_hub[hf_transfer]"
+> huggingface-cli login                          # one-time, if not already logged in
+> HF_HUB_ENABLE_HF_TRANSFER=1 hf download ibm-granite/granite-switch-4.1-3b-preview
+> ```
+> Subsequent runs will use the local cache automatically.
+
+**vLLM + Mellea (recommended):**
+
+
 ```bash
 pip install mellea
 python -m vllm.entrypoints.openai.api_server --model ibm-granite/granite-switch-4.1-3b-preview --port 8000
