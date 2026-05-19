@@ -387,6 +387,17 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
                 f"mean={abs_diff.mean().item():.4f}  "
                 f"(base_model={base_model})"
             )
+            # Diagnostic: gap between the two competing tokens at each position.
+            # Tiny gap (<0.1) → base drift. Large gap → real computation divergence.
+            tok_a, tok_b = 596, 337
+            hf_gap = hf_logprobs_aligned[:, tok_a] - hf_logprobs_aligned[:, tok_b]
+            vl_gap = vllm_logprobs[:, tok_a] - vllm_logprobs[:, tok_b]
+            ctrl_pos = _control_position_index(short_seq_len, position_name)
+            print(
+                f"  [{position_name}] gap(596-337)  ctrl@{ctrl_pos}"
+                f"\n    HF  : {[f'{v:+.3f}' for v in hf_gap.tolist()]}"
+                f"\n    vLLM: {[f'{v:+.3f}' for v in vl_gap.tolist()]}"
+            )
 
             hf_argmax = hf_logprobs_aligned.argmax(dim=-1)
             vllm_argmax = vllm_logprobs.argmax(dim=-1)
