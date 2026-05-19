@@ -66,11 +66,16 @@ def load_or_build_govt_chroma(
     jsonl_path=GOVT_JSONL_PATH,
     jsonl_url=GOVT_JSONL_URL,
     embedding_model_id=EMBEDDING_MODEL_ID,
+    doc_ids_path=None,
 ):
     """Return a ready-to-query Chroma collection for the govt corpus.
 
     Loads from ``chroma_path`` if it already has documents; otherwise downloads
     the source jsonl, embeds, and persists.
+
+    When ``doc_ids_path`` is given, only docs whose ``_id`` is in that JSON list
+    are embedded. Cuts the 49k-passage corpus down to a curated subset, so
+    first-run embedding takes seconds instead of ~10 min.
     """
     granite_ef = GraniteEmbeddingFunction(model_id=embedding_model_id)
     client     = chromadb.PersistentClient(path=chroma_path)
@@ -111,6 +116,16 @@ def load_or_build_govt_chroma(
         os.replace(tmp_path, jsonl_path)
         print(f"Saved {jsonl_path} in {time.time() - t0:.1f}s.")
 
+    keep_ids = None
+    if doc_ids_path is not None:
+        if not os.path.exists(doc_ids_path):
+            raise FileNotFoundError(
+                f"doc_ids_path={doc_ids_path!r} does not exist."
+            )
+        with open(doc_ids_path) as f:
+            keep_ids = set(json.load(f))
+        print(f"Filtering to {len(keep_ids)} ids from {doc_ids_path}")
+
     print(f"Reading {jsonl_path} -> {chroma_path}...")
     t0 = time.time()
     ids, texts, metas = [], [], []
@@ -120,7 +135,10 @@ def load_or_build_govt_chroma(
             text = doc.get("text", "").strip()
             if not text:
                 continue
-            ids.append(doc.get("_id", doc.get("id", str(len(ids)))))
+            doc_id = doc.get("_id", doc.get("id", str(len(ids))))
+            if keep_ids is not None and doc_id not in keep_ids:
+                continue
+            ids.append(doc_id)
             texts.append(text)
             metas.append({"title": doc.get("title", ""), "url": doc.get("url", "")})
     if not ids:
