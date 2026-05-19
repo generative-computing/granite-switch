@@ -152,7 +152,7 @@ parameters:
 sentence_boundaries: ~
 ```
 
-**Run the composer.** See [`../notebooks/04_compose_granite_switch.ipynb`](../notebooks/04_compose_granite_switch.ipynb) for the end-to-end walkthrough. For the BYO case here, pass two entries to `--adapters`: `ibm-granite/granitelib-rag-r1.0` (the composer auto-discovers all 6 adapters in the library) and `./uncertainty-adapter/uncertainty/granite-4.1-3b/alora` (the local "built-by-us" adapter — the composer walks up from `alora/` and uses the grandparent-directory name `uncertainty` as the adapter name). Set `--output ./composed-model`.
+**Run the composer.** See [`../notebooks/compose_granite_switch.ipynb`](../notebooks/compose_granite_switch.ipynb) for the end-to-end walkthrough. For the BYO case here, pass two entries to `--adapters`: `ibm-granite/granitelib-rag-r1.0` (the composer auto-discovers all 6 adapters in the library) and `./uncertainty-adapter/uncertainty/granite-4.1-3b/alora` (the local "built-by-us" adapter — the composer walks up from `alora/` and uses the grandparent-directory name `uncertainty` as the adapter name). Set `--output ./composed-model`.
 
 ### Compose output
 
@@ -249,6 +249,6 @@ print(response.choices[0].message.content)
 
 ## Next Steps
 
-- **[Hello Adapter](../notebooks/00_hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
+- **[Hello Adapter](../notebooks/hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
 - **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
 - **[Compare Inference Throughput](compare_inference_throughput.md)** - benchmark ALORA vs LoRA on a 6-step RAG pipeline

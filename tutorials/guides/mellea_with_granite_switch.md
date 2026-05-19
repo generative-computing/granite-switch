@@ -247,7 +247,7 @@ print(f"Citations: {citations}")
 
 ## Next Steps
 
-- **[Hello Adapter](../notebooks/00_hello_adapter.ipynb)** - Minimal embedded-adapter invocation via the HuggingFace backend
+- **[Hello Adapter](../notebooks/hello_adapter.ipynb)** - Minimal embedded-adapter invocation via the HuggingFace backend
 - **[Bring Your Own Adapter](bring_your_own_adapter.md)** - Train a custom adapter and compose it in
 - **[Compare Inference Throughput](compare_inference_throughput.md)** - Benchmark ALORA vs LoRA on a 6-step RAG pipeline
 - **[Mellea Repository](https://github.com/generative-computing/mellea)** - Full documentation

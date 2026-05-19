@@ -14,7 +14,7 @@ of a 32-conversation race (no setup required).
 
 ## Reproduce in Google Colab
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb)
 
 The notebook runs both servers sequentially on a single A100 GPU and produces
 `race_live.html` (animated replay) and `race_report.html` (static summary).
@@ -33,7 +33,7 @@ The notebook runs both servers sequentially on a single A100 GPU and produces
   ```bash
   python build_govt_chroma.py
   ```
-- Compose the LoRA-only model. See [`../notebooks/04_compose_granite_switch.ipynb`](../notebooks/04_compose_granite_switch.ipynb) — pass the three libraries (`granitelib-rag-r1.0`, `granitelib-core-r1.0`, `granitelib-guardian-r1.0`) with `--technology-filter lora` to force every adapter to its standard LoRA variant, and set `--output ./granite-switch-lora-only`.
+- Compose the LoRA-only model. See [`../notebooks/compose_granite_switch.ipynb`](../notebooks/compose_granite_switch.ipynb) — pass the three libraries (`granitelib-rag-r1.0`, `granitelib-core-r1.0`, `granitelib-guardian-r1.0`) with `--technology-filter lora` to force every adapter to its standard LoRA variant, and set `--output ./granite-switch-lora-only`.
 
 ### Simultaneous race (two H100 GPUs)
 
@@ -85,6 +85,6 @@ raced simultaneously.
 
 ## Next Steps
 
-- **[Hello Adapter](../notebooks/00_hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
+- **[Hello Adapter](../notebooks/hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
 - **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
 - **[Bring Your Own Adapter](bring_your_own_adapter.md)** - train a custom adapter and compose it in

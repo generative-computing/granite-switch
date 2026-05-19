@@ -8,13 +8,13 @@ Step-by-step walkthroughs covering adapter invocation, pipeline construction, an
 
 | Notebook | Topics | Duration | Colab |
 |----------|--------|----------|-------|
-| [00_hello_adapter.ipynb](notebooks/00_hello_adapter.ipynb) | Minimal adapter invocation with HuggingFace | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/00_hello_adapter.ipynb) |
-| [01_hello_mellea.ipynb](notebooks/01_hello_mellea.ipynb) | Mellea intrinsics intro with vLLM | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/01_hello_mellea.ipynb) |
-| [02_granite_switch_with_hf.ipynb](notebooks/02_granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/02_granite_switch_with_hf.ipynb) |
-| [03_01_rag_101.ipynb](notebooks/03_01_rag_101.ipynb) | RAG 101: build a vector corpus and run a basic answerability check | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_rag_101.ipynb) |
-| [03_02_rag_full_pipeline.ipynb](notebooks/03_02_rag_full_pipeline.ipynb) | Full RAG pipeline with guardian checks (harm + scope) | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_02_rag_full_pipeline.ipynb) |
-| [04_compose_granite_switch.ipynb](notebooks/04_compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |  |
-| [05_alora_vs_lora_race.ipynb](notebooks/05_alora_vs_lora_race.ipynb) | ALORA vs LoRA race: side-by-side throughput comparison on a multi-step RAG pipeline | 20 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb) |
+| [hello_mellea.ipynb](notebooks/hello_mellea.ipynb) | Mellea intrinsics intro with vLLM | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_mellea.ipynb) |
+| [rag_101.ipynb](notebooks/rag_101.ipynb) | RAG 101: build a vector corpus and run a basic answerability check | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_101.ipynb) |
+| [rag_full_pipeline.ipynb](notebooks/rag_full_pipeline.ipynb) | Full RAG pipeline with guardian checks (harm + scope) | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_full_pipeline.ipynb) |
+| [compose_granite_switch.ipynb](notebooks/compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |  |
+| [alora_vs_lora_race.ipynb](notebooks/alora_vs_lora_race.ipynb) | ALORA vs LoRA race: side-by-side throughput comparison on a multi-step RAG pipeline | 20 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb) |
+| [hello_adapter.ipynb](notebooks/hello_adapter.ipynb) | Minimal adapter invocation with HuggingFace | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_adapter.ipynb) |
+| [granite_switch_with_hf.ipynb](notebooks/granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapters in a multi-turn conversation | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_switch_with_hf.ipynb) |
 
 ## Guides
 
@@ -40,7 +40,7 @@ prompt rewriting, and input/output processing automatically. Currently supports 
 support coming soon.
 
 1. [Prerequisites](PREREQUISITES.md#vllm-backend)
-2. [Hello Mellea](notebooks/01_hello_mellea.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/01_hello_mellea.ipynb)
+2. [Hello Mellea](notebooks/hello_mellea.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_mellea.ipynb)
 
 
 
@@ -48,8 +48,8 @@ support coming soon.
 
 Best for: Seeing how adapters compose into multi-step applications
 
-1. [RAG 101](notebooks/03_01_rag_101.ipynb) - corpus build + answerability check, the smallest end-to-end RAG demo [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_rag_101.ipynb)
-2. [Full RAG Pipeline with Guardians](notebooks/03_02_rag_full_pipeline.ipynb) - rewrite, answerability, citations, harm + scope checks [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_02_rag_full_pipeline.ipynb)
+1. [RAG 101](notebooks/rag_101.ipynb) - corpus build + answerability check, the smallest end-to-end RAG demo [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_101.ipynb)
+2. [Full RAG Pipeline with Guardians](notebooks/rag_full_pipeline.ipynb) - rewrite, answerability, citations, harm + scope checks [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_full_pipeline.ipynb)
 
 
 
@@ -61,7 +61,7 @@ Best for: Custom adapter development
 
 1. [Bring Your Own Adapter Guide](guides/bring_your_own_adapter.md)
 2. [Configure Your Own Adapter Guide](guides/configure_your_own_adapter.md)
-3. [Compose Your Checkpoint](notebooks/04_compose_granite_switch.ipynb) 
+3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb) 
 
 
 ### Path 4: Low-Level Understanding (HuggingFace)
@@ -70,8 +70,8 @@ Best for: Understanding how Granite Switch works at the control-token level
 
 HuggingFace inference examples demonstrate how adapters are activated via control tokens, providing insight into the underlying mechanics. For most applications, we recommend running inference with Mellea (Part 2).
 1. [Prerequisites](PREREQUISITES.md#huggingface-backend)
-2. [Hello Adapter](notebooks/00_hello_adapter.ipynb) — see control tokens in action [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/00_hello_adapter.ipynb)
-3. [Granite Switch with HuggingFace](notebooks/02_granite_switch_with_hf.ipynb) — detailed walkthrough [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/02_granite_switch_with_hf.ipynb)
+2. [Hello Adapter](notebooks/hello_adapter.ipynb) — see control tokens in action [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_adapter.ipynb)
+3. [Granite Switch with HuggingFace](notebooks/granite_switch_with_hf.ipynb) — detailed walkthrough [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_switch_with_hf.ipynb)
 
 
 
@@ -91,9 +91,9 @@ Granite Switch checkpoints embed adapters drawn from IBM's granitelib libraries.
 
 | Adapter | Purpose | Where used in tutorials | HF repo |
 |---------|---------|-------------------------|---------|
-| Core | Foundational post-generation intrinsics: certainty scoring, requirement checking, and response attribution. | [02](notebooks/02_granite_switch_with_hf.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) |
-| RAG | Retrieval-augmented generation intrinsics: query rewrite, answerability, hallucination detection, and citation generation. | [01](notebooks/01_hello_mellea.ipynb), [03_01](notebooks/03_01_rag_101.ipynb), [03_02](notebooks/03_02_rag_full_pipeline.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) |
-| Guardian | Safety and risk detection: harm, social bias, jailbreaking, factuality, and policy compliance checks. | [00](notebooks/00_hello_adapter.ipynb), [01](notebooks/01_hello_mellea.ipynb), [02](notebooks/02_granite_switch_with_hf.ipynb), [03_02](notebooks/03_02_rag_full_pipeline.ipynb), [04](notebooks/04_compose_granite_switch.ipynb) | [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) |
+| Core | Foundational post-generation intrinsics: certainty scoring, requirement checking, and response attribution. | [granite_switch_with_hf](notebooks/granite_switch_with_hf.ipynb), [compose_granite_switch](notebooks/compose_granite_switch.ipynb) | [ibm-granite/granitelib-core-r1.0](https://huggingface.co/ibm-granite/granitelib-core-r1.0) |
+| RAG | Retrieval-augmented generation intrinsics: query rewrite, answerability, hallucination detection, and citation generation. | [hello_mellea](notebooks/hello_mellea.ipynb), [rag_101](notebooks/rag_101.ipynb), [rag_full_pipeline](notebooks/rag_full_pipeline.ipynb), [compose_granite_switch](notebooks/compose_granite_switch.ipynb) | [ibm-granite/granitelib-rag-r1.0](https://huggingface.co/ibm-granite/granitelib-rag-r1.0) |
+| Guardian | Safety and risk detection: harm, social bias, jailbreaking, factuality, and policy compliance checks. | [hello_adapter](notebooks/hello_adapter.ipynb), [hello_mellea](notebooks/hello_mellea.ipynb), [granite_switch_with_hf](notebooks/granite_switch_with_hf.ipynb), [rag_full_pipeline](notebooks/rag_full_pipeline.ipynb), [compose_granite_switch](notebooks/compose_granite_switch.ipynb) | [ibm-granite/granitelib-guardian-r1.0](https://huggingface.co/ibm-granite/granitelib-guardian-r1.0) |
 
 ## External Resources
 

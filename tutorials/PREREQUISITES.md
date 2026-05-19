@@ -138,6 +138,6 @@ curl http://localhost:8000/v1/models
 
 Once prerequisites are installed, proceed to:
 
-1. **[Hello Adapter](notebooks/00_hello_adapter.ipynb)** - Minimal HuggingFace example
-2. **[Hello Mellea](notebooks/01_hello_mellea.ipynb)** - Mellea intrinsics with vLLM
+1. **[Hello Mellea](notebooks/hello_mellea.ipynb)** - Mellea intrinsics with vLLM (recommended start)
+2. **[Hello Adapter](notebooks/hello_adapter.ipynb)** - Minimal HuggingFace example
 3. **[Learning Paths](README.md#learning-paths)** - Choose your path based on use case
