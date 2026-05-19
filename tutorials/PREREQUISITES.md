@@ -19,8 +19,12 @@ Python 3.10+ is required.
 
 ### Base Installation
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/), then:
+
 ```bash
-pip install granite-switch
+git clone https://github.com/generative-computing/granite-switch.git
+cd granite-switch
+uv sync
 ```
 
 ### HuggingFace Backend
@@ -28,13 +32,12 @@ pip install granite-switch
 For direct model inference with HuggingFace Transformers:
 
 ```bash
-pip install "granite-switch[hf,compose]"
+uv sync --extra hf
 ```
 
 This includes:
 - `transformers` for model loading and generation
 - `torch` with CUDA support
-- `peft` for LoRA operations
 - Compose tools for model building
 
 ### vLLM Backend
@@ -42,7 +45,8 @@ This includes:
 For production inference with vLLM:
 
 ```bash
-pip install "granite-switch[vllm]"
+uv sync --extra vllm         # CUDA 12.x
+uv sync --extra vllm20       # CUDA 13+ (requires PyTorch 2.11+)
 ```
 
 This includes:
@@ -54,7 +58,7 @@ This includes:
 Mellea provides high-level wrapper functions for adapter invocation:
 
 ```bash
-pip install mellea
+uv pip install mellea
 ```
 
 ### Notebook Dependencies
@@ -62,7 +66,7 @@ pip install mellea
 For running Jupyter notebooks:
 
 ```bash
-pip install jupyter chromadb tqdm httpx python-dotenv
+uv pip install jupyter chromadb tqdm httpx python-dotenv
 ```
 
 ## Model Access

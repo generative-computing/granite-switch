@@ -80,21 +80,23 @@ granite-switch/
 
 ## Installation (local/dev)
 
+This project uses [uv](https://docs.astral.sh/uv/getting-started/installation/).
+
 ```bash
 # Core package only (config)
-pip install -e .
+uv sync
 
 # With HuggingFace backend
-pip install -e ".[hf]"
+uv sync --extra hf
 
 # With vLLM backend
-pip install -e ".[vllm]"
+uv sync --extra vllm
 
 # With compose tools
-pip install -e ".[compose]"
+uv sync --extra compose
 
 # Everything (development)
-pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
 ## Import Paths

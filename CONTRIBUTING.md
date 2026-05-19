@@ -9,7 +9,7 @@ Thank you for your interest in contributing to Granite Switch!
    ```bash
    git clone https://github.com/<your-username>/granite-switch.git
    cd granite-switch
-   pip install -e ".[dev]"
+   uv sync --extra dev
    ```
 3. Create a feature branch and make your changes
 4. Run tests: `pytest tests/ -v`
