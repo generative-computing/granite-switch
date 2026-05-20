@@ -332,6 +332,15 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     # tests/shared/vllm_equivalence.py:174-189).
     short_seq_len = 8  # short context for the vLLM equivalence loop
 
+    # Baseline: no control token — pure base-model comparison.
+    # If HF and vLLM disagree here too, the argmax comparison is unreliable
+    # for this model (backend drift, not a switch bug).
+    _baseline_seq = list(_TEXT_TOKENS)
+    with torch.no_grad():
+        _baseline_out = hf_model(input_ids=torch.tensor([_baseline_seq], device="cuda"))
+    _hf_baseline_logprobs = torch.log_softmax(_baseline_out.logits[0].float(), dim=-1)[:-1].cpu()
+    del _baseline_out
+
     hf_logprobs_by_position = {}
     input_ids_by_position = {}
     for position_name in _CONTROL_POSITION_NAMES:
