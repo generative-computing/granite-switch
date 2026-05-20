@@ -190,7 +190,7 @@ def _control_position_index(seq_len: int, position_name: str) -> int:
     raise ValueError(f"unknown control_position: {position_name}")
 
 
-_TEXT_TOKENS = [10, 20, 30, 40, 50, 60, 70, 80]
+_TEXT_TOKENS = [791, 5679, 2766, 279, 893, 389, 813, 1450]  # "The dog bit the man on his hand"
 
 
 def _build_input(ctrl_pos: int, ctrl_token: int, total_len: int):
@@ -331,15 +331,6 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     # prompt_logprobs has no entry for position 0: see
     # tests/shared/vllm_equivalence.py:174-189).
     short_seq_len = 8  # short context for the vLLM equivalence loop
-
-    # Baseline: no control token — pure base-model comparison.
-    # If HF and vLLM disagree here too, the argmax comparison is unreliable
-    # for this model (backend drift, not a switch bug).
-    _baseline_seq = [_TEXT_TOKENS[i % len(_TEXT_TOKENS)] for i in range(short_seq_len)]
-    with torch.no_grad():
-        _baseline_out = hf_model(input_ids=torch.tensor([_baseline_seq], device="cuda"))
-    _hf_baseline_logprobs = torch.log_softmax(_baseline_out.logits[0].float(), dim=-1)[:-1].cpu()
-    del _baseline_out
 
     hf_logprobs_by_position = {}
     input_ids_by_position = {}
