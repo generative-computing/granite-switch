@@ -149,7 +149,7 @@ def load_or_build_govt_chroma(
     print(f"Read {len(ids):,} docs in {time.time() - t0:.1f}s.  Embedding & indexing...")
 
     t1 = time.time()
-    batch = 500
+    batch = 16 if granite_ef._device == "cpu" else 500
     for i in tqdm(range(0, len(ids), batch), unit="batch", desc="indexing"):
         collection.upsert(
             ids       = ids  [i : i + batch],
