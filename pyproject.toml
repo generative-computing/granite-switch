@@ -30,7 +30,7 @@ tutorials = [
     "httpx>=0.24.0",
     "requests>=2.31.0",
     "rich>=13.0.0",
-    "mellea>=0.1.0",
+    "mellea>=0.1.0,<=0.5.0",
     "ipython>=8.10.0",
     "python-dotenv>=1.0.0",
 ]
@@ -69,6 +69,14 @@ conflicts = [
     [
         { extra = "dev-vllm20" },
         { extra = "vllm" },
+    ],
+    [
+        { extra = "tutorials" },
+        { extra = "vllm20" },
+    ],
+    [
+        { extra = "tutorials" },
+        { extra = "dev-vllm20" },
     ],
 ]
 

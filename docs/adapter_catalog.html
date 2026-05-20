@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Granite Switch — Adapter Composer</title>
+  <title>Granite Switch Composer — models à la carte</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
   <!-- Carbon design tokens (White theme) — required for web components to render correctly -->
   <link rel="stylesheet" href="https://unpkg.com/@carbon/styles@1/css/styles.min.css">
@@ -202,12 +202,59 @@
     }
     .copy-btn:hover  { background: #0353e9; }
     .copy-btn.copied { background: #24a148; }
+
+    /* ── Library quick-add buttons ── */
+    .cart-library-row {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.75rem 1.25rem;
+      border-bottom: 1px solid #e0e0e0;
+    }
+
+    .lib-btn {
+      font-family: inherit;
+      font-size: 0.8rem;
+      font-weight: 500;
+      padding: 0.35rem 0.75rem;
+      border-radius: 0.25rem;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+    }
+
+    .lib-btn--none {
+      background: #fff;
+      border: 1px solid #8d8d8d;
+      color: #525252;
+    }
+    .lib-btn--none:hover {
+      background: #e8e8e8;
+      border-color: #525252;
+    }
+
+    .lib-btn--partial {
+      background: #fff;
+      border: 1px solid #0f62fe;
+      color: #0f62fe;
+    }
+    .lib-btn--partial:hover {
+      background: #edf5ff;
+    }
+
+    .lib-btn--full {
+      background: #0f62fe;
+      border: 1px solid #0f62fe;
+      color: #fff;
+    }
+    .lib-btn--full:hover {
+      background: #0353e9;
+      border-color: #0353e9;
+    }
   </style>
 </head>
 <body>
 <div class="container">
   <header>
-    <h1>Granite Switch — Adapter Composer</h1>
+    <h1>Granite Switch Composer — models à la carte</h1>
     <p>Browse the 12 Granite Libraries adapters, compare benchmarks, and generate your <code>compose_granite_switch</code> command.</p>
   </header>
 
@@ -249,6 +296,7 @@
       </span>
       <cds-button id="cart-clear-btn" kind="danger--ghost"                  onclick="clearCart()" style="display:none">Clear all</cds-button>
     </div>
+    <div id="cart-library-buttons" class="cart-library-row"></div>
     <div id="cart-body"></div>
   </div>
 </div>
@@ -653,14 +701,17 @@ function generateCommand() {
     .filter(lib => libSet.has(lib))
     .map(lib => LIBRARY_REPOS[lib]);
 
-  const allSelected = cart.size === Object.keys(ADAPTERS).length;
+  // Omit --include-adapters when every involved library is fully selected
+  const allLibsFullySelected = [...libSet].every(lib =>
+    getLibraryAdapterIds(lib).every(id => cart.has(id))
+  );
 
   const lines = [
     'python -m granite_switch.composer.compose_granite_switch \\',
     `  --base-model ${selectedModel} \\`,
     `  --adapters ${libs.join(' ')} \\`,
   ];
-  if (!allSelected) {
+  if (!allLibsFullySelected) {
     lines.push(`  --include-adapters ${includeNames.join(' ')} \\`);
   }
   if (selectedBuildType === 'all-lora') {
@@ -694,6 +745,61 @@ function attachCartListeners() {
   });
 }
 
+// ── Library quick-add helpers ─────────────────────────────────────────────────
+
+function getLibraryAdapterIds(library) {
+  return Object.keys(ADAPTERS).filter(id => ADAPTERS[id].library === library);
+}
+
+function getLibraryState(library) {
+  const ids = getLibraryAdapterIds(library);
+  const inCart = ids.filter(id => cart.has(id)).length;
+  if (inCart === 0) return 'none';
+  if (inCart === ids.length) return 'full';
+  return 'partial';
+}
+
+function toggleLibrary(library) {
+  const ids = getLibraryAdapterIds(library);
+  const state = getLibraryState(library);
+  if (state === 'full') {
+    ids.forEach(id => cart.delete(id));
+  } else {
+    ids.forEach(id => cart.add(id));
+  }
+  // Update the current panel's add button if it was affected
+  const btn = document.getElementById('add-btn');
+  if (btn && ADAPTERS[currentId]) {
+    const inCart = cart.has(currentId);
+    btn.setAttribute('kind', inCart ? 'primary' : 'tertiary');
+    btn.textContent = inCart ? '✓ Added' : '+ Add to composition';
+  }
+  renderCart();
+}
+
+function renderLibraryButtons() {
+  const container = document.getElementById('cart-library-buttons');
+  if (!container) return;
+
+  container.innerHTML = LIBRARY_ORDER.map(lib => {
+    const ids = getLibraryAdapterIds(lib);
+    const state = getLibraryState(lib);
+    let label, cssClass;
+    if (state === 'full') {
+      label = `✓ ${lib} Library`;
+      cssClass = 'lib-btn--full';
+    } else if (state === 'partial') {
+      const inCart = ids.filter(id => cart.has(id)).length;
+      label = `${lib} (${inCart}/${ids.length})`;
+      cssClass = 'lib-btn--partial';
+    } else {
+      label = `＋ ${lib} Library`;
+      cssClass = 'lib-btn--none';
+    }
+    return `<button class="lib-btn ${cssClass}" onclick="toggleLibrary('${lib}')">${label}</button>`;
+  }).join('');
+}
+
 function renderCart() {
   const countEl  = document.getElementById('cart-count');
   const clearBtn = document.getElementById('cart-clear-btn');
@@ -701,6 +807,8 @@ function renderCart() {
 
   if (countEl)  countEl.textContent = cart.size > 0 ? ` (${cart.size})` : '';
   if (clearBtn) clearBtn.style.display = cart.size > 0 ? '' : 'none';
+
+  renderLibraryButtons();
 
   if (cart.size === 0) {
     bodyEl.innerHTML =
