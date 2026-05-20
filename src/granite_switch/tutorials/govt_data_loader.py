@@ -2,7 +2,7 @@
 
 Kept separate from the notebook so the pipeline stays focused on RAG concepts.
 
-First run: downloads `govt.jsonl.zip` from IBM mt-rag-benchmark (49k passages),
+First run: downloads `govt.jsonl.zip` from IBM mt-rag-benchmark,
 embeds with `ibm-granite/granite-embedding-small-english-r2`, and saves to
 `./govt_chroma`. Subsequent runs: loads the persisted index instantly.
 """
@@ -42,7 +42,7 @@ class GraniteEmbeddingFunction(EmbeddingFunction):
         print(f"Granite embedding model ready on {device}  ({model_id})")
         if device == "cpu":
             warnings.warn(
-                "Embedding ~49k passages on CPU will take hours. "
+                "Embedding of the passages on CPU will take hours. "
                 "Expected runtime is ~10 min on a single consumer GPU. "
                 "Consider running on a GPU host, or sharing a pre-built ./govt_chroma directory.",
                 stacklevel=2,
@@ -79,7 +79,7 @@ def load_or_build_govt_chroma(
 
     When ``load_only_tutorial_docs=True``, embed only docs whose ``_id`` is in
     ``TUTORIAL_DOC_IDS`` (the curated subset that the demo queries actually
-    retrieve). Cuts the 49k-passage corpus down dramatically so first-run
+    retrieve). Cuts the passage corpus down dramatically so first-run
     embedding takes seconds instead of minutes.
     """
     granite_ef = GraniteEmbeddingFunction(model_id=embedding_model_id, device= device)
