@@ -70,6 +70,14 @@ conflicts = [
         { extra = "dev-vllm20" },
         { extra = "vllm" },
     ],
+    [
+        { extra = "tutorials" },
+        { extra = "vllm20" },
+    ],
+    [
+        { extra = "tutorials" },
+        { extra = "dev-vllm20" },
+    ],
 ]
 
 [tool.setuptools.packages.find]
