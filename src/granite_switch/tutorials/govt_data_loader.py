@@ -32,8 +32,9 @@ TUTORIAL_DOC_IDS = ["05537c9ec2dfe15e-1362-3310", "05537c9ec2dfe15e-2821-4679", 
 class GraniteEmbeddingFunction(EmbeddingFunction):
     """ChromaDB EmbeddingFunction backed by ibm-granite/granite-embedding-*-r2."""
 
-    def __init__(self, model_id=EMBEDDING_MODEL_ID, batch_size=64):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+    def __init__(self, model_id=EMBEDDING_MODEL_ID, batch_size=64, device = None):
+        if device == None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
         self._device    = device
         self._batch     = batch_size
         self._tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -69,6 +70,7 @@ def load_or_build_govt_chroma(
     jsonl_url=GOVT_JSONL_URL,
     embedding_model_id=EMBEDDING_MODEL_ID,
     load_only_tutorial_docs=False,
+    device=None,
 ):
     """Return a ready-to-query Chroma collection for the govt corpus.
 
@@ -80,7 +82,7 @@ def load_or_build_govt_chroma(
     retrieve). Cuts the 49k-passage corpus down dramatically so first-run
     embedding takes seconds instead of minutes.
     """
-    granite_ef = GraniteEmbeddingFunction(model_id=embedding_model_id)
+    granite_ef = GraniteEmbeddingFunction(model_id=embedding_model_id, device= device)
     client     = chromadb.PersistentClient(path=chroma_path)
     collection = client.get_or_create_collection(
         name="govt",
