@@ -190,13 +190,17 @@ def _control_position_index(seq_len: int, position_name: str) -> int:
     raise ValueError(f"unknown control_position: {position_name}")
 
 
+_TEXT_TOKENS = [10, 20, 30, 40, 50, 60, 70, 80]
+
+
 def _build_input(ctrl_pos: int, ctrl_token: int, total_len: int):
     """Build a `total_len`-long sequence with `ctrl_token` at `ctrl_pos`.
 
-    Non-control positions use token id 50 (same convention as the bare-switch
-    tests at tests/shared/single_switch_cases.py:20).
+    Non-control positions cycle through _TEXT_TOKENS to produce a varied
+    distribution that avoids near-ties in logit space (which makes argmax
+    fragile under HF/vLLM precision differences).
     """
-    seq = [50] * total_len
+    seq = [_TEXT_TOKENS[i % len(_TEXT_TOKENS)] for i in range(total_len)]
     seq[ctrl_pos] = ctrl_token
     return seq
 
@@ -331,7 +335,7 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     # Baseline: no control token — pure base-model comparison.
     # If HF and vLLM disagree here too, the argmax comparison is unreliable
     # for this model (backend drift, not a switch bug).
-    _baseline_seq = [50] * short_seq_len
+    _baseline_seq = [_TEXT_TOKENS[i % len(_TEXT_TOKENS)] for i in range(short_seq_len)]
     with torch.no_grad():
         _baseline_out = hf_model(input_ids=torch.tensor([_baseline_seq], device="cuda"))
     _hf_baseline_logprobs = torch.log_softmax(_baseline_out.logits[0].float(), dim=-1)[:-1].cpu()
