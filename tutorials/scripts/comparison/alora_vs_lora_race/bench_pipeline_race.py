@@ -198,16 +198,6 @@ def make_backend(cfg):
     return backend
 
 
-def build_context(history):
-    ctx = ChatContext()
-    for m in history:
-        docs = ([MelleaDocument(doc_id=str(i), text=t)
-                 for i, t in enumerate(m["documents"])]
-                if m.get("documents") else None)
-        ctx = ctx.add(MelleaMessage(m["role"], m["content"], documents=docs))
-    return ctx
-
-
 def to_mellea_docs(texts):
     return [MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(texts)]
 
@@ -254,18 +244,25 @@ def retrieve_documents(query, top_k=None):
     return collection.query(query_texts=[query], n_results=top_k)["documents"][0]
 
 
-def run_timed_pipeline(query, history, backend, conv_json_idx=None, turn_idx=None, state_cb=None):
-    """Run one pipeline turn. Returns timings, work metadata, and result."""
-    timings = {}
-    work    = {"history_turns": len(history), "query_len": len(query)}
+def run_timed_pipeline(query, ctx, backend, conv_json_idx=None, turn_idx=None, state_cb=None):
+    """Run one pipeline turn. Returns timings, work metadata, and result.
 
-    history_ctx = build_context(history)
+    Args:
+        query: The user's current question.
+        ctx: ChatContext containing prior conversation turns (without the current query).
+        backend: mellea OpenAIBackend connected to a vLLM server.
+        conv_json_idx: Index into CONVERSATIONS for error dumping.
+        turn_idx: Turn number within the conversation for error dumping.
+        state_cb: Callback for live-display state updates.
+    """
+    timings = {}
+    work    = {"history_turns": len(ctx.as_list()) // 2, "query_len": len(query)}
 
     if state_cb: state_cb("harm")
-    ctx = history_ctx.add(MelleaMessage("user", query))
+    ctx_with_query = ctx.add(MelleaMessage("user", query))
     t0  = time.perf_counter()
-    harm_score = _call_or_dump("guardian_harm", ctx, conv_json_idx, turn_idx,
-                               guardian_check, ctx, backend, GUARDIAN_HARM_CRITERIA, target_role="user")
+    harm_score = _call_or_dump("guardian_harm", ctx_with_query, conv_json_idx, turn_idx,
+                               guardian_check, ctx_with_query, backend, GUARDIAN_HARM_CRITERIA, target_role="user")
     timings["guardian_harm"] = time.perf_counter() - t0
     if harm_score >= 0.5:
         work["exit"] = "harm_blocked"
@@ -273,8 +270,8 @@ def run_timed_pipeline(query, history, backend, conv_json_idx=None, turn_idx=Non
 
     if state_cb: state_cb("rewrite")
     t0 = time.perf_counter()
-    rewritten = _call_or_dump("query_rewrite", history_ctx, conv_json_idx, turn_idx,
-                              rag.rewrite_question, query, history_ctx, backend)
+    rewritten = _call_or_dump("query_rewrite", ctx, conv_json_idx, turn_idx,
+                              rag.rewrite_question, query, ctx, backend)
     timings["query_rewrite"] = time.perf_counter() - t0
     work["rewritten_len"] = len(rewritten)
 
@@ -287,8 +284,8 @@ def run_timed_pipeline(query, history, backend, conv_json_idx=None, turn_idx=Non
 
     if state_cb: state_cb("answer?")
     t0 = time.perf_counter()
-    ad_score = _call_or_dump("answerability", history_ctx, conv_json_idx, turn_idx,
-                             rag.check_answerability, query, to_mellea_docs(documents), history_ctx, backend)
+    ad_score = _call_or_dump("answerability", ctx, conv_json_idx, turn_idx,
+                             rag.check_answerability, query, to_mellea_docs(documents), ctx, backend)
     timings["answerability"] = time.perf_counter() - t0
     if ad_score == "unanswerable":
         work["exit"] = "unanswerable"
@@ -297,8 +294,8 @@ def run_timed_pipeline(query, history, backend, conv_json_idx=None, turn_idx=Non
 
     if state_cb: state_cb("clarify")
     t0 = time.perf_counter()
-    clarification = _call_or_dump("clarification", history_ctx, conv_json_idx, turn_idx,
-                                  rag.clarify_query, query, to_mellea_docs(documents), history_ctx, backend)
+    clarification = _call_or_dump("clarification", ctx, conv_json_idx, turn_idx,
+                                  rag.clarify_query, query, to_mellea_docs(documents), ctx, backend)
     timings["clarification"] = time.perf_counter() - t0
     work["clarification_len"] = len(clarification)
     if not clarification.strip().upper().startswith("CLEAR"):
@@ -310,8 +307,8 @@ def run_timed_pipeline(query, history, backend, conv_json_idx=None, turn_idx=Non
     gen_msg = MelleaMessage("user", rewritten + "\n\n" + GENERATION_INSTRUCTION,
                             documents=to_mellea_docs(documents) if documents else None)
     t0  = time.perf_counter()
-    out, _ = _call_or_dump("generation", history_ctx.add(gen_msg), conv_json_idx, turn_idx,
-                           mfuncs.act, gen_msg, history_ctx, backend,
+    out, _ = _call_or_dump("generation", ctx.add(gen_msg), conv_json_idx, turn_idx,
+                           mfuncs.act, gen_msg, ctx, backend,
                            model_options={ModelOption.TEMPERATURE: 0.0})
     timings["generation"] = time.perf_counter() - t0
     answer = str(out)
@@ -480,7 +477,7 @@ def _emit_event(event_type, **kwargs):
 def run_conversation(run_idx, backend, label):
     queries          = get_queries_for_run(run_idx)
     conv_json_idx    = run_idx % len(CONVERSATIONS)
-    history          = []
+    ctx              = ChatContext()
     query_results    = []
     conv_start       = time.perf_counter()
     _emit_event("conv_start", srv=label, conv=run_idx)
@@ -494,16 +491,18 @@ def run_conversation(run_idx, backend, label):
                 _emit_event("step_start", srv=_l, conv=_i, turn=_t, step=step)
 
             state_cb("harm")
-            r = run_timed_pipeline(query, history, backend,
+            r = run_timed_pipeline(query, ctx, backend,
                                    conv_json_idx=conv_json_idx, turn_idx=qi, state_cb=state_cb)
 
+            # Advance context with the turn (only when not blocked by guardian).
             docs = r.get("documents")
+            mellea_docs = to_mellea_docs(docs) if docs else None
             if r.get("needs_clarification"):
-                history.append({"role": "user",      "content": query,             "documents": docs})
-                history.append({"role": "assistant",  "content": r["clarification"]})
+                ctx = ctx.add(MelleaMessage("user", query, documents=mellea_docs))
+                ctx = ctx.add(MelleaMessage("assistant", r["clarification"]))
             elif r.get("answer"):
-                history.append({"role": "user",      "content": query,             "documents": docs})
-                history.append({"role": "assistant",  "content": r["answer"]})
+                ctx = ctx.add(MelleaMessage("user", query, documents=mellea_docs))
+                ctx = ctx.add(MelleaMessage("assistant", r["answer"]))
 
             query_results.append((ql, r))
             _update_state(label, run_idx, turns_done=qi + 1)
