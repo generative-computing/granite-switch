@@ -6,7 +6,7 @@ This guide explains how to configure your own adapter with Mellea to be used by 
 
 Together, Mellea + Granite Switch + vLLM provide a production-ready inference stack for adapter-based AI applications that can utilize custom adapters.
 - See [Mellea With Granite Switch](mellea_with_granite_switch.md) for a detailed explanation of how granite-switch and Mellea work together.
-- See [Bring Your Own Adapter](bring_your_own_adapter.md) for info on how to train your own adapter.
+- See [Bring Your Own Adapter](build_your_own_adapter.md) for info on how to train your own adapter.
 - See Mellea's [Lora and aLoRA adapters](https://docs.mellea.ai/advanced/lora-and-alora-adapters) for info on how to train your own custom adapters using Mellea.
 
 ## Prerequisites
