@@ -887,7 +887,7 @@ def write_telemetry(server_results, adapter_tech, all_conv_results, labels, race
             "mode":        mode,
             "runs":        RUNS,
             "concurrency": CONCURRENCY_PER_SERVER,
-            "timestamp":   datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp":   datetime.datetime.now(datetime.UTC).isoformat(),
             "race_wall":   race_wall,
         },
         "servers": servers_block,
