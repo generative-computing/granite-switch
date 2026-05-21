@@ -30,7 +30,7 @@ Small models with the right adapters consistently outperform much larger general
 </p>
 
 <p align="center"><em>aLoRA completes 20 of 32 RAG queries while standard LoRA is still waiting — same model, same hardware, different adapter technology.</em><br>
-<a href="https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb">Reproduce it yourself on Colab →</a></p>
+<a href="https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb">Reproduce it yourself on Colab →</a></p>
 
 ## Quick Start
 
@@ -114,9 +114,9 @@ New here? Start with a 5-minute notebook and work your way up:
 
 | Notebook | What you'll build | Time | |
 |---|---|---|---|
-| [Hello Mellea](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/01_hello_mellea.ipynb) | Call adapters through a clean Python API | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/01_hello_mellea.ipynb) |
-| [RAG Pipeline](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_govt_rag_pipeline_simple.ipynb) | Query rewrite + answerability + citations in one model | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/03_01_govt_rag_pipeline_simple.ipynb) |
-| [Compose Your Own](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_compose_granite_switch.ipynb) | Build a custom checkpoint from adapter libraries | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/04_compose_granite_switch.ipynb) |
+| [Hello Mellea](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_mellea.ipynb) | Call adapters through a clean Python API | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_mellea.ipynb) |
+| [RAG Pipeline](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_full_pipeline.ipynb) | Query rewrite + answerability + citations in one model | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_full_pipeline.ipynb) |
+| [Compose Your Own](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/compose_granite_switch.ipynb) | Build a custom checkpoint from adapter libraries | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/compose_granite_switch.ipynb) |
 
 All notebooks run on Colab. See [tutorials/README.md](tutorials/README.md) for the full list and guided learning paths.
 
