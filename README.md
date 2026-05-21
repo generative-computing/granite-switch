@@ -30,7 +30,7 @@ Small models with the right adapters consistently outperform much larger general
 </p>
 
 <p align="center"><em>aLoRA completes 20 of 32 RAG queries while standard LoRA is still waiting — same model, same hardware, different adapter technology.</em><br>
-<a href="https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/05_alora_vs_lora_race.ipynb">Reproduce it yourself on Colab →</a></p>
+<a href="https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb">Reproduce it yourself on Colab →</a></p>
 
 ## Quick Start
 
