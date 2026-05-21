@@ -25,11 +25,11 @@ Small models with the right adapters consistently outperform much larger general
 
 <p align="center">
   <a href="https://generative-computing.github.io/granite-switch/race_live.html">
-    <img src="docs/alora_lora_race.png" alt="aLoRA vs LoRA live race — aLoRA finishes first with KV cache reuse" width="820">
+    <img src="docs/alora_vs_lora_race.png" alt="aLoRA vs LoRA live race telemetry — aLoRA at 10/16 queries done with 73% KV hit rate while LoRA is at 1/16 with 7%" width="820">
   </a>
 </p>
 
-<p align="center"><em>aLoRA completes 20 of 32 RAG queries while standard LoRA is still waiting — same model, same hardware, different adapter technology.</em><br>
+<p align="center"><em>Live race telemetry: aLoRA (73% KV cache hit rate, 0.64s TTFT) vs LoRA (7% KV hit rate, 2.08s TTFT) — same model, same hardware, different adapter technology.</em><br>
 <a href="https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb">Reproduce it yourself on Colab →</a></p>
 
 ## Quick Start
