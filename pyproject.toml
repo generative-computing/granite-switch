@@ -27,12 +27,14 @@ build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compati
 tutorials = [
     "granite-switch[hf,vllm,compose]",
     "chromadb>=0.4.0",
+    "datasets>=2.0.0",
     "httpx>=0.24.0",
     "requests>=2.31.0",
     "rich>=13.0.0",
     "mellea>=0.1.0,<=0.5.0",
     "ipython>=8.10.0",
     "python-dotenv>=1.0.0",
+    "sentence-transformers>=3.0.0",
 ]
 dev = ["pytest", "granite-switch[hf,vllm,compose]"]
 dev-vllm20 = ["pytest", "granite-switch[hf,vllm20,compose]"]
