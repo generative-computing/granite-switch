@@ -10,7 +10,7 @@
 
 Software is built from libraries — you pick the ones you need, compose them, and ship. Granite Switch brings this to AI models: choose **adapter functions** for RAG, safety, factuality, and more, compose them into a single model, and deploy with one command. Swap or upgrade any component independently, just like updating a dependency.
 
-An adapter function is a LoRA adapter trained to a specific input/output contract — a score, a decision, a rewritten query — with the output schema [enforced at the token level by Mellea](https://mellea.ai), not retried into existence. This is what makes them composable as software: each function has a known signature, not just a general-purpose text output.
+An adapter function is a LoRA adapter trained to a specific input/output contract — a score, a decision, a rewritten query — with the output schema [enforced at the token level by Mellea](https://mellea.ai). This is what makes them composable as software: each function has a known signature, not just a general-purpose text output.
 
 Small models with the right adapter functions consistently outperform much larger generalist models on targeted tasks. **Activated LoRA (aLoRA)** makes this practical at scale: all adapter functions share one KV cache, activating on demand — so one deployment serves many capabilities with no memory or latency overhead.
 
