@@ -30,7 +30,7 @@ tutorials = [
     "httpx>=0.24.0",
     "requests>=2.31.0",
     "rich>=13.0.0",
-    "mellea>=0.1.0,<=0.6.0",
+    "mellea==0.6.0",
     "ipython>=8.10.0",
     "python-dotenv>=1.0.0",
 ]
