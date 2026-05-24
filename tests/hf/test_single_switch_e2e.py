@@ -11,8 +11,8 @@ wired through:
   GraniteSwitchConfig  →  create_switch()  →  SingleSwitch.__init__
                        →  model forward    →  _last_adapter_indices
 
-Parametrized over both PRODUCTION_ATTENTION_MULTIPLIERS and both control_dims
-modes (native and hiding) to catch config-flow regressions in either code path.
+Parametrized over PRODUCTION_ATTENTION_MULTIPLIERS to catch config-flow
+regressions across the realistic multiplier values.
 
 CPU-only. Does not exercise vLLM gain compensation — HF SingleSwitch hardcodes
 scaling=1.0 regardless of config. Compensation is tested in the Tier 2 composer
@@ -34,11 +34,6 @@ from tests.shared.granite4_constants import (
     PRODUCTION_ATTENTION_MULTIPLIERS,
 )
 from tests.shared.single_switch_cases import ADAPTER_TOKEN_IDS_LIST, NUM_ADAPTERS
-
-# control_dims=0 → native mode (no KV hiding). control_dims=32 → hiding mode.
-# Both take different code paths through SingleSwitch.__init__ (expanded_head_dim)
-# and through GraniteSwitchModel.forward (hiding-group mask construction).
-CONTROL_DIMS_MODES = [0, 32]
 
 # TEXT_TOKEN matches tests/shared/single_switch_cases.py convention. Any
 # non-adapter token ID works — 50 is outside ADAPTER_TOKEN_IDS_LIST (1000+).
@@ -62,35 +57,20 @@ _E2E_VOCAB_SIZE = max(
 )
 
 
-def _build_e2e_overrides(base_cfg, *, num_adapters=NUM_ADAPTERS, control_dims=32):
-    """Build config overrides for a production-ish E2E test model.
-
-    Three overrides beyond the `single_overrides()` defaults:
-    - vocab_size: large enough to hold every adapter token ID (derived).
-    - max_position_embeddings: supports the long-context test matrix (derived).
-    - control_dims parametrized: native (0) vs hiding (32+).
-    """
+def _build_e2e_overrides(base_cfg, *, num_adapters=NUM_ADAPTERS):
+    """Build config overrides for a production-ish E2E test model."""
     adapter_names = [f"adapter_{i}" for i in range(num_adapters)]
-    overrides = {
+    return {
         "vocab_size": _E2E_VOCAB_SIZE,
         "max_position_embeddings": _E2E_MAX_POSITION_EMBEDDINGS,
         "num_adapters": num_adapters,
         "adapter_ranks": [8] * num_adapters,
         "adapter_token_ids": ADAPTER_TOKEN_IDS_LIST[:num_adapters],
         "adapter_names": adapter_names,
-        "control_dims": control_dims,
+        "adapter_substitute_token_ids": [1] * num_adapters,
         "num_hidden_layers": len(base_cfg["layer_types"]) + 1,
         "layer_types": ["attention"] + base_cfg["layer_types"],
     }
-    if control_dims > 0:
-        # Hiding mode needs hiding_groups + hiding_policy + adapter_third_party.
-        overrides["hiding_groups"] = {"all_controls": adapter_names}
-        overrides["hiding_policy"] = {
-            n: ["all_controls"] for n in ["base"] + adapter_names
-        }
-        overrides["adapter_third_party"] = adapter_names
-    # control_dims == 0 → native mode → no hiding_groups/policy.
-    return overrides
 
 
 def _make_e2e_model(base_cfg, overrides):
@@ -107,29 +87,28 @@ def _make_e2e_model(base_cfg, overrides):
 # Module scope would save ~19s across the long-context matrix but would require
 # auditing that no test mutates model state — not worth it.
 @pytest.fixture(
-    params=[(m, cd) for m in PRODUCTION_ATTENTION_MULTIPLIERS for cd in CONTROL_DIMS_MODES],
-    ids=lambda p: f"mult={p[0]}-cd={p[1]}",
+    params=PRODUCTION_ATTENTION_MULTIPLIERS,
+    ids=lambda m: f"mult={m}",
 )
 def e2e_model(request):
-    """GraniteSwitchForCausalLM parametrized over (attention_multiplier, control_dims)."""
-    multiplier, control_dims = request.param
+    """GraniteSwitchForCausalLM parametrized over attention_multiplier."""
+    multiplier = request.param
     base_cfg = {**DENSE_CFG, "attention_multiplier": multiplier}
-    overrides = _build_e2e_overrides(base_cfg, control_dims=control_dims)
+    overrides = _build_e2e_overrides(base_cfg)
     model, config = _make_e2e_model(base_cfg, overrides)
-    return model, config, multiplier, control_dims
+    return model, config, multiplier
 
 
 @pytest.fixture
 def e2e_model_32adapter():
     """Single-variant fixture for the 32-adapter stress test.
 
-    The adapter-ID rounding math is independent of (multiplier, control_dims),
-    so we don't parametrize this fixture — TestE2EBasicAdapterActivation already
-    covers the cross-product. Chosen variant: hiding mode (control_dims=32) with
-    the most common production multiplier (0.0078125, granite-4.0-h-1b/tiny/small/4.1-8b/30b).
+    The adapter-ID rounding math is independent of multiplier, so we don't
+    parametrize. Chosen variant: most common production multiplier
+    (0.0078125, granite-4.0-h-1b/tiny/small/4.1-8b/30b).
     """
     base_cfg = {**DENSE_CFG, "attention_multiplier": 0.0078125}
-    overrides = _build_e2e_overrides(base_cfg, control_dims=32)
+    overrides = _build_e2e_overrides(base_cfg)
     model, config = _make_e2e_model(base_cfg, overrides)
     return model, config
 
@@ -160,10 +139,9 @@ class TestE2EBasicAdapterActivation:
         from position 2 onward; positions before it remain at 0 (base).
 
         Proves the full chain config → create_switch → forward →
-        _last_adapter_indices works on a production-ish multiplier/control_dims
-        combination.
+        _last_adapter_indices works on a production-ish multiplier.
         """
-        model, config, mult, cd = e2e_model
+        model, config, mult = e2e_model
         ctrl_token = config.adapter_token_ids[0]  # adapter_0 → expected index 1
         input_ids = torch.tensor([[10, 20, ctrl_token, 30, 40, 50, 60, 70]])
         with torch.no_grad():
@@ -227,7 +205,7 @@ class TestE2ELongContext:
 
         Default CI runs seq_len ∈ {10K, 32K}; `-m slow` adds 65K and 131K.
         """
-        model, config, mult, cd = e2e_model
+        model, config, mult = e2e_model
         ctrl_token = config.adapter_token_ids[adapter_idx]
         expected_id = adapter_idx + 1
         ctrl_pos = _control_position(seq_len, control_position)
@@ -244,10 +222,10 @@ class TestE2ELongContext:
             assert (ai[:ctrl_pos] == 0).all(), (
                 f"pre-control slice should be all 0; failed at seq_len={seq_len}, "
                 f"adapter_idx={adapter_idx}, position={control_position}, "
-                f"mult={mult}, cd={cd}"
+                f"mult={mult}"
             )
         assert (ai[ctrl_pos:] == expected_id).all(), (
             f"post-control slice should be all {expected_id}; failed at seq_len={seq_len}, "
             f"adapter_idx={adapter_idx}, position={control_position}, "
-            f"mult={mult}, cd={cd}"
+            f"mult={mult}"
         )

@@ -371,13 +371,6 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Control dimension expansion for KV cache masking.
-        # Expand only when adapters present AND control_dims > 0.
-        # control_dims=0 means native mode: no KV hiding, no expansion.
-        self.expand_control_dims = config.num_adapters > 0 and config.control_dims > 0
-        self.control_dims = config.control_dims
-        self.expanded_head_dim = self.head_dim + self.control_dims
-
         # Fused QKV projection - conditionally add LoRA based on config
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_key_value_heads * self.head_dim
@@ -425,94 +418,10 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             )
             self.has_o_lora = False
 
-    def _expand_with_control_dimensions(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        token_group_membership: Optional[torch.Tensor],
-        query_group_suppression: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Expand Q, K, V with control dimensions for group-based KV cache hiding.
-
-        Always called when num_adapters > 0 (static shape decision).
-        Each hiding group g uses one control dimension:
-        - K-side: finfo(dtype).min for tokens that are members of group g
-        - Q-side: 1.0 for queries whose adapter suppresses group g,
-                  except for tokens that are themselves in group g
-
-        When both tensors are None, all control dims are zero (no masking effect).
-
-        Args:
-            q: Query tensor [batch, seq_len, num_heads, head_dim]
-            k: Key tensor [batch, seq_len, num_kv_heads, head_dim]
-            v: Value tensor [batch, seq_len, num_kv_heads, head_dim]
-            token_group_membership: [batch, seq_len, num_groups] — True if token is in group g
-            query_group_suppression: [batch, seq_len, num_groups] — True if token's adapter suppresses group g
-
-        Returns:
-            Expanded Q, K, V tensors with control_dims added to head_dim
-        """
-        batch_size, seq_len = q.shape[:2]
-        device = q.device
-        dtype = q.dtype
-
-        # Allocate control dimensions (initialized to zero)
-        q_control = torch.zeros(
-            batch_size, seq_len, self.num_heads, self.control_dims,
-            device=device, dtype=dtype
-        )
-        k_control = torch.zeros(
-            batch_size, seq_len, self.num_key_value_heads, self.control_dims,
-            device=device, dtype=dtype
-        )
-        v_control = torch.zeros(
-            batch_size, seq_len, self.num_key_value_heads, self.control_dims,
-            device=device, dtype=dtype
-        )
-
-        # K-side: brand each group-member token's key with finfo.min in its group's
-        # control dim so that suppressing queries score it as −∞.
-        # token_group_membership: [batch, seq, num_groups]
-        # → expand to [batch, seq, num_kv_heads, num_groups]
-        if token_group_membership is not None:
-            num_groups = token_group_membership.shape[-1]
-            hiding_constant = torch.finfo(dtype).min
-            k_control[:, :, :, :num_groups] = (
-                token_group_membership.unsqueeze(2)
-                .expand(-1, -1, self.num_key_value_heads, -1)
-                .to(dtype) * hiding_constant
-            )
-
-        # Q-side: set control dim g to 1.0 for queries whose adapter suppresses group g.
-        # query_group_suppression: [batch, seq, num_groups]
-        # → expand to [batch, seq, num_heads, num_groups]
-        # Tokens that are themselves in group g are excluded: when the control token
-        # sits at position 0 it has no other causal key to attend to, so suppressing
-        # its own key yields softmax([−∞]) = NaN.
-        if query_group_suppression is not None:
-            num_groups = query_group_suppression.shape[-1]
-            q_hide = query_group_suppression.to(dtype)
-            if token_group_membership is not None:
-                q_hide = q_hide * (1 - token_group_membership.to(dtype))
-            q_control[:, :, :, :num_groups] = (
-                q_hide.unsqueeze(2)
-                .expand(-1, -1, self.num_heads, -1)
-            )
-
-        # Concatenate original dims + control dims
-        q = torch.cat([q, q_control], dim=-1)  # [batch, seq_len, num_heads, head_dim + control_dims]
-        k = torch.cat([k, k_control], dim=-1)  # [batch, seq_len, num_kv_heads, head_dim + control_dims]
-        v = torch.cat([v, v_control], dim=-1)  # [batch, seq_len, num_kv_heads, head_dim + control_dims]
-
-        return q, k, v
-
     def forward(
         self,
         hidden_states: torch.Tensor,
         adapter_indices: torch.Tensor,
-        token_group_membership: Optional[torch.Tensor],
-        query_group_suppression: Optional[torch.Tensor],
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
@@ -525,8 +434,6 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         Args:
             hidden_states: Input tensor [batch, seq_len, hidden_size]
             adapter_indices: Per-token adapter selection [batch, seq_len]
-            token_group_membership: [batch, seq_len, num_groups] — True if token is in group g, or None
-            query_group_suppression: [batch, seq_len, num_groups] — True if token's adapter suppresses group g, or None
             position_embeddings: Precomputed (cos, sin) for RoPE
             attention_mask: Attention mask
             past_key_values: Cache object for KV caching
@@ -573,15 +480,6 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             query_states = query_states_t.transpose(1, 2)
             key_states = key_states_t.transpose(1, 2)
 
-        # Control dimension expansion: always when adapters are present.
-        # Group masks control which tokens/groups get K=finfo.min masking
-        # (can be None if no hiding groups, but expansion still happens).
-        if self.expand_control_dims:
-            query_states, key_states, value_states = self._expand_with_control_dimensions(
-                query_states, key_states, value_states,
-                token_group_membership, query_group_suppression,
-            )
-
         # Belief that both cache and attention expect [batch, heads, seq, dim]
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
@@ -611,12 +509,6 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             scaling=self.scaling,
             sliding_window=getattr(self.config, "sliding_window", None),
         )
-
-        # Trim control dimensions from output
-        if self.expand_control_dims:
-            # attn_output shape: [batch, num_heads, seq_len, expanded_head_dim]
-            # Trim to original head_dim
-            attn_output = attn_output[..., :self.head_dim]
 
         # Reshape and project output - conditionally use LoRA
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)

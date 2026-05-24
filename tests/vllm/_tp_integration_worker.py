@@ -47,12 +47,9 @@ def cmd_build(args):
         built_in_adapter_names=["test"],
         adapter_names=["test"],
         adapter_token_ids=[adapter_token_id],
+        adapter_substitute_token_ids=[1],
         muted_adapter_token_ids=[muted_token_id],
-        control_dims=32,
         switch_type="single",
-        hiding_groups={"all_controls": ["test"]},
-        hiding_policy={"base": ["all_controls"], "test": ["all_controls"]},
-        adapter_third_party=["test"],
     )
 
     model.save_pretrained(output_dir)

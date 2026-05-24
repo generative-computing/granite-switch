@@ -47,7 +47,7 @@ def _set_nonzero_lora_B(model, scale=0.1):
 
 @pytest.fixture
 def tiny_single_config():
-    """Minimal SingleSwitch config for CPU tests."""
+    """Minimal SingleSwitch config for CPU tests (token exchange)."""
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -57,37 +57,11 @@ def tiny_single_config():
         num_key_value_heads=4,
         num_adapters=2,
         adapter_token_ids=[250, 251],
+        adapter_substitute_token_ids=[1, 1],
         adapter_names=["adapter_1", "adapter_2"],
-        hiding_groups={"all_controls": ["adapter_1", "adapter_2"]},
-        hiding_policy={"base": ["all_controls"], "adapter_1": ["all_controls"], "adapter_2": ["all_controls"]},
-        adapter_third_party=["adapter_1", "adapter_2"],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
         switch_head_dim=16,
-        control_dims=8,
-    )
-
-
-@pytest.fixture
-def tiny_basic_mixed_tp_config():
-    """SingleSwitch config where only adapter_1 is third-party (adapter_2 is not)."""
-    return GraniteSwitchConfig(
-        vocab_size=300,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=3,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_adapters=2,
-        adapter_token_ids=[250, 251],
-        adapter_names=["adapter_1", "adapter_2"],
-        hiding_groups={"all_controls": ["adapter_1", "adapter_2"]},
-        hiding_policy={"base": ["all_controls"], "adapter_1": ["all_controls"], "adapter_2": ["all_controls"]},
-        adapter_third_party=["adapter_1"],  # only adapter_1 is third-party
-        max_lora_rank=4,
-        adapter_ranks=[4, 4],
-        switch_head_dim=16,
-        control_dims=8,
     )
 
 
@@ -238,101 +212,7 @@ class TestAdapterIndicesWiring:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 6. Control token KV invisibility
-# ════════════════════════════════════════════════════════════════════
-
-class TestControlTokenKVInvisibility:
-    """Verify control_dims makes control tokens invisible in KV cache."""
-
-    def test_control_token_kv_invisible_to_future_positions(self, tiny_config):
-        """Perturbing a control token's embedding doesn't affect future positions."""
-        torch.manual_seed(42)
-        model = GraniteSwitchForCausalLM(tiny_config).eval()
-        _set_adapter_token_ids(model, tiny_config.adapter_token_ids)
-
-        # Control token 250 at position 2
-        input_ids = torch.tensor([[10, 20, 250, 30, 40, 50, 60, 70]])
-
-        # Pass A: original embeddings
-        with torch.no_grad():
-            out_a = model(input_ids=input_ids, output_hidden_states=True)
-            hidden_a = out_a.hidden_states  # tuple of [1, 8, hidden_size]
-
-        # Perturb the control token's embedding
-        with torch.no_grad():
-            perturbation = torch.randn(tiny_config.hidden_size) * 10.0
-            model.model.embed_tokens.weight.data[250] += perturbation
-
-        # Pass B: perturbed embedding
-        with torch.no_grad():
-            out_b = model(input_ids=input_ids, output_hidden_states=True)
-            hidden_b = out_b.hidden_states
-
-        # Check each layer's hidden states
-        for layer_idx in range(len(hidden_a)):
-            ha = hidden_a[layer_idx][0]  # [8, hidden_size]
-            hb = hidden_b[layer_idx][0]
-
-            # Pre-control (positions 0, 1): identical (causal, can't see pos 2)
-            torch.testing.assert_close(
-                ha[:2], hb[:2],
-                msg=f"Layer {layer_idx}: pre-control hidden states should be identical"
-            )
-
-            # At control position (2): must differ (embedding changed)
-            assert not torch.allclose(ha[2], hb[2]), \
-                f"Layer {layer_idx}: control token hidden state should differ after perturbation"
-
-            # Post-control (positions 3+): identical (control token KV is invisible)
-            torch.testing.assert_close(
-                ha[3:], hb[3:],
-                msg=f"Layer {layer_idx}: post-control hidden states should be identical "
-                    f"(control token KV masked by control_dims)"
-            )
-
-
-# ════════════════════════════════════════════════════════════════════
-# 7. Control token KV visibility
-# ════════════════════════════════════════════════════════════════════
-
-class TestControlTokenKVVisibility:
-    """Verify control tokens are KV-invisible (hidden from attention via control dimensions)."""
-
-    def _make_model(self, config):
-        torch.manual_seed(42)
-        model = GraniteSwitchForCausalLM(config).eval()
-        _set_adapter_token_ids(model, config.adapter_token_ids)
-        return model
-
-    def test_adapter_token_kv_invisible(self, tiny_single_config):
-        """Adapter token (250) is KV-invisible: perturbing doesn't affect future."""
-        config = tiny_single_config
-        model = self._make_model(config)
-
-        input_ids = torch.tensor([[10, 20, 250, 30, 40, 50, 60, 70]])
-
-        with torch.no_grad():
-            out_a = model(input_ids=input_ids, output_hidden_states=True)
-            hidden_a = out_a.hidden_states
-
-        with torch.no_grad():
-            perturbation = torch.randn(config.hidden_size) * 10.0
-            model.model.embed_tokens.weight.data[250] += perturbation
-
-        with torch.no_grad():
-            out_b = model(input_ids=input_ids, output_hidden_states=True)
-            hidden_b = out_b.hidden_states
-
-        for layer_idx in range(len(hidden_a)):
-            ha = hidden_a[layer_idx][0]
-            hb = hidden_b[layer_idx][0]
-            torch.testing.assert_close(
-                ha[3:], hb[3:],
-                msg=f"Layer {layer_idx}: post-adapter-token hidden states should be identical"
-            )
-
-# ════════════════════════════════════════════════════════════════════
-# 8. Activating tokens: switch behavior (explicit adapter_indices)
+# 6. Activating tokens: switch behavior (explicit adapter_indices)
 # ════════════════════════════════════════════════════════════════════
 
 class TestActivatingTokenSwitch:
@@ -355,13 +235,13 @@ class TestActivatingTokenSwitch:
 
 
 # ════════════════════════════════════════════════════════════════════
-# 9. Native mode: control_dims=0 (no KV hiding)
+# 7. Token-exchange forward pass tests
 # ════════════════════════════════════════════════════════════════════
 
 
 @pytest.fixture
 def tiny_native_config():
-    """Minimal config for native mode (control_dims=0, no hiding)."""
+    """Minimal config for token-exchange mode."""
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -371,20 +251,16 @@ def tiny_native_config():
         num_key_value_heads=4,
         num_adapters=2,
         adapter_token_ids=[250, 251],
+        adapter_substitute_token_ids=[1, 1],
         adapter_names=["router", "planner"],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
         switch_head_dim=16,
-        control_dims=0,
-        # No hiding
-        hiding_groups=None,
-        hiding_policy=None,
-        adapter_third_party=None,
     )
 
 
 class TestNativeModeForward:
-    """Forward pass tests with control_dims=0 (native mode)."""
+    """Forward pass tests with token-exchange enabled."""
 
     def test_forward_produces_logits(self, tiny_native_config):
         """Basic forward pass succeeds and produces correct-shaped logits."""
@@ -399,24 +275,6 @@ class TestNativeModeForward:
         assert output.logits.shape == (1, 5, config.vocab_size)
         assert torch.isfinite(output.logits).all()
 
-    def test_no_expansion_in_attention(self, tiny_native_config):
-        """Attention layers should not expand control dimensions."""
-        config = tiny_native_config
-        model = GraniteSwitchForCausalLM(config)
-
-        for layer in model.model.layers:
-            attn = layer.self_attn
-            assert not attn.expand_control_dims
-            assert attn.expanded_head_dim == attn.head_dim
-
-    def test_no_hiding_buffers(self, tiny_native_config):
-        """Model should have no hiding group buffers."""
-        config = tiny_native_config
-        model = GraniteSwitchForCausalLM(config)
-
-        assert model.model.token_to_group_mask is None
-        assert model.model.adapter_hiding_matrix is None
-
     def test_control_token_logits_finite(self, tiny_native_config):
         """Control token logits should be finite."""
         config = tiny_native_config
@@ -430,7 +288,7 @@ class TestNativeModeForward:
         # All control token logits should be finite
         for tid in config.adapter_token_ids:
             assert torch.isfinite(output.logits[:, :, tid]).all(), (
-                f"Token {tid} logits should be finite in native mode"
+                f"Token {tid} logits should be finite"
             )
 
     def test_adapter_effect_visible(self, tiny_native_config):
@@ -451,7 +309,7 @@ class TestNativeModeForward:
         assert diff > 1e-6, "Adapter should produce different logits"
 
     def test_batch_forward(self, tiny_native_config):
-        """Batched forward pass works with control_dims=0."""
+        """Batched forward pass works."""
         config = tiny_native_config
         model = GraniteSwitchForCausalLM(config).eval()
         _set_adapter_token_ids(model, config.adapter_token_ids)

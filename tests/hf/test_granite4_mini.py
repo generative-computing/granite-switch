@@ -178,7 +178,7 @@ def _make_zero_adapter_pair(cfg_dict):
     for name in unloaded:
         assert any(k in name for k in (
             "lora_A", "lora_B", "switch", "adapter_token_ids",
-            "token_to_group_mask", "adapter_hiding_matrix",
+            "control_to_substitute_lut",
         )), f"Unexpected unloaded parameter: {name}"
 
     # Zero all LoRA weights defensively

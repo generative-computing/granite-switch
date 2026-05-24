@@ -122,31 +122,29 @@ def transfer_weights_strict(upstream_sd, switch_sd):
 # zero LoRA weights the delta is zero for the LoRA path.
 #
 # All control tokens (adapter_token_ids) are KV-hidden by default.
-# Test sequences use adapter tokens; hidden positions are excluded
+# Test sequences use adapter tokens; the control position is excluded
 # from comparison via get_visible_mask().
 #
-# KV hiding: control tokens get K=finfo.min masking on control dims,
-# zeroing their attention contribution at hidden positions.
+# Token-exchange: at the switch, each control token's id is rewritten to
+# its configured substitute id before the decoder embeds. Upstream sees
+# the original control id; switch sees the substitute. The two embeddings
+# differ at the control position only.
 #
-# Error sources (with control_dims=32, exact K=-inf masking):
+# Error sources:
 #
-# 1. Hidden token attention contribution removal (primary):
-#    The upstream model attends to control tokens normally. The switch
-#    model masks them exactly (K=-inf -> zero attention weight). The diff
-#    is the value of the removed attention contribution -- fundamental
-#    and unavoidable. Error scales with hidden_tokens / seq_len.
+# 1. Embedding divergence at control positions (primary):
+#    Upstream embeds the original control id; switch embeds the substitute.
+#    The control position itself is excluded from comparison. Visible
+#    positions attend to the control position too — the attention
+#    contribution from the (substitute vs original) embedding propagates.
+#    Error scales with control_tokens / seq_len.
 #
-# 2. Expanded tensor FP rounding (secondary):
-#    control_dims adds extra dimensions to Q/K/V, changing the dot
-#    product accumulation in the attention kernel (D+32 vs D elements).
-#    This introduces small FP differences even for real token positions.
-#
-# 3. Mamba conv1d zero-gap (additional, hybrid only):
-#    Input zeroing writes zeros into conv1d's sliding window, perturbing
-#    K-1 subsequent real tokens per hidden token (issue #5).
+# 2. Mamba conv1d effects (hybrid only):
+#    Conv1d's sliding window over substituted vs original tokens at the
+#    control position perturbs K-1 subsequent real tokens.
 #
 # Token allocation (within vocab_size=256):
-#   101+ = adapter_token_ids (KV-hidden, activate switch)
+#   101+ = adapter_token_ids (rewritten to substitute by switch)
 #   Random fill: [0, 100) -- guaranteed no collisions with control tokens
 
 # Control token IDs -- low-vocab, valid embeddings in the base model
@@ -165,9 +163,9 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     - num_hidden_layers += 1 (1 cache slot for SingleSwitch)
     - layer_types prepended with "attention" (switch layer type)
     - LoRA adapter config fields
-    - adapter_token_ids (KV-hidden)
+    - adapter_token_ids (rewritten to substitute ids by the switch)
+    - adapter_substitute_token_ids (token-exchange substitutes)
     - adapter_names for name-to-index mapping
-    - control_dims=32 (default: exact K=-inf masking, no softmax dilution)
     """
     cfg = dict(cfg_dict)
 
@@ -186,13 +184,10 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     cfg["adapter_token_ids"] = [
         _ADAPTER_TOKEN_BASE + i for i in range(num_adapters)
     ]
-
-    # Default hiding config: all adapters in a single group, all hide it.
-    cfg["hiding_groups"] = {"all_controls": list(adapter_names)}
-    cfg["hiding_policy"] = {
-        name: ["all_controls"] for name in ["base"] + list(adapter_names)
-    }
-    cfg["adapter_third_party"] = list(adapter_names)
+    # Token-exchange substitute ids — use a benign shared id (the BOS-or-
+    # equivalent doesn't matter for these synthetic equivalence tests since
+    # all LoRA weights are zero, so the embedding is what feeds the decoder).
+    cfg["adapter_substitute_token_ids"] = [1] * num_adapters
 
     return cfg
 
@@ -233,13 +228,14 @@ def zero_lora_weights(model):
 
 
 def get_visible_mask(input_ids):
-    """Return boolean mask of non-hidden (visible) positions.
+    """Return boolean mask of non-control (visible) positions.
 
-    Positions in a hiding group get K=finfo.min masking on control dims,
-    making their logits intentionally different from upstream. This mask
-    identifies positions that should be compared in equivalence tests.
+    Control positions hold the substitute embedding in the switch model
+    versus the original control-token embedding upstream — their logits
+    are intentionally different. This mask identifies positions that
+    should be compared in equivalence tests.
 
-    All adapter tokens (>= _ADAPTER_TOKEN_BASE) are KV-hidden.
+    All adapter tokens (>= _ADAPTER_TOKEN_BASE) are control positions.
     Fill tokens from [0, 100) are visible.
     """
     is_adapter = input_ids >= _ADAPTER_TOKEN_BASE
@@ -252,38 +248,33 @@ def get_visible_mask(input_ids):
 def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
     """Return (atol, rtol) for a given architecture.
 
-    Error sources (systematic analysis):
+    Error sources:
 
-    1. **No hiding, no adapters**: GraniteSwitch with num_adapters=0 is
-       bit-exact vs upstream Granite (all configs). Fused QKV matmul is
-       bit-identical to separate Q/K/V matmuls in float32.
+    1. **No adapters**: GraniteSwitch with num_adapters=0 is bit-exact vs
+       upstream Granite. Fused QKV matmul is bit-identical to separate
+       Q/K/V matmuls in float32.
 
-    2. **Hidden token attention contribution removal**: When control tokens
-       are hidden, the switch model masks them exactly (K=-inf, zero attention
-       weight via control_dims). Visible tokens lose the attention contribution
-       that the upstream model gets from those positions. Fundamental and
-       unavoidable — error scales with hidden_tokens / seq_len.
-
-    3. **Expanded tensor FP rounding**: control_dims adds extra dimensions
-       to Q/K/V, changing the attention kernel's dot product accumulation
-       (D+32 vs D elements). Small FP rounding differences at real positions.
+    2. **Token-exchange embedding divergence**: With adapters and a control
+       token in the input, the switch embeds the substitute id at that
+       position while upstream embeds the original control id. Visible
+       positions attending to the control position pick up that delta.
 
     Args:
         layer_types: list of "attention" strings
         long_sequence: unused (kept for API compatibility)
-        has_kv_hidden: True when control token hiding is active
+        has_kv_hidden: True when adapters are active and control tokens
+            are present (kept name for API compatibility — the parameter
+            now means "control tokens get substituted").
 
     Returns:
         (atol, rtol) tuple, or None if bit-exact match expected.
     """
     if not has_kv_hidden:
-        # No hiding: bit-exact (fused QKV is numerically identical,
-        # control_dims expansion adds exactly 0 to dot products).
+        # Pure base-model path: bit-exact (fused QKV numerically identical).
         return None
     else:
-        # Attention-only with hiding (control_dims=32): hidden token
-        # attention contribution removed.
-        # Worst observed: ~5.0e-2 (multi 1b, seed-dependent).
+        # Substitute-embedding propagates through attention to visible
+        # positions. Worst observed: ~5.0e-2 (multi 1b, seed-dependent).
         return (6e-2, 6e-2)
 
 

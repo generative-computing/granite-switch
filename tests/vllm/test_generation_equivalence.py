@@ -2,13 +2,10 @@
 """Verify greedy generation equivalence: upstream model vs zero-adapter switch model.
 
 Tests that autoregressive generation produces identical token sequences when a
-GraniteSwitch model has a single built-in adapter with zero LoRA weights and
-control_dims=32 (KV hiding infrastructure active, standard third-party mode).
+GraniteSwitch model has a single built-in adapter with zero LoRA weights.
 
 No control tokens appear in the prompt, so:
-- Switch layer → adapter_indices=0 everywhere
-- hidden_count=0 → no RoPE gap correction
-- K control dims = 0 for all tokens → QK dot product unchanged
+- Switch layer → adapter_indices=0 everywhere, no token rewrite
 - LoRA delta = 0 → decoder layers produce identical output
 
 Each model runs in its own set of subprocesses so CUDA context is fully torn

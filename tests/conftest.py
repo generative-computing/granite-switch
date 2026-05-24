@@ -54,18 +54,11 @@ def tiny_config():
         num_key_value_heads=4,
         num_adapters=2,
         adapter_token_ids=[250, 251],
+        adapter_substitute_token_ids=[1, 1],
         adapter_names=["adapter_a", "adapter_b"],
-        hiding_groups={"all_controls": ["adapter_a", "adapter_b"]},
-        hiding_policy={
-            "base": ["all_controls"],
-            "adapter_a": ["all_controls"],
-            "adapter_b": ["all_controls"],
-        },
-        adapter_third_party=["adapter_a", "adapter_b"],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
         switch_head_dim=16,
-        control_dims=8,
     )
 
 

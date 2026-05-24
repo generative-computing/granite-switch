@@ -60,12 +60,6 @@ logging.getLogger("mellea").setLevel(logging.ERROR)
 logging.getLogger("fancy_logger").setLevel(logging.ERROR)
 
 
-from IPython.utils import coloransi
-if not hasattr(coloransi.TermColors, 'Green'):
-    coloransi.TermColors.Green = '\033[0;32m'
-    coloransi.TermColors.Blue = '\033[0;34m'
-    coloransi.TermColors.Normal = '\033[0m'
-
 def _detect_notebook():
     """Return True when running inside Jupyter / Colab."""
     try:
@@ -262,7 +256,7 @@ def run_timed_pipeline(query, ctx, backend, conv_json_idx=None, turn_idx=None, s
     ctx_with_query = ctx.add(MelleaMessage("user", query))
     t0  = time.perf_counter()
     harm_score = _call_or_dump("guardian_harm", ctx_with_query, conv_json_idx, turn_idx,
-                               guardian_check, ctx_with_query, backend, GUARDIAN_HARM_CRITERIA, target_role="user")
+                               guardian_check, ctx_with_query, backend, GUARDIAN_HARM_CRITERIA, scoring_schema="user_prompt")
     timings["guardian_harm"] = time.perf_counter() - t0
     if harm_score >= 0.5:
         work["exit"] = "harm_blocked"
@@ -887,7 +881,7 @@ def write_telemetry(server_results, adapter_tech, all_conv_results, labels, race
             "mode":        mode,
             "runs":        RUNS,
             "concurrency": CONCURRENCY_PER_SERVER,
-            "timestamp":   datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp":   datetime.datetime.now(datetime.UTC).isoformat(),
             "race_wall":   race_wall,
         },
         "servers": servers_block,

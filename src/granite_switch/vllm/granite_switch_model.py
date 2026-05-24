@@ -81,17 +81,10 @@ class GraniteSwitchModel(nn.Module):
     3. Base transformer layers with LoRA
     4. LM head 
 
-    The switch detects special tokens and selects the appropriate adapter.
-    Adapter indices are passed as arguments to LoRA layers.
-
-    To mitigate the contribution of control tokens in the base model and adapter computations:
-    - Each layer's k and v values are augmented with a control dimension set to
-    k=-inf for control tokens and k=0 otherwise (v=0 throughout), prior to attention
-    calculation. After softmax attention is computed, the value is reduced to its
-    original dimension.
-    - The logits for control tokens are set to -inf in compute_logits() to prevent
-    the sampler from generating control tokens
-    - Position correction via hidden_count closes RoPE gaps from KV-hidden control tokens
+    The switch detects special tokens, selects the appropriate adapter, and
+    rewrites each control token's id to its substitute id (token exchange).
+    The decoder embeds the rewritten ids and is otherwise oblivious to the
+    substitution. Adapter indices are passed as arguments to LoRA layers.
     """
 
     def __init__(
@@ -155,6 +148,11 @@ class GraniteSwitchModel(nn.Module):
                     torch.zeros(num_adapters, dtype=torch.long),
                 )
 
+            # Token-exchange LUT lives on the switch module
+            # (see vllm/switch/single.py); the switch rewrites input_ids
+            # in-place during its forward pass, so this model class no
+            # longer needs a decoder-side substitute table.
+
             # Initialize compile-friendly LoRA metadata handler
             # This replaces vLLM's LoRAKernelMeta with a torch.compile-compatible version
             # that avoids data-dependent branching
@@ -164,38 +162,10 @@ class GraniteSwitchModel(nn.Module):
                 dtype=torch.bfloat16,
             )
 
-            # --- Hiding group buffers ---
-            num_groups = config.num_hiding_groups
-            if num_groups > 0:
-                group_token_ids = config.get_hiding_group_token_ids()
-                all_known_ids = [tid for tids in group_token_ids.values() for tid in tids]
-                if config.adapter_token_ids:
-                    all_known_ids.extend(config.adapter_token_ids)
-                max_tid = max(all_known_ids) if all_known_ids else -1
-                table_size = max(config.vocab_size, max_tid + 1)
-                token_to_group_mask = torch.zeros(
-                    table_size, num_groups, dtype=torch.bool
-                )
-                for g, tids in group_token_ids.items():
-                    for tid in tids:
-                        token_to_group_mask[tid, g] = True
-                self.register_buffer("token_to_group_mask", token_to_group_mask)
-
-                policy_matrix = config.get_adapter_hiding_policy_matrix()
-                self.register_buffer(
-                    "adapter_hiding_matrix",
-                    torch.tensor(policy_matrix, dtype=torch.bool),
-                )
-            else:
-                self.token_to_group_mask = None
-                self.adapter_hiding_matrix = None
-
         else:
             self.switch = None
             self.adapter_token_ids = None
             self.lora_meta = None
-            self.token_to_group_mask = None
-            self.adapter_hiding_matrix = None
 
         # 3. Base transformer layers with custom LoRA
         #
@@ -285,19 +255,6 @@ class GraniteSwitchModel(nn.Module):
             ),
         }
 
-        num_groups = self.config.num_hiding_groups
-        if num_groups > 0:
-            tensors["token_group_membership"] = torch.zeros(
-                (batch_size, num_groups),
-                dtype=torch.bool,
-                device=device,
-            )
-            tensors["query_group_suppression"] = torch.zeros(
-                (batch_size, num_groups),
-                dtype=torch.bool,
-                device=device,
-            )
-
         return IntermediateTensors(tensors)
 
     def forward(
@@ -327,63 +284,33 @@ class GraniteSwitchModel(nn.Module):
         # COMPILED: Switch + Metadata preparation
         # ═══════════════════════════════════════════════════════════════
 
-        # Step 1: Switch - determine adapter for each token via switch
-        # Switch only runs on first rank
-        hidden_count = None
+        # Step 1: Switch — determine adapter for each token and rewrite
+        # control tokens via token-exchange. Only runs on first rank.
         if get_pp_group().is_first_rank:
             if self.switch is not None:
-                adapter_indices = self.switch(
+                adapter_indices, modified_input_ids = self.switch(
                     input_ids=input_ids,
                     adapter_token_ids=self.adapter_token_ids,
                 )
             else:
-                # No switch - all tokens use base model (adapter_id = 0)
+                # No switch — all tokens use base model (adapter_id = 0).
                 num_tokens = input_ids.shape[0]
                 adapter_indices = torch.zeros(
-                    num_tokens,
-                    dtype=torch.long,
-                    device=input_ids.device
+                    num_tokens, dtype=torch.long, device=input_ids.device,
                 )
+                modified_input_ids = input_ids
 
-            # Step 2: Compute group-based hiding masks.
-            if self.token_to_group_mask is not None:
-                # token_group_membership: True at [i, g] if token i is a member of group g
-                token_group_membership = self.token_to_group_mask[input_ids]  # [num_tokens, num_groups]
-                # query_group_suppression: True at [i, g] if token i's adapter suppresses group g
-                query_group_suppression = self.adapter_hiding_matrix[adapter_indices]  # [num_tokens, num_groups]
-            else:
-                token_group_membership = None
-                query_group_suppression = None
-
-            # Compute hidden_count for position correction (SingleSwitch)
-            if hidden_count is None:
-                hidden_count = (adapter_indices > 0).long()
-
-            # Position correction: adjust positions to close gaps from hidden tokens.
-            # Clamp to >= 0: pre-init tokens have no hidden tokens in their causal
-            # past, but the counting mechanism returns capacity-1 when all attention
-            # keys are masked, which would produce negative positions and OOB RoPE
-            # cache indices.
-            if hidden_count is not None:
-                positions = torch.clamp(positions - hidden_count, min=0)
-
-            # Step 3: Prepare LoRA metadata ONCE for all decoder layers.
+            # Step 2: Prepare LoRA metadata ONCE for all decoder layers.
             # Stored on the shared LoRAContext — every SwitchedLoRALinear reads from it.
             if self.lora_meta is not None and self.lora_ctx is not None:
                 # Convert to Punica convention: 0=base -> -1=base
                 punica_indices = adapter_indices - 1
                 self.lora_meta.prepare_and_store(punica_indices, self.lora_ctx)
-                self.lora_ctx.token_group_membership = token_group_membership
-                self.lora_ctx.query_group_suppression = query_group_suppression
 
-            # Store metadata in intermediate_tensors for pipeline parallelism
+            # Store metadata in intermediate_tensors for pipeline parallelism.
             if intermediate_tensors is None:
                 intermediate_tensors = IntermediateTensors({})
             intermediate_tensors["adapter_indices"] = adapter_indices
-            if token_group_membership is not None:
-                intermediate_tensors["token_group_membership"] = token_group_membership
-            if query_group_suppression is not None:
-                intermediate_tensors["query_group_suppression"] = query_group_suppression
         else:
             # Subsequent ranks: recompute fixed-size LoRA metadata from
             # token-leading adapter_indices received through PP.
@@ -392,18 +319,6 @@ class GraniteSwitchModel(nn.Module):
                 if self.lora_ctx is not None:
                     punica_indices = adapter_indices - 1
                     self.lora_meta.prepare_and_store(punica_indices, self.lora_ctx)
-                    self.lora_ctx.token_group_membership = (
-                        _get_intermediate_tensor(
-                            intermediate_tensors, "token_group_membership",
-                        )
-                    )
-                    self.lora_ctx.query_group_suppression = (
-                        _get_intermediate_tensor(
-                            intermediate_tensors, "query_group_suppression",
-                        )
-                    )
-                hidden_count = (adapter_indices > 0).long()
-                positions = torch.clamp(positions - hidden_count, min=0)
             else:
                 # Fallback: no metadata available (should not happen in normal operation)
                 num_tokens = input_ids.shape[0] if input_ids is not None else 0
@@ -420,7 +335,11 @@ class GraniteSwitchModel(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.get_input_embeddings(input_ids)
+                # Embed the (possibly-rewritten) input_ids the switch returned.
+                # The switch already performed the token-exchange rewrite, so
+                # this single lookup produces the correct embeddings for both
+                # control positions (substitute id) and content positions.
+                hidden_states = self.get_input_embeddings(modified_input_ids)
 
             hidden_states *= self.config.embedding_multiplier
             residual = None

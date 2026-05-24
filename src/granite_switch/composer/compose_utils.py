@@ -25,6 +25,7 @@ class GraniteSwitchComposer:
         base_model_name_or_path: str,
         adapter_paths: Optional[List[str]] = None,
         adapter_token_ids: Optional[List[int]] = None,
+        adapter_substitute_token_ids: Optional[List[int]] = None,
         adapter_names: Optional[List[str]] = None,
         built_in_adapter_names: Optional[List[str]] = None,
         built_in_lora_rank: int = 8,
@@ -48,6 +49,9 @@ class GraniteSwitchComposer:
                 empty for zero-adapter skinning (base model only).
             adapter_token_ids: Token IDs for adapter control.  Required when
                 ``adapter_paths`` is non-empty.
+            adapter_substitute_token_ids: Token IDs whose embeddings replace
+                control-token embeddings at the switch. Required when
+                ``adapter_paths`` is non-empty; one per adapter.
             adapter_names: Display names for each adapter (external + built-in).
                 When ``None``, derived from the directory structure.
             built_in_adapter_names: Names for built-in (empty LoRA) adapter slots.
@@ -112,10 +116,6 @@ class GraniteSwitchComposer:
                 source_analysis = {}
 
         # --- Step 4: Build switch config from arch descriptor ---
-        hiding_groups = kwargs.pop("hiding_groups", None)
-        hiding_policy = kwargs.pop("hiding_policy", None)
-        adapter_third_party = kwargs.pop("adapter_third_party", None)
-
         # Copy config fields driven by architecture descriptor
         config_kwargs: Dict = {}
 
@@ -151,17 +151,15 @@ class GraniteSwitchComposer:
             {
                 "num_adapters": num_total,
                 "adapter_token_ids": adapter_token_ids,
+                "adapter_substitute_token_ids": adapter_substitute_token_ids,
                 "adapter_names": adapter_names,
-                "hiding_groups": hiding_groups,
-                "hiding_policy": hiding_policy,
-                "adapter_third_party": adapter_third_party,
                 "max_lora_rank": lora_rank,
                 "adapter_ranks": adapter_ranks,
                 "lora_target_modules": lora_target_modules,
             }
         )
 
-        # Merge caller-provided overrides (switch_head_dim, control_dims, etc.)
+        # Merge caller-provided overrides (switch_head_dim, etc.)
         config_kwargs.update(kwargs)
 
         switch_config = GraniteSwitchConfig(**config_kwargs)

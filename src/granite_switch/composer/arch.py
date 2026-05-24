@@ -119,9 +119,7 @@ class ArchDescriptor:
         default_factory=lambda: [
             "adapter_token_ids",
             "adapter_scalings",
-            "token_to_group_mask",
-            "adapter_hiding_matrix",
-            "all_hiding_group_token_ids",
+            "control_to_substitute_lut",
         ]
     )
 

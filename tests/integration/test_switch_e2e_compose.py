@@ -190,13 +190,17 @@ def _control_position_index(seq_len: int, position_name: str) -> int:
     raise ValueError(f"unknown control_position: {position_name}")
 
 
+_TEXT_TOKENS = [791, 5679, 2766, 279, 893, 389, 813, 1450]  # "The dog bit the man on his hand"
+
+
 def _build_input(ctrl_pos: int, ctrl_token: int, total_len: int):
     """Build a `total_len`-long sequence with `ctrl_token` at `ctrl_pos`.
 
-    Non-control positions use token id 50 (same convention as the bare-switch
-    tests at tests/shared/single_switch_cases.py:20).
+    Non-control positions cycle through _TEXT_TOKENS to produce a varied
+    distribution that avoids near-ties in logit space (which makes argmax
+    fragile under HF/vLLM precision differences).
     """
-    seq = [50] * total_len
+    seq = [_TEXT_TOKENS[i % len(_TEXT_TOKENS)] for i in range(total_len)]
     seq[ctrl_pos] = ctrl_token
     return seq
 
@@ -327,6 +331,16 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     # prompt_logprobs has no entry for position 0: see
     # tests/shared/vllm_equivalence.py:174-189).
     short_seq_len = 8  # short context for the vLLM equivalence loop
+
+    # Baseline: no control token — pure base-model comparison.
+    # If HF and vLLM disagree here too, the argmax comparison is unreliable
+    # for this model (backend drift, not a switch bug).
+    _baseline_seq = list(_TEXT_TOKENS)
+    with torch.no_grad():
+        _baseline_out = hf_model(input_ids=torch.tensor([_baseline_seq], device="cuda"))
+    _hf_baseline_logprobs = torch.log_softmax(_baseline_out.logits[0].float(), dim=-1)[:-1].cpu()
+    del _baseline_out
+
     hf_logprobs_by_position = {}
     input_ids_by_position = {}
     for position_name in _CONTROL_POSITION_NAMES:
@@ -372,6 +386,23 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
     )
 
     try:
+        # Baseline vLLM run: no control token.
+        _baseline_prompt = TokensPrompt(prompt_token_ids=_baseline_seq)
+        _baseline_vllm = extract_logprobs_tensor(
+            llm.generate(_baseline_prompt, sampling_params=sampling_params), vocab_size
+        )
+        _baseline_argmax_hf = _hf_baseline_logprobs.argmax(dim=-1)
+        _baseline_argmax_vllm = _baseline_vllm.argmax(dim=-1)
+        _baseline_mismatches = (
+            _baseline_argmax_hf != _baseline_argmax_vllm
+        ).nonzero(as_tuple=False).flatten().tolist()
+        print(
+            f"\n  [baseline-no-ctrl] argmax mismatch positions: {_baseline_mismatches}"
+            f"\n    HF  : {_baseline_argmax_hf.tolist()}"
+            f"\n    vLLM: {_baseline_argmax_vllm.tolist()}"
+            f"\n  NOTE: any mismatch here = backend drift, not a switch bug"
+        )
+
         failures = []
         for position_name in _CONTROL_POSITION_NAMES:
             seq = input_ids_by_position[position_name]
@@ -388,11 +419,39 @@ def test_hf_vllm_argmax_equivalence(composed_model_artifacts):
                 f"(base_model={base_model})"
             )
 
+            tok_a, tok_b = 596, 337
+            hf_gap = hf_logprobs_aligned[:, tok_a] - hf_logprobs_aligned[:, tok_b]
+            vl_gap = vllm_logprobs[:, tok_a] - vllm_logprobs[:, tok_b]
+            ctrl_pos = _control_position_index(short_seq_len, position_name)
+            print(
+                f"  [{position_name}] gap(596-337)  ctrl@{ctrl_pos}"
+                f"\n    HF  : {[f'{v:+.3f}' for v in hf_gap.tolist()]}"
+                f"\n    vLLM: {[f'{v:+.3f}' for v in vl_gap.tolist()]}"
+            )
+
             hf_argmax = hf_logprobs_aligned.argmax(dim=-1)
             vllm_argmax = vllm_logprobs.argmax(dim=-1)
             mismatches = (hf_argmax != vllm_argmax).nonzero(
                 as_tuple=False,
             ).flatten().tolist()
+
+            pre_ctrl  = [i for i in mismatches if i < ctrl_pos]
+            post_ctrl = [i for i in mismatches if i >= ctrl_pos]
+            hf_top2   = torch.topk(hf_logprobs_aligned, k=2, dim=-1).values
+            vllm_top2 = torch.topk(vllm_logprobs, k=2, dim=-1).values
+            hf_margin   = hf_top2[:, 0] - hf_top2[:, 1]
+            vllm_margin = vllm_top2[:, 0] - vllm_top2[:, 1]
+            print(
+                f"  [{position_name}] mismatch split: "
+                f"pre_ctrl={pre_ctrl}, post_ctrl={post_ctrl}"
+            )
+            if mismatches:
+                print(
+                    f"  [{position_name}] top1-top2 margins at mismatches"
+                    f"\n    HF  : {[f'{hf_margin[i].item():.4f}' for i in mismatches]}"
+                    f"\n    vLLM: {[f'{vllm_margin[i].item():.4f}' for i in mismatches]}"
+                )
+
             if mismatches:
                 failures.append((position_name, mismatches, hf_argmax.tolist(),
                                  vllm_argmax.tolist()))

@@ -2,7 +2,7 @@
 """SingleSwitch using replicated one-hot attention for adapter selection.
 
 This switch uses the backbone's full head geometry (num_attention_heads,
-num_key_value_heads, expanded_head_dim, attention_multiplier) so that all
+num_key_value_heads, projection_head_dim, attention_multiplier) so that all
 attention layers share one FlashAttentionMetadataBuilder configuration.
 
 The same one-hot dim-0 pattern is replicated identically across every head:
@@ -18,7 +18,7 @@ one-hot pattern — no all-reduce or broadcast needed.
 
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Tuple
 
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.config import VllmConfig
@@ -65,7 +65,7 @@ class SingleSwitch(nn.Module):
                 self.num_kv_heads = total_kv // tp_size
             else:
                 self.num_kv_heads = max(1, total_kv // tp_size)
-            self.head_dim = config.expanded_head_dim
+            self.head_dim = config.projection_head_dim
             self.scaling = config.attention_multiplier
             self.effective_gain = control_token_gain / self.scaling
         else:
@@ -92,6 +92,29 @@ class SingleSwitch(nn.Module):
             prefix="switch.layers.0",
         )
 
+        # control_to_substitute_lut: [vocab_size_or_higher], -1 at non-control
+        # ids and the substitute id at each control slot. The switch performs
+        # the runtime token-exchange: it rewrites input_ids in-place so that
+        # control-token positions carry the substitute id by the time the
+        # decoder embeds them. The decoder is then oblivious — it just calls
+        # get_input_embeddings(input_ids) and gets the right result by
+        # construction.
+        if (
+            config is not None
+            and getattr(config, "adapter_token_ids", None) is not None
+            and getattr(config, "adapter_substitute_token_ids", None) is not None
+        ):
+            ctrl_ids = config.adapter_token_ids
+            sub_ids = config.adapter_substitute_token_ids
+            max_ctrl_id = max(ctrl_ids)
+            lut_size = max(getattr(config, "vocab_size", 0), max_ctrl_id + 1)
+            lut = torch.full((lut_size,), -1, dtype=torch.long)
+            for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
+                lut[ctrl_id] = sub_id
+            self.register_buffer("control_to_substitute_lut", lut)
+        else:
+            self.control_to_substitute_lut = None
+
     @property
     def num_cache_layers(self) -> int:
         """Number of KV cache slots used by this switch (1 Attention layer)."""
@@ -101,9 +124,13 @@ class SingleSwitch(nn.Module):
         self,
         input_ids: torch.Tensor,
         adapter_token_ids: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute adapter indices using replicated one-hot attention.
+        Compute adapter indices and rewrite control tokens via the LUT.
+
+        See the HF SingleSwitch docstring for the full rationale. In short:
+        the switch performs both adapter selection and token-exchange
+        rewrite, so the decoder is agnostic to substitution.
 
         Args:
             input_ids: Input token IDs [total_tokens] - flattened by vLLM scheduler
@@ -114,7 +141,10 @@ class SingleSwitch(nn.Module):
                               to transition back to base mid-sequence.
 
         Returns:
-            adapter_indices: [total_tokens] where 0 = base, 1+ = adapters
+            (adapter_indices, modified_input_ids):
+              adapter_indices:    [total_tokens] where 0 = base, 1+ = adapters.
+              modified_input_ids: [total_tokens] with each control-token id
+                                  replaced by its substitute id.
         """
         total_tokens = input_ids.shape[0]
         device = input_ids.device
@@ -162,8 +192,23 @@ class SingleSwitch(nn.Module):
 
         # Round to get integer adapter indices
         adapter_indices = torch.round(attn_output).long()
-        
+
         # Clamp to valid range [0, num_adapters]
         adapter_indices = torch.clamp(adapter_indices, 0, self.num_adapters)
 
-        return adapter_indices
+        # Token-exchange rewrite: see the HF switch for the rationale.
+        # Skipped only when no LUT was built (no substitute ids configured).
+        # No data-dependent gate here — the surrounding decoder is wrapped in
+        # @support_torch_compile, which forbids `tensor.any()` branching.
+        # `torch.where` runs every step; the cost is one indexed gather and
+        # one elementwise select on the flat input.
+        if self.control_to_substitute_lut is not None:
+            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+            is_control = sub_id_per_pos >= 0
+            modified_input_ids = torch.where(
+                is_control, sub_id_per_pos, input_ids
+            )
+        else:
+            modified_input_ids = input_ids
+
+        return adapter_indices, modified_input_ids

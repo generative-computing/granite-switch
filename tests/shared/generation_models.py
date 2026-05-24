@@ -49,20 +49,14 @@ ADAPTER_RANK = 8
 
 
 def single_overrides(base_cfg):
-    """SingleSwitch overrides for the given base config."""
+    """SingleSwitch overrides for the given base config (token exchange)."""
     base_layers = base_cfg["layer_types"]
     return {
         "num_adapters": NUM_ADAPTERS,
         "adapter_ranks": [ADAPTER_RANK] * NUM_ADAPTERS,
         "adapter_token_ids": [250, 251],
+        "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
-        "hiding_groups": {"all_controls": ["adapter_0", "adapter_1"]},
-        "hiding_policy": {
-            "base": ["all_controls"],
-            "adapter_0": ["all_controls"],
-            "adapter_1": ["all_controls"],
-        },
-        "adapter_third_party": ["adapter_0", "adapter_1"],
         "num_hidden_layers": len(base_layers) + 1,
         "layer_types": ["attention"] + base_layers,
     }

@@ -4,7 +4,6 @@
 from .population_table import generate_adapter_population_table, print_adapter_population_table
 from .compose_report import generate_compose_report
 from .adapter_analysis import print_source_adapter_analysis
-from .hiding_constant_report import compute_hiding_constant_safety, print_hiding_constant_safety
 from .model_card import render_model_card, write_model_card, write_build_doc
 
 __all__ = [
@@ -12,8 +11,6 @@ __all__ = [
     'print_adapter_population_table',
     'generate_compose_report',
     'print_source_adapter_analysis',
-    'compute_hiding_constant_safety',
-    'print_hiding_constant_safety',
     'render_model_card',
     'write_model_card',
     'write_build_doc',

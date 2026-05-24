@@ -391,7 +391,9 @@ def write_build_doc(
         "lora_rank": getattr(args, "lora_rank", None) if built_in else None,
         "lora_alpha": getattr(args, "lora_alpha", None) if built_in else None,
         "switch_head_dim": getattr(args, "switch_head_dim", None),
-        "control_dims": getattr(args, "control_dims", None),
+        "adapter_substitute_token_ids": getattr(
+            model.config, "adapter_substitute_token_ids", None
+        ),
         "target_model": getattr(args, "target_model", None),
     }
     # Parameter counts: base is captured during transfer (see

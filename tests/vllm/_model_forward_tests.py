@@ -63,40 +63,10 @@ def _tiny_vllm_config():
         num_adapters=2,
         adapter_token_ids=[250, 251],
         adapter_names=["adapter_1", "adapter_2"],
-        hiding_groups={"all_controls": ["adapter_1", "adapter_2"]},
-        hiding_policy={"base": ["all_controls"], "adapter_1": ["all_controls"], "adapter_2": ["all_controls"]},
-        adapter_third_party=["adapter_1", "adapter_2"],
+        adapter_substitute_token_ids=[1, 1],
         max_lora_rank=4,
         adapter_ranks=[4, 4],
         switch_head_dim=32,
-        control_dims=32,
-        max_position_embeddings=512,
-        attention_multiplier=1.0,
-        embedding_multiplier=1.0,
-        residual_multiplier=1.0,
-        logits_scaling=1.0,
-    )
-
-
-def _tiny_vllm_mixed_tp_config():
-    """SingleSwitch config where only adapter_1 is third-party."""
-    return GraniteSwitchConfig(
-        vocab_size=300,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=3,
-        num_attention_heads=2,
-        num_key_value_heads=2,
-        num_adapters=2,
-        adapter_token_ids=[250, 251],
-        adapter_names=["adapter_1", "adapter_2"],
-        hiding_groups={"all_controls": ["adapter_1", "adapter_2"]},
-        hiding_policy={"base": ["all_controls"], "adapter_1": ["all_controls"], "adapter_2": ["all_controls"]},
-        adapter_third_party=["adapter_1"],
-        max_lora_rank=4,
-        adapter_ranks=[4, 4],
-        switch_head_dim=32,
-        control_dims=32,
         max_position_embeddings=512,
         attention_multiplier=1.0,
         embedding_multiplier=1.0,
@@ -449,46 +419,7 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
 
 
 # ════════════════════════════════════════════════════════════════════
-# 5. Control token KV invisibility
-# ════════════════════════════════════════════════════════════════════
-
-class TestControlTokenKVInvisibility(_VLLMModelTestBase):
-
-    def test_control_token_invisible_to_future_positions(self):
-        torch.manual_seed(SEED)
-        self.model.eval()
-
-        seq = [10, 20, 250, 30, 40, 50, 60, 70]
-
-        with torch.no_grad():
-            logits_a = self._run_forward_and_logits(seq)
-
-        with torch.no_grad():
-            perturbation = torch.randn(
-                self.config.hidden_size, device=self.device, dtype=torch.bfloat16
-            ) * 10.0
-            self.model.model.embed_tokens.weight.data[250] += perturbation
-
-        with torch.no_grad():
-            logits_b = self._run_forward_and_logits(seq)
-
-        torch.testing.assert_close(
-            logits_a[:2], logits_b[:2],
-            msg="Pre-control logits should be identical"
-        )
-
-        assert not torch.allclose(logits_a[2], logits_b[2]), \
-            "Control token logits should differ after perturbation"
-
-        torch.testing.assert_close(
-            logits_a[3:], logits_b[3:],
-            msg="Post-control logits should be identical "
-                "(control token KV masked by control_dims)"
-        )
-
-
-# ════════════════════════════════════════════════════════════════════
-# 6. KV visibility tests
+# 5. KV visibility tests
 # ════════════════════════════════════════════════════════════════════
 
 class TestKVVisibility(_VLLMModelTestBase):

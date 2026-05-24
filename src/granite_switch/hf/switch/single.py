@@ -14,7 +14,7 @@ Uses the modern HuggingFace Cache API for KV caching (required for incremental d
 
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Tuple
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.granite.modeling_granite import eager_attention_forward
@@ -57,11 +57,14 @@ class SingleSwitch(nn.Module):
         self.control_token_gain = control_token_gain
         self.config = config
 
-        # Use expanded_head_dim to align with decoder layers across both backends.
-        if config is not None and hasattr(config, 'expanded_head_dim') and getattr(config, 'num_adapters', 0) > 0:
-            self.head_dim = config.expanded_head_dim
-        elif config is not None:
-            self.head_dim = config.hidden_size // config.num_attention_heads
+        # Align with the decoder's native head_dim. (Under token exchange the
+        # KV cache no longer carries any expansion, so this is just the
+        # base-model projection_head_dim.)
+        if config is not None:
+            self.head_dim = getattr(
+                config, "projection_head_dim",
+                config.hidden_size // config.num_attention_heads,
+            )
         else:
             self.head_dim = switch_head_dim
 
@@ -78,6 +81,28 @@ class SingleSwitch(nn.Module):
         # Switch is layer 0, decoder layers are 1 to num_hidden_layers
         self.layer_idx = layer_idx
 
+        # control_to_substitute_lut: [vocab_size_or_higher], -1 at non-control
+        # ids and the substitute id at each control slot. The switch performs
+        # the runtime token-exchange: it rewrites input_ids in-place so that
+        # control-token positions carry the substitute id by the time the
+        # decoder embeds them. The decoder is then oblivious — it just calls
+        # embed_tokens(input_ids) and gets the right result by construction.
+        if (
+            config is not None
+            and getattr(config, "adapter_token_ids", None) is not None
+            and getattr(config, "adapter_substitute_token_ids", None) is not None
+        ):
+            ctrl_ids = config.adapter_token_ids
+            sub_ids = config.adapter_substitute_token_ids
+            max_ctrl_id = max(ctrl_ids)
+            lut_size = max(getattr(config, "vocab_size", 0), max_ctrl_id + 1)
+            lut = torch.full((lut_size,), -1, dtype=torch.long)
+            for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
+                lut[ctrl_id] = sub_id
+            self.register_buffer("control_to_substitute_lut", lut)
+        else:
+            self.control_to_substitute_lut = None
+
     @property
     def num_cache_layers(self) -> int:
         """Number of cache slots used."""
@@ -90,13 +115,19 @@ class SingleSwitch(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         past_key_values: Optional[Cache] = None,
         cache_position: Optional[torch.LongTensor] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute adapter indices using single-head attention mechanism.
+        Compute adapter indices and rewrite control tokens via the LUT.
 
-        The switch uses the same head_dim as decoder layers to share the model's Cache object,
-        ensuring standard HuggingFace behavior where past_key_values is exposed and managed
-        by the caller.
+        The switch performs both halves of token-exchange:
+          1. Adapter selection: read input_ids, detect control tokens via
+             input_ids == adapter_token_ids, emit per-token adapter_indices.
+          2. Token rewrite: replace each control token's id in input_ids
+             with its substitute id (from control_to_substitute_lut).
+
+        Returning the rewritten input_ids means the decoder is oblivious to
+        the swap — it simply embeds whatever it's given. There's no
+        decoder-side LUT, no per-forward scatter, no clone-guard.
 
         Args:
             input_ids: Input token IDs [batch, seq_len]
@@ -110,7 +141,10 @@ class SingleSwitch(nn.Module):
             cache_position: Position indices for caching [seq_len]
 
         Returns:
-            adapter_indices: [batch, seq_len] where 0 = base, 1+ = adapters
+            (adapter_indices, modified_input_ids):
+              adapter_indices:     [batch, seq_len] where 0 = base, 1+ = adapters.
+              modified_input_ids:  [batch, seq_len] with each control-token
+                                   id replaced by its substitute id.
         """
         bsz, q_len = input_ids.shape
         device = input_ids.device
@@ -195,4 +229,20 @@ class SingleSwitch(nn.Module):
             f"adapter_indices shape {adapter_indices.shape} must match input_ids shape {input_ids.shape}"
         )
 
-        return adapter_indices
+        # Token-exchange rewrite: replace each control token's id with its
+        # substitute id via the LUT. Done here (rather than in the decoder)
+        # so the decoder sees a clean, unified input_ids and never has to
+        # know about substitutes. Skipped only when the LUT was not built
+        # (no substitute ids configured — e.g. a non-token-exchange test
+        # fixture). Kept symmetric with the vLLM switch, which forbids the
+        # `tensor.any()` short-circuit under @support_torch_compile.
+        if self.control_to_substitute_lut is not None:
+            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+            is_control = sub_id_per_pos >= 0
+            modified_input_ids = torch.where(
+                is_control, sub_id_per_pos, input_ids
+            )
+        else:
+            modified_input_ids = input_ids
+
+        return adapter_indices, modified_input_ids

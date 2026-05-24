@@ -62,6 +62,7 @@ from granite_switch.composer.adapter_discovery import (
 from granite_switch.composer.tokenizer_setup import (
     add_control_tokens,
     configure_chat_template,
+    get_alora_first_invocation_token_id,
 )
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 
@@ -74,6 +75,70 @@ from granite_switch.composer.reporting import generate_compose_report, write_bui
 def _load_tokenizer(model_name_or_path):
     """Load tokenizer from a Granite base model."""
     return AutoTokenizer.from_pretrained(model_name_or_path)
+
+
+def _probe_lora_substitute_token_id(tokenizer) -> int:
+    """Ask the tokenizer which token naturally appears at sequence position 0
+    of a rendered no-adapter chat.
+
+    The LoRA prefix insertion places the adapter control token at sequence
+    position 0 of the rendered output. Whatever token would otherwise have
+    occupied position 0 (in a no-adapter render) is the right substitute
+    whose embedding should land at the swap site so the post-swap sequence
+    is indistinguishable from a no-adapter render.
+
+    Assumption (Granite 4.x): the chat template emits a constant
+    ``input_ids[0]`` regardless of message content, system prompt presence,
+    or generation-prompt flag. Empirically verified — every realistic render
+    of the Granite 4.1 template yields ``<|start_of_role|>`` (id 100264) at
+    position 0. The probe renders a single minimal chat to read that
+    constant out of the template.
+
+    A future model whose chat template branches on inputs at position 0
+    (e.g. emits BOS only when no system message is present) would break
+    this assumption: the probe would still return *some* valid id, but it
+    might not match position 0 in another render mode at runtime, leaving
+    the LoRA control token swapped to an embedding the model doesn't
+    expect at that position. ``tests/composer/test_lora_substitute_probe.py``
+    pins the Granite 4.x behavior; if you port to another base model with
+    a more dynamic template, extend the probe to render multiple shapes
+    and verify they all agree.
+
+    By deriving the substitute from the tokenizer's own chat template at
+    compose time we avoid hard-coding a Granite-specific token string.
+
+    Raises ``ValueError`` if the template is missing, fails to render, or
+    emits an unknown token.
+    """
+    if tokenizer.chat_template is None:
+        raise ValueError(
+            "Tokenizer has no chat_template; cannot probe the LoRA "
+            "substitute token."
+        )
+    try:
+        probe_text = tokenizer.apply_chat_template(
+            [{"role": "user", "content": "probe"}],
+            tokenize=False,
+            add_generation_prompt=False,
+        )
+    except Exception as e:
+        raise ValueError(
+            "Failed to render a probe chat via tokenizer.apply_chat_template "
+            f"while detecting the LoRA substitute token: {e!r}."
+        ) from e
+    ids = tokenizer(probe_text, add_special_tokens=False).input_ids
+    if not ids:
+        raise ValueError(
+            "Probe chat tokenized to an empty id list; cannot determine the "
+            "LoRA substitute token."
+        )
+    sub_id = ids[0]
+    if sub_id == tokenizer.unk_token_id:
+        raise ValueError(
+            "First token of the rendered probe chat is <unk>; the template "
+            "appears to emit content outside the tokenizer's vocabulary."
+        )
+    return sub_id
 
 
 def _get_directory_size(directory):
@@ -450,12 +515,6 @@ Examples:
         help="Dimension of Q/K/V vectors in switch attention",
     )
     parser.add_argument(
-        "--control-dims",
-        type=int,
-        default=None,
-        help="Extra dims for K/V to mask control tokens in decoder layers",
-    )
-    parser.add_argument(
         "--built-in-adapters",
         type=str,
         nargs="*",
@@ -678,9 +737,8 @@ def build():
     has_external = len(external_discovered) > 0
     has_built_in = len(built_in_discovered) > 0
 
-    # Mode detection:
-    #   Mode A (native): built-in only → no hiding, control_dims=0
-    #   Mode B (third-party): externals present → full hiding
+    # Mode detection (informational only — token-exchange handles both
+    # native and third-party adapter builds uniformly).
     if has_built_in and not has_external:
         build_mode = "native"
     elif has_external:
@@ -692,7 +750,6 @@ def build():
     # Extract fields from 4-tuples (path, name, tech, source)
     adapter_paths = [t[0] for t in all_discovered if t[0] is not None]
     adapter_names = [t[1] for t in all_discovered]
-    external_names = [t[1] for t in external_discovered]
     built_in_names = [name for name in (args.built_in_adapters or [])]
 
     print(f"\nBuild mode: {build_mode}")
@@ -747,33 +804,30 @@ def build():
     optional_kwargs = {}
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
-    if args.control_dims is not None:
-        optional_kwargs["control_dims"] = args.control_dims
 
-    # Per-mode hiding configuration
-    if build_mode == "native":
-        # Mode A (native): no hiding, control_dims=0 (unless overridden)
-        hiding_groups = None
-        hiding_policy = None
-        adapter_third_party = None
-        if "control_dims" not in optional_kwargs:
-            optional_kwargs["control_dims"] = 0
-    else:
-        # Mode B (third-party): full hiding for external adapters
-        hiding_groups = {"all_controls": list(adapter_names)}
-        hiding_policy = {name: ["all_controls"] for name in adapter_names}
-        hiding_policy["base"] = ["all_controls"]
-        # Only external adapters are third-party
-        adapter_third_party = list(external_names)
+    # Token-exchange substitute choice (must mirror the token that appears
+    # right after the control token in the rendered chat prompt, so the
+    # swap keeps the residual stream in-distribution):
+    #   - ALoRA: first token of the adapter's alora_invocation_tokens.
+    #   - LoRA/builtin: whatever the tokenizer's chat template emits at
+    #     the very start of a no-adapter user turn. For Granite 4.x that's
+    #     <|start_of_role|>; the probe derives this from the template at
+    #     compose time so other base models work by construction.
+    lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
+    adapter_substitute_token_ids = []
+    for adapter_path, _name, technology, _source in all_discovered:
+        if technology == "alora":
+            sub_id = get_alora_first_invocation_token_id(adapter_path)
+        else:
+            sub_id = lora_sub_id
+        adapter_substitute_token_ids.append(sub_id)
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
         adapter_paths=adapter_paths,
         adapter_token_ids=adapter_token_ids,
+        adapter_substitute_token_ids=adapter_substitute_token_ids,
         adapter_names=adapter_names,
-        hiding_groups=hiding_groups,
-        hiding_policy=hiding_policy,
-        adapter_third_party=adapter_third_party,
         built_in_adapter_names=built_in_names,
         built_in_lora_rank=args.lora_rank,
         built_in_lora_alpha=args.lora_alpha if args.lora_alpha is not None else float(args.lora_rank),

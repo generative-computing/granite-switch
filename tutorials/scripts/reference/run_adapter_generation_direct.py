@@ -62,7 +62,17 @@ def load_model(model_dir: str):
 
 
 def _generate(model, tokenizer, text: str, max_new_tokens: int) -> str:
-    """Generate text and return only the new tokens."""
+    """Generate text and return only the new tokens.
+
+    When ``_PROMPT_CAPTURE`` is active (set by build_demo_prompts), skip
+    generation entirely, capture the prompt on the thread-local list, and
+    return an empty string so each demo's subsequent logic (score parsing,
+    etc.) can no-op harmlessly.
+    """
+    if _PROMPT_CAPTURE is not None:
+        _PROMPT_CAPTURE.append(text)
+        return ""
+
     device = model.device
     inputs = tokenizer(text, return_tensors="pt").to(device)
 
@@ -75,9 +85,75 @@ def _generate(model, tokenizer, text: str, max_new_tokens: int) -> str:
     return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
 
+# Module-level capture switch. Populated by build_demo_prompts; None means
+# the normal generate path runs.
+_PROMPT_CAPTURE: Optional[list] = None
+
+
+def build_demo_prompts(
+    tokenizer, available_adapters: Optional[set[str]] = None,
+) -> list[tuple[str, str]]:
+    """Render every registered demo's prompt as a string, without generation.
+
+    Returns a list of ``(demo_key, prompt_text)`` pairs for all demos whose
+    base adapter is present in ``available_adapters`` (or every registered
+    demo when the filter is None). The prompts are exactly what the demo
+    script would feed to ``model.generate`` — chat-template-rendered and
+    adapter-token-injected by the composed tokenizer.
+
+    Used by the token-exchange parity eval
+    (tests/integration/test_token_exchange_parity.py) to compare legacy
+    hiding vs. token-exchange on realistic adapter inputs.
+    """
+    global _PROMPT_CAPTURE
+    results: list[tuple[str, str]] = []
+    _PROMPT_CAPTURE = []
+    try:
+        for base_adapter, demo_fn in _DEMOS:
+            if available_adapters is not None and base_adapter not in available_adapters:
+                continue
+            demo_key = demo_fn.__name__.removeprefix("demo_")
+            _PROMPT_CAPTURE.clear()
+            try:
+                demo_fn(model=None, tokenizer=tokenizer, max_new_tokens=1)
+            except Exception as e:
+                # Some demos parse the (empty) output and may raise. Capture
+                # the prompt we already collected and move on; partial prompts
+                # are still useful for parity comparison.
+                if not _PROMPT_CAPTURE:
+                    print(f"[build_demo_prompts] {demo_key}: {e}")
+                    continue
+            for prompt_text in _PROMPT_CAPTURE:
+                results.append((demo_key, prompt_text))
+    finally:
+        _PROMPT_CAPTURE = None
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Activation helper — uses the composed model's chat template
 # ---------------------------------------------------------------------------
+
+
+def _build_prompt(
+    tokenizer,
+    adapter_name: str,
+    messages: list[dict],
+    documents: Optional[list[dict]] = None,
+) -> str:
+    """Render an adapter prompt using the composed model's chat template.
+
+    Separated from _invoke so callers (e.g. the parity eval) can obtain the
+    exact prompt text without running generation.
+    """
+    tmpl_kwargs: dict = {
+        "tokenize": False,
+        "add_generation_prompt": True,
+        "adapter_name": adapter_name,
+    }
+    if documents is not None:
+        tmpl_kwargs["documents"] = documents
+    return tokenizer.apply_chat_template(messages, **tmpl_kwargs)
 
 
 def _invoke(
@@ -96,26 +172,8 @@ def _invoke(
     position for that adapter's technology (LoRA prefix vs aLoRA
     splice). See ``composer/tokenizer_setup.py`` for the template
     machinery.
-
-    Args:
-        adapter_name: Name of the adapter to activate; must be one of
-            the composed model's ``adapter_names``.
-        messages: List of ``{"role", "content"}`` dicts.
-        documents: Optional list of ``{"doc_id", "text"}`` dicts, as
-            documented in the granite-switch README.
-        max_new_tokens: Generation budget.
-
-    Returns:
-        The generated adapter output (new tokens only, decoded).
     """
-    tmpl_kwargs: dict = {
-        "tokenize": False,
-        "add_generation_prompt": True,
-        "adapter_name": adapter_name,
-    }
-    if documents is not None:
-        tmpl_kwargs["documents"] = documents
-    prompt = tokenizer.apply_chat_template(messages, **tmpl_kwargs)
+    prompt = _build_prompt(tokenizer, adapter_name, messages, documents=documents)
     return _generate(model, tokenizer, prompt, max_new_tokens)
 
 

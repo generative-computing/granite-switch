@@ -48,14 +48,23 @@ def _setup():
     MAX_TOKENS = 131_072
     NUM_ADAPTERS = 32
     ADAPTER_TOKEN_IDS_LIST = list(range(1000, 1000 + NUM_ADAPTERS))
+    # Deterministic substitute mapping for token-exchange tests:
+    # control id 1000+i → substitute id i+1 (i.e. 1, 2, ..., NUM_ADAPTERS).
+    # Substitute ids must be < vocab_size and != any control id.
+    ADAPTER_SUBSTITUTE_TOKEN_IDS_LIST = [i + 1 for i in range(NUM_ADAPTERS)]
 
     # Mock config with realistic backbone geometry (GQA: 4Q/2KV, head_dim=64)
     # so unit tests exercise the multi-head path, not the fallback.
+    # adapter_token_ids + adapter_substitute_token_ids enable the
+    # control_to_substitute_lut path, which production configs always have.
     mock_config = SimpleNamespace(
         num_attention_heads=4,
         num_key_value_heads=2,
-        expanded_head_dim=64,
+        projection_head_dim=64,
         attention_multiplier=0.125,
+        vocab_size=2000,
+        adapter_token_ids=ADAPTER_TOKEN_IDS_LIST,
+        adapter_substitute_token_ids=ADAPTER_SUBSTITUTE_TOKEN_IDS_LIST,
     )
 
     device = torch.device("cuda")
@@ -71,6 +80,14 @@ def _setup():
                 vllm_config=vllm_config,
                 control_token_gain=15.0,
                 config=mock_config,
+            )
+        # Move buffers to CUDA so the LUT (registered as a CPU buffer in
+        # SingleSwitch.__init__) can index the CUDA input_ids during forward.
+        # The Q/K/V tensors in SingleSwitch.forward() are constructed directly
+        # on CUDA so they don't otherwise force a .to() call.
+        if switch.control_to_substitute_lut is not None:
+            switch.control_to_substitute_lut = (
+                switch.control_to_substitute_lut.to(device)
             )
     finally:
         torch.set_default_dtype(old_dtype)
@@ -98,6 +115,7 @@ def _setup():
         "kv_cache": kv_cache,
         "device": device,
         "layer_name": layer_name,
+        "adapter_substitute_token_ids_list": ADAPTER_SUBSTITUTE_TOKEN_IDS_LIST,
         "backend_name": backend_name,
         "block_size": BLOCK_SIZE,
         "adapter_token_ids_list": ADAPTER_TOKEN_IDS_LIST,
@@ -213,7 +231,7 @@ def _run(harness, seq, num_adapters, control_token_gain):
 
     try:
         with override_forward_context(forward_ctx):
-            result = switch.forward(
+            adapter_indices, _modified_input_ids = switch.forward(
                 input_ids=input_ids,
                 adapter_token_ids=adapter_token_ids,
             )
@@ -223,7 +241,67 @@ def _run(harness, seq, num_adapters, control_token_gain):
         switch.effective_gain = orig_effective_gain
         switch.num_adapters = orig_num_adapters
 
-    return result.cpu().tolist()
+    return adapter_indices.cpu().tolist()
+
+
+def _run_with_modified(harness, seq, num_adapters, control_token_gain):
+    """Execute SingleSwitch.forward and return BOTH outputs as lists.
+
+    Used by token-exchange tests that need to inspect modified_input_ids
+    in addition to adapter_indices. Same setup as _run, but the response
+    is a dict {"adapter_indices": [...], "modified_input_ids": [...]}.
+    """
+    from vllm.forward_context import ForwardContext, override_forward_context
+
+    switch = harness["switch"]
+    vllm_config = harness["vllm_config"]
+    kv_cache = harness["kv_cache"]
+    device = harness["device"]
+    layer_name = harness["layer_name"]
+    adapter_token_ids_list = harness["adapter_token_ids_list"]
+
+    seq_len = len(seq)
+    kv_cache.zero_()
+
+    orig_gain = switch.control_token_gain
+    orig_effective_gain = switch.effective_gain
+    orig_num_adapters = switch.num_adapters
+    switch.control_token_gain = control_token_gain
+    switch.effective_gain = control_token_gain / switch.scaling
+    switch.num_adapters = num_adapters
+
+    input_ids = torch.tensor(seq, dtype=torch.long, device=device)
+    adapter_token_ids = torch.tensor(
+        adapter_token_ids_list[:num_adapters], dtype=torch.long, device=device,
+    )
+
+    metadata, slot_mapping = _build_metadata(harness, seq_len)
+
+    forward_ctx = ForwardContext(
+        no_compile_layers=vllm_config.compilation_config.static_forward_context,
+        attn_metadata={layer_name: metadata},
+        slot_mapping={layer_name: slot_mapping},
+    )
+
+    old_direct = switch.attn.use_direct_call
+    switch.attn.use_direct_call = True
+
+    try:
+        with override_forward_context(forward_ctx):
+            adapter_indices, modified_input_ids = switch.forward(
+                input_ids=input_ids,
+                adapter_token_ids=adapter_token_ids,
+            )
+    finally:
+        switch.attn.use_direct_call = old_direct
+        switch.control_token_gain = orig_gain
+        switch.effective_gain = orig_effective_gain
+        switch.num_adapters = orig_num_adapters
+
+    return {
+        "adapter_indices": adapter_indices.cpu().tolist(),
+        "modified_input_ids": modified_input_ids.cpu().tolist(),
+    }
 
 
 def _query_geometry(harness):
@@ -316,6 +394,17 @@ def main():
                     control_token_gain=req.get("control_token_gain", 15.0),
                 )
                 resp = {"result": result}
+            elif command == "forward_with_modified":
+                result = _run_with_modified(
+                    harness,
+                    seq=req["seq"],
+                    num_adapters=req.get("num_adapters", 32),
+                    control_token_gain=req.get("control_token_gain", 15.0),
+                )
+                resp = {"result": result}
+            elif command == "query_lut":
+                lut = harness["switch"].control_to_substitute_lut
+                resp = {"result": lut.cpu().tolist() if lut is not None else None}
             else:
                 resp = {"error": f"Unknown command: {command}"}
         except Exception:

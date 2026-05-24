@@ -492,14 +492,14 @@ class TestPhase1_BuildSaveLoad:
         )
         
     def test_config_adapter_identity(self, phase1):
-        """num_adapters, token IDs, names, third_party survive save→load."""
+        """num_adapters, token IDs, names, substitute IDs survive save→load."""
         built = phase1["built_config"]
         loaded = phase1["loaded_config"]
 
         assert loaded.num_adapters == built.num_adapters
         assert loaded.adapter_token_ids == built.adapter_token_ids
         assert loaded.adapter_names == built.adapter_names
-        assert loaded.adapter_third_party == built.adapter_third_party
+        assert loaded.adapter_substitute_token_ids == built.adapter_substitute_token_ids
 
     def test_config_lora(self, phase1):
         """adapter_ranks, max_lora_rank, lora_target_modules survive save→load."""
@@ -511,21 +511,12 @@ class TestPhase1_BuildSaveLoad:
         assert loaded.lora_target_modules == built.lora_target_modules
 
     def test_config_switch(self, phase1):
-        """switch head_dim, control_dims, gain survive save→load."""
+        """switch_head_dim and control_token_gain survive save→load."""
         built = phase1["built_config"]
         loaded = phase1["loaded_config"]
 
         assert loaded.switch_head_dim == built.switch_head_dim
-        assert loaded.control_dims == built.control_dims
         assert loaded.control_token_gain == built.control_token_gain
-
-    def test_config_hiding(self, phase1):
-        """hiding_groups and hiding_policy survive save→load."""
-        built = phase1["built_config"]
-        loaded = phase1["loaded_config"]
-
-        assert loaded.hiding_groups == built.hiding_groups
-        assert loaded.hiding_policy == built.hiding_policy
 
     def test_config_granite_scaling(self, phase1):
         """Granite-specific scaling parameters survive save→load."""
@@ -848,8 +839,7 @@ class TestPhase2_DoubleSerialization:
         assert c2.adapter_ranks == c1.adapter_ranks
         assert c2.max_lora_rank == c1.max_lora_rank
         assert c2.lora_target_modules == c1.lora_target_modules
-        assert c2.hiding_groups == c1.hiding_groups
-        assert c2.hiding_policy == c1.hiding_policy
+        assert c2.adapter_substitute_token_ids == c1.adapter_substitute_token_ids
         assert c2.logits_scaling == c1.logits_scaling
         assert c2.attention_multiplier == c1.attention_multiplier
         assert c2.vocab_size == c1.vocab_size

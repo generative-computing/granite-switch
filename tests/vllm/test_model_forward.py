@@ -50,11 +50,6 @@ class TestAdapterIndicesWiring:
         _run_inner_class("TestAdapterIndicesWiring")
 
 
-class TestControlTokenKVInvisibility:
-    def test_suite(self):
-        _run_inner_class("TestControlTokenKVInvisibility")
-
-
 class TestKVVisibility:
     def test_suite(self):
         _run_inner_class("TestKVVisibility")
