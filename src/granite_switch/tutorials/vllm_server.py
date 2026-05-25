@@ -18,9 +18,9 @@ def launch_vllm(
     model: str,
     port: int,
     log_file: str,
-    gpu_memory_utilization: float = 0.95,
+    gpu_memory_utilization: float = 0.9,
     max_num_seqs: int = 1,
-    enforce_eager: bool = True,
+    enforce_eager: bool = False,
     extra_args: Sequence[str] = (),
     max_model_len: int = DEFAULT_MAX_MODEL_LEN,
 ) -> subprocess.Popen:
