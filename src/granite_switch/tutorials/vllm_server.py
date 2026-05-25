@@ -51,7 +51,7 @@ def wait_for_server(port: int, timeout: int = 300) -> bool:
     t0 = time.time()
     while time.time() - t0 < timeout:
         try:
-            if requests.get(f"http://localhost:{port}/health", timeout=2).status_code == 200:
+            if requests.get(f"http://localhost:{port}/v1/models", timeout=2).status_code == 200:
                 print(f"\n  Server ready on :{port} in {int(time.time() - t0)}s")
                 return True
         except Exception:
