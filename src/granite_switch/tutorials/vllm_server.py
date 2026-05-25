@@ -46,7 +46,7 @@ def launch_vllm(
     return proc
 
 
-def wait_for_server(port: int, timeout: int = 300) -> bool:
+def wait_for_server(port: int, timeout: int = 600) -> bool:
     """Poll /health until vLLM is ready."""
     t0 = time.time()
     while time.time() - t0 < timeout:
