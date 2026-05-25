@@ -332,6 +332,7 @@ def load_or_build_chroma(
     max_docs: Optional[int] = None,
     filter_ids: Optional[Set[str]] = None,
     device: Optional[str] = None,
+    query_device: str = "cpu",
     text_field: str = "text",
     id_field: Optional[str] = None,
     hf_config: Optional[str] = None,
@@ -343,6 +344,11 @@ def load_or_build_chroma(
     1. Named MT-RAG corpus (via corpus_name)
     2. Local JSONL file (via jsonl_path + optional jsonl_url)
     3. HuggingFace dataset (via hf_dataset_id)
+
+    Indexing uses `device` (default: GPU if available) for fast batch embedding.
+    After indexing, the GPU model is freed and the returned collection uses
+    `query_device` (default: "cpu") for query-time embedding — freeing the GPU
+    for vLLM. On cache hit the GPU is never loaded at all.
 
     Args:
         corpus_name: Named MT-RAG corpus ("govt", "fiqa", etc.)
@@ -356,14 +362,15 @@ def load_or_build_chroma(
         max_length: Maximum sequence length for embeddings
         max_docs: Maximum documents to ingest (None = no limit)
         filter_ids: Set of document IDs to include (None = all docs)
-        device: "cpu" or "cuda" (None = auto-detect)
+        device: Indexing device — "cpu", "cuda", or None (auto-detect GPU)
+        query_device: Query-time embedding device (default "cpu")
         text_field: Field name for document text
         id_field: Field name for document ID
         hf_config: HuggingFace dataset configuration
         hf_split: HuggingFace dataset split
 
     Returns:
-        ChromaDB collection ready for queries
+        ChromaDB collection ready for queries (embedding function on query_device)
     """
     # Resolve corpus info if corpus_name provided
     if corpus_name:
@@ -384,23 +391,22 @@ def load_or_build_chroma(
     if not hf_dataset_id and not jsonl_path:
         raise ValueError("Must specify either hf_dataset_id or jsonl_path")
 
-    # Create embedding function
-    granite_ef = GraniteEmbeddingFunction(
+    # Query-time embedding function (CPU by default — GPU is reserved for vLLM)
+    query_ef = GraniteEmbeddingFunction(
         model_id=embedding_model_id,
         batch_size=batch_size,
         max_length=max_length,
-        device=device,
+        device=query_device,
     )
 
-    # Create or load collection
     client = chromadb.PersistentClient(path=chroma_path)
     collection = client.get_or_create_collection(
         name=collection_name,
-        embedding_function=granite_ef,
+        embedding_function=query_ef,
         metadata={"hnsw:space": "cosine"},
     )
 
-    # Return if already populated
+    # Cache hit: GPU never needed
     if collection.count() > 0:
         print(f"Loaded from {chroma_path}  ({collection.count():,} docs).")
         return collection
@@ -438,20 +444,40 @@ def load_or_build_chroma(
         )
         print(f"Read {len(ids):,} docs in {time.time() - t0:.1f}s.")
 
-    # Embed and index documents
-    print(f"Embedding & indexing {len(ids):,} documents...")
+    # Index on GPU: create a separate indexing embedding function
+    index_ef = GraniteEmbeddingFunction(
+        model_id=embedding_model_id,
+        batch_size=batch_size,
+        max_length=max_length,
+        device=device,  # GPU (or auto-detect)
+    )
+
+    print(f"Embedding {len(ids):,} documents on {index_ef.device}...")
     t1 = time.time()
 
-    # Use smaller batch sizes for upsert based on device
-    upsert_batch = 16 if device == "cpu" else 500
+    # Pre-compute all embeddings on the indexing device in batches
+    embed_batch = batch_size or 64
+    all_embeddings: List = []
+    for i in tqdm(range(0, len(ids), embed_batch), unit="batch", desc="embedding"):
+        all_embeddings.extend(index_ef(texts[i : i + embed_batch]))
+
+    # Free indexing model from GPU before vLLM launches
+    del index_ef.model
+    del index_ef
+    torch.cuda.empty_cache()
+    print(f"Embedding done in {time.time() - t1:.1f}s. GPU memory freed.")
+
+    # Upsert pre-computed embeddings (no re-embedding by ChromaDB)
+    upsert_batch = 500
     for i in tqdm(range(0, len(ids), upsert_batch), unit="batch", desc="indexing"):
         collection.upsert(
             ids=ids[i : i + upsert_batch],
             documents=texts[i : i + upsert_batch],
             metadatas=metas[i : i + upsert_batch],
+            embeddings=all_embeddings[i : i + upsert_batch],
         )
 
-    print(f"Done. {collection.count():,} docs saved to {chroma_path} in {time.time() - t1:.1f}s.")
+    print(f"Done. {collection.count():,} docs saved to {chroma_path}.")
     return collection
 
 
@@ -462,6 +488,7 @@ def load_or_build_govt_chroma(
     embedding_model_id: str = EMBEDDING_MODEL_ID,
     load_only_tutorial_docs: bool = False,
     device: Optional[str] = None,
+    query_device: str = "cpu",
 ) -> chromadb.Collection:
     """Backward-compatible govt corpus loader.
 
@@ -474,7 +501,8 @@ def load_or_build_govt_chroma(
         jsonl_url: Download URL
         embedding_model_id: Embedding model ID
         load_only_tutorial_docs: If True, load only 177 tutorial docs (T4-friendly)
-        device: "cpu" or "cuda" (None = auto-detect)
+        device: Indexing device — "cpu", "cuda", or None (auto-detect GPU)
+        query_device: Query-time embedding device (default "cpu")
 
     Returns:
         ChromaDB collection with govt corpus
@@ -489,5 +517,6 @@ def load_or_build_govt_chroma(
         embedding_model_id=embedding_model_id,
         filter_ids=filter_ids,
         device=device,
+        query_device=query_device,
         max_docs=None,  # NO artificial limit
     )
