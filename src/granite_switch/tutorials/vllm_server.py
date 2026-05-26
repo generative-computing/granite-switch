@@ -46,9 +46,33 @@ def launch_vllm(
     return proc
 
 
-def wait_for_server(port: int, timeout: int = 600) -> bool:
-    """Poll /health until vLLM is ready."""
+# vLLM log keywords in order of progression (last match wins = most advanced stage)
+_VLLM_STAGES = [
+    ("Downloading",           "Downloading model from HuggingFace Hub"),
+    ("Loading model weights", "Loading model weights into GPU"),
+    ("GPU blocks",            "Allocating KV cache — almost ready"),
+]
+
+
+def _current_stage(log_file: str) -> str:
+    """Return the most advanced stage seen so far in the vLLM log."""
+    try:
+        r = subprocess.run(["tail", "-200", log_file], capture_output=True, text=True)
+        content = r.stdout
+        stage = "Starting up"
+        for keyword, label in _VLLM_STAGES:
+            if keyword in content:
+                stage = label
+        return stage
+    except Exception:
+        return "Starting up"
+
+
+def wait_for_server(port: int, timeout: int = 600, log_file: str | None = None) -> bool:
+    """Poll /v1/models until vLLM is ready, showing log-based stage progress."""
     t0 = time.time()
+    print("Waiting for vLLM server — download + GPU load typically takes 3-5 min...")
+    last_stage = ""
     while time.time() - t0 < timeout:
         try:
             if requests.get(f"http://localhost:{port}/v1/models", timeout=2).status_code == 200:
@@ -58,7 +82,15 @@ def wait_for_server(port: int, timeout: int = 600) -> bool:
             pass
 
         elapsed = int(time.time() - t0)
-        print(f"  waiting for :{port} ... {elapsed}s", end="\r")
+        if log_file:
+            stage = _current_stage(log_file)
+            if stage != last_stage:
+                print(f"\n  [{elapsed:3d}s] {stage}...")
+                last_stage = stage
+            else:
+                print(f"  [{elapsed:3d}s] {stage}...", end="\r")
+        else:
+            print(f"  waiting for :{port} ... {elapsed}s", end="\r")
         time.sleep(5)
 
     print(f"\n  timed out after {timeout}s - check the log file")
