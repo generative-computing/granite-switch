@@ -76,7 +76,7 @@ _HEARTBEAT_INTERVAL = 30  # seconds between heartbeat prints when stage hasn't c
 def wait_for_server(port: int, timeout: int = 600, log_file: str | None = None) -> bool:
     """Poll /v1/models until vLLM is ready, showing log-based stage progress."""
     t0 = time.time()
-    print("Waiting for vLLM server — download + GPU load typically takes 3-5 min...")
+    print("Waiting for vLLM server — this may take a few minutes...")
     last_stage = ""
     last_print_time = -_HEARTBEAT_INTERVAL  # force print on first iteration
     while time.time() - t0 < timeout:
