@@ -48,11 +48,11 @@ def launch_vllm(
 
 # vLLM log keywords in order of progression (last match wins = most advanced stage)
 _VLLM_STAGES = [
-    ("Downloading",          "Downloading model from HuggingFace Hub"),
-    ("Loading",              "Loading model weights into GPU"),
-    ("GPU KV cache size",    "Allocating KV cache"),
-    ("Capturing CUDA graphs","Warming up — capturing CUDA graphs"),
-    ("Starting vLLM server", "Starting API server"),
+    ("Starting to load model",    "Downloading / loading model"),
+    ("Loading safetensors",       "Loading model weights into GPU"),
+    ("GPU KV cache size",         "Allocating KV cache"),
+    ("Capturing CUDA graphs",     "Warming up — capturing CUDA graphs"),
+    ("Application startup complete", "Starting API server"),
 ]
 
 
