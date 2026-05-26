@@ -68,29 +68,33 @@ def _current_stage(log_file: str) -> str:
         return "Starting up"
 
 
+_HEARTBEAT_INTERVAL = 30  # seconds between heartbeat prints when stage hasn't changed
+
+
 def wait_for_server(port: int, timeout: int = 600, log_file: str | None = None) -> bool:
     """Poll /v1/models until vLLM is ready, showing log-based stage progress."""
     t0 = time.time()
     print("Waiting for vLLM server — download + GPU load typically takes 3-5 min...")
     last_stage = ""
+    last_print_time = -_HEARTBEAT_INTERVAL  # force print on first iteration
     while time.time() - t0 < timeout:
         try:
             if requests.get(f"http://localhost:{port}/v1/models", timeout=2).status_code == 200:
-                print(f"\n  Server ready on :{port} in {int(time.time() - t0)}s")
+                print(f"  Server ready on :{port} in {int(time.time() - t0)}s")
                 return True
         except Exception:
             pass
 
         elapsed = int(time.time() - t0)
-        if log_file:
-            stage = _current_stage(log_file)
-            if stage != last_stage:
-                print(f"\n  [{elapsed:3d}s] {stage}...")
-                last_stage = stage
-            else:
-                print(f"  [{elapsed:3d}s] {stage}...", end="\r")
-        else:
-            print(f"  waiting for :{port} ... {elapsed}s", end="\r")
+        stage = _current_stage(log_file) if log_file else "waiting"
+        stage_changed = stage != last_stage
+        heartbeat_due = (elapsed - last_print_time) >= _HEARTBEAT_INTERVAL
+
+        if stage_changed or heartbeat_due:
+            print(f"  [{elapsed:3d}s] {stage}...")
+            last_stage = stage
+            last_print_time = elapsed
+
         time.sleep(5)
 
     print(f"\n  timed out after {timeout}s - check the log file")
