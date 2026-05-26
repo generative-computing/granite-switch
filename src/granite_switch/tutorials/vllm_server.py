@@ -48,17 +48,19 @@ def launch_vllm(
 
 # vLLM log keywords in order of progression (last match wins = most advanced stage)
 _VLLM_STAGES = [
-    ("Downloading",           "Downloading model from HuggingFace Hub"),
-    ("Loading model weights", "Loading model weights into GPU"),
-    ("GPU blocks",            "Allocating KV cache — almost ready"),
+    ("Downloading",          "Downloading model from HuggingFace Hub"),
+    ("Loading",              "Loading model weights into GPU"),
+    ("GPU KV cache size",    "Allocating KV cache"),
+    ("Capturing CUDA graphs","Warming up — capturing CUDA graphs"),
+    ("Starting vLLM server", "Starting API server"),
 ]
 
 
 def _current_stage(log_file: str) -> str:
     """Return the most advanced stage seen so far in the vLLM log."""
     try:
-        r = subprocess.run(["tail", "-200", log_file], capture_output=True, text=True)
-        content = r.stdout
+        with open(log_file) as f:
+            content = f.read()
         stage = "Starting up"
         for keyword, label in _VLLM_STAGES:
             if keyword in content:
