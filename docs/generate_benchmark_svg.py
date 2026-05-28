@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Generate docs/compose_benchmark_short.svg — animated benchmark showcase.
+"""Generate docs/benchmark_animation.svg — animated benchmark showcase.
 
-Shows 18 slots (6 per model family) cycling through all 12 Granite Libraries
-adapters. Uses SMIL <animate> for Safari compatibility.
+Shows 9 slots cycling through all 12 Granite Libraries adapters across 3 model
+sizes using a Latin square rotation (no repeated adapter-model pairs).
+Uses SMIL <animate> for Safari compatibility.
 
 Usage:
-    python docs/generate_benchmark_svg.py > docs/compose_benchmark_short.svg
+    python docs/generate_benchmark_svg.py > docs/benchmark_animation.svg
 """
 
 # ── DATA ──────────────────────────────────────────────────────────────────────
