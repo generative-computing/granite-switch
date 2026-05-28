@@ -15,7 +15,7 @@ An adapter function is a LoRA adapter trained to a specific input/output contrac
 Small models with the right adapter functions consistently outperform much larger generalist models on targeted tasks. **Activated LoRA (aLoRA)** makes this practical at scale: all adapter functions share one KV cache, activating on demand — so one deployment serves many capabilities with no memory or latency overhead.
 
 <p align="center">
-  <img src="docs/benchmark_animation.svg" alt="Granite Switch: adapters stack, accuracy improves" width="820">
+  <img src="docs/media/benchmark_animation.svg" alt="Granite Switch: adapters stack, accuracy improves" width="820">
 </p>
 
 ## Key Features
@@ -27,7 +27,7 @@ Small models with the right adapter functions consistently outperform much large
 
 <p align="center">
   <a href="https://generative-computing.github.io/granite-switch/race_live.html">
-    <img src="docs/alora_vs_lora_race.png" alt="aLoRA vs LoRA live race telemetry — aLoRA at 5/16 queries done with 74% KV hit rate while LoRA is at 1/16 with 29%" width="820">
+    <img src="docs/media/alora_vs_lora_race.png" alt="aLoRA vs LoRA live race telemetry — aLoRA at 5/16 queries done with 74% KV hit rate while LoRA is at 1/16 with 29%" width="820">
   </a>
 </p>
 
