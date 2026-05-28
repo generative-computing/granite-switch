@@ -183,7 +183,7 @@ The base model's tokenizer and generation assets (`generation_config.json`, `mer
 
 ## Step 4: Use the Composed Model
 
-> **Note:** Custom (BYOA) adapters are not supported by [Mellea](https://github.com/generative-computing/mellea). Mellea only supports the official IBM Granite Library adapters. To invoke your custom adapters, use the chat template directly as shown below.
+> **Note:** The high-level Mellea wrappers (`guardian_check`, `rag.rewrite_question`, etc.) are built for the official IBM Granite Library adapters. Custom adapters can be invoked through Mellea's lower-level `Intrinsic` API — see [Bring Your Own Adapter with Mellea](mellea_build_your_own_adapter.md). To invoke adapters without Mellea at all, use the chat template directly as shown below.
 
 ### With HuggingFace
 

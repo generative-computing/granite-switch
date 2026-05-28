@@ -16,16 +16,13 @@ automatically from the HuggingFace `config.model_type` field.
 Any Granite model whose HuggingFace config has `model_type: granite` can be used
 as a base model. The table below lists representative examples.
 
-**Note:** Granite Switch currently supports single-GPU inference only. Models
-that do not fit in a single GPU's memory are not yet supported.
-
 #### Granite 4.x (`granite`)
 
 | Model Tag | Size | Variant |
 |---|---|---|
 | `ibm-granite/granite-4.1-3b` | 3B | Dense, instruct |
 | `ibm-granite/granite-4.1-8b` | 8B | Dense, instruct |
-| `ibm-granite/granite-4.0-micro` | 3B | Dense, instruct |
+| `ibm-granite/granite-4.1-30b` | 30B | Dense, instruct |
 
 Base variants (`granite-4.1-3b-base`, `granite-4.1-8b-base`) are also supported.
 

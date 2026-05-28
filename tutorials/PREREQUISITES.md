@@ -15,7 +15,7 @@ Setup requirements for running Granite Switch tutorials.
 
 ### Python Version
 
-Python 3.10+ is required.
+Python 3.11–3.13 is required.
 
 ### Base Installation
 

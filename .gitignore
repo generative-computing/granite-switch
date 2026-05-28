@@ -1,8 +1,10 @@
 # OS files
 .DS_Store
 
-# Claude Code
+# Claude Code — ignore local settings but track shared skills
 .claude/
+!.claude/skills/
+!.claude/skills/**
 
 # Python cache files
 *.pyc
