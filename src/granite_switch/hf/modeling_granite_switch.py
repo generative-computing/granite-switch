@@ -11,9 +11,15 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
+import transformers
+from packaging.version import parse as _parse_version
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask
+
+# transformers 5.9.0 renamed `input_embeds` -> `inputs_embeds` and dropped the
+# unused `cache_position` kwarg in `create_causal_mask`.
+_TRANSFORMERS_GE_5_9 = _parse_version(transformers.__version__) >= _parse_version("5.9.0")
 from transformers.modeling_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
 from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
     GraniteMoeHybridMLP,
@@ -283,14 +289,18 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         mask_shape_proxy = inputs_embeds if inputs_embeds is not None else torch.empty(
             batch_size, seq_length, 1, device=device, dtype=embed_dtype
         )
-        causal_mask = create_causal_mask(
-            config=self.config,
-            input_embeds=mask_shape_proxy,
-            attention_mask=attention_mask,
-            cache_position=cache_position,
-            past_key_values=past_key_values,
-            position_ids=position_ids,
-        )
+        mask_kwargs = {
+            "config": self.config,
+            "attention_mask": attention_mask,
+            "past_key_values": past_key_values,
+            "position_ids": position_ids,
+        }
+        if _TRANSFORMERS_GE_5_9:
+            mask_kwargs["inputs_embeds"] = mask_shape_proxy
+        else:
+            mask_kwargs["input_embeds"] = mask_shape_proxy
+            mask_kwargs["cache_position"] = cache_position
+        causal_mask = create_causal_mask(**mask_kwargs)
 
         # The switch returns adapter_indices alongside modified_input_ids:
         # input_ids with each control token rewritten to its substitute id,
