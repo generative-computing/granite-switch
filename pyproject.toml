@@ -36,9 +36,6 @@ tutorials = [
     "sentence-transformers>=3.0.0",
     "datasets>=2.0.0",
 ]
-dev = ["pytest", "granite-switch[hf,vllm,compose]"]
-dev-vllm20 = ["pytest", "granite-switch[hf,vllm20,compose]"]
-test = ["pytest", "bitsandbytes", "optimum-quanto"]
 
 [project.entry-points."vllm.general_plugins"]
 register_granite_switch = "granite_switch.vllm:register"
@@ -54,32 +51,28 @@ markers = [
     "requires_model: needs a real model checkpoint",
 ]
 
+[dependency-groups]
+vllm19     = ["vllm>=0.19.1,<0.20.0"]
+vllm20     = ["vllm>=0.20.0,<0.21.0"]
+dev        = ["pytest", { include-group = "vllm19" }, "granite-switch[hf,compose]"]
+dev-vllm20 = ["pytest", { include-group = "vllm20" }, "granite-switch[hf,compose]"]
+test       = ["pytest", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
+
 [tool.uv]
+default-groups = ["vllm19"]
 conflicts = [
-    [
-        { extra = "vllm" },
-        { extra = "vllm20" },
-    ],
-    [
-        { extra = "dev" },
-        { extra = "vllm20" },
-    ],
-    [
-        { extra = "dev" },
-        { extra = "dev-vllm20" },
-    ],
-    [
-        { extra = "dev-vllm20" },
-        { extra = "vllm" },
-    ],
-    [
-        { extra = "tutorials" },
-        { extra = "vllm20" },
-    ],
-    [
-        { extra = "tutorials" },
-        { extra = "dev-vllm20" },
-    ],
+    # group conflicts (uv developer workflow)
+    [{ group = "vllm19" },     { group = "vllm20" }],
+    [{ group = "dev" },        { group = "vllm20" }],
+    [{ group = "dev" },        { group = "dev-vllm20" }],
+    [{ group = "dev-vllm20" }, { group = "vllm19" }],
+    # extra conflicts (pip workflow)
+    [{ extra = "vllm" },       { extra = "vllm20" }],
+    [{ extra = "dev" },        { extra = "vllm20" }],
+    [{ extra = "dev" },        { extra = "dev-vllm20" }],
+    [{ extra = "dev-vllm20" }, { extra = "vllm" }],
+    [{ extra = "tutorials" },  { extra = "vllm20" }],
+    [{ extra = "tutorials" },  { extra = "dev-vllm20" }],
 ]
 
 [tool.setuptools.packages.find]

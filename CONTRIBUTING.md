@@ -2,6 +2,16 @@
 
 Thank you for your interest in contributing to Granite Switch!
 
+## Prerequisites
+
+This project uses [uv](https://docs.astral.sh/uv/) for dependency management. Install it once before working on the project:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Or via pip: `pip install uv`
+
 ## Getting Started
 
 1. Fork the repository
@@ -9,7 +19,7 @@ Thank you for your interest in contributing to Granite Switch!
    ```bash
    git clone https://github.com/<your-username>/granite-switch.git
    cd granite-switch
-   uv sync --extra dev
+   uv sync --group dev
    ```
 3. Create a feature branch and make your changes
 4. Run tests: `uv run pytest tests/ -v`
