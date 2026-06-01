@@ -61,18 +61,21 @@ test       = ["pytest", "bitsandbytes", "optimum-quanto", { include-group = "dev
 [tool.uv]
 default-groups = ["vllm19"]
 conflicts = [
-    # group conflicts (uv developer workflow)
+    # group-vs-group
     [{ group = "vllm19" },     { group = "vllm20" }],
     [{ group = "dev" },        { group = "vllm20" }],
     [{ group = "dev" },        { group = "dev-vllm20" }],
     [{ group = "dev-vllm20" }, { group = "vllm19" }],
-    # extra conflicts (pip workflow)
+    # group-vs-extra
+    [{ group = "vllm19" },     { extra = "vllm20" }],
+    [{ group = "vllm20" },     { extra = "vllm" }],
+    [{ group = "vllm20" },     { extra = "tutorials" }],
+    [{ group = "dev" },        { extra = "vllm20" }],
+    [{ group = "dev-vllm20" }, { extra = "vllm" }],
+    [{ group = "dev-vllm20" }, { extra = "tutorials" }],
+    # extra-vs-extra
     [{ extra = "vllm" },       { extra = "vllm20" }],
-    [{ extra = "dev" },        { extra = "vllm20" }],
-    [{ extra = "dev" },        { extra = "dev-vllm20" }],
-    [{ extra = "dev-vllm20" }, { extra = "vllm" }],
     [{ extra = "tutorials" },  { extra = "vllm20" }],
-    [{ extra = "tutorials" },  { extra = "dev-vllm20" }],
 ]
 
 [tool.setuptools.packages.find]
