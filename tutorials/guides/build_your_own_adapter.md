@@ -183,8 +183,6 @@ The base model's tokenizer and generation assets (`generation_config.json`, `mer
 
 ## Step 4: Use the Composed Model
 
-> **Note:** Custom (BYOA) adapters are not supported by [Mellea](https://github.com/generative-computing/mellea). Mellea only supports the official IBM Granite Library adapters. To invoke your custom adapters, use the chat template directly as shown below.
-
 ### With HuggingFace
 
 The composed model ships with a chat template that places the adapter's control token correctly for its technology (aLoRA vs LoRA). Invoke any adapter by passing `adapter_name=` to `apply_chat_template`:
@@ -247,8 +245,60 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+### With Mellea
+
+Custom adapters require the lower-level Mellea interfaces — the high-level helper functions (e.g., `mellea.stdlib.rag`) are only available for official IBM Granite Library adapters. Install Mellea and use `Intrinsic` with an `OpenAIBackend` pointed at your running vLLM server:
+
+```python
+import json
+
+from mellea.backends.model_options import ModelOption
+from mellea.backends.openai import OpenAIBackend
+from mellea.stdlib.context import ChatContext
+from mellea.stdlib.components import Message, Intrinsic
+import mellea.stdlib.functional as mfuncs
+
+backend = OpenAIBackend(
+    model_id="./composed-model",
+    base_url="http://localhost:8000/v1",
+    api_key="unused",
+    load_embedded_adapters=True,
+)
+
+context = ChatContext().add(Message("assistant", "Hello there, how can I help you?"))
+action = Intrinsic("uncertainty")  # Your adapter name from io.yaml
+
+out, _ = mfuncs.act(
+    action,
+    context,
+    backend,
+    model_options={ModelOption.TEMPERATURE: 0.0},
+    strategy=None,
+)
+
+result = json.loads(str(out))
+print(result)
+```
+
+`load_embedded_adapters=True` auto-discovers the adapters embedded in the composed model. The `Intrinsic` processor reads `response_format` and `transformations` from the adapter's `io.yaml`, so the output is already post-processed JSON.
+
+If you want a reusable helper that matches the shape of Mellea's built-in adapter functions:
+
+```python
+from typing import Any
+from mellea.backends.adapters import AdapterMixin
+from mellea.stdlib.components.intrinsic._util import call_intrinsic
+
+def your_custom_functionality(context: ChatContext, backend: AdapterMixin) -> Any:
+    result_json = call_intrinsic("uncertainty", context, backend)
+    return result_json["certainty"]  # key from io.yaml `transformations.retained_fields`
+```
+
+For the full standalone walkthrough of Mellea + custom adapters, see **[Bring Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)**.
+
 ## Next Steps
 
 - **[Hello Adapter](../notebooks/hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
+- **[Bring Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)** - full walkthrough for invoking custom adapters via Mellea
 - **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
 - **[Compare Inference Throughput](compare_inference_throughput.md)** - benchmark ALORA vs LoRA on a 6-step RAG pipeline
