@@ -1,4 +1,4 @@
-# Bring Your Own Adapter (BYOA)
+# Build Your Own Adapter (BYOA)
 
 This guide explains how to train your own adapter (aLoRA or LoRA) and compose it into a Granite Switch model.
 
@@ -294,11 +294,11 @@ def your_custom_functionality(context: ChatContext, backend: AdapterMixin) -> An
     return result_json["certainty"]  # key from io.yaml `transformations.retained_fields`
 ```
 
-For the full standalone walkthrough of Mellea + custom adapters, see **[Bring Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)**.
+For the full standalone walkthrough of Mellea + custom adapters, see **[Build Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)**.
 
 ## Next Steps
 
 - **[Hello Adapter](../notebooks/hello_adapter.ipynb)** - minimal embedded-adapter invocation via the HuggingFace backend
-- **[Bring Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)** - full walkthrough for invoking custom adapters via Mellea
+- **[Build Your Own Adapter with Mellea](mellea_build_your_own_adapter.md)** - full walkthrough for invoking custom adapters via Mellea
 - **[Using Mellea with Granite Switch](mellea_with_granite_switch.md)** - deeper Mellea integration details
 - **[Compare Inference Throughput](compare_inference_throughput.md)** - benchmark ALORA vs LoRA on a 6-step RAG pipeline

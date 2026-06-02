@@ -22,7 +22,7 @@ Step-by-step walkthroughs covering adapter function invocation, pipeline constru
 | Guide | Description |
 |-------|-------------|
 | [Using Mellea with Granite Switch](guides/mellea_with_granite_switch.md) | Connect Mellea to a Granite Switch model |
-| [Bring Your Own Adapter](guides/build_your_own_adapter.md) | Train, compose, and use custom adapters |
+| [Build Your Own Adapter](guides/build_your_own_adapter.md) | Train, compose, and use custom adapters |
 | [Compare Inference Throughput](guides/compare_inference_throughput.md) | Compare LoRA vs aLoRA based models in an inference race setup |
 
 
@@ -57,11 +57,11 @@ Best for: Seeing how adapter functions compose into multi-step applications
 
 
 
-### Path 3: Bring Your Own Adapter
+### Path 3: Build Your Own Adapter
 
 Best for: Custom adapter function development
 
-1. [Bring Your Own Adapter Guide](guides/build_your_own_adapter.md)
+1. [Build Your Own Adapter Guide](guides/build_your_own_adapter.md)
 2. [Configure Your Own Adapter Guide](guides/mellea_build_your_own_adapter.md)
 3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb) 
 
