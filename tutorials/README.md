@@ -11,7 +11,7 @@ Step-by-step walkthroughs covering adapter function invocation, pipeline constru
 | [hello_mellea.ipynb](notebooks/hello_mellea.ipynb) | Mellea adapter functions intro with vLLM | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_mellea.ipynb) |
 | [rag_101.ipynb](notebooks/rag_101.ipynb) | RAG 101: build a vector corpus and run a basic answerability check | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_101.ipynb) |
 | [rag_flow.ipynb](notebooks/rag_flow.ipynb) | Full RAG flow with guardian checks (harm + scope) | 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/rag_flow.ipynb) |
-| [compose_granite_switch.ipynb](notebooks/compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min |  |
+| [compose_granite_switch.ipynb](notebooks/compose_granite_switch.ipynb) | Compose a checkpoint from adapter libraries | 15 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/compose_granite_switch.ipynb) |
 | [alora_vs_lora_race.ipynb](notebooks/alora_vs_lora_race.ipynb) | ALORA vs LoRA race: side-by-side throughput comparison on a multi-step RAG pipeline | 20 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/alora_vs_lora_race.ipynb) |
 | [hello_adapter.ipynb](notebooks/hello_adapter.ipynb) | Minimal adapter function invocation with HuggingFace | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_adapter.ipynb) |
 | [granite_switch_with_hf.ipynb](notebooks/granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapter functions in a multi-turn conversation | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_switch_with_hf.ipynb) |
@@ -63,7 +63,7 @@ Best for: Custom adapter function development
 
 1. [Bring Your Own Adapter Guide](guides/build_your_own_adapter.md)
 2. [Configure Your Own Adapter Guide](guides/mellea_build_your_own_adapter.md)
-3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb) 
+3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb) [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/compose_granite_switch.ipynb)
 
 
 ### Path 4: Low-Level Understanding (HuggingFace)
