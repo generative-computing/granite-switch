@@ -15,6 +15,8 @@ from granite_switch.composer.arch import (
 from granite_switch.composer.weight_transfer import _classify_base_weights
 from granite_switch.composer.weight_remapper import AdapterRemapper
 
+pytestmark = pytest.mark.local_fast
+
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -19,6 +19,8 @@ from tests.shared.generation_models import (
     make_switch_model,
 )
 
+pytestmark = pytest.mark.local_fast
+
 
 # ── Helpers ───────────────────────────────────────────────────────
 

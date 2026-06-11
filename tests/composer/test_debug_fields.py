@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for --debug-fields flag and source propagation in compose reports."""
 
+import pytest
+
 from granite_switch.composer.adapter_discovery import discover_adapters
+
+pytestmark = pytest.mark.local_fast
 
 
 class TestSourcePropagation:

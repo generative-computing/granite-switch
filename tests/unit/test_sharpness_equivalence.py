@@ -36,6 +36,8 @@ from tests.shared.granite4_constants import (
     MAX_POSITION_EMBEDDINGS,
 )
 
+pytestmark = pytest.mark.local_fast
+
 # Stress adapter IDs: 1 (smallest), 16 (middle), 32 (largest supported)
 ADAPTER_IDS = [1, 16, 32]
 

@@ -12,6 +12,8 @@ from unittest.mock import patch
 
 import pytest
 
+pytestmark = pytest.mark.local_fast
+
 
 FAKE_ADAPTERS = [
     {"name": "rag", "technologies": ["alora", "lora"]},

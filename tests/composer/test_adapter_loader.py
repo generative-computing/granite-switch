@@ -20,6 +20,8 @@ from granite_switch.composer.arch import ModuleDescriptor, ArchDescriptor
 from granite_switch.composer.adapter_discovery import discover_adapters, discover_adapters_from_yaml
 from granite_switch.composer.arch import resolve_arch
 
+pytestmark = pytest.mark.local_fast
+
 
 @pytest.fixture
 def simple_arch():

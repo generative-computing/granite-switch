@@ -8,6 +8,8 @@ import torch.nn as nn
 from granite_switch.composer.validator import validate_all_parameters
 from granite_switch.composer.arch import ModuleDescriptor, ArchDescriptor
 
+pytestmark = pytest.mark.local_fast
+
 
 @pytest.fixture
 def simple_arch():

@@ -34,10 +34,11 @@ import pytest
 
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 
-pytestmark = pytest.mark.skipif(
-    not _VLLM_AVAILABLE,
-    reason="requires vLLM installed (GPU checked by worker)",
-)
+pytestmark = [
+    pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed (GPU checked by worker)"),
+    pytest.mark.vllm,
+    pytest.mark.gpu,
+]
 
 from tests.shared.single_switch_cases import (
     NUM_ADAPTERS,

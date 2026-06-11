@@ -9,6 +9,8 @@ import pytest
 
 from granite_switch.config import GraniteSwitchConfig
 
+pytestmark = pytest.mark.local_fast
+
 
 # ── Helper ────────────────────────────────────────────────────────────
 

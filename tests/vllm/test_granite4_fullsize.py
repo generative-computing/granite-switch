@@ -39,6 +39,7 @@ _MODEL_NAMES = sorted(GRANITE4_FULLSIZE.keys())
 # ── Weight transfer tests (HF-level, no vLLM) ────────────────────
 
 
+@pytest.mark.slow
 class TestGranite4FullSizeWeightTransfer:
     """HF-level weight transfer at full model dimensions.
 
@@ -85,6 +86,9 @@ def _run_inner_class(class_name):
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
+@pytest.mark.vllm
+@pytest.mark.gpu
+@pytest.mark.slow
 class TestGranite4FullSizeEquivalence:
     def test_suite(self):
         _run_inner_class("TestGranite4FullSizeEquivalence")

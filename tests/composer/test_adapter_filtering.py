@@ -14,6 +14,8 @@ from granite_switch.composer.adapter_discovery import (
 
 from granite_switch.composer.arch import resolve_arch
 
+pytestmark = pytest.mark.local_fast
+
 # -- Fixtures ----------------------------------------------------------------
 
 @pytest.fixture

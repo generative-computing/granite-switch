@@ -14,6 +14,8 @@ import torch
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf.core.lora import GraniteLoRAEmbeddedAttention
 
+pytestmark = pytest.mark.local_fast
+
 
 # ── Helpers ────────────────────────────────────────────────────────
 

@@ -38,10 +38,15 @@ def _try_import_vllm():
 
 _VLLM_AVAILABLE = _try_import_vllm() if _CUDA_AVAILABLE else False
 
-pytestmark = pytest.mark.skipif(
-    not _CUDA_AVAILABLE or not _VLLM_AVAILABLE,
-    reason="requires CUDA GPU and vLLM installed",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not _CUDA_AVAILABLE or not _VLLM_AVAILABLE,
+        reason="requires CUDA GPU and vLLM installed",
+    ),
+    pytest.mark.vllm,
+    pytest.mark.gpu,
+    pytest.mark.slow,
+]
 
 if _VLLM_AVAILABLE:
     from safetensors.torch import load_file

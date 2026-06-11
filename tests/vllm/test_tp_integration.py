@@ -32,6 +32,9 @@ _NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
 pytestmark = [
     pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM"),
     pytest.mark.skipif(_NUM_GPUS < 2, reason="requires at least 2 GPUs"),
+    pytest.mark.vllm,
+    pytest.mark.gpu,
+    pytest.mark.slow,
 ]
 
 WORKER = Path(__file__).parent / "_tp_integration_worker.py"

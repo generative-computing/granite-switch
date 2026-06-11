@@ -23,6 +23,7 @@ from granite_switch.composer.compose_granite_switch import (
 )
 
 
+@pytest.mark.requires_model
 class TestOnRealGraniteTokenizer:
     """Exercise the probe on actual Granite tokenizers. Network-dependent;
     skips cleanly if the model can't be fetched."""
@@ -47,6 +48,7 @@ class TestOnRealGraniteTokenizer:
         assert tok.convert_ids_to_tokens([sub_id])[0] == "<|start_of_role|>"
 
 
+@pytest.mark.local_fast
 class TestOnSyntheticTokenizer:
     """Verify the probe is generic — it returns whatever the template emits,
     not a Granite-specific hardcoded token."""
@@ -75,6 +77,7 @@ class TestOnSyntheticTokenizer:
         assert _probe_lora_substitute_token_id(_FakeTokenizer()) == 42
 
 
+@pytest.mark.local_fast
 class TestErrorPaths:
 
     def _minimal_tokenizer_without_template(self):

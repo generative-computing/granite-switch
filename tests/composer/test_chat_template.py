@@ -27,9 +27,12 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from jinja2 import Environment
 
 from granite_switch.composer.tokenizer_setup import configure_chat_template
+
+pytestmark = pytest.mark.local_fast
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
 

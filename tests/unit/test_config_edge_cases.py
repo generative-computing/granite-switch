@@ -5,6 +5,8 @@ import pytest
 
 from granite_switch.config import GraniteSwitchConfig
 
+pytestmark = pytest.mark.local_fast
+
 
 def _valid_kwargs(num_adapters=2, **overrides):
     """Return kwargs for a valid token-exchange config."""

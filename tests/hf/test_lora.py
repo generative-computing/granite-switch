@@ -21,6 +21,8 @@ from tests.shared.lora_cases import (
     LoRAShapeCorrectnessCases,
 )
 
+pytestmark = pytest.mark.local_fast
+
 
 # ════════════════════════════════════════════════════════════════════
 # Section 1: SwitchedLoRALinear — shared mixin tests

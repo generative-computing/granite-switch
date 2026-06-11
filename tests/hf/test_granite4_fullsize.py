@@ -73,6 +73,8 @@ def _run_equivalence(cfg_dict, *, seq_len=8):
     return upstream_logits, switch_logits
 
 
+pytestmark = pytest.mark.slow
+
 _MODEL_NAMES = sorted(GRANITE4_FULLSIZE.keys())
 
 

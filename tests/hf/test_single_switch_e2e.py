@@ -28,6 +28,8 @@ Runtime reference (measured on CPU, 2026-04-30):
 import pytest
 import torch
 
+pytestmark = pytest.mark.local_fast
+
 from tests.shared.generation_models import DENSE_CFG, make_switch_model
 from tests.shared.granite4_constants import (
     MAX_POSITION_EMBEDDINGS,

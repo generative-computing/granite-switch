@@ -12,6 +12,8 @@ import pytest
 import torch
 
 from granite_switch.hf.switch.single import SingleSwitch
+
+pytestmark = pytest.mark.local_fast
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from tests.shared.single_switch_cases import (

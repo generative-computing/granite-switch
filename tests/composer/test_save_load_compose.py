@@ -32,6 +32,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import granite_switch.hf  # noqa: F401 — registers AutoModel
 
+pytestmark = [pytest.mark.slow, pytest.mark.requires_model]
+
 SEED = 42
 
 

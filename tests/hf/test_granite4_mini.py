@@ -37,6 +37,9 @@ from tests.shared.granite4_equivalence import (
 )
 
 
+pytestmark = pytest.mark.local_fast
+
+
 def _make_pair(cfg_dict):
     """Create upstream + switch model pair with transferred weights."""
     torch.manual_seed(0)

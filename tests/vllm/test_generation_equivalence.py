@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = [pytest.mark.vllm, pytest.mark.gpu, pytest.mark.slow]
 
 WORKER = Path(__file__).parent / "_generation_equivalence_worker.py"
 TIMEOUT = 1200  # 20 min per model (download + build + 2× vLLM load + generate)

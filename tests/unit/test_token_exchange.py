@@ -9,6 +9,8 @@ import pytest
 
 from granite_switch.config import GraniteSwitchConfig
 
+pytestmark = pytest.mark.local_fast
+
 
 def _base(num_adapters=2, **overrides):
     names = [f"a{i}" for i in range(num_adapters)]

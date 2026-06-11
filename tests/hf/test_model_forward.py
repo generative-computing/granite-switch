@@ -13,6 +13,8 @@ from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
 from granite_switch.hf.switch.single import SingleSwitch
 
+pytestmark = pytest.mark.local_fast
+
 
 # ── Helpers ────────────────────────────────────────────────────────
 

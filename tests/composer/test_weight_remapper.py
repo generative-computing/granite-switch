@@ -6,6 +6,8 @@ import pytest
 from granite_switch.composer.weight_remapper import AdapterRemapper, RemapResult
 from granite_switch.composer.arch import ModuleDescriptor
 
+pytestmark = pytest.mark.local_fast
+
 
 class TestRemapResult:
     """Tests for RemapResult dataclass."""

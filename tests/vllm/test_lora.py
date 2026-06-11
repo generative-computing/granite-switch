@@ -15,10 +15,11 @@ import pytest
 
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 
-pytestmark = pytest.mark.skipif(
-    not _VLLM_AVAILABLE,
-    reason="requires vLLM installed (GPU checked by inner tests)",
-)
+pytestmark = [
+    pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed (GPU checked by inner tests)"),
+    pytest.mark.vllm,
+    pytest.mark.gpu,
+]
 
 _INNER = Path(__file__).parent / "_lora_tests.py"
 _TIMEOUT = 300

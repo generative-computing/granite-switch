@@ -10,6 +10,8 @@ from granite_switch.composer.reporting.model_card import (
     write_model_card,
 )
 
+pytestmark = pytest.mark.local_fast
+
 
 def _fake_base_config(**overrides):
     defaults = dict(

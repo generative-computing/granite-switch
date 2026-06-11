@@ -45,6 +45,7 @@ _MODEL_NAMES = sorted(GRANITE4_MINI.keys())
 # ── Weight transfer tests (HF-level, no vLLM) ────────────────────
 
 
+@pytest.mark.local_fast
 class TestGranite4FamilyWeightTransfer:
     """HF-level weight transfer: all switch params populated from upstream.
 
@@ -70,6 +71,7 @@ class TestGranite4FamilyWeightTransfer:
         gc.collect()
 
 
+@pytest.mark.local_fast
 class TestZeroAdapterWeightTransfer:
     """HF-level weight transfer with adapter infrastructure.
 
@@ -122,6 +124,9 @@ def _run_inner_class(class_name):
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
+@pytest.mark.vllm
+@pytest.mark.gpu
+@pytest.mark.slow
 class TestGranite4FamilyEquivalence:
     @pytest.mark.parametrize("model_name", _MODEL_NAMES)
     def test_suite(self, model_name):
@@ -129,6 +134,8 @@ class TestGranite4FamilyEquivalence:
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
+@pytest.mark.vllm
+@pytest.mark.gpu
 class TestZeroAdapterNoHiding:
     @pytest.mark.parametrize("model_name", _MODEL_NAMES)
     def test_suite(self, model_name):
@@ -136,6 +143,8 @@ class TestZeroAdapterNoHiding:
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
+@pytest.mark.vllm
+@pytest.mark.gpu
 class TestZeroAdapterEquivalence:
     @pytest.mark.parametrize("model_name", _MODEL_NAMES)
     def test_suite(self, model_name):

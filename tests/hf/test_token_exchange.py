@@ -15,6 +15,8 @@ import torch
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
 
+pytestmark = pytest.mark.local_fast
+
 
 def _build(num_adapters=2, substitute_ids=(1, 7)):
     return GraniteSwitchConfig(

@@ -15,6 +15,8 @@ from granite_switch.composer.compose_granite_switch import (
     _extract_hf_snapshot_commit,
 )
 
+pytestmark = pytest.mark.local_fast
+
 
 VALID_SHA = "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf"
 SHORT_SHA = VALID_SHA[:8]
