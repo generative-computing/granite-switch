@@ -541,6 +541,9 @@ class TestAdapterLoadingFromYAML:
 
         # Verification of Parity: compare (path, name, technology) - source differs by design
         # discover_adapters returns source=None, discover_adapters_from_yaml returns source=manifest_path
+        # Compare order-independently: discover_adapters walks the filesystem (scan
+        # order varies by OS/filesystem) while the YAML path follows manifest order,
+        # so parity means the same set of adapters, not the same ordering.
         adapters_without_source = [(p, n, t) for p, n, t, _ in adapters]
         yaml_without_source = [(p, n, t) for p, n, t, _ in yaml_adapters]
-        assert adapters_without_source == yaml_without_source
+        assert sorted(adapters_without_source) == sorted(yaml_without_source)
