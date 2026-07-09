@@ -63,7 +63,7 @@ Best for: Custom adapter function development
 
 1. [Bring Your Own Adapter Guide](guides/build_your_own_adapter.md)
 2. [Configure Your Own Adapter Guide](guides/mellea_build_your_own_adapter.md)
-3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb) 
+3. [Compose Your Checkpoint](notebooks/compose_granite_switch.ipynb)
 
 
 ### Path 4: Low-Level Understanding (HuggingFace)
