@@ -1,0 +1,23 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: GPU Tests
+
+on:
+  workflow_dispatch:   # admin-only trigger (requires write access)
+
+jobs:
+  gpu-tests:
+    name: GPU Tests
+    runs-on: [self-hosted, gpu]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --group dev --extra hf --extra vllm --extra compose
+
+      - name: Run GPU tests
+        run: |
+          uv run pytest tests/vllm/ tests/integration/ -v -s --tb=short -x

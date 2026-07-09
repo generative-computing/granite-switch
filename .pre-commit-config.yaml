@@ -1,0 +1,64 @@
+fail_fast: true
+repos:
+  # Ruff is advisory for now: the repo is not yet ruff-clean, so the lint hook
+  # reports findings (--exit-zero) without blocking or modifying files, and the
+  # auto-formatting hook is deferred. A dedicated repo-wide formatting PR will
+  # apply the fixes; then re-enable blocking: add back `ruff-format` and swap
+  # the ruff args to `[--exit-non-zero-on-fix, --fix, --config=pyproject.toml]`.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.0
+    hooks:
+      - id: ruff
+        name: ruff (advisory)
+        args: [--exit-zero, --config=pyproject.toml]
+        verbose: true
+
+  - repo: local
+    hooks:
+      - id: check-headers
+        name: Check SPDX headers
+        entry: python ci/check_headers.py
+        language: system
+        args: [--fix]
+        files: '^(src|tests)/.*\.py$'
+        pass_filenames: true
+
+      - id: check-dco
+        name: Check DCO sign-off
+        entry: python ci/check_dco.py
+        language: system
+        stages: [commit-msg]
+
+      - id: validate-links
+        name: Validate links and first-party imports
+        entry: python .pre-commit/validate_links.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        files: \.(ipynb|md|py)$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-toml
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: check-case-conflict
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: end-of-file-fixer
+        exclude: \.ipynb$
+      - id: trailing-whitespace
+        exclude: \.ipynb$
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.8.1
+    hooks:
+      - id: nbstripout
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.6.0
+    hooks:
+      - id: uv-lock

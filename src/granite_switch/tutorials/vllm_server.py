@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Helpers for launching and monitoring local vLLM servers in tutorials."""
 
 from __future__ import annotations

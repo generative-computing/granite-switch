@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Helper utilities for HuggingFace backend tutorials.
 
 This module provides reusable helper functions for granite_switch_with_hf.ipynb

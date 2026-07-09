@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: DCO Check
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  dco:
+    name: DCO Sign-off
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check DCO sign-off
+        shell: bash
+        run: |
+          COMMITS=$(git log origin/${{ github.base_ref }}..${{ github.sha }} --format="%H")
+          MISSING_DCO=false
+
+          for commit in $COMMITS; do
+            PARENTS=$(git rev-list --parents -n 1 $commit | wc -w)
+            if [ "$PARENTS" -gt 2 ]; then
+              echo "ℹ️  Skipping merge commit $commit"
+              continue
+            fi
+
+            MESSAGE=$(git log -1 --format=%B $commit)
+            if ! echo "$MESSAGE" | grep -q "^Signed-off-by:"; then
+              echo "❌ Commit $commit is missing DCO sign-off"
+              echo "   Commit message:"
+              echo "$MESSAGE" | head -5
+              echo ""
+              MISSING_DCO=true
+            fi
+          done
+
+          if [ "$MISSING_DCO" = true ]; then
+            echo ""
+            echo "Error: One or more commits are missing DCO sign-off!"
+            echo "Please sign your commits with: git commit -s"
+            echo ""
+            echo "To fix existing commits:"
+            echo "  git rebase --signoff origin/${{ github.base_ref }}"
+            exit 1
+          fi
+
+          echo "✅ All commits have DCO sign-off"

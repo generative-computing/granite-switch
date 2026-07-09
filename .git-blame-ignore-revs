@@ -4,5 +4,5 @@
 # Enable locally with:
 #   git config blame.ignoreRevsFile .git-blame-ignore-revs
 
-# Apply ruff format and lint autofixes across the codebase
-9c376fb56e2c4c8266cb072c07d54704486693c7
+# Apply ruff format and lint autofixes across the codebase (#102)
+c8d4a4ab79cc9e22cc0d5de264ec6d1a2b412d08

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Generic ChromaDB loader with sentence-transformers backend.
 
 This module provides a flexible interface for loading or building ChromaDB collections

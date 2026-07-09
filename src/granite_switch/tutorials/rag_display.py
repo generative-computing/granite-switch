@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 """Display helpers for the govt RAG flow tutorial.
 
 Formatting / pretty-printing only. Blocked-state branches in

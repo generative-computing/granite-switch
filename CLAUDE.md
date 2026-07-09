@@ -71,6 +71,8 @@ granite-switch/
 │   ├── regression/                      # Regression tests (hf/, vllm/, integration/, shared/, tools/)
 │   └── shared/                          # Shared test utilities and parametrized cases
 │
+├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
+├── .pre-commit-config.yaml              # Pre-commit hook configuration
 ├── scratch/                             # Throwaway debug/diagnostic scripts (gitignored)
 ├── docs/                                # Documentation
 ├── tutorials/                           # Tutorials and how-to guides
@@ -371,6 +373,32 @@ with the upstream HF model is not achievable. The vLLM skinning equivalence test
 authoritative check — both the upstream and skinned models use the same fused-projection
 architecture there. The HF skinning tests in `tests/composer/test_skinning_equivalence.py` are
 skipped for this reason.
+
+## Pre-commit
+
+This repo uses [pre-commit](https://pre-commit.com/) with ruff (lint + format), nbstripout,
+a local `validate-links` hook (broken local links, stale labels, and broken first-party imports
+in `.ipynb`/`.md`/`.py`; script lives at `.pre-commit/validate_links.py`), local SPDX-header and
+DCO-signoff checks, `uv-lock`, and the standard hygiene hooks (whitespace, EOF, YAML/TOML
+validity, merge conflicts, large files, case conflicts, line endings).
+
+After cloning:
+
+```bash
+uv run pre-commit install
+git config blame.ignoreRevsFile .git-blame-ignore-revs
+```
+
+Hooks run on `git commit`. Most are auto-fixing - if a hook modifies files, re-stage and
+commit again. Do NOT use `--no-verify` to bypass; fix the underlying issue instead. Run
+`uv run pre-commit run --all-files` to apply hooks across the full tree, and
+`uv run pre-commit autoupdate` periodically to bump pinned hook versions.
+
+What is intentionally NOT in pre-commit (run in CI instead):
+
+- `pytest` (GPU tests, vLLM - too slow for commit time)
+- `mypy` / type checking (too slow)
+- Notebook execution
 
 ## Documentation
 

@@ -1,4 +1,4 @@
-.PHONY: test test-unit test-composer test-hf test-vllm test-integration test-all test-cpu test-gpu test-gpu-full test-tp test-regression-fast test-regression-real test-regression-hf test-peft-equiv test-peft-equiv-hf lint help
+.PHONY: test test-unit test-composer test-hf test-vllm test-integration test-all test-cpu test-gpu test-gpu-full test-tp test-regression-fast test-regression-real test-regression-hf test-peft-equiv test-peft-equiv-hf lint fmt pre-commit help
 
 # Default Python (can override: make test PYTHON=python3.11)
 PYTHON ?= python
@@ -59,9 +59,15 @@ test-regression-hf:
 test-peft-equiv-hf:
 	-$(PYTHON) -m pytest tests/regression/hf/test_peft_equivalence.py $(PYTEST_FLAGS)
 
-# Linting
+# Linting / formatting
 lint:
 	$(PYTHON) -m ruff check .
+
+fmt:
+	$(PYTHON) -m ruff format .
+
+pre-commit:
+	uv run pre-commit run --all-files
 
 # Help
 help:
@@ -83,3 +89,5 @@ help:
 	@echo "  test-regression-hf    - Run all HF regression tests (no vLLM/GPU)"
 	@echo "  test-peft-equiv-hf    - Run PEFT equivalence (HF only)"
 	@echo "  lint           - Run ruff linter"
+	@echo "  fmt            - Run ruff formatter"
+	@echo "  pre-commit     - Run all pre-commit hooks on all files"
