@@ -19,13 +19,13 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync --frozen --extra compose --extra hf
-
+      # ruff isn't a project dependency; fetch the pinned version standalone
+      # (matches the pre-commit hook). No project sync needed just to lint.
       - name: Check formatting
-        run: uv run ruff format --check .
+        run: uvx ruff@0.9.0 format --check .
 
       - name: Check linting
-        run: uv run ruff check .
+        run: uvx ruff@0.9.0 check .
 
   test-cpu:
     name: CPU Tests (Python ${{ matrix.python-version }})
