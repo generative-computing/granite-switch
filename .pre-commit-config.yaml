@@ -54,6 +54,6 @@ repos:
       - id: nbstripout
 
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.6.0
+    rev: 0.8.4
     hooks:
       - id: uv-lock
