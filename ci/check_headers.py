@@ -20,7 +20,7 @@ def has_headers(content: str) -> bool:
 def add_headers(filepath: Path) -> bool:
     """Add headers to file if missing. Returns True if file was modified."""
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
 
         if has_headers(content):
@@ -30,7 +30,7 @@ def add_headers(filepath: Path) -> bool:
         if lines and lines[0].startswith("#!"):
             new_content = "\n".join([lines[0]] + HEADER_LINES + [""] + lines[1:])
         else:
-            new_content = "\n".join(HEADER_LINES + [""] + [content])
+            new_content = "\n".join([*HEADER_LINES, "", content])
 
         with open(filepath, "w", encoding="utf-8") as f:
             f.write(new_content)
@@ -45,7 +45,7 @@ def add_headers(filepath: Path) -> bool:
 def check_file(filepath: Path) -> bool:
     """Check if file has required headers."""
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(filepath, encoding="utf-8") as f:
             content = f.read()
         return has_headers(content)
     except Exception as e:
@@ -55,9 +55,13 @@ def check_file(filepath: Path) -> bool:
 
 def main() -> int:
     """Check or fix SPDX headers in files."""
-    parser = argparse.ArgumentParser(description="Check/fix SPDX headers in source files")
+    parser = argparse.ArgumentParser(
+        description="Check/fix SPDX headers in source files"
+    )
     parser.add_argument("files", nargs="+", type=Path, help="Files to check")
-    parser.add_argument("--fix", action="store_true", help="Automatically add missing headers")
+    parser.add_argument(
+        "--fix", action="store_true", help="Automatically add missing headers"
+    )
     args = parser.parse_args()
 
     if args.fix:

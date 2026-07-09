@@ -29,7 +29,9 @@ EXT_OK = {".ipynb", ".md", ".py", ".png", ".jpg", ".jpeg", ".svg", ".json", ".sh
 
 
 def git_ls_files(repo: Path) -> list[str]:
-    return subprocess.check_output(["git", "ls-files"], cwd=repo, text=True).splitlines()
+    return subprocess.check_output(
+        ["git", "ls-files"], cwd=repo, text=True
+    ).splitlines()
 
 
 def discover_package_roots(repo: Path) -> tuple[list[Path], set[str]]:
@@ -37,7 +39,12 @@ def discover_package_roots(repo: Path) -> tuple[list[Path], set[str]]:
     pyproject = repo / "pyproject.toml"
     if pyproject.exists():
         cfg = tomllib.loads(pyproject.read_text())
-        find = cfg.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {})
+        find = (
+            cfg.get("tool", {})
+            .get("setuptools", {})
+            .get("packages", {})
+            .get("find", {})
+        )
         for w in find.get("where", []) or []:
             roots.append((repo / w).resolve())
     if not roots:
@@ -156,7 +163,9 @@ def scan_imports(
             top = dotted.split(".")[0]
             if top not in first_party:
                 continue
-            if len(node.names) == 1 and module_resolves(f"{dotted}.{node.names[0].name}", roots):
+            if len(node.names) == 1 and module_resolves(
+                f"{dotted}.{node.names[0].name}", roots
+            ):
                 continue
             if not module_resolves(dotted, roots):
                 names = ", ".join(a.name for a in node.names)
@@ -208,17 +217,23 @@ def main() -> int:
                 src_lines = cell.get("source", [])
                 if ctype == "markdown":
                     src = "".join(src_lines)
-                    b, s = scan_text(src, p, f"{rel} (cell {ci})", existing, existing_dirs)
+                    b, s = scan_text(
+                        src, p, f"{rel} (cell {ci})", existing, existing_dirs
+                    )
                     broken_links += b
                     stale_labels += s
                 elif ctype == "code":
                     if not src_lines:
                         continue
-                    first_nonblank = next((line for line in src_lines if line.strip()), "")
+                    first_nonblank = next(
+                        (line for line in src_lines if line.strip()), ""
+                    )
                     if first_nonblank.lstrip().startswith(("%", "!")):
                         continue
                     src = "".join(src_lines)
-                    broken_imports += scan_imports(src, f"{rel} (cell {ci})", p, roots, first_party)
+                    broken_imports += scan_imports(
+                        src, f"{rel} (cell {ci})", p, roots, first_party
+                    )
 
     findings = len(broken_links) + len(stale_labels) + len(broken_imports)
 
@@ -231,7 +246,9 @@ def main() -> int:
     if stale_labels:
         print("STALE LABELS (target works, but the label names the wrong file)\n")
         for label, ltext, target, expected in stale_labels:
-            print(f"  {label}\n    [{ltext}]({target})  -> label should name {expected}")
+            print(
+                f"  {label}\n    [{ltext}]({target})  -> label should name {expected}"
+            )
         print(f"\n  {len(stale_labels)} stale label(s)\n")
 
     if broken_imports:
@@ -246,7 +263,9 @@ def main() -> int:
         )
 
     if findings == 0:
-        print("validate_links: clean (no broken links, stale labels, or broken imports)")
+        print(
+            "validate_links: clean (no broken links, stale labels, or broken imports)"
+        )
         return 0
 
     print(

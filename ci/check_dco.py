@@ -11,7 +11,7 @@ from pathlib import Path
 def check_dco(commit_msg_file: Path) -> bool:
     """Check if commit message has DCO sign-off."""
     try:
-        with open(commit_msg_file, "r", encoding="utf-8") as f:
+        with open(commit_msg_file, encoding="utf-8") as f:
             message = f.read()
 
         pattern = r"^Signed-off-by: .+ <.+@.+>$"
@@ -28,7 +28,9 @@ def check_dco(commit_msg_file: Path) -> bool:
 def main() -> int:
     """Check DCO sign-off in commit message."""
     parser = argparse.ArgumentParser(description="Check DCO sign-off in commit message")
-    parser.add_argument("commit_msg_file", type=Path, help="Path to commit message file")
+    parser.add_argument(
+        "commit_msg_file", type=Path, help="Path to commit message file"
+    )
     args = parser.parse_args()
 
     if not check_dco(args.commit_msg_file):
