@@ -21,15 +21,10 @@ jobs:
 
       - run: uv sync --frozen --extra compose --extra hf
 
-      # Ruff is advisory for now: the repo is not yet ruff-clean, so these steps
-      # report findings without failing the build. Flip continue-on-error to
-      # false once the dedicated repo-wide formatting PR lands.
       - name: Check formatting
-        continue-on-error: true
         run: uv run ruff format --check .
 
       - name: Check linting
-        continue-on-error: true
         run: uv run ruff check .
 
   test-cpu:

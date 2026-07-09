@@ -1,17 +1,12 @@
 fail_fast: true
 repos:
-  # Ruff is advisory for now: the repo is not yet ruff-clean, so the lint hook
-  # reports findings (--exit-zero) without blocking or modifying files, and the
-  # auto-formatting hook is deferred. A dedicated repo-wide formatting PR will
-  # apply the fixes; then re-enable blocking: add back `ruff-format` and swap
-  # the ruff args to `[--exit-non-zero-on-fix, --fix, --config=pyproject.toml]`.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.0
     hooks:
+      - id: ruff-format
+        args: [--config=pyproject.toml]
       - id: ruff
-        name: ruff (advisory)
-        args: [--exit-zero, --config=pyproject.toml]
-        verbose: true
+        args: [--exit-non-zero-on-fix, --fix, --config=pyproject.toml]
 
   - repo: local
     hooks:

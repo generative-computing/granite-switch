@@ -17,7 +17,8 @@ uv run pre-commit install --hook-type commit-msg   # DCO hook for commit message
 
 | Hook | What it does | Auto-fix? |
 |------|-------------|-----------|
-| `ruff` | Lints Python files (imports, style) — **advisory** (reports only, does not block or modify) | No — advisory for now (see [Ruff rollout](#ruff-rollout-format-first-then-enforce)) |
+| `ruff-format` | Formats Python files | Yes (reformats, then blocks until staged) |
+| `ruff` | Lints Python files (imports, style) | Yes (fixable issues; then blocks until staged) |
 | `check-headers` | Ensures every `.py` file starts with `# SPDX-License-Identifier: Apache-2.0` | Yes (regenerates, then blocks until staged) |
 | `check-dco` | Validates commit message has `Signed-off-by: Name <email>` | No — blocks commit |
 | `check-toml` / `check-yaml` | Validates config file syntax | No |
@@ -60,7 +61,7 @@ Three workflows run automatically when a PR is opened against `main` or a commit
 **Trigger:** Pull request or push to `main`
 
 **Jobs:**
-1. `lint` — runs `ruff format --check .` and `ruff check .` over the **whole repository** (ruff respects `.gitignore`, so `scratch/` is skipped, but `tutorials/` — which lives outside `src/` — is included). These steps are **advisory** (`continue-on-error: true`): they surface findings in the logs but do not fail the build. See [Ruff rollout](#ruff-rollout-format-first-then-enforce).
+1. `lint` — runs `ruff format --check .` and `ruff check .` over the **whole repository** (ruff respects `.gitignore`, so `scratch/` is skipped, but `tutorials/` — which lives outside `src/` — is included). These are **blocking**: the tree is ruff-clean (see [Ruff rollout](#ruff-rollout-format-first-then-enforce)), so any new violation fails the build.
 2. `test-cpu` — runs `tests/unit/`, `tests/composer/`, and `tests/hf/` on Python 3.11 and 3.12 in parallel
 
 Coverage is uploaded to [Codecov](https://codecov.io) after each test run (see [Coverage](#coverage) below).
@@ -218,7 +219,7 @@ The existing tree is not yet ruff-clean — a whole-repo `ruff check .` / `ruff 
 
 **Decision:** roll ruff out in **two separate PRs**, formatting first.
 
-Until PR 1 lands, ruff is intentionally **advisory** in both CI (`ci.yaml` lint steps use `continue-on-error: true`) and pre-commit (the `ruff` hook runs with `--exit-zero`; the auto-formatting hook is omitted). This is a temporary bridge, not the target state.
+Before PR 1 lands, ruff is intentionally **advisory** as a temporary bridge (CI `continue-on-error: true`; pre-commit `ruff` with `--exit-zero`, no auto-format). **On this branch PR 1 has landed** and the tree is ruff-clean, so ruff is now **blocking**: CI drops `continue-on-error` and the pre-commit hooks are `ruff-format` + `ruff --fix` (fail on any change).
 
 #### PR 1 — repo-wide format (branches off `main`, touches source only)
 
