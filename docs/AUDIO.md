@@ -37,6 +37,55 @@ settings into `config.json` so the checkpoint is self-describing:
 Audio capability is **gated per checkpoint** by `asr_enabled`: a checkpoint built
 without `--enable-audio` reports no audio modality and never loads the ASR model.
 
+### Tuning the ASR model
+
+Two optional config fields let a checkpoint carry ASR tuning so no code change is
+needed to swap or steer any HF `automatic-speech-recognition` model:
+
+- `asr_pipeline_kwargs` — extra kwargs merged into the `transformers.pipeline(...)`
+  **construction** (e.g. `chunk_length_s`, `batch_size`). These change how the
+  pipeline is built, so they are folded into the transcriber cache key.
+- `asr_generate_kwargs` — **decode-time** defaults applied on every transcription
+  (e.g. `language`, `task` for a multilingual Whisper). Applied at call time, so
+  one loaded pipeline is reused. Ignored by non-generative backends (e.g. CTC).
+
+Set them at compose time (JSON), which writes them into `config.json`:
+
+```bash
+python -m granite_switch.composer.compose_granite_switch \
+  --adapters ... \
+  --asr-model openai/whisper-large-v3 \
+  --asr-pipeline-kwargs '{"chunk_length_s": 15}' \
+  --asr-generate-kwargs '{"language": "de", "task": "transcribe"}'
+```
+
+Because they live in `config.json`, an existing audio checkpoint can be retuned by
+editing that file directly — no re-compose and no patched package:
+
+```json
+{ "asr_enabled": true, "asr_model_id": "openai/whisper-large-v3",
+  "asr_pipeline_kwargs": {"chunk_length_s": 15},
+  "asr_generate_kwargs": {"language": "de", "task": "transcribe"} }
+```
+
+### Per-request language (multilingual)
+
+For one deployment that serves many languages, a request can override the config
+default via `mm_processor_kwargs`. Only `language` and `task` are honored from a
+request (an allowlist — clients cannot inject arbitrary generation options); the
+config default supplies everything else, and request values win:
+
+```python
+out = llm.generate({
+    "prompt": "Transcript of the audio: <|audio|>\nAnswer:",
+    "multi_modal_data": {"audio": [(audio, sr)]},
+    "mm_processor_kwargs": {"language": "fr"},   # this request, French
+}, SamplingParams(max_tokens=128))
+```
+
+The same cached pipeline serves every language — the decode kwargs are applied per
+call, so there is no per-language reload.
+
 ## Calling it
 
 ### Python (offline)
@@ -104,7 +153,11 @@ tokens.
 - **Cascade, not end-to-end.** Prosody/emotion/uncertainty are lost; ASR errors
   propagate to the LLM. Two models run sequentially (ASR then LLM).
 - **English by default** (`distil-whisper/distil-small.en`). Use `--asr-model`
-  for multilingual.
+  with a multilingual model and set the language via `asr_generate_kwargs` (or
+  per request via `mm_processor_kwargs`; see *Tuning the ASR model* above).
+- **HF `pipeline` backends only.** Any `automatic-speech-recognition` pipeline
+  model works via config alone; a non-pipeline backend (cloud STT, faster-whisper,
+  a custom encoder) still needs a code-level plug point — tracked as future work.
 - One audio clip per request.
 
 ## Audio + adapters
@@ -119,6 +172,9 @@ adapter behaves identically to the text equivalent.
 ## Tests
 
 - `tests/unit/test_asr.py` — CPU unit tests for the ASR backend (audio coercion,
-  resampling, transcription with a mocked pipeline). No GPU/vLLM required.
+  resampling, transcription with a mocked pipeline, pipeline-kwargs cache keying,
+  and per-request decode-kwargs resolution). No GPU/vLLM required.
+- `tests/unit/test_config.py` — round-trips `asr_pipeline_kwargs` /
+  `asr_generate_kwargs` through save/load.
 - End-to-end (GPU): compose an `--enable-audio` checkpoint, then an audio request
   through vLLM produces an answer and text-only requests are unaffected.

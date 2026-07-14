@@ -23,7 +23,7 @@ Design notes:
 from __future__ import annotations
 
 import threading
-from typing import Dict, Optional, Tuple, Union
+from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
 import numpy as np
 
@@ -54,9 +54,14 @@ class ASRTranscriber:
         self,
         model_id: str = DEFAULT_ASR_MODEL_ID,
         device: str = "cpu",
+        pipeline_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
+        # Extra kwargs merged into the pipeline() construction. Because they
+        # change the built pipeline, get_transcriber folds them into the cache
+        # key so distinct construction options get distinct cached instances.
+        self.pipeline_kwargs: Dict[str, Any] = dict(pipeline_kwargs or {})
         self._pipeline = None
         self._load_lock = threading.Lock()
 
@@ -77,20 +82,26 @@ class ASRTranscriber:
                 if isinstance(self.device, str) and self.device.startswith("cuda")
                 else torch.float32
             )
-            self._pipeline = pipeline(
-                task="automatic-speech-recognition",
-                model=self.model_id,
-                device=self.device,
-                torch_dtype=torch_dtype,
+            # Built-in defaults, then let checkpoint-supplied pipeline_kwargs
+            # override any of them (e.g. a different chunk_length_s, or model
+            # kwargs a non-Whisper backend needs).
+            kwargs: Dict[str, Any] = {
+                "task": "automatic-speech-recognition",
+                "model": self.model_id,
+                "device": self.device,
+                "torch_dtype": torch_dtype,
                 # Enable internal 30s chunking so audio longer than the model's
                 # native window is handled without us re-implementing it.
-                chunk_length_s=30,
-            )
+                "chunk_length_s": 30,
+            }
+            kwargs.update(self.pipeline_kwargs)
+            self._pipeline = pipeline(**kwargs)
 
     def transcribe(
         self,
         audio: AudioInput,
         sampling_rate: Optional[int] = None,
+        generate_kwargs: Optional[Mapping[str, Any]] = None,
     ) -> str:
         """Transcribe one audio clip to a text string.
 
@@ -101,6 +112,10 @@ class ASRTranscriber:
             sampling_rate: Sample rate of ``audio`` in Hz. Required unless
                 ``audio`` is an ``(array, sampling_rate)`` tuple. Audio is
                 resampled to 16 kHz when needed.
+            generate_kwargs: Decode-time kwargs forwarded to the ASR model for
+                this call (e.g. ``{"language": "fr"}``). Applied per call so the
+                same loaded pipeline serves many languages. Passed only when
+                non-empty, so CTC/non-generative backends are unaffected.
 
         Returns:
             The transcript with surrounding whitespace stripped.
@@ -112,8 +127,12 @@ class ASRTranscriber:
         self.load()
         # Pass the already-resampled mono waveform; tell the pipeline its rate so
         # it does not attempt its own resampling.
+        call_kwargs: Dict[str, Any] = {}
+        if generate_kwargs:
+            call_kwargs["generate_kwargs"] = dict(generate_kwargs)
         result = self._pipeline(
-            {"raw": samples, "sampling_rate": _TARGET_SAMPLE_RATE}
+            {"raw": samples, "sampling_rate": _TARGET_SAMPLE_RATE},
+            **call_kwargs,
         )
         text = result["text"] if isinstance(result, dict) else str(result)
         return text.strip()
@@ -121,26 +140,78 @@ class ASRTranscriber:
 
 # ── Module-level cache + convenience function ────────────────────────────────
 
-_TRANSCRIBERS: Dict[Tuple[str, str], ASRTranscriber] = {}
+# Keyed on (model_id, device, frozen pipeline_kwargs). pipeline_kwargs are in
+# the key because they change the constructed pipeline; generate_kwargs are NOT
+# — they are applied per transcribe() call, so one cached pipeline serves them
+# all (that is what makes per-request language selection cheap).
+_TRANSCRIBERS: Dict[Tuple, ASRTranscriber] = {}
 _CACHE_LOCK = threading.Lock()
+
+
+# Decode kwargs a client may set per request. Kept to language/task so a client
+# cannot inject arbitrary (potentially expensive or unsafe) generation options;
+# everything else is fixed by the checkpoint author in config.asr_generate_kwargs.
+DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS = frozenset({"language", "task"})
+
+
+def resolve_generate_kwargs(
+    config_defaults: Optional[Mapping[str, Any]],
+    request: Optional[Mapping[str, Any]] = None,
+    allowed_keys: "frozenset[str]" = DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
+) -> Dict[str, Any]:
+    """Merge config-default decode kwargs with allowlisted per-request overrides.
+
+    ``config_defaults`` come from ``config.asr_generate_kwargs``. ``request`` is
+    the per-request mapping (vLLM's ``mm_processor_kwargs``); a top-level
+    ``language`` or a nested ``asr_generate_kwargs`` object may override the
+    defaults, but only keys in ``allowed_keys`` are honored. Request values win
+    so one deployed model can serve many languages. Pure and vLLM-free so it can
+    be unit-tested on CPU.
+    """
+    merged: Dict[str, Any] = dict(config_defaults or {})
+    if isinstance(request, Mapping):
+        nested = request.get("asr_generate_kwargs")
+        if isinstance(nested, Mapping):
+            merged.update(
+                {k: v for k, v in nested.items() if k in allowed_keys}
+            )
+        language = request.get("language")
+        if language is not None:
+            merged["language"] = language
+    return merged
+
+
+def _freeze(value: Any) -> Any:
+    """Recursively convert dicts/lists into a hashable, order-stable form."""
+    if isinstance(value, Mapping):
+        return tuple(sorted((k, _freeze(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
 
 
 def get_transcriber(
     model_id: Optional[str] = None,
     device: str = "cpu",
+    pipeline_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> ASRTranscriber:
-    """Return a process-wide cached :class:`ASRTranscriber` for (model_id, device).
+    """Return a process-wide cached :class:`ASRTranscriber`.
 
-    ``model_id`` of None resolves to :data:`DEFAULT_ASR_MODEL_ID`.
+    Cached per ``(model_id, device, pipeline_kwargs)``. ``model_id`` of None
+    resolves to :data:`DEFAULT_ASR_MODEL_ID`.
     """
     resolved = model_id or DEFAULT_ASR_MODEL_ID
-    key = (resolved, device)
+    key = (resolved, device, _freeze(pipeline_kwargs or {}))
     transcriber = _TRANSCRIBERS.get(key)
     if transcriber is None:
         with _CACHE_LOCK:
             transcriber = _TRANSCRIBERS.get(key)
             if transcriber is None:
-                transcriber = ASRTranscriber(model_id=resolved, device=device)
+                transcriber = ASRTranscriber(
+                    model_id=resolved,
+                    device=device,
+                    pipeline_kwargs=pipeline_kwargs,
+                )
                 _TRANSCRIBERS[key] = transcriber
     return transcriber
 
@@ -151,11 +222,13 @@ def transcribe(
     *,
     model_id: Optional[str] = None,
     device: str = "cpu",
+    pipeline_kwargs: Optional[Mapping[str, Any]] = None,
+    generate_kwargs: Optional[Mapping[str, Any]] = None,
 ) -> str:
     """Convenience wrapper: transcribe with the cached transcriber for the args."""
-    return get_transcriber(model_id=model_id, device=device).transcribe(
-        audio, sampling_rate
-    )
+    return get_transcriber(
+        model_id=model_id, device=device, pipeline_kwargs=pipeline_kwargs
+    ).transcribe(audio, sampling_rate, generate_kwargs=generate_kwargs)
 
 
 # ── Audio coercion helpers ───────────────────────────────────────────────────

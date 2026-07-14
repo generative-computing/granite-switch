@@ -52,6 +52,18 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             asr_device (str): Device the ASR model runs on. Default "cpu" keeps
                 vLLM's GPU KV-cache budget clean; set to a CUDA device to trade GPU
                 memory for transcription latency.
+            asr_pipeline_kwargs (Optional[dict]): Extra keyword arguments merged
+                into the ``transformers.pipeline(...)`` construction call for the
+                ASR model (e.g. ``{"chunk_length_s": 15}``). These affect how the
+                pipeline is built, so they are baked into the transcriber cache
+                key. None means "no extras". Default: None.
+            asr_generate_kwargs (Optional[dict]): Default decode-time keyword
+                arguments passed to the ASR model on every transcription (e.g.
+                ``{"language": "de", "task": "transcribe"}`` for a multilingual
+                Whisper). Applied at call time, so a single loaded pipeline can be
+                reused; per-request values (via ``mm_processor_kwargs``) override
+                these. Ignored by models that do not generate (e.g. CTC). Default:
+                None.
         **kwargs: Additional arguments passed to GraniteConfig.
     """
 
@@ -74,6 +86,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         asr_enabled: bool = False,
         asr_model_id: Optional[str] = None,
         asr_device: str = "cpu",
+        asr_pipeline_kwargs: Optional[dict] = None,
+        asr_generate_kwargs: Optional[dict] = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -162,6 +176,10 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.asr_enabled = asr_enabled
         self.asr_model_id = asr_model_id
         self.asr_device = asr_device
+        # Pipeline-construction extras (affect the built pipeline → cache key)
+        # and default decode kwargs (applied per call, per-request overridable).
+        self.asr_pipeline_kwargs = asr_pipeline_kwargs
+        self.asr_generate_kwargs = asr_generate_kwargs
 
         # Adapter names
         self.adapter_names = adapter_names

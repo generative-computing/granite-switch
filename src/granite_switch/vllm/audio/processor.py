@@ -48,7 +48,12 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 
-from .asr import DEFAULT_ASR_MODEL_ID, get_transcriber
+from .asr import (
+    DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
+    DEFAULT_ASR_MODEL_ID,
+    get_transcriber,
+    resolve_generate_kwargs,
+)
 
 # The chat-template marker that stands in for an audio clip before replacement.
 AUDIO_MARKER = "<|audio|>"
@@ -104,6 +109,14 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
         cfg = self.get_hf_config()
         return getattr(cfg, "asr_device", "cpu") or "cpu"
 
+    def _asr_pipeline_kwargs(self) -> Mapping[str, object]:
+        cfg = self.get_hf_config()
+        return getattr(cfg, "asr_pipeline_kwargs", None) or {}
+
+    def _asr_generate_kwargs(self) -> Mapping[str, object]:
+        cfg = self.get_hf_config()
+        return getattr(cfg, "asr_generate_kwargs", None) or {}
+
 
 class GraniteSwitchASRDummyInputsBuilder(
     BaseDummyInputsBuilder[GraniteSwitchASRProcessingInfo]
@@ -130,14 +143,17 @@ class GraniteSwitchASRMultiModalProcessor(
 ):
     """Runs ASR and splices the transcript tokens into the prompt."""
 
-    def _transcribe(self, audio) -> list[int]:
+    def _transcribe(self, audio, generate_kwargs: Optional[Mapping[str, object]] = None) -> list[int]:
         """Transcribe one audio item to a list of token ids."""
         transcriber = get_transcriber(
             model_id=self.info._asr_model_id(),
             device=self.info._asr_device(),
+            pipeline_kwargs=self.info._asr_pipeline_kwargs(),
         )
         # The data parser already resampled to _TARGET_SR.
-        text = transcriber.transcribe(audio, sampling_rate=_TARGET_SR)
+        text = transcriber.transcribe(
+            audio, sampling_rate=_TARGET_SR, generate_kwargs=generate_kwargs or None
+        )
         tokenizer = self.info.get_tokenizer()
         ids = tokenizer.encode(text, add_special_tokens=False)
         # Guard the profiling bound.
@@ -158,8 +174,16 @@ class GraniteSwitchASRMultiModalProcessor(
             input_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature(dict(input_ids=[input_ids]), tensor_type="pt")
 
+        # Resolve decode kwargs once (config defaults + allowlisted per-request
+        # overrides) and apply them to every audio item in this request.
+        generate_kwargs = resolve_generate_kwargs(
+            self.info._asr_generate_kwargs(),
+            mm_kwargs,
+            DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
+        )
+
         # Transcribe each audio to token ids; concatenate flat with per-item sizes.
-        per_item_ids = [self._transcribe(a) for a in audios]
+        per_item_ids = [self._transcribe(a, generate_kwargs) for a in audios]
         sizes = [len(ids) for ids in per_item_ids]
         flat_ids = [tid for ids in per_item_ids for tid in ids]
 

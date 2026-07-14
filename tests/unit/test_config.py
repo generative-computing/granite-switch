@@ -100,3 +100,36 @@ class TestConfigDefaults:
     def test_projection_head_dim_inferred_from_hidden_size(self):
         cfg = GraniteSwitchConfig(**_valid_kwargs())
         assert cfg.projection_head_dim == 64 // 4
+
+
+# ════════════════════════════════════════════════════════════════════
+# 3. Audio (ASR) preprocessing fields
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestAudioConfig:
+
+    def test_asr_defaults_off(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_enabled is False
+        assert cfg.asr_model_id is None
+        assert cfg.asr_device == "cpu"
+        assert cfg.asr_pipeline_kwargs is None
+        assert cfg.asr_generate_kwargs is None
+
+    def test_asr_kwargs_round_trip(self, tmp_path):
+        # Pipeline/generate kwargs must survive save_pretrained → from_pretrained
+        # so the checkpoint stays self-describing about its ASR front-end.
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_model_id="openai/whisper-large-v3",
+            asr_pipeline_kwargs={"chunk_length_s": 15, "batch_size": 4},
+            asr_generate_kwargs={"language": "de", "task": "transcribe"},
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_enabled is True
+        assert loaded.asr_model_id == "openai/whisper-large-v3"
+        assert loaded.asr_pipeline_kwargs == {"chunk_length_s": 15, "batch_size": 4}
+        assert loaded.asr_generate_kwargs == {"language": "de", "task": "transcribe"}

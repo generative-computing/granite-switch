@@ -593,6 +593,23 @@ Examples:
         help="Device the ASR model runs on (default: cpu). Use e.g. cuda:0 to "
              "run transcription on GPU (watch vLLM's KV-cache memory budget).",
     )
+    parser.add_argument(
+        "--asr-pipeline-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of extra kwargs merged into the transformers ASR "
+             "pipeline() construction, e.g. '{\"chunk_length_s\": 15}'. Baked "
+             "into the checkpoint config. Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-generate-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of default decode kwargs applied on every "
+             "transcription, e.g. '{\"language\": \"de\", \"task\": "
+             "\"transcribe\"}' for multilingual Whisper. Per-request "
+             "mm_processor_kwargs override these. Implies --enable-audio.",
+    )
     return parser
 
 
@@ -798,7 +815,12 @@ def build():
 
     # Audio cascade: add the <|audio|> marker token before the embedding resize.
     # Enabled by --enable-audio or by naming an --asr-model.
-    audio_enabled = args.enable_audio or args.asr_model is not None
+    audio_enabled = (
+        args.enable_audio
+        or args.asr_model is not None
+        or args.asr_pipeline_kwargs is not None
+        or args.asr_generate_kwargs is not None
+    )
     audio_token_id = add_audio_token(tokenizer) if audio_enabled else None
 
     # Configure chat template with adapter mappings (Granite models only).
@@ -872,10 +894,18 @@ def build():
         model.config.asr_enabled = True
         model.config.asr_model_id = args.asr_model
         model.config.asr_device = args.asr_device
+        # Optional pipeline-construction extras and default decode kwargs. Only
+        # set when provided so the config stays minimal for the common case.
+        if args.asr_pipeline_kwargs is not None:
+            model.config.asr_pipeline_kwargs = args.asr_pipeline_kwargs
+        if args.asr_generate_kwargs is not None:
+            model.config.asr_generate_kwargs = args.asr_generate_kwargs
         print(
             f"  Audio cascade enabled "
             f"(asr_model_id={args.asr_model or 'default'}, "
-            f"asr_device={args.asr_device}, audio_token_id={audio_token_id})"
+            f"asr_device={args.asr_device}, audio_token_id={audio_token_id}, "
+            f"pipeline_kwargs={args.asr_pipeline_kwargs or {}}, "
+            f"generate_kwargs={args.asr_generate_kwargs or {}})"
         )
 
     # Base model size (best effort)
