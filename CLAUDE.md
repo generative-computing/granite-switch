@@ -393,3 +393,27 @@ When committing, **never sign as Claude** (per project instructions)
 ## License
 
 Apache-2.0 (as indicated by SPDX headers in source files)
+
+<!-- CollaborativeDream navigation block — appended to CLAUDE.md by /cd-init.
+     Keep it thin: it loads on every turn. Never @import REQ/ADR bodies here. -->
+
+## CollaborativeDream navigation (how project knowledge is loaded)
+
+This repo uses **CollaborativeDream**: a three-layer knowledge graph loaded into context
+only when needed, so the always-on context stays small.
+
+- **WHY** — business goals → `docs/context/why/PLAN.md`. Not auto-loaded; run **`/cd-why`**.
+- **WHAT** — versioned requirements (source of truth) → `docs/context/what/`. A requirement
+  **auto-loads when you read a file matching its `governs_paths`**; otherwise run
+  **`/cd-context <subsystem>`**. Human registry: `docs/context/what/INDEX.md`.
+- **HOW** — design decisions → `.claude/rules/adr/`. Each ADR **auto-loads only when you read a
+  file matching its `paths:`**.
+
+### Hard invariants (repo-wide)
+
+- Every ADR / standard rule **must** have `paths:` frontmatter. Check: `scripts/check-context-scoping.sh`.
+- A **retired** requirement/ADR must have **no live scoping globs** (strip `governs_paths` / `paths:`,
+  or delete the file). Git preserves history.
+- A requirement is **not authoritative until `reviewed_by` is set** (human review gate).
+
+Lifecycle procedures (create / change / retire records): see `.claude/rules/_global/cd-maintenance.md`.
