@@ -113,6 +113,67 @@ class TestTranscriber:
         assert t._pipeline is sentinel
 
 
+class TestAudioTokenBudget:
+    def test_single_clip_uses_context_minus_reserve(self):
+        assert asr.audio_token_budget(131072, 8192, 1) == 131072 - 8192
+
+    def test_split_across_clips(self):
+        # (131072 - 8192) // 4
+        assert asr.audio_token_budget(131072, 8192, 4) == (131072 - 8192) // 4
+
+    def test_prompt_tokens_subtracted(self):
+        assert asr.audio_token_budget(8192, 4096, 2, prompt_tokens=1000) == (
+            (8192 - 4096 - 1000) // 2
+        )
+
+    def test_floors_at_one_when_no_room(self):
+        # Reserve exceeds context -> still at least one placeholder per clip.
+        assert asr.audio_token_budget(100, 200, 1) == 1
+
+    def test_zero_clip_count_treated_as_one(self):
+        assert asr.audio_token_budget(1000, 0, 0) == 1000
+
+
+class TestChunkedTranscribe:
+    """self_chunks=False routes through the split/transcribe/merge chunker."""
+
+    def _fake_pipe_transcriber(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        # Each segment "transcribes" to a token tagged by its sample length, so we
+        # can see how many windows were produced and that merge stitched them.
+        t._pipeline = lambda inp, **k: {"text": "seg%d" % len(inp["raw"])}
+        return t
+
+    def test_self_chunks_true_is_single_call(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        calls = []
+        t._pipeline = lambda inp, **k: (calls.append(len(inp["raw"])) or {"text": "x"})
+        # 70s clip; with self_chunks the whole thing goes in one call.
+        t.transcribe(np.zeros(70 * 16000, dtype=np.float32), sampling_rate=16000,
+                     self_chunks=True)
+        assert len(calls) == 1
+        assert calls[0] == 70 * 16000
+
+    def test_non_self_chunking_splits_and_merges(self):
+        t = self._fake_pipe_transcriber()
+        # 70s @16k, 30s window, 5s overlap -> 3 windows: 480000, 480000, 320000
+        # samples. The two identical 30s window texts collapse at the seam; the
+        # 20s remainder is appended.
+        out = t.transcribe(
+            np.zeros(70 * 16000, dtype=np.float32), sampling_rate=16000,
+            self_chunks=False, chunk_length_s=30.0, chunk_overlap_s=5.0,
+        )
+        assert out == "seg480000 seg320000"
+
+    def test_short_clip_single_window(self):
+        t = self._fake_pipe_transcriber()
+        out = t.transcribe(
+            np.zeros(5 * 16000, dtype=np.float32), sampling_rate=16000,
+            self_chunks=False, chunk_length_s=30.0, chunk_overlap_s=5.0,
+        )
+        assert out == "seg80000"
+
+
 class TestTranscriberCache:
     def test_same_key_returns_same_instance(self):
         a = asr.get_transcriber("m", "cpu")

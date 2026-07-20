@@ -40,15 +40,19 @@ if _VLLM_AVAILABLE:
     from granite_switch.vllm.audio.asr import DEFAULT_ASR_MODEL_ID
 
 
-def _make_info(**cfg_attrs):
+def _make_info(*, max_model_len=131072, **cfg_attrs):
     """A ProcessingInfo whose get_hf_config() returns a stub config.
 
     Bypasses __init__ (which needs a full vLLM InputProcessingContext) — we only
-    exercise methods that read the config.
+    exercise methods that read the config. A stub ``ctx`` supplies the served
+    ``max_model_len`` used to size the transcript budget.
     """
     info = object.__new__(GraniteSwitchASRProcessingInfo)
     cfg = SimpleNamespace(**cfg_attrs)
     info.get_hf_config = lambda: cfg
+    info.ctx = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=max_model_len)
+    )
     return info
 
 
@@ -63,11 +67,21 @@ class TestProcessingInfoGating:
         info = _make_info()
         assert info.get_supported_mm_limits() == {}
 
-    def test_enabled_reports_one_audio(self):
+    def test_enabled_reports_configurable_clip_limit(self):
+        # Default ceiling is 32 clips; no longer hard-capped at 1.
         info = _make_info(asr_enabled=True)
-        assert info.get_supported_mm_limits() == {"audio": 1}
-        assert info.get_mm_max_tokens_per_item(128, {"audio": 1}) == {
-            "audio": proc_mod._MAX_TRANSCRIPT_TOKENS
+        assert info.get_supported_mm_limits() == {"audio": 32}
+        info3 = _make_info(asr_enabled=True, asr_max_audio_clips=3)
+        assert info3.get_supported_mm_limits() == {"audio": 3}
+
+    def test_max_tokens_per_item_is_context_derived(self):
+        # Budget = (seq_len - generation_reserve) // clip_count (default reserve 8192).
+        info = _make_info(asr_enabled=True)
+        assert info.get_mm_max_tokens_per_item(20000, {"audio": 1}) == {
+            "audio": 20000 - 8192
+        }
+        assert info.get_mm_max_tokens_per_item(20000, {"audio": 4}) == {
+            "audio": (20000 - 8192) // 4
         }
 
 
@@ -97,6 +111,37 @@ class TestProcessingInfoAsrAccessors:
         assert info._asr_pipeline_kwargs() == {"chunk_length_s": 15}
         assert info._asr_generate_kwargs() == {"language": "de"}
 
+    def test_longaudio_accessor_defaults(self):
+        info = _make_info(asr_enabled=True)
+        assert info._asr_max_audio_clips() == 32
+        assert info._asr_generation_reserve_tokens() == 8192
+        assert info._asr_self_chunks() is True
+        assert info._asr_chunk_length_s() == 30.0
+        assert info._asr_chunk_overlap_s() == 5.0
+
+    def test_longaudio_accessors_from_config(self):
+        info = _make_info(
+            asr_enabled=True,
+            asr_max_audio_clips=2,
+            asr_generation_reserve_tokens=4096,
+            asr_self_chunks=False,
+            asr_chunk_length_s=20.0,
+            asr_chunk_overlap_s=3.0,
+        )
+        assert info._asr_max_audio_clips() == 2
+        assert info._asr_generation_reserve_tokens() == 4096
+        assert info._asr_self_chunks() is False
+        assert info._asr_chunk_length_s() == 20.0
+        assert info._asr_chunk_overlap_s() == 3.0
+
+    def test_max_model_len_from_ctx(self):
+        assert _make_info(asr_enabled=True, max_model_len=16000)._max_model_len() == 16000
+
+    def test_max_model_len_falls_back_to_position_embeddings(self):
+        info = _make_info(asr_enabled=True, max_position_embeddings=4096)
+        info.ctx = SimpleNamespace(model_config=SimpleNamespace(max_model_len=None))
+        assert info._max_model_len() == 4096
+
 
 def _make_processor(info, monkeypatch, capture):
     """A processor whose transcriber is faked; records what it was called with."""
@@ -107,9 +152,20 @@ def _make_processor(info, monkeypatch, capture):
     proc.info = info
 
     class FakeTranscriber:
-        def transcribe(self, audio, sampling_rate=None, generate_kwargs=None):
+        def transcribe(
+            self,
+            audio,
+            sampling_rate=None,
+            generate_kwargs=None,
+            self_chunks=True,
+            chunk_length_s=30.0,
+            chunk_overlap_s=5.0,
+        ):
             capture["sampling_rate"] = sampling_rate
             capture["generate_kwargs"] = generate_kwargs
+            capture["self_chunks"] = self_chunks
+            capture["chunk_length_s"] = chunk_length_s
+            capture["chunk_overlap_s"] = chunk_overlap_s
             return "hello world"
 
     def fake_get_transcriber(model_id=None, device="cpu", pipeline_kwargs=None):
@@ -211,3 +267,53 @@ class TestCallHfProcessorMerge:
         # No audio → transcriber never touched, no audio fields emitted.
         assert capture == {}
         assert "audio_token_ids" not in bf
+
+
+class TestMultiClipAndBudget:
+    """#1 (multiple clips) + #2 (context-derived per-clip token budget)."""
+
+    def test_two_clips_produce_two_transcripts(self, monkeypatch):
+        capture = {}
+        info = _make_info(asr_enabled=True, asr_model_id="w")
+        proc = _make_processor(info, monkeypatch, capture)
+
+        bf = proc._call_hf_processor(
+            prompt="<|audio|> and <|audio|>",
+            mm_data={"audios": [
+                np.zeros(1600, dtype=np.float32),
+                np.zeros(1600, dtype=np.float32),
+            ]},
+            mm_kwargs={},
+            tok_kwargs={},
+        )
+        # Each faked transcript is [1,2,3]; two clips -> per-item sizes [3,3],
+        # flat length 6 (spliced at the two markers by _get_prompt_updates).
+        assert bf["audio_num_tokens"].tolist() == [3, 3]
+        assert len(bf["audio_token_ids"]) == 6
+
+    def test_transcribe_truncates_to_budget(self, monkeypatch):
+        capture = {}
+        info = _make_info(asr_enabled=True, asr_model_id="w")
+        proc = _make_processor(info, monkeypatch, capture)
+        # Override tokenizer to emit 5 ids so the budget cut is visible.
+        info.get_tokenizer = lambda: SimpleNamespace(
+            encode=lambda text, add_special_tokens=False: [1, 2, 3, 4, 5]
+        )
+        assert proc._transcribe(np.zeros(1600, dtype=np.float32), {}, budget=2) == [1, 2]
+        # No budget -> untruncated.
+        assert proc._transcribe(np.zeros(1600, dtype=np.float32), {}) == [1, 2, 3, 4, 5]
+
+    def test_self_chunks_and_chunk_params_forwarded(self, monkeypatch):
+        capture = {}
+        info = _make_info(
+            asr_enabled=True,
+            asr_model_id="w",
+            asr_self_chunks=False,
+            asr_chunk_length_s=20.0,
+            asr_chunk_overlap_s=3.0,
+        )
+        proc = _make_processor(info, monkeypatch, capture)
+        proc._transcribe(np.zeros(1600, dtype=np.float32), {})
+        assert capture["self_chunks"] is False
+        assert capture["chunk_length_s"] == 20.0
+        assert capture["chunk_overlap_s"] == 3.0

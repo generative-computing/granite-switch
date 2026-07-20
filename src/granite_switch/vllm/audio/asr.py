@@ -31,6 +31,33 @@ import numpy as np
 # checkpoint does not name its own (config.asr_model_id is None).
 DEFAULT_ASR_MODEL_ID = "distil-whisper/distil-small.en"
 
+_CHUNKING = None
+
+
+def _load_chunking():
+    """Load the pure chunking helpers, memoized.
+
+    Uses the normal relative import in production (running inside the
+    ``granite_switch.vllm.audio`` package). Falls back to a direct file-path load
+    when this module is imported standalone (the CPU unit tests load ``asr.py`` by
+    path to skip the vLLM-importing package ``__init__``).
+    """
+    global _CHUNKING
+    if _CHUNKING is not None:
+        return _CHUNKING
+    try:
+        from . import chunking as _chunking  # normal package import
+    except ImportError:
+        import importlib.util
+        import pathlib
+
+        path = pathlib.Path(__file__).with_name("chunking.py")
+        spec = importlib.util.spec_from_file_location("gs_chunking", path)
+        _chunking = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(_chunking)
+    _CHUNKING = _chunking
+    return _CHUNKING
+
 # Sample rate expected by Whisper-family feature extractors.
 _TARGET_SAMPLE_RATE = 16_000
 
@@ -102,6 +129,9 @@ class ASRTranscriber:
         audio: AudioInput,
         sampling_rate: Optional[int] = None,
         generate_kwargs: Optional[Mapping[str, Any]] = None,
+        self_chunks: bool = True,
+        chunk_length_s: float = 30.0,
+        chunk_overlap_s: float = 5.0,
     ) -> str:
         """Transcribe one audio clip to a text string.
 
@@ -116,6 +146,16 @@ class ASRTranscriber:
                 this call (e.g. ``{"language": "fr"}``). Applied per call so the
                 same loaded pipeline serves many languages. Passed only when
                 non-empty, so CTC/non-generative backends are unaffected.
+            self_chunks: True when the backend handles long audio itself (the
+                Whisper pipeline, via its internal ``chunk_length_s``); the whole
+                clip is passed in one call. False routes long audio through our
+                encoder-agnostic chunker (:mod:`.chunking`): split into
+                overlapping windows, transcribe each, and merge with overlap
+                de-duplication.
+            chunk_length_s: Window length for our chunker (only used when
+                ``self_chunks`` is False).
+            chunk_overlap_s: Window overlap for our chunker (only used when
+                ``self_chunks`` is False).
 
         Returns:
             The transcript with surrounding whitespace stripped.
@@ -125,8 +165,27 @@ class ASRTranscriber:
         samples = _resample(samples, sr, _TARGET_SAMPLE_RATE)
 
         self.load()
-        # Pass the already-resampled mono waveform; tell the pipeline its rate so
-        # it does not attempt its own resampling.
+
+        # Backend chunks internally (Whisper): one call over the whole clip.
+        if self_chunks:
+            return self._run_pipeline(samples, generate_kwargs)
+
+        # Encoder-agnostic path: split into overlapping windows, transcribe each,
+        # then stitch the per-window transcripts (de-duplicating the overlap).
+        chunking = _load_chunking()
+        segments = chunking.split_waveform(
+            samples, _TARGET_SAMPLE_RATE, chunk_length_s, chunk_overlap_s
+        )
+        texts = [self._run_pipeline(seg, generate_kwargs) for seg in segments]
+        return chunking.merge_transcripts(texts).strip()
+
+    def _run_pipeline(
+        self,
+        samples: np.ndarray,
+        generate_kwargs: Optional[Mapping[str, Any]] = None,
+    ) -> str:
+        """Run the loaded pipeline over an already-resampled mono waveform."""
+        # Tell the pipeline the rate so it does not attempt its own resampling.
         call_kwargs: Dict[str, Any] = {}
         if generate_kwargs:
             call_kwargs["generate_kwargs"] = dict(generate_kwargs)
@@ -181,6 +240,34 @@ def resolve_generate_kwargs(
     return merged
 
 
+def audio_token_budget(
+    context_len: int,
+    reserve_tokens: int,
+    num_clips: int,
+    prompt_tokens: int = 0,
+) -> int:
+    """Max transcript tokens allowed per audio clip, derived from the context.
+
+    Replaces the old fixed 2048-token cap. The audio in a request may occupy the
+    context window minus what is held back for the generated answer (and any
+    prompt text already present), split evenly across the request's clips::
+
+        (context_len - reserve_tokens - prompt_tokens) // num_clips
+
+    Two call sites, both vLLM-free so this is unit-testable on CPU:
+      * startup profiling knows only ``context_len`` (seq_len) and the clip count
+        (``prompt_tokens`` defaults to 0), giving the worst-case per-clip bound;
+      * at request time the real prompt length is subtracted too, so the actual
+        transcript is always <= what profiling reserved.
+
+    Floored at 1 so every clip contributes at least one placeholder token (vLLM
+    rejects a multimodal item with zero placeholders).
+    """
+    clips = max(1, num_clips)
+    available = context_len - reserve_tokens - prompt_tokens
+    return max(1, available // clips)
+
+
 def _freeze(value: Any) -> Any:
     """Recursively convert dicts/lists into a hashable, order-stable form."""
     if isinstance(value, Mapping):
@@ -224,11 +311,21 @@ def transcribe(
     device: str = "cpu",
     pipeline_kwargs: Optional[Mapping[str, Any]] = None,
     generate_kwargs: Optional[Mapping[str, Any]] = None,
+    self_chunks: bool = True,
+    chunk_length_s: float = 30.0,
+    chunk_overlap_s: float = 5.0,
 ) -> str:
     """Convenience wrapper: transcribe with the cached transcriber for the args."""
     return get_transcriber(
         model_id=model_id, device=device, pipeline_kwargs=pipeline_kwargs
-    ).transcribe(audio, sampling_rate, generate_kwargs=generate_kwargs)
+    ).transcribe(
+        audio,
+        sampling_rate,
+        generate_kwargs=generate_kwargs,
+        self_chunks=self_chunks,
+        chunk_length_s=chunk_length_s,
+        chunk_overlap_s=chunk_overlap_s,
+    )
 
 
 # ── Audio coercion helpers ───────────────────────────────────────────────────
