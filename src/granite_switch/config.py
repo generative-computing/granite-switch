@@ -52,6 +52,50 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             asr_device (str): Device the ASR model runs on. Default "cpu" keeps
                 vLLM's GPU KV-cache budget clean; set to a CUDA device to trade GPU
                 memory for transcription latency.
+            asr_pipeline_kwargs (Optional[dict]): Extra keyword arguments merged
+                into the ``transformers.pipeline(...)`` construction call for the
+                ASR model (e.g. ``{"chunk_length_s": 15}``). These affect how the
+                pipeline is built, so they are baked into the transcriber cache
+                key. None means "no extras". Default: None.
+            asr_generate_kwargs (Optional[dict]): Default decode-time keyword
+                arguments passed to the ASR model on every transcription (e.g.
+                ``{"language": "de", "task": "transcribe"}`` for a multilingual
+                Whisper). Applied at call time, so a single loaded pipeline can be
+                reused; per-request values (via ``mm_processor_kwargs``) override
+                these. Ignored by models that do not generate (e.g. CTC). Default:
+                None.
+            asr_max_audio_clips (int): Maximum number of audio clips accepted in a
+                single request. Each clip's transcript is spliced at its own
+                ``<|audio|>`` marker. vLLM enforces this as the modality ceiling
+                (``--limit-mm-per-prompt`` may lower it, not raise it). For the
+                cascade the clips cost no extra KV (transcripts are ordinary text
+                tokens bounded by the context window); the ceiling mainly guards
+                against one request triggering an unbounded number of synchronous
+                ASR transcriptions, and bounds the startup profiling pass. Default:
+                32.
+            asr_generation_reserve_tokens (int): Tokens held back from the context
+                window for the model's generated answer (and prompt overhead) when
+                computing how many transcript tokens the audio may occupy. The
+                per-request audio budget is roughly
+                ``max_model_len - asr_generation_reserve_tokens - prompt_tokens``,
+                split across the request's clips. Replaces the old fixed 2048-token
+                transcript cap with a context-derived one. Default: 8192.
+            asr_chunk_length_s (float): Window length (seconds) our own long-audio
+                chunker splits a clip into before transcribing each window. Only
+                used for backends that do not self-chunk (see asr_self_chunks); the
+                default Whisper backend chunks internally and ignores this. Default:
+                30.0.
+            asr_chunk_overlap_s (float): Overlap (seconds) between consecutive
+                chunker windows, so words straddling a boundary are whole in at
+                least one window; the transcript merge de-duplicates the overlap.
+                Only used when asr_self_chunks is False. Default: 5.0.
+            asr_self_chunks (bool): Whether the ASR backend handles long audio
+                itself. True for the Whisper pipeline (its internal
+                ``chunk_length_s`` does timestamp-based stitching, higher quality
+                than our text-level merge), so our chunker is bypassed. Set False
+                for a backend with a fixed input window (e.g. a future speech
+                encoder) to route audio through our encoder-agnostic
+                split/transcribe/merge chunker. Default: True.
         **kwargs: Additional arguments passed to GraniteConfig.
     """
 
@@ -74,6 +118,13 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         asr_enabled: bool = False,
         asr_model_id: Optional[str] = None,
         asr_device: str = "cpu",
+        asr_pipeline_kwargs: Optional[dict] = None,
+        asr_generate_kwargs: Optional[dict] = None,
+        asr_max_audio_clips: int = 32,
+        asr_generation_reserve_tokens: int = 8192,
+        asr_chunk_length_s: float = 30.0,
+        asr_chunk_overlap_s: float = 5.0,
+        asr_self_chunks: bool = True,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -162,6 +213,33 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.asr_enabled = asr_enabled
         self.asr_model_id = asr_model_id
         self.asr_device = asr_device
+        # Pipeline-construction extras (affect the built pipeline → cache key)
+        # and default decode kwargs (applied per call, per-request overridable).
+        self.asr_pipeline_kwargs = asr_pipeline_kwargs
+        self.asr_generate_kwargs = asr_generate_kwargs
+        # Long-audio / multi-clip preprocessing. The transcript token budget is
+        # derived from the context window at runtime (max_model_len minus the
+        # generation reserve, split across clips) rather than a fixed cap; the
+        # chunker settings only apply to backends that do not self-chunk.
+        if asr_max_audio_clips < 1:
+            raise ValueError(
+                f"asr_max_audio_clips must be >= 1, got {asr_max_audio_clips}"
+            )
+        if asr_generation_reserve_tokens < 0:
+            raise ValueError(
+                f"asr_generation_reserve_tokens must be >= 0, got "
+                f"{asr_generation_reserve_tokens}"
+            )
+        if asr_chunk_overlap_s >= asr_chunk_length_s:
+            raise ValueError(
+                f"asr_chunk_overlap_s ({asr_chunk_overlap_s}) must be < "
+                f"asr_chunk_length_s ({asr_chunk_length_s})"
+            )
+        self.asr_max_audio_clips = asr_max_audio_clips
+        self.asr_generation_reserve_tokens = asr_generation_reserve_tokens
+        self.asr_chunk_length_s = asr_chunk_length_s
+        self.asr_chunk_overlap_s = asr_chunk_overlap_s
+        self.asr_self_chunks = asr_self_chunks
 
         # Adapter names
         self.adapter_names = adapter_names

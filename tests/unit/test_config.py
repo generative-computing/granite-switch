@@ -100,3 +100,72 @@ class TestConfigDefaults:
     def test_projection_head_dim_inferred_from_hidden_size(self):
         cfg = GraniteSwitchConfig(**_valid_kwargs())
         assert cfg.projection_head_dim == 64 // 4
+
+
+# ════════════════════════════════════════════════════════════════════
+# 3. Audio (ASR) preprocessing fields
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestAudioConfig:
+
+    def test_asr_defaults_off(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_enabled is False
+        assert cfg.asr_model_id is None
+        assert cfg.asr_device == "cpu"
+        assert cfg.asr_pipeline_kwargs is None
+        assert cfg.asr_generate_kwargs is None
+
+    def test_longaudio_defaults(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_max_audio_clips == 32
+        assert cfg.asr_generation_reserve_tokens == 8192
+        assert cfg.asr_chunk_length_s == 30.0
+        assert cfg.asr_chunk_overlap_s == 5.0
+        assert cfg.asr_self_chunks is True
+
+    def test_longaudio_round_trip(self, tmp_path):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_max_audio_clips=4,
+            asr_generation_reserve_tokens=4096,
+            asr_chunk_length_s=20.0,
+            asr_chunk_overlap_s=3.0,
+            asr_self_chunks=False,
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_max_audio_clips == 4
+        assert loaded.asr_generation_reserve_tokens == 4096
+        assert loaded.asr_chunk_length_s == 20.0
+        assert loaded.asr_chunk_overlap_s == 3.0
+        assert loaded.asr_self_chunks is False
+
+    def test_invalid_max_audio_clips_raises(self):
+        with pytest.raises(ValueError, match="asr_max_audio_clips"):
+            GraniteSwitchConfig(num_adapters=0, asr_max_audio_clips=0)
+
+    def test_overlap_ge_window_raises(self):
+        with pytest.raises(ValueError, match="asr_chunk_overlap_s"):
+            GraniteSwitchConfig(
+                num_adapters=0, asr_chunk_length_s=10.0, asr_chunk_overlap_s=10.0
+            )
+
+    def test_asr_kwargs_round_trip(self, tmp_path):
+        # Pipeline/generate kwargs must survive save_pretrained → from_pretrained
+        # so the checkpoint stays self-describing about its ASR front-end.
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_model_id="openai/whisper-large-v3",
+            asr_pipeline_kwargs={"chunk_length_s": 15, "batch_size": 4},
+            asr_generate_kwargs={"language": "de", "task": "transcribe"},
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_enabled is True
+        assert loaded.asr_model_id == "openai/whisper-large-v3"
+        assert loaded.asr_pipeline_kwargs == {"chunk_length_s": 15, "batch_size": 4}
+        assert loaded.asr_generate_kwargs == {"language": "de", "task": "transcribe"}

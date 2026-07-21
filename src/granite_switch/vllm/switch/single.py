@@ -202,13 +202,20 @@ class SingleSwitch(nn.Module):
         # @support_torch_compile, which forbids `tensor.any()` branching.
         # `torch.where` runs every step; the cost is one indexed gather and
         # one elementwise select on the flat input.
-        if self.control_to_substitute_lut is not None:
-            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
-            is_control = sub_id_per_pos >= 0
-            modified_input_ids = torch.where(
-                is_control, sub_id_per_pos, input_ids
-            )
-        else:
-            modified_input_ids = input_ids
+        modified_input_ids = self.apply_token_exchange(input_ids)
 
         return adapter_indices, modified_input_ids
+
+    def apply_token_exchange(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Rewrite control-token ids to their substitute ids (pure LUT lookup).
+
+        This is the embedding-side half of the switch — no attention, no KV —
+        so it can be reused by the model's ``embed_input_ids`` on the multimodal
+        path, where vLLM precomputes ``inputs_embeds`` before ``forward`` runs.
+        Returns ``input_ids`` unchanged when no substitute LUT was built.
+        """
+        if self.control_to_substitute_lut is None:
+            return input_ids
+        sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+        is_control = sub_id_per_pos >= 0
+        return torch.where(is_control, sub_id_per_pos, input_ids)

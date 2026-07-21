@@ -48,7 +48,13 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 
-from .asr import DEFAULT_ASR_MODEL_ID, get_transcriber
+from .asr import (
+    DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
+    DEFAULT_ASR_MODEL_ID,
+    audio_token_budget,
+    get_transcriber,
+    resolve_generate_kwargs,
+)
 
 # The chat-template marker that stands in for an audio clip before replacement.
 AUDIO_MARKER = "<|audio|>"
@@ -56,10 +62,9 @@ AUDIO_MARKER = "<|audio|>"
 # ASR feature-extractor sample rate the audio is resampled to.
 _TARGET_SR = 16_000
 
-# Upper bound on transcript tokens per audio item, used for startup memory
-# profiling (get_mm_max_tokens_per_item). Generous enough for a long clip; the
-# real transcript is usually far shorter. ~ a few minutes of dense speech.
-_MAX_TRANSCRIPT_TOKENS = 2048
+# Fallback context length if the served max_model_len cannot be read (should not
+# happen in practice; keeps the transcript budget finite either way).
+_FALLBACK_CONTEXT_LEN = 8192
 
 # Dummy clip length (seconds) used during vLLM's profiling run.
 _DUMMY_AUDIO_SECONDS = 5
@@ -76,8 +81,11 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
         # reports no modalities, so vLLM never profiles audio or loads ASR.
         if not self._asr_enabled():
             return {}
-        # One audio clip per request for the alpha.
-        return {"audio": 1}
+        # Configurable ceiling on audio clips per request; each clip's transcript
+        # is spliced at its own <|audio|> marker. Finite so vLLM can size KV for
+        # the worst case (clips x per-clip budget). --limit-mm-per-prompt may
+        # lower this, not raise it above the declared ceiling.
+        return {"audio": self._asr_max_audio_clips()}
 
     def get_mm_max_tokens_per_item(
         self,
@@ -86,9 +94,16 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
     ) -> Optional[Mapping[str, int]]:
         if not self._asr_enabled():
             return {}
-        # Bound the transcript length so vLLM can size the KV cache at startup
-        # instead of running dummy audio through ASR at max size.
-        return {"audio": _MAX_TRANSCRIPT_TOKENS}
+        # Per-clip transcript bound derived from the context window vLLM passes in
+        # (seq_len), minus the generation reserve, split across the max clip count.
+        # This is the worst case for profiling; the runtime budget also subtracts
+        # the prompt length, so it is never larger than this.
+        count = mm_counts.get("audio", 1) or 1
+        return {
+            "audio": audio_token_budget(
+                seq_len, self._asr_generation_reserve_tokens(), count
+            )
+        }
 
     def get_data_parser(self) -> MultiModalDataParser:
         # Resample incoming audio to the ASR sample rate.
@@ -103,6 +118,49 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
     def _asr_device(self) -> str:
         cfg = self.get_hf_config()
         return getattr(cfg, "asr_device", "cpu") or "cpu"
+
+    def _asr_pipeline_kwargs(self) -> Mapping[str, object]:
+        cfg = self.get_hf_config()
+        return getattr(cfg, "asr_pipeline_kwargs", None) or {}
+
+    def _asr_generate_kwargs(self) -> Mapping[str, object]:
+        cfg = self.get_hf_config()
+        return getattr(cfg, "asr_generate_kwargs", None) or {}
+
+    def _asr_max_audio_clips(self) -> int:
+        cfg = self.get_hf_config()
+        return int(getattr(cfg, "asr_max_audio_clips", 32) or 32)
+
+    def _asr_generation_reserve_tokens(self) -> int:
+        cfg = self.get_hf_config()
+        return int(getattr(cfg, "asr_generation_reserve_tokens", 8192) or 0)
+
+    def _asr_self_chunks(self) -> bool:
+        cfg = self.get_hf_config()
+        return bool(getattr(cfg, "asr_self_chunks", True))
+
+    def _asr_chunk_length_s(self) -> float:
+        cfg = self.get_hf_config()
+        return float(getattr(cfg, "asr_chunk_length_s", 30.0) or 30.0)
+
+    def _asr_chunk_overlap_s(self) -> float:
+        cfg = self.get_hf_config()
+        return float(getattr(cfg, "asr_chunk_overlap_s", 5.0) or 0.0)
+
+    def _max_model_len(self) -> int:
+        """The served context window, or a safe fallback.
+
+        vLLM passes ``seq_len`` into ``get_mm_max_tokens_per_item`` for profiling,
+        but ``_call_hf_processor`` needs the served context at request time to size
+        the transcript budget, so read it from the processing context's model
+        config (falling back to the checkpoint's max_position_embeddings, then a
+        constant).
+        """
+        model_config = getattr(self.ctx, "model_config", None)
+        max_len = getattr(model_config, "max_model_len", None)
+        if not max_len:
+            max_len = getattr(self.get_hf_config(), "max_position_embeddings", None)
+        return int(max_len) if max_len else _FALLBACK_CONTEXT_LEN
 
 
 class GraniteSwitchASRDummyInputsBuilder(
@@ -130,18 +188,36 @@ class GraniteSwitchASRMultiModalProcessor(
 ):
     """Runs ASR and splices the transcript tokens into the prompt."""
 
-    def _transcribe(self, audio) -> list[int]:
-        """Transcribe one audio item to a list of token ids."""
+    def _transcribe(
+        self,
+        audio,
+        generate_kwargs: Optional[Mapping[str, object]] = None,
+        budget: Optional[int] = None,
+    ) -> list[int]:
+        """Transcribe one audio item to a list of token ids (capped at ``budget``).
+
+        Long audio is handled by the backend itself (Whisper) or by our
+        encoder-agnostic chunker, per the checkpoint's ``asr_self_chunks`` flag.
+        """
         transcriber = get_transcriber(
             model_id=self.info._asr_model_id(),
             device=self.info._asr_device(),
+            pipeline_kwargs=self.info._asr_pipeline_kwargs(),
         )
         # The data parser already resampled to _TARGET_SR.
-        text = transcriber.transcribe(audio, sampling_rate=_TARGET_SR)
+        text = transcriber.transcribe(
+            audio,
+            sampling_rate=_TARGET_SR,
+            generate_kwargs=generate_kwargs or None,
+            self_chunks=self.info._asr_self_chunks(),
+            chunk_length_s=self.info._asr_chunk_length_s(),
+            chunk_overlap_s=self.info._asr_chunk_overlap_s(),
+        )
         tokenizer = self.info.get_tokenizer()
         ids = tokenizer.encode(text, add_special_tokens=False)
-        # Guard the profiling bound.
-        return ids[:_MAX_TRANSCRIPT_TOKENS]
+        # Cap to the per-clip transcript budget so the spliced sequence fits the
+        # context window vLLM profiled for.
+        return ids[:budget] if budget is not None else ids
 
     def _call_hf_processor(
         self,
@@ -158,12 +234,30 @@ class GraniteSwitchASRMultiModalProcessor(
             input_ids = tokenizer.encode(prompt, add_special_tokens=False)
             return BatchFeature(dict(input_ids=[input_ids]), tensor_type="pt")
 
-        # Transcribe each audio to token ids; concatenate flat with per-item sizes.
-        per_item_ids = [self._transcribe(a) for a in audios]
-        sizes = [len(ids) for ids in per_item_ids]
-        flat_ids = [tid for ids in per_item_ids for tid in ids]
+        # Resolve decode kwargs once (config defaults + allowlisted per-request
+        # overrides) and apply them to every audio item in this request.
+        generate_kwargs = resolve_generate_kwargs(
+            self.info._asr_generate_kwargs(),
+            mm_kwargs,
+            DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
+        )
 
         input_ids = tokenizer.encode(prompt, add_special_tokens=False)
+
+        # Per-clip transcript budget: the served context minus the generation
+        # reserve and the prompt already present, split across this request's
+        # clips. Derived from the context window rather than a fixed cap.
+        budget = audio_token_budget(
+            self.info._max_model_len(),
+            self.info._asr_generation_reserve_tokens(),
+            len(audios),
+            prompt_tokens=len(input_ids),
+        )
+
+        # Transcribe each audio to token ids; concatenate flat with per-item sizes.
+        per_item_ids = [self._transcribe(a, generate_kwargs, budget) for a in audios]
+        sizes = [len(ids) for ids in per_item_ids]
+        flat_ids = [tid for ids in per_item_ids for tid in ids]
 
         return BatchFeature(
             dict(

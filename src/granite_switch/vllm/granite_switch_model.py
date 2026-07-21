@@ -418,6 +418,12 @@ class GraniteSwitchForCausalLM(
 
     supports_multimodal = True
 
+    # Force vLLM to pass the raw input_ids to forward() on the multimodal path
+    # (not just precomputed inputs_embeds). The switch needs them to detect
+    # adapter control tokens, so audio requests route through adapters exactly
+    # like text requests.
+    requires_raw_input_tokens = True
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int):
         if modality.startswith("audio"):
@@ -515,10 +521,18 @@ class GraniteSwitchForCausalLM(
         """Embed token ids; scatter multimodal embeddings into their positions.
 
         Returns UN-scaled embeddings (the model forward applies the Granite
-        embedding_multiplier once over everything). ALPHA scope: audio requests
-        run on the base model, so no adapter control-token rewrite is needed.
+        embedding_multiplier once over everything).
+
+        Applies the switch's token-exchange rewrite (control -> substitute ids)
+        before embedding, so adapter control tokens get their in-distribution
+        embeddings exactly as on the text path. Adapter *detection* still runs in
+        forward on the raw input_ids (passed because requires_raw_input_tokens).
         """
-        inputs_embeds = self.model.embed_tokens(input_ids)
+        ids = input_ids
+        switch = getattr(self.model, "switch", None)
+        if switch is not None:
+            ids = switch.apply_token_exchange(input_ids)
+        inputs_embeds = self.model.embed_tokens(ids)
         if multimodal_embeddings is not None and is_multimodal is not None:
             mm = multimodal_embeddings
             if isinstance(mm, (list, tuple)):

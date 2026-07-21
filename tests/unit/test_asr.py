@@ -113,6 +113,67 @@ class TestTranscriber:
         assert t._pipeline is sentinel
 
 
+class TestAudioTokenBudget:
+    def test_single_clip_uses_context_minus_reserve(self):
+        assert asr.audio_token_budget(131072, 8192, 1) == 131072 - 8192
+
+    def test_split_across_clips(self):
+        # (131072 - 8192) // 4
+        assert asr.audio_token_budget(131072, 8192, 4) == (131072 - 8192) // 4
+
+    def test_prompt_tokens_subtracted(self):
+        assert asr.audio_token_budget(8192, 4096, 2, prompt_tokens=1000) == (
+            (8192 - 4096 - 1000) // 2
+        )
+
+    def test_floors_at_one_when_no_room(self):
+        # Reserve exceeds context -> still at least one placeholder per clip.
+        assert asr.audio_token_budget(100, 200, 1) == 1
+
+    def test_zero_clip_count_treated_as_one(self):
+        assert asr.audio_token_budget(1000, 0, 0) == 1000
+
+
+class TestChunkedTranscribe:
+    """self_chunks=False routes through the split/transcribe/merge chunker."""
+
+    def _fake_pipe_transcriber(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        # Each segment "transcribes" to a token tagged by its sample length, so we
+        # can see how many windows were produced and that merge stitched them.
+        t._pipeline = lambda inp, **k: {"text": "seg%d" % len(inp["raw"])}
+        return t
+
+    def test_self_chunks_true_is_single_call(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        calls = []
+        t._pipeline = lambda inp, **k: (calls.append(len(inp["raw"])) or {"text": "x"})
+        # 70s clip; with self_chunks the whole thing goes in one call.
+        t.transcribe(np.zeros(70 * 16000, dtype=np.float32), sampling_rate=16000,
+                     self_chunks=True)
+        assert len(calls) == 1
+        assert calls[0] == 70 * 16000
+
+    def test_non_self_chunking_splits_and_merges(self):
+        t = self._fake_pipe_transcriber()
+        # 70s @16k, 30s window, 5s overlap -> 3 windows: 480000, 480000, 320000
+        # samples. The two identical 30s window texts collapse at the seam; the
+        # 20s remainder is appended.
+        out = t.transcribe(
+            np.zeros(70 * 16000, dtype=np.float32), sampling_rate=16000,
+            self_chunks=False, chunk_length_s=30.0, chunk_overlap_s=5.0,
+        )
+        assert out == "seg480000 seg320000"
+
+    def test_short_clip_single_window(self):
+        t = self._fake_pipe_transcriber()
+        out = t.transcribe(
+            np.zeros(5 * 16000, dtype=np.float32), sampling_rate=16000,
+            self_chunks=False, chunk_length_s=30.0, chunk_overlap_s=5.0,
+        )
+        assert out == "seg80000"
+
+
 class TestTranscriberCache:
     def test_same_key_returns_same_instance(self):
         a = asr.get_transcriber("m", "cpu")
@@ -127,3 +188,121 @@ class TestTranscriberCache:
         a = asr.get_transcriber("m", "cpu")
         b = asr.get_transcriber("m", "cuda:0")
         assert a is not b
+
+    def test_pipeline_kwargs_stored_on_instance(self):
+        t = asr.get_transcriber("m", "cpu", pipeline_kwargs={"chunk_length_s": 15})
+        assert t.pipeline_kwargs == {"chunk_length_s": 15}
+
+    def test_pipeline_kwargs_are_part_of_cache_key(self):
+        # Different pipeline_kwargs → different cached pipeline (they change how
+        # the pipeline is constructed), same kwargs → same instance.
+        a = asr.get_transcriber("pk", "cpu", pipeline_kwargs={"chunk_length_s": 15})
+        b = asr.get_transcriber("pk", "cpu", pipeline_kwargs={"chunk_length_s": 30})
+        c = asr.get_transcriber("pk", "cpu", pipeline_kwargs={"chunk_length_s": 15})
+        assert a is not b
+        assert a is c
+
+    def test_pipeline_kwargs_key_is_order_independent(self):
+        a = asr.get_transcriber("pk2", "cpu", pipeline_kwargs={"x": 1, "y": 2})
+        b = asr.get_transcriber("pk2", "cpu", pipeline_kwargs={"y": 2, "x": 1})
+        assert a is b
+
+
+class TestFreeze:
+    def test_dict_order_independent(self):
+        assert asr._freeze({"a": 1, "b": 2}) == asr._freeze({"b": 2, "a": 1})
+
+    def test_nested_and_list(self):
+        frozen = asr._freeze({"a": [1, 2], "b": {"c": 3}})
+        # Result must be hashable (usable as a dict key).
+        assert hash(frozen) == hash(asr._freeze({"b": {"c": 3}, "a": [1, 2]}))
+
+
+class TestGenerateKwargsPassthrough:
+    def test_generate_kwargs_forwarded_to_pipeline_call(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        fake_pipe = mock.Mock(return_value={"text": "hola"})
+        t._pipeline = fake_pipe
+        t.transcribe(
+            np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            generate_kwargs={"language": "es"},
+        )
+        # generate_kwargs is forwarded to the pipeline call as a kwarg.
+        assert fake_pipe.call_args_list[-1].kwargs["generate_kwargs"] == {"language": "es"}
+
+    def test_empty_generate_kwargs_not_passed(self):
+        # CTC / non-generative backends must not receive a generate_kwargs kwarg.
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        fake_pipe = mock.Mock(return_value={"text": "ok"})
+        t._pipeline = fake_pipe
+        t.transcribe(np.zeros(1600, dtype=np.float32), sampling_rate=16000)
+        assert "generate_kwargs" not in fake_pipe.call_args_list[-1].kwargs
+        t.transcribe(
+            np.zeros(1600, dtype=np.float32), sampling_rate=16000, generate_kwargs={}
+        )
+        assert "generate_kwargs" not in fake_pipe.call_args_list[-1].kwargs
+
+
+class TestResolveGenerateKwargs:
+    def test_config_defaults_only(self):
+        out = asr.resolve_generate_kwargs({"language": "de", "task": "transcribe"})
+        assert out == {"language": "de", "task": "transcribe"}
+
+    def test_none_config_is_empty(self):
+        assert asr.resolve_generate_kwargs(None) == {}
+
+    def test_top_level_language_overrides_config(self):
+        out = asr.resolve_generate_kwargs({"language": "de"}, {"language": "fr"})
+        assert out == {"language": "fr"}
+
+    def test_nested_request_allowlisted_keys_merge(self):
+        out = asr.resolve_generate_kwargs(
+            {"language": "de"},
+            {"asr_generate_kwargs": {"task": "translate"}},
+        )
+        assert out == {"language": "de", "task": "translate"}
+
+    def test_disallowed_request_keys_dropped(self):
+        # A client cannot inject arbitrary generation options.
+        out = asr.resolve_generate_kwargs(
+            {"language": "de"},
+            {"asr_generate_kwargs": {"num_beams": 99, "task": "translate"}},
+        )
+        assert out == {"language": "de", "task": "translate"}
+        assert "num_beams" not in out
+
+    def test_request_wins_over_config(self):
+        out = asr.resolve_generate_kwargs(
+            {"language": "de", "task": "transcribe"},
+            {"asr_generate_kwargs": {"language": "ja"}},
+        )
+        assert out["language"] == "ja"
+        assert out["task"] == "transcribe"
+
+    def test_config_not_mutated(self):
+        cfg = {"language": "de"}
+        asr.resolve_generate_kwargs(cfg, {"language": "fr"})
+        assert cfg == {"language": "de"}
+
+
+class TestLoadMergesPipelineKwargs:
+    def test_pipeline_kwargs_override_defaults(self):
+        # load() must merge config-supplied pipeline_kwargs over the built-in
+        # defaults (e.g. override chunk_length_s, add extra kwargs).
+        pytest.importorskip("torch")
+        fake_pipe_factory = mock.Mock(return_value=mock.Mock())
+        # transformers is a lazy module: `from transformers import pipeline`
+        # re-resolves to transformers.pipelines.pipeline, so patch there.
+        with mock.patch("transformers.pipelines.pipeline", fake_pipe_factory):
+            t = asr.ASRTranscriber(
+                model_id="m",
+                device="cpu",
+                pipeline_kwargs={"chunk_length_s": 15, "batch_size": 4},
+            )
+            t.load()
+        kwargs = fake_pipe_factory.call_args.kwargs
+        assert kwargs["model"] == "m"
+        assert kwargs["task"] == "automatic-speech-recognition"
+        assert kwargs["chunk_length_s"] == 15   # overrode the default 30
+        assert kwargs["batch_size"] == 4        # extra kwarg passed through

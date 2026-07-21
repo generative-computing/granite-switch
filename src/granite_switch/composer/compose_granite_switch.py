@@ -593,6 +593,66 @@ Examples:
         help="Device the ASR model runs on (default: cpu). Use e.g. cuda:0 to "
              "run transcription on GPU (watch vLLM's KV-cache memory budget).",
     )
+    parser.add_argument(
+        "--asr-pipeline-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of extra kwargs merged into the transformers ASR "
+             "pipeline() construction, e.g. '{\"chunk_length_s\": 15}'. Baked "
+             "into the checkpoint config. Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-generate-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of default decode kwargs applied on every "
+             "transcription, e.g. '{\"language\": \"de\", \"task\": "
+             "\"transcribe\"}' for multilingual Whisper. Per-request "
+             "mm_processor_kwargs override these. Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-clips",
+        type=int,
+        default=None,
+        help="Max audio clips accepted per request (default 32). Implies "
+             "--enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-generation-reserve-tokens",
+        type=int,
+        default=None,
+        help="Context tokens held back for the generated answer when sizing the "
+             "per-clip transcript budget (default 8192). Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-self-chunks",
+        dest="asr_self_chunks",
+        action="store_true",
+        default=None,
+        help="Backend chunks long audio itself (Whisper default). Mutually "
+             "exclusive with --asr-no-self-chunks.",
+    )
+    parser.add_argument(
+        "--asr-no-self-chunks",
+        dest="asr_self_chunks",
+        action="store_false",
+        help="Route long audio through the encoder-agnostic split/merge chunker "
+             "(for backends with a fixed input window). Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-chunk-length-s",
+        type=float,
+        default=None,
+        help="Chunker window length in seconds (default 30.0). Only used when "
+             "the backend does not self-chunk. Implies --enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-chunk-overlap-s",
+        type=float,
+        default=None,
+        help="Chunker window overlap in seconds (default 5.0). Only used when "
+             "the backend does not self-chunk. Implies --enable-audio.",
+    )
     return parser
 
 
@@ -798,7 +858,17 @@ def build():
 
     # Audio cascade: add the <|audio|> marker token before the embedding resize.
     # Enabled by --enable-audio or by naming an --asr-model.
-    audio_enabled = args.enable_audio or args.asr_model is not None
+    audio_enabled = (
+        args.enable_audio
+        or args.asr_model is not None
+        or args.asr_pipeline_kwargs is not None
+        or args.asr_generate_kwargs is not None
+        or args.asr_max_audio_clips is not None
+        or args.asr_generation_reserve_tokens is not None
+        or args.asr_self_chunks is not None
+        or args.asr_chunk_length_s is not None
+        or args.asr_chunk_overlap_s is not None
+    )
     audio_token_id = add_audio_token(tokenizer) if audio_enabled else None
 
     # Configure chat template with adapter mappings (Granite models only).
@@ -872,10 +942,34 @@ def build():
         model.config.asr_enabled = True
         model.config.asr_model_id = args.asr_model
         model.config.asr_device = args.asr_device
+        # Optional pipeline-construction extras and default decode kwargs. Only
+        # set when provided so the config stays minimal for the common case.
+        if args.asr_pipeline_kwargs is not None:
+            model.config.asr_pipeline_kwargs = args.asr_pipeline_kwargs
+        if args.asr_generate_kwargs is not None:
+            model.config.asr_generate_kwargs = args.asr_generate_kwargs
+        # Long-audio / multi-clip knobs. Only set when explicitly given so the
+        # config keeps the constructor defaults otherwise.
+        if args.asr_max_audio_clips is not None:
+            model.config.asr_max_audio_clips = args.asr_max_audio_clips
+        if args.asr_generation_reserve_tokens is not None:
+            model.config.asr_generation_reserve_tokens = (
+                args.asr_generation_reserve_tokens
+            )
+        if args.asr_self_chunks is not None:
+            model.config.asr_self_chunks = args.asr_self_chunks
+        if args.asr_chunk_length_s is not None:
+            model.config.asr_chunk_length_s = args.asr_chunk_length_s
+        if args.asr_chunk_overlap_s is not None:
+            model.config.asr_chunk_overlap_s = args.asr_chunk_overlap_s
         print(
             f"  Audio cascade enabled "
             f"(asr_model_id={args.asr_model or 'default'}, "
-            f"asr_device={args.asr_device}, audio_token_id={audio_token_id})"
+            f"asr_device={args.asr_device}, audio_token_id={audio_token_id}, "
+            f"pipeline_kwargs={args.asr_pipeline_kwargs or {}}, "
+            f"generate_kwargs={args.asr_generate_kwargs or {}}, "
+            f"max_audio_clips={args.asr_max_audio_clips or 'default'}, "
+            f"self_chunks={args.asr_self_chunks})"
         )
 
     # Base model size (best effort)
