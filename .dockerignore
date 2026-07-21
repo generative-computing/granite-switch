@@ -1,0 +1,52 @@
+# Only src/, pyproject.toml, and README.md are needed to build the wheel.
+# Keep the build context small so `docker build` is fast and cache-stable.
+
+# VCS
+.git/
+.github/
+
+# Everything not needed to build/install the package
+tests/
+tutorials/
+docs/
+scratch/
+scripts/
+tmp/
+.cache/
+
+# Build artifacts
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual envs
+venv/
+.venv/
+
+# Model/adapter checkpoints (multi-GB — must never enter the build context)
+modular-granite/
+my-modular-model/
+
+# Local tooling / editor / OS
+.vscode/
+.idea/
+.DS_Store
+.python-version
+.claude/
+
+# Docker's own files
+Dockerfile
+.dockerignore
+
+# Logs / coverage
+*.log
+.coverage
+.coverage.*
+htmlcov/

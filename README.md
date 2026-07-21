@@ -115,6 +115,27 @@ print(f"social_bias score: {score:.3f}")
 # => social_bias score: 0.964
 ```
 
+**Deploy with Docker:**
+
+The included `Dockerfile` builds on the official vLLM image and serves the OpenAI-compatible
+API server. It requires an NVIDIA GPU and the [NVIDIA container toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+
+```bash
+make docker-build                        # build the image
+make docker-serve                        # serve granite-switch-4.1-3b-preview on :8000
+```
+
+The host Hugging Face cache (`~/.cache/huggingface`) is mounted so models download only once.
+Override the model, port, or vLLM args on the command line:
+
+```bash
+make docker-serve MODEL=ibm-granite/granite-switch-4.1-8b-preview PORT=8001 \
+  ARGS="--tensor-parallel-size 2"
+```
+
+For gated models, pass a token with `HF_TOKEN=...`. The server then works with the same
+Mellea client shown above (point `base_url` at the host and port you exposed).
+
 ## How It Works
 
 With standard LoRA, each adapter is trained against its own KV distribution — so switching adapter functions across complex flow control means discarding and recomputing the KV cache at every step. aLoRA adapter functions are instead trained against a common normalized KV cache, so they can all coexist in a single checkpoint and activate on demand without cross-contamination:

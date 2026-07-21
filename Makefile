@@ -1,10 +1,17 @@
-.PHONY: test test-unit test-composer test-hf test-vllm test-integration test-all test-cpu test-gpu test-gpu-full test-tp test-regression-fast test-regression-real test-regression-hf test-peft-equiv test-peft-equiv-hf lint help
+.PHONY: test test-unit test-composer test-hf test-vllm test-integration test-all test-cpu test-gpu test-gpu-full test-tp test-regression-fast test-regression-real test-regression-hf test-peft-equiv test-peft-equiv-hf lint docker-build docker-serve help
 
 # Default Python (can override: make test PYTHON=python3.11)
 PYTHON ?= python
 
 # Pytest flags per CLAUDE.md guidelines
 PYTEST_FLAGS = -v -s --tb=short
+
+# Docker image + serving config (override on the command line, e.g.
+# `make docker-serve MODEL=ibm-granite/granite-switch-4.1-8b-preview PORT=8001`)
+IMAGE ?= granite-switch-vllm
+MODEL ?= ibm-granite/granite-switch-4.1-3b-preview
+PORT  ?= 8000
+HF_CACHE ?= $(HOME)/.cache/huggingface
 
 # Individual test suites
 test-unit:
@@ -63,6 +70,20 @@ test-peft-equiv-hf:
 lint:
 	$(PYTHON) -m ruff check .
 
+# Docker: build the vLLM serving image
+docker-build:
+	docker build -t $(IMAGE) .
+
+# Docker: serve MODEL on PORT (requires an NVIDIA GPU + container toolkit).
+# Mounts the host HF cache so models download once. Pass HF_TOKEN=... for
+# gated models; extra vLLM args go in ARGS (e.g. ARGS="--tensor-parallel-size 2").
+docker-serve:
+	docker run --rm --gpus all -p $(PORT):$(PORT) \
+		-v $(HF_CACHE):/root/.cache/huggingface \
+		$(if $(HF_TOKEN),-e HF_TOKEN=$(HF_TOKEN),) \
+		-e MODEL=$(MODEL) -e PORT=$(PORT) \
+		$(IMAGE) $(ARGS)
+
 # Help
 help:
 	@echo "Available targets:"
@@ -83,3 +104,5 @@ help:
 	@echo "  test-regression-hf    - Run all HF regression tests (no vLLM/GPU)"
 	@echo "  test-peft-equiv-hf    - Run PEFT equivalence (HF only)"
 	@echo "  lint           - Run ruff linter"
+	@echo "  docker-build   - Build the vLLM serving image (override IMAGE=...)"
+	@echo "  docker-serve   - Serve MODEL on PORT via vLLM (override MODEL/PORT/ARGS/HF_TOKEN)"
