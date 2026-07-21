@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapter analysis and diagnostics — printing utilities."""
 
-from typing import Dict
 
-
-def print_source_adapter_analysis(analysis: Dict):
+def print_source_adapter_analysis(analysis: dict):
     """Print the source adapter analysis table."""
     adapter_names = analysis["adapter_names"]
     module_types = analysis["module_types"]
@@ -27,7 +25,9 @@ def print_source_adapter_analysis(analysis: Dict):
     # Print target modules for each adapter
     print("\nDeclared Target Modules (from adapter_config.json):")
     for idx, adapter_name in enumerate(adapter_names):
-        targets = sorted(list(adapter_targets[idx])) if idx < len(adapter_targets) else []
+        targets = (
+            sorted(list(adapter_targets[idx])) if idx < len(adapter_targets) else []
+        )
         print(f"  {adapter_name}: {targets}")
 
     # Print header with adapter info
@@ -67,23 +67,33 @@ def print_source_adapter_analysis(analysis: Dict):
     print("\nSummary:")
     total_cells = len(module_types) * len(adapter_names)
     populated_count = sum(
-        1 for mt in module_types for an in adapter_names
+        1
+        for mt in module_types
+        for an in adapter_names
         if status[mt].get(an) == "populated"
     )
     not_targeted_count = sum(
-        1 for mt in module_types for an in adapter_names
+        1
+        for mt in module_types
+        for an in adapter_names
         if status[mt].get(an) == "not-targeted"
     )
     missing_count = sum(
-        1 for mt in module_types for an in adapter_names
+        1
+        for mt in module_types
+        for an in adapter_names
         if status[mt].get(an) == "missing*"
     )
     zero_count = sum(
-        1 for mt in module_types for an in adapter_names
+        1
+        for mt in module_types
+        for an in adapter_names
         if status[mt].get(an) == "zero*"
     )
     unexpected_count = sum(
-        1 for mt in module_types for an in adapter_names
+        1
+        for mt in module_types
+        for an in adapter_names
         if status[mt].get(an) == "unexpected"
     )
 

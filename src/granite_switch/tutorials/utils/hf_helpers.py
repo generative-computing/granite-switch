@@ -7,7 +7,7 @@ like adapter invocation, conversation management, and complex adapter protocols.
 
 import json
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import torch
 from IPython.display import Markdown, display
@@ -17,9 +17,9 @@ def generate_turn(
     model: Any,
     tokenizer: Any,
     device: str,
-    messages: List[Dict[str, str]],
-    adapter: Optional[str] = None,
-    documents: Optional[List[Dict[str, Any]]] = None,
+    messages: list[dict[str, str]],
+    adapter: str | None = None,
+    documents: list[dict[str, Any]] | None = None,
     max_new_tokens: int = 64,
 ) -> str:
     """Render a chat prompt with the named adapter active and greedy-decode.
@@ -89,7 +89,7 @@ def screen_user_message(
     return json.loads(raw)["score"]
 
 
-def _split_sentences(text: str) -> List[str]:
+def _split_sentences(text: str) -> list[str]:
     """Simple sentence splitter for tutorial purposes.
 
     Note: This is a basic regex-based splitter suitable for demos.
@@ -109,10 +109,10 @@ def run_context_attribution(
     model: Any,
     tokenizer: Any,
     device: str,
-    messages: List[Dict[str, str]],
-    documents: List[Dict[str, Any]],
+    messages: list[dict[str, str]],
+    documents: list[dict[str, Any]],
     attribution_instruction: str,
-) -> Tuple[str, List[str], Dict[int, Tuple[str, str]]]:
+) -> tuple[str, list[str], dict[int, tuple[str, str]]]:
     """Invoke context-attribution adapter with sentence tagging.
 
     This adapter requires:
@@ -179,7 +179,7 @@ def run_context_attribution(
     return raw, response_sents, tagged_context
 
 
-def show_conversation_as_markdown(messages: List[Dict[str, str]]) -> None:
+def show_conversation_as_markdown(messages: list[dict[str, str]]) -> None:
     """Render the entire conversation as Markdown with role-labeled blocks.
 
     Call this once at the end of a cell after mutating messages, so the
@@ -196,7 +196,7 @@ def show_conversation_as_markdown(messages: List[Dict[str, str]]) -> None:
     display(Markdown("\n\n".join(md)))
 
 
-def say_user(messages: List[Dict[str, str]], content: str) -> None:
+def say_user(messages: list[dict[str, str]], content: str) -> None:
     """Append a user turn to the conversation.
 
     Does NOT print - call show_conversation_as_markdown() at the end of the cell.
@@ -208,7 +208,7 @@ def say_user(messages: List[Dict[str, str]], content: str) -> None:
     messages.append({"role": "user", "content": content})
 
 
-def say_assistant(messages: List[Dict[str, str]], content: str) -> None:
+def say_assistant(messages: list[dict[str, str]], content: str) -> None:
     """Append an assistant turn to the conversation.
 
     Does NOT print - call show_conversation_as_markdown() at the end of the cell.

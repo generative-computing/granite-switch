@@ -41,13 +41,16 @@ TIMEOUT = 1500
 def _run_step(step_name, *cmd_args, timeout=TIMEOUT):
     """Run a single worker step as a subprocess and assert success."""
     cmd = [sys.executable, str(WORKER), *cmd_args]
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Step: {step_name}")
     print(f"  Command: {' '.join(str(c) for c in cmd)}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     result = subprocess.run(
-        cmd, capture_output=True, text=True, timeout=timeout,
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
 
     if result.stdout:
@@ -138,13 +141,25 @@ def _build_and_compare(work_dir, build_args, label, intrinsic_name=None):
 
     _run_step(
         f"generate TP=1 ({label})",
-        "run", "--model-path", model_dir, "--tp-size", "1",
-        "--output-path", tp1_out, *run_extra,
+        "run",
+        "--model-path",
+        model_dir,
+        "--tp-size",
+        "1",
+        "--output-path",
+        tp1_out,
+        *run_extra,
     )
     _run_step(
         f"generate TP=2 ({label})",
-        "run", "--model-path", model_dir, "--tp-size", "2",
-        "--output-path", tp2_out, *run_extra,
+        "run",
+        "--model-path",
+        model_dir,
+        "--tp-size",
+        "2",
+        "--output-path",
+        tp2_out,
+        *run_extra,
     )
 
     with open(tp1_out) as f:
@@ -160,7 +175,6 @@ def _build_and_compare(work_dir, build_args, label, intrinsic_name=None):
         _compare_topk(label, i, r1, r2)
 
 
-
 class TestTPRealAdapters:
     """TP=1 vs TP=2 with real adapters from granite-lib-rag (granite-4.0-micro).
 
@@ -174,8 +188,10 @@ class TestTPRealAdapters:
             str(tmp_path),
             build_args=[
                 "build-compose",
-                "--base-model", "ibm-granite/granite-4.0-micro",
-                "--adapter-repos", "ibm-granite/granitelib-rag-r1.0",
+                "--base-model",
+                "ibm-granite/granite-4.0-micro",
+                "--adapter-repos",
+                "ibm-granite/granitelib-rag-r1.0",
             ],
             label="granite-4.0-micro-rag",
             intrinsic_name="answerability",

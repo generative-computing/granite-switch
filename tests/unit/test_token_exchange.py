@@ -38,7 +38,9 @@ class TestDefaults:
 
 class TestValidation:
     def test_substitute_ids_required_when_adapters_present(self):
-        with pytest.raises(ValueError, match="adapter_substitute_token_ids is required"):
+        with pytest.raises(
+            ValueError, match="adapter_substitute_token_ids is required"
+        ):
             GraniteSwitchConfig(**_base(adapter_substitute_token_ids=None))
 
     def test_substitute_wrong_length_raises(self):

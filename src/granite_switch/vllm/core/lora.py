@@ -38,14 +38,9 @@ Current usage (in granite_switch_model.py):
 """
 
 import logging
-from typing import Optional
 
 import torch
-import torch.nn.functional as F
-
-logger = logging.getLogger(__name__)
 from torch import nn
-
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -58,6 +53,9 @@ from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
     RowParallelLinear,
 )
+
+logger = logging.getLogger(__name__)
+
 
 class SwitchedLoRALinear(nn.Module):
     """LoRA linear layer that applies different adapters per token.
@@ -132,7 +130,7 @@ class SwitchedLoRALinear(nn.Module):
         self._row_parallel_reduce = (
             self._is_row_parallel
             and self.tp_size > 1
-            and getattr(base_layer, 'reduce_results', False)
+            and getattr(base_layer, "reduce_results", False)
         )
 
         # For packed modules, we need output_slices.
@@ -142,9 +140,13 @@ class SwitchedLoRALinear(nn.Module):
         # the actual sharded weight dimensions.
         if num_slices > 1:
             if output_slices is None:
-                raise ValueError("output_slices must be provided for packed modules (num_slices > 1)")
+                raise ValueError(
+                    "output_slices must be provided for packed modules (num_slices > 1)"
+                )
             if len(output_slices) != num_slices:
-                raise ValueError(f"output_slices length {len(output_slices)} != num_slices {num_slices}")
+                raise ValueError(
+                    f"output_slices length {len(output_slices)} != num_slices {num_slices}"
+                )
             if self._is_column_parallel and self.tp_size > 1:
                 self.output_slices = tuple(s // self.tp_size for s in output_slices)
             else:
@@ -170,10 +172,24 @@ class SwitchedLoRALinear(nn.Module):
         if num_slices == 1:
             # Standard case: single LoRA
             self.lora_A = nn.Parameter(
-                torch.zeros(self.num_adapters, 1, self.max_lora_rank, in_features, dtype=dtype, device=device)
+                torch.zeros(
+                    self.num_adapters,
+                    1,
+                    self.max_lora_rank,
+                    in_features,
+                    dtype=dtype,
+                    device=device,
+                )
             )
             self.lora_B = nn.Parameter(
-                torch.zeros(self.num_adapters, 1, out_features, self.max_lora_rank, dtype=dtype, device=device)
+                torch.zeros(
+                    self.num_adapters,
+                    1,
+                    out_features,
+                    self.max_lora_rank,
+                    dtype=dtype,
+                    device=device,
+                )
             )
             self.lora_A.weight_loader = self._make_weight_loader("a")
             self.lora_B.weight_loader = self._make_weight_loader("b")
@@ -181,18 +197,36 @@ class SwitchedLoRALinear(nn.Module):
             # Packed module case: separate LoRA for each slice
             # Store as ParameterList to ensure proper parameter registration
             # Matches vLLM's lora_a_stacked / lora_b_stacked structure
-            self.lora_A_slices = nn.ParameterList([
-                nn.Parameter(
-                    torch.zeros(self.num_adapters, 1, self.max_lora_rank, in_features, dtype=dtype, device=device)
-                )
-                for _ in range(num_slices)
-            ])
-            self.lora_B_slices = nn.ParameterList([
-                nn.Parameter(
-                    torch.zeros(self.num_adapters, 1, output_size, self.max_lora_rank, dtype=dtype, device=device)
-                )
-                for output_size in self.output_slices
-            ])
+            self.lora_A_slices = nn.ParameterList(
+                [
+                    nn.Parameter(
+                        torch.zeros(
+                            self.num_adapters,
+                            1,
+                            self.max_lora_rank,
+                            in_features,
+                            dtype=dtype,
+                            device=device,
+                        )
+                    )
+                    for _ in range(num_slices)
+                ]
+            )
+            self.lora_B_slices = nn.ParameterList(
+                [
+                    nn.Parameter(
+                        torch.zeros(
+                            self.num_adapters,
+                            1,
+                            output_size,
+                            self.max_lora_rank,
+                            dtype=dtype,
+                            device=device,
+                        )
+                    )
+                    for output_size in self.output_slices
+                ]
+            )
             for i, p in enumerate(self.lora_A_slices):
                 p.weight_loader = self._make_weight_loader("a", i)
             for i, p in enumerate(self.lora_B_slices):
@@ -208,7 +242,9 @@ class SwitchedLoRALinear(nn.Module):
         return self.base_layer.weight
 
     def slice_lora_a_weight(
-        self, full_weight: torch.Tensor, slice_idx: int = 0,
+        self,
+        full_weight: torch.Tensor,
+        slice_idx: int = 0,
     ) -> torch.Tensor:
         """Slice a full (unsharded) lora_A checkpoint weight for this TP rank.
 
@@ -224,7 +260,9 @@ class SwitchedLoRALinear(nn.Module):
         return full_weight[..., start : start + shard_size]
 
     def slice_lora_b_weight(
-        self, full_weight: torch.Tensor, slice_idx: int = 0,
+        self,
+        full_weight: torch.Tensor,
+        slice_idx: int = 0,
     ) -> torch.Tensor:
         """Slice a full (unsharded) lora_B checkpoint weight for this TP rank.
 
@@ -253,8 +291,14 @@ class SwitchedLoRALinear(nn.Module):
             sliced = slicer(loaded_weight, slice_idx)
             logger.debug(
                 "TP%d/%d lora_%s slice=%d base=%s param=%s loaded=%s sliced=%s",
-                self.tp_rank, self.tp_size, ab, slice_idx, base_type,
-                list(param.shape), list(loaded_weight.shape), list(sliced.shape),
+                self.tp_rank,
+                self.tp_size,
+                ab,
+                slice_idx,
+                base_type,
+                list(param.shape),
+                list(loaded_weight.shape),
+                list(sliced.shape),
             )
             param.data.copy_(sliced)
 
@@ -263,7 +307,7 @@ class SwitchedLoRALinear(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """Forward pass — reads LoRA metadata from the shared LoRAContext.
 
         Args:
@@ -295,18 +339,14 @@ class SwitchedLoRALinear(nn.Module):
         # This matches vLLM's own RowParallelLinearWithLoRA pattern.
         # For all other layers, use the normal base_layer forward.
         if self._row_parallel_reduce:
-            bias = (
-                None
-                if self.base_layer.skip_bias_add
-                else self.base_layer.bias
-            )
+            bias = None if self.base_layer.skip_bias_add else self.base_layer.bias
             output = self.base_layer.quant_method.apply(
-                self.base_layer, x, bias,
+                self.base_layer,
+                x,
+                bias,
             )
             output_bias = (
-                self.base_layer.bias
-                if self.base_layer.skip_bias_add
-                else None
+                self.base_layer.bias if self.base_layer.skip_bias_add else None
             )
         else:
             output, output_bias = self.base_layer(x)
@@ -321,21 +361,35 @@ class SwitchedLoRALinear(nn.Module):
 
         if self.num_slices == 1:
             lora_shrink(
-                x, [self.lora_A], buffer,
-                *meta_args, 1.0,
+                x,
+                [self.lora_A],
+                buffer,
+                *meta_args,
+                1.0,
             )
             lora_expand(
-                buffer, [self.lora_B], output,
-                *meta_args, offset_start=0, add_inputs=True,
+                buffer,
+                [self.lora_B],
+                output,
+                *meta_args,
+                offset_start=0,
+                add_inputs=True,
             )
         else:
             lora_shrink(
-                x, list(self.lora_A_slices), buffer,
-                *meta_args, 1.0,
+                x,
+                list(self.lora_A_slices),
+                buffer,
+                *meta_args,
+                1.0,
             )
             lora_expand(
-                buffer, list(self.lora_B_slices), output,
-                *meta_args, offset_start=0, add_inputs=True,
+                buffer,
+                list(self.lora_B_slices),
+                output,
+                *meta_args,
+                offset_start=0,
+                add_inputs=True,
             )
 
         # Row-parallel TP > 1: all-reduce the combined (base + LoRA) output.

@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Additional config edge case tests for GraniteSwitchConfig."""
 
-import pytest
-
 from granite_switch.config import GraniteSwitchConfig
 
 
@@ -37,9 +35,11 @@ class TestSharedIntermediateSize:
         assert cfg.shared_intermediate_size > 0
 
     def test_explicit_shared_intermediate_size_preserved(self):
-        cfg = GraniteSwitchConfig(**_valid_kwargs(
-            shared_intermediate_size=256,
-        ))
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(
+                shared_intermediate_size=256,
+            )
+        )
         assert cfg.shared_intermediate_size == 256
 
 
@@ -75,7 +75,5 @@ class TestLoraTargetModulesDefault:
         assert "shared_output_linear" in cfg.lora_target_modules
 
     def test_explicit_target_modules_preserved(self):
-        cfg = GraniteSwitchConfig(
-            **_valid_kwargs(lora_target_modules=["qkv_proj"])
-        )
+        cfg = GraniteSwitchConfig(**_valid_kwargs(lora_target_modules=["qkv_proj"]))
         assert cfg.lora_target_modules == ["qkv_proj"]

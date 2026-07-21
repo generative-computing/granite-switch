@@ -38,7 +38,7 @@ def show_history(ctx):
     if not messages:
         display(Markdown("*(conversation history is empty)*"))
         return
-    md = ["---", f"### Conversation history — {len(messages)//2} turn(s)", "---"]
+    md = ["---", f"### Conversation history — {len(messages) // 2} turn(s)", "---"]
     for m in messages:
         role = "👤 **User**" if m.role == "user" else "🤖 **Assistant**"
         docs = m._docs or []
@@ -53,7 +53,9 @@ def show_intermediates(r, top_k):
 
     harm_score = r.get("guardian_harm_score", 0)
     harm_badge = "🟢 safe" if harm_score < 0.5 else "🔴 harmful"
-    md.append(f"**[1a] Guardian - Harm** - {harm_badge} &nbsp;&nbsp; `score={harm_score:.3f}` &nbsp;&nbsp; (full-conversation eval)")
+    md.append(
+        f"**[1a] Guardian - Harm** - {harm_badge} &nbsp;&nbsp; `score={harm_score:.3f}` &nbsp;&nbsp; (full-conversation eval)"
+    )
 
     if r.get("blocked") and "Harmful" in r.get("block_reason", ""):
         md.append(f"\n> ⛔ **BLOCKED:** {r['block_reason']}")
@@ -62,30 +64,40 @@ def show_intermediates(r, top_k):
 
     scope_score = r.get("guardian_scope_score", 0)
     scope_badge = "🟢 in-scope" if scope_score >= 0.5 else "🔴 out-of-scope"
-    md.append(f"\n**[1b] Guardian - Scope** - {scope_badge} &nbsp;&nbsp; `score={scope_score:.3f}`")
+    md.append(
+        f"\n**[1b] Guardian - Scope** - {scope_badge} &nbsp;&nbsp; `score={scope_score:.3f}`"
+    )
 
     if r.get("blocked"):
         md.append(f"\n> ⛔ **BLOCKED:** {r['block_reason']}")
         display(Markdown("\n\n".join(md)))
         return
 
-    md.append(f"\n**[2] Query Rewrite**\n\n"
-              f"| | |\n|---|---|\n"
-              f"| original | {r['query']} |\n"
-              f"| rewritten | {r.get('rewritten_query')} |")
+    md.append(
+        f"\n**[2] Query Rewrite**\n\n"
+        f"| | |\n|---|---|\n"
+        f"| original | {r['query']} |\n"
+        f"| rewritten | {r.get('rewritten_query')} |"
+    )
 
     docs = r.get("documents", [])
-    md.append(f"\n**[3] ChromaDB Retrieval** - {len(docs)} doc(s) (top {top_k}, cosine sim)")
+    md.append(
+        f"\n**[3] ChromaDB Retrieval** - {len(docs)} doc(s) (top {top_k}, cosine sim)"
+    )
     if docs:
         md.append(f"\n<details><summary>📚 Show all {len(docs)} documents</summary>\n")
         for i, d in enumerate(docs):
-            md.append(f"<details><summary>📄 Document {i+1}</summary>\n\n```\n{d}\n```\n\n</details>\n")
+            md.append(
+                f"<details><summary>📄 Document {i + 1}</summary>\n\n```\n{d}\n```\n\n</details>\n"
+            )
         md.append("</details>")
 
     answerability = r.get("answerability")
     if answerability is not None:
         badge = "✅ answerable" if not r.get("unanswerable") else "🔍 unanswerable"
-        md.append(f"\n**[4] Answerability** - {badge} &nbsp;&nbsp; `verdict={answerability}`")
+        md.append(
+            f"\n**[4] Answerability** - {badge} &nbsp;&nbsp; `verdict={answerability}`"
+        )
     if r.get("unanswerable"):
         display(Markdown("\n\n".join(md)))
         return
@@ -104,10 +116,10 @@ def show_intermediates(r, top_k):
     citations = r.get("citations", [])
     md.append(f"\n**[7] Citations** - {len(citations)} found")
     if citations:
-        md.append(f"\n<details><summary>🔖 Show citations JSON</summary>\n\n```json\n{json.dumps(citations, indent=2)}\n```\n\n</details>")
+        md.append(
+            f"\n<details><summary>🔖 Show citations JSON</summary>\n\n```json\n{json.dumps(citations, indent=2)}\n```\n\n</details>"
+        )
     else:
         md.append("\n*(none)*")
 
     display(Markdown("\n\n".join(md)))
-
-

@@ -24,8 +24,8 @@ from pathlib import Path
 import pytest
 
 from granite_switch.composer.compose_granite_switch import (
-    _resolve_base_model_path,
     _copy_upstream_auxiliary_files,
+    _resolve_base_model_path,
 )
 
 # ---------------------------------------------------------------------------
@@ -76,9 +76,12 @@ def built_in_build_output(request, tmp_path_factory):
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
-        "--base-model", model_id,
-        "--built-in-adapters", "base",
-        "--output", str(output_dir),
+        "--base-model",
+        model_id,
+        "--built-in-adapters",
+        "base",
+        "--output",
+        str(output_dir),
     ]
 
     result = subprocess.run(
@@ -153,9 +156,7 @@ class TestUpstreamFileCopy:
         if not upstream_template:
             pytest.skip(f"upstream model {_model_id} has no chat template")
 
-        upstream.add_special_tokens(
-            {"additional_special_tokens": ["<|__test__|>"]}
-        )
+        upstream.add_special_tokens({"additional_special_tokens": ["<|__test__|>"]})
         upstream.save_pretrained(str(tmp_path))
 
         reloaded = AutoTokenizer.from_pretrained(str(tmp_path))

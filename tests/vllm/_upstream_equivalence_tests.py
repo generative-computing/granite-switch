@@ -14,6 +14,7 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm import LLM  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -27,8 +28,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 if _VLLM_AVAILABLE:
-    from tests.shared.vllm_equivalence import run_equivalence_integration
     from tests.shared.granite4_equivalence import assert_close
+    from tests.shared.vllm_equivalence import run_equivalence_integration
 
 
 _COMMON_CONFIG = dict(
@@ -54,7 +55,6 @@ _COMMON_CONFIG = dict(
 
 
 class TestAttentionOnlyNoMoE:
-
     def test_logits_match(self, tmp_path):
         cfg = {
             **_COMMON_CONFIG,
@@ -64,12 +64,14 @@ class TestAttentionOnlyNoMoE:
             "shared_intermediate_size": _COMMON_CONFIG["intermediate_size"],
         }
         upstream, switch = run_equivalence_integration(
-            cfg, seq_len=16, tmpdir=tmp_path,
+            cfg,
+            seq_len=16,
+            tmpdir=tmp_path,
         )
         assert_close(
-            switch, upstream,
-            atol=1e-2, rtol=1e-2,
+            switch,
+            upstream,
+            atol=1e-2,
+            rtol=1e-2,
             msg="Attention-only (no MoE): vLLM logprobs diverge",
         )
-
-

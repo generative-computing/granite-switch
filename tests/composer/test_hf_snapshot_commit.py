@@ -7,14 +7,9 @@ constant to a controlled temp directory and build realistic HF-style cache
 paths under it.
 """
 
-import os
-
-import pytest
-
 from granite_switch.composer.compose_granite_switch import (
     _extract_hf_snapshot_commit,
 )
-
 
 VALID_SHA = "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf"
 SHORT_SHA = VALID_SHA[:8]
@@ -27,6 +22,7 @@ def _patch_hf_cache(monkeypatch, cache_root):
     already-imported module.
     """
     from huggingface_hub import constants
+
     monkeypatch.setattr(constants, "HF_HUB_CACHE", str(cache_root))
 
 

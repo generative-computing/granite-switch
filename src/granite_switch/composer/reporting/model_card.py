@@ -13,9 +13,8 @@ Layout (top to bottom):
   - Composition Details section (YAML-style text block with raw values)
 """
 
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import Iterable, List, Mapping, Optional
-
 
 _BASE_MODEL_FIELDS = [
     ("model_type", "Model type"),
@@ -53,7 +52,7 @@ def _yaml_scalar(value) -> str:
 def _format_base_model_section(
     base_model_name: str,
     base_config,
-) -> List[str]:
+) -> list[str]:
     lines = ["## Base Model", "", f"- Identifier: {base_model_name}"]
     for attr, label in _BASE_MODEL_FIELDS:
         value = getattr(base_config, attr, None)
@@ -93,13 +92,15 @@ def _format_target_modules(targets) -> str:
 
 def _format_adapter_row(
     entry: dict,
-    rank: Optional[int],
+    rank: int | None,
     alpha,
     targets,
-    source: Optional[str],
+    source: str | None,
 ) -> str:
     name = entry.get("adapter_name", "")
-    technology = entry.get("technology") or ("built-in" if entry.get("built_in") else "")
+    technology = entry.get("technology") or (
+        "built-in" if entry.get("built_in") else ""
+    )
     control_token = entry.get("control_token") or {}
     token_text = _escape_pipes(control_token.get("token", ""))
     token_id = control_token.get("id", "")
@@ -123,7 +124,7 @@ def _format_adapter_row(
     )
 
 
-def _pad(values: Optional[List], length: int) -> List:
+def _pad(values: list | None, length: int) -> list:
     out = list(values) if values is not None else [None] * length
     if len(out) < length:
         out = out + [None] * (length - len(out))
@@ -132,11 +133,11 @@ def _pad(values: Optional[List], length: int) -> List:
 
 def _format_adapters_section(
     adapters: Iterable[dict],
-    adapter_ranks: Optional[List[int]],
-    adapter_alphas: Optional[List],
-    adapter_targets: Optional[List],
-    adapter_sources: Optional[List[Optional[str]]],
-) -> List[str]:
+    adapter_ranks: list[int] | None,
+    adapter_alphas: list | None,
+    adapter_targets: list | None,
+    adapter_sources: list[str | None] | None,
+) -> list[str]:
     adapters = list(adapters)
     lines = ["## Embedded Adapters", ""]
     if not adapters:
@@ -146,8 +147,12 @@ def _format_adapters_section(
 
     lines.append(f"Total adapters: **{len(adapters)}**")
     lines.append("")
-    lines.append("| # | Name | Technology | Control Token | Token ID | Rank | Alpha | Target Modules | Source |")
-    lines.append("|---|------|------------|---------------|----------|------|-------|----------------|--------|")
+    lines.append(
+        "| # | Name | Technology | Control Token | Token ID | Rank | Alpha | Target Modules | Source |"
+    )
+    lines.append(
+        "|---|------|------------|---------------|----------|------|-------|----------------|--------|"
+    )
 
     n = len(adapters)
     ranks = _pad(adapter_ranks, n)
@@ -155,18 +160,20 @@ def _format_adapters_section(
     targets = _pad(adapter_targets, n)
     sources = _pad(adapter_sources, n)
 
-    for entry, rank, alpha, tgt, source in zip(adapters, ranks, alphas, targets, sources):
+    for entry, rank, alpha, tgt, source in zip(
+        adapters, ranks, alphas, targets, sources
+    ):
         lines.append(_format_adapter_row(entry, rank, alpha, tgt, source))
     lines.append("")
     return lines
 
 
 def _format_composition_details_section(
-    compose_settings: Optional[Mapping[str, object]],
-    adapter_commits_by_source: Optional[Mapping[str, str]],
-    base_param_count: Optional[int],
-    composed_param_count: Optional[int],
-) -> List[str]:
+    compose_settings: Mapping[str, object] | None,
+    adapter_commits_by_source: Mapping[str, str] | None,
+    base_param_count: int | None,
+    composed_param_count: int | None,
+) -> list[str]:
     """Render the Composition Details section.
 
     Starts with a human-readable ``Params (base → composed)`` summary (the
@@ -180,7 +187,8 @@ def _format_composition_details_section(
     visible_settings = {}
     if compose_settings:
         visible_settings = {
-            k: v for k, v in compose_settings.items()
+            k: v
+            for k, v in compose_settings.items()
             if v is not None and v != "" and v != []
         }
     visible_sources = dict(adapter_commits_by_source or {})
@@ -189,7 +197,7 @@ def _format_composition_details_section(
     if not visible_settings and not visible_sources and not has_params:
         return []
 
-    lines: List[str] = ["## Composition Details", ""]
+    lines: list[str] = ["## Composition Details", ""]
 
     # Markdown-list block. Integer counts use thousands separators. Param
     # delta follows immediately. Nested mappings (compose_settings,
@@ -226,14 +234,14 @@ def render_model_card(
     base_model_name: str,
     base_config,
     adapter_index: dict,
-    adapter_ranks: Optional[List[int]] = None,
-    adapter_alphas: Optional[List] = None,
-    adapter_targets: Optional[List] = None,
-    adapter_sources: Optional[List[Optional[str]]] = None,
-    adapter_commits_by_source: Optional[Mapping[str, str]] = None,
-    compose_settings: Optional[Mapping[str, object]] = None,
-    base_param_count: Optional[int] = None,
-    composed_param_count: Optional[int] = None,
+    adapter_ranks: list[int] | None = None,
+    adapter_alphas: list | None = None,
+    adapter_targets: list | None = None,
+    adapter_sources: list[str | None] | None = None,
+    adapter_commits_by_source: Mapping[str, str] | None = None,
+    compose_settings: Mapping[str, object] | None = None,
+    base_param_count: int | None = None,
+    composed_param_count: int | None = None,
 ) -> str:
     """Render a Markdown model card describing the composed model.
 
@@ -259,18 +267,27 @@ def render_model_card(
     """
     adapters = adapter_index.get("adapters", []) if adapter_index else []
 
-    lines: List[str] = []
+    lines: list[str] = []
     lines.append("# Granite Switch Composed Model")
     lines.append("")
     lines.extend(_format_base_model_section(base_model_name, base_config))
-    lines.extend(_format_adapters_section(
-        adapters, adapter_ranks, adapter_alphas,
-        adapter_targets, adapter_sources,
-    ))
-    lines.extend(_format_composition_details_section(
-        compose_settings, adapter_commits_by_source,
-        base_param_count, composed_param_count,
-    ))
+    lines.extend(
+        _format_adapters_section(
+            adapters,
+            adapter_ranks,
+            adapter_alphas,
+            adapter_targets,
+            adapter_sources,
+        )
+    )
+    lines.extend(
+        _format_composition_details_section(
+            compose_settings,
+            adapter_commits_by_source,
+            base_param_count,
+            composed_param_count,
+        )
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -279,14 +296,14 @@ def write_model_card(
     base_model_name: str,
     base_config,
     adapter_index: dict,
-    adapter_ranks: Optional[List[int]] = None,
-    adapter_alphas: Optional[List] = None,
-    adapter_targets: Optional[List] = None,
-    adapter_sources: Optional[List[Optional[str]]] = None,
-    adapter_commits_by_source: Optional[Mapping[str, str]] = None,
-    compose_settings: Optional[Mapping[str, object]] = None,
-    base_param_count: Optional[int] = None,
-    composed_param_count: Optional[int] = None,
+    adapter_ranks: list[int] | None = None,
+    adapter_alphas: list | None = None,
+    adapter_targets: list | None = None,
+    adapter_sources: list[str | None] | None = None,
+    adapter_commits_by_source: Mapping[str, str] | None = None,
+    compose_settings: Mapping[str, object] | None = None,
+    base_param_count: int | None = None,
+    composed_param_count: int | None = None,
 ) -> Path:
     """Render and write ``BUILD.md`` into ``output_path``.
 
@@ -314,7 +331,7 @@ def write_model_card(
 def write_build_doc(
     model,
     args,
-    all_discovered: List,
+    all_discovered: list,
     output_path: str,
     base_model_local_path: str,
     adapter_index: dict,
@@ -347,6 +364,7 @@ def write_build_doc(
 
     base_config = load_base_config(base_model_local_path)
     adapter_ranks = getattr(model.config, "adapter_ranks", None)
+
     # all_discovered tuples are (path, name, technology, source).
     # For BUILD.md readability, shorten local paths to the basename
     # (filename for YAML manifests, last directory for folders). HF repo
@@ -406,7 +424,7 @@ def write_build_doc(
     # last (see build() tuple assembly).
     adapter_alphas_src = model._build_mappings.get("adapter_alphas") or []
     adapter_alphas: list = list(adapter_alphas_src)
-    built_in_alpha: Optional[float] = None
+    built_in_alpha: float | None = None
     if getattr(args, "built_in_adapters", None):
         built_in_alpha = float(
             args.lora_alpha if args.lora_alpha is not None else args.lora_rank

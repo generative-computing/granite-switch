@@ -24,12 +24,11 @@ from pathlib import Path
 
 import pytest
 
-
 WORKER = Path(__file__).parent / "_generation_equivalence_worker.py"
 TIMEOUT = 1200  # 20 min per model (download + build + 2× vLLM load + generate)
 
 MODELS = [
-    "ibm-granite/granite-4.0-micro",        # Granite 4.x Dense (small, fast)
+    "ibm-granite/granite-4.0-micro",  # Granite 4.x Dense (small, fast)
 ]
 
 
@@ -44,10 +43,10 @@ def _run_step(step_name, *cmd_args, timeout):
     Each step is a fresh process so CUDA memory is fully released between steps.
     """
     cmd = [sys.executable, str(WORKER), *cmd_args]
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  Step: {step_name}")
     print(f"  Command: {' '.join(str(c) for c in cmd)}")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
     result = subprocess.run(
         cmd,
@@ -85,26 +84,37 @@ def _run_generation_test(model_name, timeout):
         # 1. Build switch model (CPU, no GPU needed)
         _run_step(
             "build switch",
-            "build", "--model", model_name,
-            "--work-dir", work_dir,
+            "build",
+            "--model",
+            model_name,
+            "--work-dir",
+            work_dir,
             timeout=timeout,
         )
 
         # 2. Run upstream model in vLLM (GPU)
         _run_step(
             "run upstream",
-            "run", "--model", model_name,
-            "--work-dir", work_dir,
-            "--tag", "ref",
+            "run",
+            "--model",
+            model_name,
+            "--work-dir",
+            work_dir,
+            "--tag",
+            "ref",
             timeout=timeout,
         )
 
         # 3. Run switch model in vLLM (GPU)
         _run_step(
             "run switch",
-            "run", "--model", switch_dir,
-            "--work-dir", work_dir,
-            "--tag", "switch",
+            "run",
+            "--model",
+            switch_dir,
+            "--work-dir",
+            work_dir,
+            "--tag",
+            "switch",
             timeout=timeout,
         )
 
@@ -112,8 +122,10 @@ def _run_generation_test(model_name, timeout):
         _run_step(
             "compare",
             "compare",
-            "--work-dir", work_dir,
-            "--label", model_name,
+            "--work-dir",
+            work_dir,
+            "--label",
+            model_name,
             timeout=60,
         )
 

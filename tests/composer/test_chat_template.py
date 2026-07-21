@@ -47,7 +47,6 @@ def _render(tokenizer, **kwargs):
 
 
 class TestConfigureChatTemplate:
-
     def test_lora_prefix_path(self):
         """LoRA: activation token emitted at the very start of the sequence.
 
@@ -88,9 +87,7 @@ class TestConfigureChatTemplate:
         """
         with patch(_PATCH_TARGET, return_value="<requirements>"):
             tokenizer = _make_tokenizer()
-            configure_chat_template(
-                tokenizer, [("/path/a", "req_check", "alora")]
-            )
+            configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
 
         result = _render(
             tokenizer,
@@ -108,7 +105,10 @@ class TestConfigureChatTemplate:
         # Fallback did not fire: token is not immediately before generation prompt
         gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         last_gen_pos = result.rindex(gen_prompt)
-        assert result[last_gen_pos - len("<|req_check|>"):last_gen_pos] != "<|req_check|>"
+        assert (
+            result[last_gen_pos - len("<|req_check|>") : last_gen_pos]
+            != "<|req_check|>"
+        )
 
     def test_alora_fallback_path(self):
         """ALoRA fallback: token emitted before generation prompt when invocation text is absent.
@@ -117,11 +117,11 @@ class TestConfigureChatTemplate:
         text (here the assistant role token sequence), so ns.alora_target_idx stays -1
         and the fallback block fires.
         """
-        with patch(_PATCH_TARGET, return_value="<|start_of_role|>assistant<|end_of_role|>"):
+        with patch(
+            _PATCH_TARGET, return_value="<|start_of_role|>assistant<|end_of_role|>"
+        ):
             tokenizer = _make_tokenizer()
-            configure_chat_template(
-                tokenizer, [("/path/a", "answerability", "alora")]
-            )
+            configure_chat_template(tokenizer, [("/path/a", "answerability", "alora")])
 
         result = _render(
             tokenizer,
@@ -139,7 +139,7 @@ class TestConfigureChatTemplate:
         # alora_insertion comment).
         token = "<|answerability|>"
         token_pos = result.index(token)
-        after = result[token_pos + len(token):]
+        after = result[token_pos + len(token) :]
         assert after.startswith("assistant<|end_of_role|>"), (
             f"expected 'assistant<|end_of_role|>' immediately after "
             f"{token!r}, got {after[:60]!r}"
@@ -157,9 +157,7 @@ class TestConfigureChatTemplate:
         """
         with patch(_PATCH_TARGET, return_value="<requirements>"):
             tokenizer = _make_tokenizer()
-            configure_chat_template(
-                tokenizer, [("/path/a", "req_check", "alora")]
-            )
+            configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
 
         messages = [
             {"role": "system", "content": "You are helpful."},
@@ -180,11 +178,16 @@ class TestConfigureChatTemplate:
         # text's first character ('<') has been dropped.
         assert "<|req_check|>requirements>" in result
         assert "<|req_check|><requirements>" not in result
-        assert result.index("<|req_check|>") > result.index("<|start_of_role|>user<|end_of_role|>")
+        assert result.index("<|req_check|>") > result.index(
+            "<|start_of_role|>user<|end_of_role|>"
+        )
         # Fallback must NOT also fire
         gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         last_gen_pos = result.rindex(gen_prompt)
-        assert result[last_gen_pos - len("<|req_check|>"):last_gen_pos] != "<|req_check|>"
+        assert (
+            result[last_gen_pos - len("<|req_check|>") : last_gen_pos]
+            != "<|req_check|>"
+        )
 
     def test_skip_once_is_single_shot(self):
         """Skip-once flag consumes itself: only the first <|start_of_role|>
@@ -216,7 +219,9 @@ class TestConfigureChatTemplate:
     def test_no_adapter_no_tokens(self):
         """Without adapter_name the rendered output is identical to the original template."""
         messages = [{"role": "user", "content": "Hello"}]
-        original = _render(_make_tokenizer(), messages=messages, add_generation_prompt=True)
+        original = _render(
+            _make_tokenizer(), messages=messages, add_generation_prompt=True
+        )
 
         with patch(_PATCH_TARGET, return_value="<requirements>"):
             tokenizer = _make_tokenizer()
@@ -247,10 +252,12 @@ class TestInvocationFirstCharDropProperty:
 
     def _get_tokenizer(self):
         from transformers import AutoTokenizer
+
         try:
             return AutoTokenizer.from_pretrained("ibm-granite/granite-4.1-3b")
         except Exception as e:
             import pytest
+
             pytest.skip(f"could not fetch Granite tokenizer: {e}")
 
     def test_first_char_drop_equals_first_token_drop(self):
@@ -305,13 +312,18 @@ class TestEndToEndAdapterConfigToRender:
     def test_alora_fallback_from_adapter_config(self):
         """ALoRA adapter whose invocation tokens decode to the assistant role
         sequence → fallback path (token before generation prompt)."""
-        tokenizer = self._make_tokenizer({
-            # [100264, 78191, 100265] → assistant role sequence
-            (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
-        })
-        configure_chat_template(tokenizer, [
-            (self._ANSWERABILITY, "answerability", "alora"),
-        ])
+        tokenizer = self._make_tokenizer(
+            {
+                # [100264, 78191, 100265] → assistant role sequence
+                (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
+            }
+        )
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._ANSWERABILITY, "answerability", "alora"),
+            ],
+        )
 
         result = _render(
             tokenizer,
@@ -325,7 +337,7 @@ class TestEndToEndAdapterConfigToRender:
         token = "<|answerability|>"
         assert token in result
         token_pos = result.index(token)
-        after = result[token_pos + len(token):]
+        after = result[token_pos + len(token) :]
         assert after.startswith("assistant<|end_of_role|>"), (
             f"expected 'assistant<|end_of_role|>' immediately after "
             f"{token!r}, got {after[:60]!r}"
@@ -341,9 +353,12 @@ class TestEndToEndAdapterConfigToRender:
         "<|context_relevance|>context>" in the rendered output.
         """
         tokenizer = self._make_tokenizer({(27,): "<context>"})
-        configure_chat_template(tokenizer, [
-            (self._CONTEXT_REL, "context_relevance", "alora"),
-        ])
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._CONTEXT_REL, "context_relevance", "alora"),
+            ],
+        )
 
         result = _render(
             tokenizer,
@@ -359,7 +374,10 @@ class TestEndToEndAdapterConfigToRender:
         # Fallback must NOT fire
         gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         last_gen_pos = result.rindex(gen_prompt)
-        assert result[last_gen_pos - len("<|context_relevance|>"):last_gen_pos] != "<|context_relevance|>"
+        assert (
+            result[last_gen_pos - len("<|context_relevance|>") : last_gen_pos]
+            != "<|context_relevance|>"
+        )
 
     def test_alora_invocation_mid_user_message(self):
         """ALoRA: invocation text appears in the middle of the user message.
@@ -367,13 +385,18 @@ class TestEndToEndAdapterConfigToRender:
         Same first-character drop as the start-of-message case.
         """
         tokenizer = self._make_tokenizer({(27,): "<context>"})
-        configure_chat_template(tokenizer, [
-            (self._CONTEXT_REL, "context_relevance", "alora"),
-        ])
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._CONTEXT_REL, "context_relevance", "alora"),
+            ],
+        )
 
         result = _render(
             tokenizer,
-            messages=[{"role": "user", "content": "Please review: <context>docs</context>"}],
+            messages=[
+                {"role": "user", "content": "Please review: <context>docs</context>"}
+            ],
             add_generation_prompt=True,
             adapter_name="context_relevance",
         )
@@ -385,7 +408,10 @@ class TestEndToEndAdapterConfigToRender:
         # Fallback must NOT fire
         gen_prompt = "<|start_of_role|>assistant<|end_of_role|>"
         last_gen_pos = result.rindex(gen_prompt)
-        assert result[last_gen_pos - len("<|context_relevance|>"):last_gen_pos] != "<|context_relevance|>"
+        assert (
+            result[last_gen_pos - len("<|context_relevance|>") : last_gen_pos]
+            != "<|context_relevance|>"
+        )
 
     def test_alora_multiple_occurrences_targets_last(self):
         """ALoRA: invocation text appears twice — token injected before the last occurrence.
@@ -395,31 +421,42 @@ class TestEndToEndAdapterConfigToRender:
         remains intact with its '<'; only the second has its '<' dropped.
         """
         tokenizer = self._make_tokenizer({(27,): "<context>"})
-        configure_chat_template(tokenizer, [
-            (self._CONTEXT_REL, "context_relevance", "alora"),
-        ])
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._CONTEXT_REL, "context_relevance", "alora"),
+            ],
+        )
 
         result = _render(
             tokenizer,
-            messages=[{
-                "role": "user",
-                "content": "<context>first batch</context> Also check <context>second batch</context>",
-            }],
+            messages=[
+                {
+                    "role": "user",
+                    "content": "<context>first batch</context> Also check <context>second batch</context>",
+                }
+            ],
             add_generation_prompt=True,
             adapter_name="context_relevance",
         )
         # First <context> untouched; second one has the control token
         # inserted with its '<' dropped.
-        assert "<context>first batch</context> Also check <|context_relevance|>context>second batch" in result
+        assert (
+            "<context>first batch</context> Also check <|context_relevance|>context>second batch"
+            in result
+        )
         # Only one control token in the entire output
         assert result.count("<|context_relevance|>") == 1
 
     def test_lora_prefix_from_adapter_config(self):
         """LoRA adapter (no alora_invocation_tokens) → prefix path."""
         tokenizer = self._make_tokenizer({})  # no decode needed for LoRA
-        configure_chat_template(tokenizer, [
-            (self._SUMMARIZATION, "summarization", "lora"),
-        ])
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._SUMMARIZATION, "summarization", "lora"),
+            ],
+        )
 
         result = _render(
             tokenizer,
@@ -436,22 +473,29 @@ class TestEndToEndAdapterConfigToRender:
 
     def test_mixed_adapters_from_adapter_config(self):
         """All three adapter types composed together, each activated independently."""
-        tokenizer = self._make_tokenizer({
-            (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
-            (27,): "<context>",
-        })
-        configure_chat_template(tokenizer, [
-            (self._ANSWERABILITY, "answerability", "alora"),
-            (self._CONTEXT_REL, "context_relevance", "alora"),
-            (self._SUMMARIZATION, "summarization", "lora"),
-        ])
+        tokenizer = self._make_tokenizer(
+            {
+                (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
+                (27,): "<context>",
+            }
+        )
+        configure_chat_template(
+            tokenizer,
+            [
+                (self._ANSWERABILITY, "answerability", "alora"),
+                (self._CONTEXT_REL, "context_relevance", "alora"),
+                (self._SUMMARIZATION, "summarization", "lora"),
+            ],
+        )
 
         messages = [{"role": "user", "content": "<context>docs</context>"}]
 
         # Activate context_relevance → Pass 1+2 (drops first char of invocation).
         result = _render(
-            tokenizer, messages=messages,
-            add_generation_prompt=True, adapter_name="context_relevance",
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="context_relevance",
         )
         assert "<|context_relevance|>context>" in result
         assert "<|context_relevance|><context>" not in result
@@ -459,24 +503,30 @@ class TestEndToEndAdapterConfigToRender:
         # Activate answerability → fallback (skip-once suppresses the
         # generation-prompt <|start_of_role|>).
         result = _render(
-            tokenizer, messages=messages,
-            add_generation_prompt=True, adapter_name="answerability",
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="answerability",
         )
         token = "<|answerability|>"
         token_pos = result.index(token)
-        after = result[token_pos + len(token):]
+        after = result[token_pos + len(token) :]
         assert after.startswith("assistant<|end_of_role|>")
 
         # Activate summarization → prefix
         result = _render(
-            tokenizer, messages=messages,
-            add_generation_prompt=True, adapter_name="summarization",
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="summarization",
         )
         assert result.startswith("<|summarization|>")
 
         # No adapter → no tokens
         result_none = _render(
-            tokenizer, messages=messages, add_generation_prompt=True,
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
         )
         assert "<|answerability|>" not in result_none
         assert "<|context_relevance|>" not in result_none

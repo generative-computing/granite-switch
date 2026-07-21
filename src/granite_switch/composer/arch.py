@@ -7,7 +7,7 @@ programmatically from the descriptor list.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -35,11 +35,11 @@ class ModuleDescriptor:
     """
 
     name: str
-    peft_modules: List[str]
+    peft_modules: list[str]
     parent: str
-    attr_name: Optional[str] = None
-    source_parent: Optional[str] = None
-    num_switch_slices: Optional[int] = None
+    attr_name: str | None = None
+    source_parent: str | None = None
+    num_switch_slices: int | None = None
     target_inner_path: str = ""
 
     @property
@@ -99,23 +99,21 @@ class ArchDescriptor:
     """
 
     # Primary data — single source of truth
-    groups: List[ModuleDescriptor]
+    groups: list[ModuleDescriptor]
 
     # Config fields to copy from base_config -> switch_config
-    required_config_fields: List[str]
-    optional_config_fields: Dict[str, Any]
+    required_config_fields: list[str]
+    optional_config_fields: dict[str, Any]
 
     # Weight name patterns
     layer_pattern: str = r"layers\.(\d+)\."
     peft_source_prefix: str = "base_model.model.model."
 
     # LoRA parameter keywords (for filtering)
-    lora_keywords: List[str] = field(
-        default_factory=lambda: ["lora_A", "lora_B"]
-    )
+    lora_keywords: list[str] = field(default_factory=lambda: ["lora_A", "lora_B"])
 
     # Non-LoRA buffer keywords to exclude from base validation
-    buffer_keywords: List[str] = field(
+    buffer_keywords: list[str] = field(
         default_factory=lambda: [
             "adapter_token_ids",
             "adapter_scalings",
@@ -124,7 +122,7 @@ class ArchDescriptor:
     )
 
     @property
-    def switch_to_peft(self) -> Dict[str, List[str]]:
+    def switch_to_peft(self) -> dict[str, list[str]]:
         """Map ``parent.attr`` keys to their PEFT source module names.
 
         Keys match what :meth:`extract_module_key` returns, e.g.,
@@ -136,12 +134,12 @@ class ArchDescriptor:
         }
 
     @property
-    def all_peft_modules(self) -> List[str]:
+    def all_peft_modules(self) -> list[str]:
         """Flat list of all PEFT module names across all groups."""
         return [mod for g in self.groups for mod in g.peft_modules]
 
     @property
-    def parent_names(self) -> List[str]:
+    def parent_names(self) -> list[str]:
         """Ordered list of unique parent module names."""
         seen = []
         for g in self.groups:
@@ -149,7 +147,7 @@ class ArchDescriptor:
                 seen.append(g.parent)
         return seen
 
-    def extract_module_key(self, param_name: str) -> Optional[str]:
+    def extract_module_key(self, param_name: str) -> str | None:
         """Extract ``parent.attr`` module key from a parameter name.
 
         E.g., ``"model.layers.0.self_attn.qkv_proj.lora_A"`` →
@@ -181,7 +179,8 @@ class ArchDescriptor:
 # Common ModuleDescriptor instances
 # ---------------------------------------------------------------------------
 
-def _common_attn_groups() -> List[ModuleDescriptor]:
+
+def _common_attn_groups() -> list[ModuleDescriptor]:
     """Attention module groups shared by all architectures."""
     return [
         ModuleDescriptor(
@@ -197,7 +196,7 @@ def _common_attn_groups() -> List[ModuleDescriptor]:
     ]
 
 
-def _dense_mlp_to_shared_groups() -> List[ModuleDescriptor]:
+def _dense_mlp_to_shared_groups() -> list[ModuleDescriptor]:
     """Map dense MLP (gate/up/down) to switch model's shared_mlp naming.
 
     Used for Granite 3.x whose base model uses ``mlp.gate_proj`` /
@@ -223,7 +222,7 @@ def _dense_mlp_to_shared_groups() -> List[ModuleDescriptor]:
     ]
 
 
-def _moe_shared_mlp_groups() -> List[ModuleDescriptor]:
+def _moe_shared_mlp_groups() -> list[ModuleDescriptor]:
     """MoE shared_mlp groups (fused input_linear split into 2 slices + output_linear)."""
     return [
         ModuleDescriptor(
@@ -242,12 +241,11 @@ def _moe_shared_mlp_groups() -> List[ModuleDescriptor]:
     ]
 
 
-
 # ---------------------------------------------------------------------------
 # Common config fields
 # ---------------------------------------------------------------------------
 
-_COMMON_REQUIRED_FIELDS: List[str] = [
+_COMMON_REQUIRED_FIELDS: list[str] = [
     "vocab_size",
     "hidden_size",
     "intermediate_size",
@@ -265,7 +263,7 @@ _COMMON_REQUIRED_FIELDS: List[str] = [
     "tie_word_embeddings",
 ]
 
-_COMMON_OPTIONAL_FIELDS: Dict[str, Any] = {
+_COMMON_OPTIONAL_FIELDS: dict[str, Any] = {
     "rope_theta": 10000,
     "rope_scaling": None,
     "attention_bias": False,
@@ -278,7 +276,7 @@ _COMMON_OPTIONAL_FIELDS: Dict[str, Any] = {
 # Granite optional config fields
 # ---------------------------------------------------------------------------
 
-_GRANITE_OPTIONAL_FIELDS: Dict[str, Any] = {
+_GRANITE_OPTIONAL_FIELDS: dict[str, Any] = {
     **_COMMON_OPTIONAL_FIELDS,
     "residual_multiplier": 1.0,
     "embedding_multiplier": 1.0,
@@ -289,14 +287,14 @@ _GRANITE_OPTIONAL_FIELDS: Dict[str, Any] = {
 }
 
 # MoE fields (propagated when num_local_experts > 0)
-_MOE_OPTIONAL_FIELDS: Dict[str, Any] = {
+_MOE_OPTIONAL_FIELDS: dict[str, Any] = {
     "num_local_experts": 0,
     "num_experts_per_tok": 1,
     "shared_intermediate_size": None,
 }
 
 # Layer type fields (propagated for hybrid models)
-_HYBRID_OPTIONAL_FIELDS: Dict[str, Any] = {
+_HYBRID_OPTIONAL_FIELDS: dict[str, Any] = {
     "layer_types": None,
     "position_embedding_type": "rope",
 }
@@ -368,9 +366,7 @@ def resolve_arch(model_name_or_path: str, base_config=None) -> ArchDescriptor:
 
     model_type = getattr(base_config, "model_type", None)
     if model_type is None:
-        raise ValueError(
-            f"Cannot determine model_type for {model_name_or_path}"
-        )
+        raise ValueError(f"Cannot determine model_type for {model_name_or_path}")
 
     # Normalize: granite_switch -> granite (handle our own model type)
     normalized = model_type.replace("_switch", "")

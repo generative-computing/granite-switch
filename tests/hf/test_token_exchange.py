@@ -9,7 +9,6 @@ Two properties under test:
    does not expand the KV cache.
 """
 
-import pytest
 import torch
 
 from granite_switch.config import GraniteSwitchConfig
@@ -51,7 +50,9 @@ class TestTokenExchangeEmbeddingSwap:
         config = _build(substitute_ids=(5, 7))
         model, _ = _forward(
             config,
-            torch.tensor([[10, 20, 100, 40]], dtype=torch.long),  # adapter 0 control at pos 2
+            torch.tensor(
+                [[10, 20, 100, 40]], dtype=torch.long
+            ),  # adapter 0 control at pos 2
         )
         # The LUT lives on the switch (it performs the rewrite during its
         # forward); maps control id 100 → substitute 5.
@@ -67,8 +68,12 @@ class TestTokenExchangeEmbeddingSwap:
         model = GraniteSwitchForCausalLM(config).eval()
         # Run once through the model with a control token and once without;
         # verify the non-control embedding rows are identical.
-        raw_a = model.model.embed_tokens(torch.tensor([[10, 20, 30, 40]], dtype=torch.long))
-        raw_b = model.model.embed_tokens(torch.tensor([[10, 20, 100, 40]], dtype=torch.long))
+        raw_a = model.model.embed_tokens(
+            torch.tensor([[10, 20, 30, 40]], dtype=torch.long)
+        )
+        raw_b = model.model.embed_tokens(
+            torch.tensor([[10, 20, 100, 40]], dtype=torch.long)
+        )
         # Positions 0, 1, 3 should match; position 2 is the control token (differs).
         assert torch.allclose(raw_a[:, 0], raw_b[:, 0])
         assert torch.allclose(raw_a[:, 1], raw_b[:, 1])

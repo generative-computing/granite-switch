@@ -9,7 +9,6 @@ target names based on module descriptors.
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
 
 
 @dataclass
@@ -29,9 +28,10 @@ class RemapResult:
     - ``split_type="chunk_dim0"``: chunk tensor along dim=0 into N slices
       (used for lora_B where output dim is [gate_size | up_size]).
     """
+
     target_name: str
-    split_slices: Optional[int] = None
-    split_type: Optional[str] = None
+    split_slices: int | None = None
+    split_type: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -65,8 +65,7 @@ class AdapterRemapper:
                 for ab in ("lora_A", "lora_B"):
                     pattern = self._make_pattern(prefix, src_parent, peft_mod, ab)
                     target_template = (
-                        f"model.layers.{{layer}}.{g.parent}.{attr}."
-                        f"{inner}{ab}_slices"
+                        f"model.layers.{{layer}}.{g.parent}.{attr}.{inner}{ab}_slices"
                     )
                     if ab == "lora_A":
                         split_info = {"slices": n_slices, "type": "duplicate"}
@@ -91,8 +90,7 @@ class AdapterRemapper:
                 for ab in ("lora_A", "lora_B"):
                     pattern = self._make_pattern(prefix, src_parent, peft_mod, ab)
                     target_template = (
-                        f"model.layers.{{layer}}.{g.parent}.{attr}."
-                        f"{inner}{ab}"
+                        f"model.layers.{{layer}}.{g.parent}.{attr}.{inner}{ab}"
                     )
                     self._rules.append((pattern, target_template, None))
 
@@ -113,7 +111,7 @@ class AdapterRemapper:
         )
         return re.compile(regex)
 
-    def remap_adapter_name(self, src_name: str) -> Optional[RemapResult]:
+    def remap_adapter_name(self, src_name: str) -> RemapResult | None:
         """Remap a single adapter weight name to its target name.
 
         Args:

@@ -18,7 +18,6 @@ Requires CUDA GPU and vLLM installed.  All tests are skipped otherwise.
 """
 
 import os
-import tempfile
 
 import pytest
 import torch
@@ -29,8 +28,12 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm.config import VllmConfig  # noqa: F401
+        from vllm.forward_context import (  # noqa: F401
+            ForwardContext,
+            override_forward_context,
+        )
         from vllm.model_executor.layers.attention import Attention  # noqa: F401
-        from vllm.forward_context import ForwardContext, override_forward_context  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -45,13 +48,15 @@ pytestmark = pytest.mark.skipif(
 
 if _VLLM_AVAILABLE:
     from safetensors.torch import load_file
-    from vllm.config import VllmConfig, ModelConfig, set_current_vllm_config
+    from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
     from vllm.forward_context import ForwardContext, override_forward_context
 
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM as HFModel
-    from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM as VLLMModel
     from granite_switch.vllm import register
+    from granite_switch.vllm.granite_switch_model import (
+        GraniteSwitchForCausalLM as VLLMModel,
+    )
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -64,8 +69,8 @@ SEED = 42
 
 from tests.shared.vllm_distributed import ensure_distributed as _ensure_distributed
 
-
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _set_adapter_token_ids_hf(model, token_ids):
     """Populate HF model.model.adapter_token_ids from a list of ints."""
@@ -102,8 +107,12 @@ def _set_nonzero_lora_hf(model, scale=0.1):
                     b.data = torch.randn_like(b) * scale
             # output_linear (SwitchedLoRALinear)
             if hasattr(mlp.output_linear, "lora_A"):
-                mlp.output_linear.lora_A.data = torch.randn_like(mlp.output_linear.lora_A) * scale
-                mlp.output_linear.lora_B.data = torch.randn_like(mlp.output_linear.lora_B) * scale
+                mlp.output_linear.lora_A.data = (
+                    torch.randn_like(mlp.output_linear.lora_A) * scale
+                )
+                mlp.output_linear.lora_B.data = (
+                    torch.randn_like(mlp.output_linear.lora_B) * scale
+                )
 
 
 def _make_vllm_config(tmpdir, config):
@@ -128,6 +137,7 @@ def _make_vllm_config(tmpdir, config):
 def _load_safetensors_as_iterable(tmpdir):
     """Load all safetensors files from a directory as (name, tensor) pairs."""
     import glob
+
     safetensors_files = sorted(glob.glob(os.path.join(tmpdir, "*.safetensors")))
     for sf_path in safetensors_files:
         state_dict = load_file(sf_path)
@@ -135,6 +145,7 @@ def _load_safetensors_as_iterable(tmpdir):
 
 
 # ── Base test class ──────────────────────────────────────────────────
+
 
 class _HFToVLLMWeightTestBase:
     """Base class for HF→vLLM weight compatibility tests.
@@ -225,7 +236,10 @@ class _HFToVLLMWeightTestBase:
         """Configure a single Attention layer with KV cache."""
         attn.kv_cache_torch_dtype = torch.bfloat16
         cache_shape = attn.attn_backend.get_kv_cache_shape(
-            num_blocks, BLOCK_SIZE, attn.num_kv_heads, attn.head_size,
+            num_blocks,
+            BLOCK_SIZE,
+            attn.num_kv_heads,
+            attn.head_size,
         )
         kv_cache = torch.zeros(cache_shape, device=self.device, dtype=torch.bfloat16)
         attn.kv_cache = kv_cache
@@ -252,16 +266,21 @@ class _HFToVLLMWeightTestBase:
         slot_mapping = torch.arange(seq_len, dtype=torch.int64, device=self.device)
         num_blocks_needed = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         block_table = torch.arange(
-            num_blocks_needed, dtype=torch.int32, device=self.device,
+            num_blocks_needed,
+            dtype=torch.int32,
+            device=self.device,
         ).unsqueeze(0)
         query_start_loc = torch.tensor(
-            [0, seq_len], dtype=torch.int32, device=self.device,
+            [0, seq_len],
+            dtype=torch.int32,
+            device=self.device,
         )
         seq_lens = torch.tensor([seq_len], dtype=torch.int32, device=self.device)
 
-        backend_name = list(self._attention_map.values())[0].attn_backend.get_name()
+        backend_name = next(iter(self._attention_map.values())).attn_backend.get_name()
         if backend_name == "FLASH_ATTN":
             from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
             metadata = FlashAttentionMetadata(
                 num_actual_tokens=seq_len,
                 max_query_len=seq_len,
@@ -278,7 +297,9 @@ class _HFToVLLMWeightTestBase:
                 causal=True,
             )
         else:
-            pytest.skip(f"Backend {backend_name}: metadata not implemented for this test")
+            pytest.skip(
+                f"Backend {backend_name}: metadata not implemented for this test"
+            )
 
         attn_metadata = {name: metadata for name in self._layer_names}
         slot_mapping_dict = {name: slot_mapping for name in self._layer_names}
@@ -323,7 +344,7 @@ class _HFToVLLMWeightTestBase:
         input_ids_list = self._input_ids()
 
         with torch.no_grad():
-            hf_logits = self._run_hf_forward(input_ids_list)   # [1, seq, vocab]
+            hf_logits = self._run_hf_forward(input_ids_list)  # [1, seq, vocab]
             vllm_logits = self._run_vllm_forward(input_ids_list)  # [tokens, vocab]
 
         # Reshape HF logits to [tokens, vocab] for comparison
@@ -349,15 +370,18 @@ class _HFToVLLMWeightTestBase:
         )
 
         torch.testing.assert_close(
-            hf_logits_bf16, vllm_logits,
-            atol=1e-2, rtol=1e-2,
-            msg=f"HF and vLLM logits diverged: max_atol={max_atol:.2e}, max_rtol={max_rtol:.2e}"
+            hf_logits_bf16,
+            vllm_logits,
+            atol=1e-2,
+            rtol=1e-2,
+            msg=f"HF and vLLM logits diverged: max_atol={max_atol:.2e}, max_rtol={max_rtol:.2e}",
         )
 
 
 # ════════════════════════════════════════════════════════════════════
 # SingleSwitch forward equivalence
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestSingleSwitchForwardEquivalence(_HFToVLLMWeightTestBase):
     """Verify HF→vLLM weight loading produces equivalent logits for SingleSwitch."""
@@ -387,5 +411,3 @@ class TestSingleSwitchForwardEquivalence(_HFToVLLMWeightTestBase):
     def _input_ids(self):
         # Include a control token (250 = adapter 1) at position 2
         return [10, 20, 250, 30, 40, 50, 60, 70]
-
-

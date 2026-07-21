@@ -3,8 +3,6 @@
 
 from types import SimpleNamespace
 
-import pytest
-
 from granite_switch.composer.reporting.model_card import (
     render_model_card,
     write_model_card,
@@ -112,7 +110,7 @@ class TestRenderModelCard:
         assert "Param delta" not in base_section
         assert "base_param_count" not in base_section
 
-        details = md[md.index("## Composition Details"):]
+        details = md[md.index("## Composition Details") :]
         assert "base_param_count: 3,402,836,480" in details
         assert "composed_param_count: 3,776,507,411" in details
         assert "Param delta: +10.98%" in details
@@ -223,7 +221,7 @@ class TestRenderModelCard:
             base_param_count=3_402_836_480,
             composed_param_count=3_776_507_411,
         )
-        details = md[md.index("## Composition Details"):]
+        details = md[md.index("## Composition Details") :]
         # Counts are thousands-separated for readability. Strict YAML parsers
         # would need to strip commas, but the section is plain markdown text
         # (not fenced) and the same values appear on the bulleted Params line.
@@ -238,7 +236,7 @@ class TestRenderModelCard:
             adapter_ranks=[8, 8, 8],
             compose_settings={"technology_filter": "alora"},
         )
-        details = md[md.index("## Composition Details"):]
+        details = md[md.index("## Composition Details") :]
         assert "compose_settings:" in details
         assert "technology_filter:" in details
         assert "alora" in details
@@ -253,7 +251,7 @@ class TestRenderModelCard:
                 "ibm-granite/granite-lib-rag-r1.0": "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf",
             },
         )
-        details = md[md.index("## Composition Details"):]
+        details = md[md.index("## Composition Details") :]
         assert "adapter_sources:" in details
         assert "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf" in details
 
@@ -267,8 +265,8 @@ class TestRenderModelCard:
         )
         # Lists render as YAML sequences
         assert "include_adapters:" in md
-        assert "- \"query_*\"" in md
-        assert "- \"answerability\"" in md
+        assert '- "query_*"' in md
+        assert '- "answerability"' in md
 
     def test_composition_details_omitted_when_empty(self):
         md = render_model_card(

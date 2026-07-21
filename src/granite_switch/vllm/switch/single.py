@@ -18,11 +18,9 @@ one-hot pattern — no all-reduce or broadcast needed.
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
-
-from vllm.model_executor.layers.attention.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention.attention import Attention
 
 
 class SingleSwitch(nn.Module):
@@ -43,7 +41,7 @@ class SingleSwitch(nn.Module):
     def __init__(
         self,
         num_adapters: int,
-        vllm_config: Optional[VllmConfig] = None,
+        vllm_config: VllmConfig | None = None,
         control_token_gain: float = 15.0,
         switch_head_dim: int = 32,
         config=None,
@@ -57,7 +55,7 @@ class SingleSwitch(nn.Module):
         else:
             self.dtype = torch.get_default_dtype()
 
-        if config is not None and hasattr(config, 'num_attention_heads'):
+        if config is not None and hasattr(config, "num_attention_heads"):
             tp_size = get_tensor_model_parallel_world_size()
             self.num_heads = config.num_attention_heads // tp_size
             total_kv = config.num_key_value_heads
@@ -124,7 +122,7 @@ class SingleSwitch(nn.Module):
         self,
         input_ids: torch.Tensor,
         adapter_token_ids: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute adapter indices and rewrite control tokens via the LUT.
 
@@ -155,7 +153,11 @@ class SingleSwitch(nn.Module):
         # Every head gets the same one-hot dim-0 pattern. Under TP, each
         # rank's local heads independently compute the correct result.
 
-        q = torch.zeros((total_tokens, self.num_heads, self.head_dim), device=device, dtype=self.dtype)
+        q = torch.zeros(
+            (total_tokens, self.num_heads, self.head_dim),
+            device=device,
+            dtype=self.dtype,
+        )
         q[:, :, 0] = 1.0
 
         # Vectorized adapter token matching
@@ -165,16 +167,24 @@ class SingleSwitch(nn.Module):
         adapter_ids = torch.where(
             is_control,
             matches.long().argmax(dim=1) + 1,
-            torch.zeros_like(input_ids, dtype=torch.long)
+            torch.zeros_like(input_ids, dtype=torch.long),
         )
 
         # Keys dim 0: ±effective_gain (compensated for attention_multiplier)
         gain_sign = (2.0 * is_control.to(self.dtype) - 1.0) * self.effective_gain
 
-        k = torch.zeros((total_tokens, self.num_kv_heads, self.head_dim), device=device, dtype=self.dtype)
+        k = torch.zeros(
+            (total_tokens, self.num_kv_heads, self.head_dim),
+            device=device,
+            dtype=self.dtype,
+        )
         k[:, :, 0] = gain_sign.unsqueeze(1)
 
-        v = torch.zeros((total_tokens, self.num_kv_heads, self.head_dim), device=device, dtype=self.dtype)
+        v = torch.zeros(
+            (total_tokens, self.num_kv_heads, self.head_dim),
+            device=device,
+            dtype=self.dtype,
+        )
         v[:, :, 0] = adapter_ids.to(self.dtype).unsqueeze(1)
 
         # ==================================================================

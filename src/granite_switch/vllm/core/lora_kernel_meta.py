@@ -45,11 +45,8 @@ Usage:
     lora_expand(output, *meta_args, ...)
 """
 
-from typing import Optional, Tuple
-
 import torch
 from torch import nn
-
 from torch.library import Library, impl
 
 # Custom op: copy a CUDA bool scalar into a CPU bool[1] mailbox.
@@ -57,6 +54,7 @@ _mailbox_lib = Library("compile_friendly_lora_meta", "DEF")
 _mailbox_lib.define(
     "set_no_lora_flag_from_gpu_bool(Tensor no_lora_gpu, Tensor(a!) no_lora_flag_cpu) -> ()"
 )
+
 
 @impl(_mailbox_lib, "set_no_lora_flag_from_gpu_bool", "CompositeExplicitAutograd")
 def _set_no_lora_flag_from_gpu_bool_impl(
@@ -82,6 +80,7 @@ def _set_no_lora_flag_from_gpu_bool_impl(
     # Copy (this is the single GPU->CPU sync you pay once per forward)
     no_lora_flag_cpu.copy_(no_lora_gpu.to("cpu"))
 
+
 @impl(_mailbox_lib, "set_no_lora_flag_from_gpu_bool", "Meta")
 def _set_no_lora_flag_from_gpu_bool_meta(
     no_lora_gpu: torch.Tensor,
@@ -92,6 +91,7 @@ def _set_no_lora_flag_from_gpu_bool_meta(
         raise RuntimeError("no_lora_flag_cpu must have numel()==1")
     return
 
+
 set_no_lora_flag_from_gpu_bool = (
     torch.ops.compile_friendly_lora_meta.set_no_lora_flag_from_gpu_bool
 )
@@ -101,9 +101,8 @@ set_no_lora_flag_from_gpu_bool = (
 _cfmeta_lib = Library("cf_lora_meta", "DEF")
 
 # counts: [A+1] (int/long) on CUDA -> start_loc: [A+2] long on CUDA
-_cfmeta_lib.define(
-    "counts_to_start_loc(Tensor counts) -> Tensor"
-)
+_cfmeta_lib.define("counts_to_start_loc(Tensor counts) -> Tensor")
+
 
 @impl(_cfmeta_lib, "counts_to_start_loc", "CompositeExplicitAutograd")
 def _counts_to_start_loc_impl(counts: torch.Tensor) -> torch.Tensor:
@@ -127,11 +126,13 @@ def _counts_to_start_loc_impl(counts: torch.Tensor) -> torch.Tensor:
     )  # [A+2]
     return start_loc
 
+
 @impl(_cfmeta_lib, "counts_to_start_loc", "Meta")
 def _counts_to_start_loc_meta(counts: torch.Tensor) -> torch.Tensor:
     # FakeTensor/Meta mode: return correct shape/dtype/device, values unknown.
     a1 = counts.numel()
     return torch.empty((a1 + 1,), device=counts.device, dtype=torch.int64)
+
 
 counts_to_start_loc = torch.ops.cf_lora_meta.counts_to_start_loc
 
@@ -148,27 +149,27 @@ class LoRAContext:
     """
 
     __slots__ = (
-        "token_lora_mapping",
-        "token_indices_sorted",
-        "num_tokens_per_lora",
-        "lora_token_start_loc",
         "active_lora_ids",
+        "lora_token_start_loc",
         "no_lora_flag_cpu",
         "num_active_loras",
-        "token_group_membership",
+        "num_tokens_per_lora",
         "query_group_suppression",
+        "token_group_membership",
+        "token_indices_sorted",
+        "token_lora_mapping",
     )
 
     def __init__(self):
-        self.token_lora_mapping: Optional[torch.Tensor] = None
-        self.token_indices_sorted: Optional[torch.Tensor] = None
-        self.num_tokens_per_lora: Optional[torch.Tensor] = None
-        self.lora_token_start_loc: Optional[torch.Tensor] = None
-        self.active_lora_ids: Optional[torch.Tensor] = None
-        self.no_lora_flag_cpu: Optional[torch.Tensor] = None
-        self.num_active_loras: Optional[torch.Tensor] = None
-        self.token_group_membership: Optional[torch.Tensor] = None
-        self.query_group_suppression: Optional[torch.Tensor] = None
+        self.token_lora_mapping: torch.Tensor | None = None
+        self.token_indices_sorted: torch.Tensor | None = None
+        self.num_tokens_per_lora: torch.Tensor | None = None
+        self.lora_token_start_loc: torch.Tensor | None = None
+        self.active_lora_ids: torch.Tensor | None = None
+        self.no_lora_flag_cpu: torch.Tensor | None = None
+        self.num_active_loras: torch.Tensor | None = None
+        self.token_group_membership: torch.Tensor | None = None
+        self.query_group_suppression: torch.Tensor | None = None
 
     def reset(self):
         """Clear all stored metadata (e.g. between forwards)."""
@@ -244,7 +245,7 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
 
     def prepare_tensors(
         self, adapter_indices: torch.Tensor
-    ) -> Tuple[
+    ) -> tuple[
         torch.Tensor,  # token_lora_mapping
         torch.Tensor,  # token_indices_sorted
         torch.Tensor,  # num_tokens_per_lora
@@ -282,7 +283,6 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
             even if some have zero tokens. This trades some efficiency for
             torch.compile compatibility.
         """
-        num_tokens = adapter_indices.size(0)
         device = adapter_indices.device
 
         # 1. token_lora_mapping - just pass through (already in Punica convention)
@@ -312,7 +312,7 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
                 torch.cumsum(num_tokens_per_lora, dim=0),
             ]
         )  # [num_adapters+2]
-    #    lora_token_start_loc = counts_to_start_loc(num_tokens_per_lora)
+        #    lora_token_start_loc = counts_to_start_loc(num_tokens_per_lora)
 
         # 5. Active adapter IDs - in compile-friendly version, always all adapters
         # Note: Unlike vLLM's version which filters to only active adapters,
@@ -320,14 +320,13 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
         # Punica kernels can handle zero-token adapters efficiently.
         active_lora_ids = self.adapter_ids_punica  # [num_adapters+1]
 
-#        # 6. No-lora flag (CPU mailbox), computed once per forward without Python branching.
-#        # no_lora_gpu is True iff there are zero adapter tokens (all tokens are base model).
-#        no_lora_gpu = (num_tokens_per_lora[1:].sum() == 0)  # CUDA bool scalar
+        #        # 6. No-lora flag (CPU mailbox), computed once per forward without Python branching.
+        #        # no_lora_gpu is True iff there are zero adapter tokens (all tokens are base model).
+        #        no_lora_gpu = (num_tokens_per_lora[1:].sum() == 0)  # CUDA bool scalar
 
- #       # Update the CPU mailbox via opaque custom op (single sync per forward).
- #       set_no_lora_flag_from_gpu_bool(no_lora_gpu, self.no_lora_flag_cpu)
- #       no_lora_flag_cpu = self.no_lora_flag_cpu
-
+        #       # Update the CPU mailbox via opaque custom op (single sync per forward).
+        #       set_no_lora_flag_from_gpu_bool(no_lora_gpu, self.no_lora_flag_cpu)
+        #       no_lora_flag_cpu = self.no_lora_flag_cpu
 
         # 6. No-lora flag - always False in this implementation
         # The kernels will handle the no-lora case based on token_lora_mapping
@@ -368,7 +367,7 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
         ctx.no_lora_flag_cpu = result[5]
         ctx.num_active_loras = result[6]
 
-    def meta_args(self) -> Tuple[torch.Tensor, ...]:
+    def meta_args(self) -> tuple[torch.Tensor, ...]:
         """Get cached metadata arguments.
 
         Note: This implementation doesn't cache metadata like vLLM's version.
@@ -385,9 +384,7 @@ class CompileFriendlyLoRAKernelMeta(nn.Module):
             "Use prepare_tensors() directly instead of meta_args()."
         )
 
-    def forward(
-        self, adapter_indices: torch.Tensor
-    ) -> Tuple[torch.Tensor, ...]:
+    def forward(self, adapter_indices: torch.Tensor) -> tuple[torch.Tensor, ...]:
         """Forward pass - same as prepare_tensors().
 
         This allows using the module in a nn.Sequential or as a regular module.
@@ -426,9 +423,7 @@ if __name__ == "__main__":
     # Create metadata preparation module
     num_adapters = 4
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    lora_meta = CompileFriendlyLoRAKernelMeta(
-        num_adapters=num_adapters, device=device
-    )
+    lora_meta = CompileFriendlyLoRAKernelMeta(num_adapters=num_adapters, device=device)
 
     # Test with sample adapter indices (Punica convention)
     # -1 = no adapter, 0-3 = adapters

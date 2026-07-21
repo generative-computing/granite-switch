@@ -7,19 +7,13 @@ Requires CUDA GPU and vLLM installed.
 
 import pytest
 import torch
-from transformers.models.granitemoehybrid.configuration_granitemoehybrid import (
-    GraniteMoeHybridConfig,
-)
-
-from granite_switch.config import GraniteSwitchConfig
 
 from tests.shared.granite4_equivalence import (
+    GRANITE4_MINI,
     assert_close,
-    augment_cfg_with_adapters,
     get_tolerances,
     get_visible_mask,
     make_active_adapter_input,
-    GRANITE4_MINI,
 )
 
 _UPSTREAM_EAGER_CONFIGS = {"4.0-h-350m"}
@@ -37,6 +31,7 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm import LLM  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -63,21 +58,27 @@ class TestGranite4FamilyEquivalence:
         layer_types = cfg.get("layer_types", [])
 
         upstream, switch = run_equivalence_integration(
-            cfg, seq_len=16, tmpdir=tmp_path,
+            cfg,
+            seq_len=16,
+            tmpdir=tmp_path,
             **_eager_kwargs_if_needed(model_name),
         )
 
         tol = get_tolerances(layer_types, long_sequence=False)
         if tol is None:
             torch.testing.assert_close(
-                switch, upstream,
-                atol=0.0, rtol=0.0,
+                switch,
+                upstream,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: logprobs should be bit-exact",
             )
         else:
             assert_close(
-                switch, upstream,
-                atol=tol[0], rtol=tol[1],
+                switch,
+                upstream,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: short sequence logprobs diverge",
             )
 
@@ -89,21 +90,27 @@ class TestGranite4FamilyEquivalence:
         layer_types = cfg.get("layer_types", [])
 
         upstream, switch = run_equivalence_integration(
-            cfg, seq_len=64, tmpdir=tmp_path,
+            cfg,
+            seq_len=64,
+            tmpdir=tmp_path,
             **_eager_kwargs_if_needed(model_name),
         )
 
         tol = get_tolerances(layer_types, long_sequence=True)
         if tol is None:
             torch.testing.assert_close(
-                switch, upstream,
-                atol=0.0, rtol=0.0,
+                switch,
+                upstream,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: logprobs should be bit-exact",
             )
         else:
             assert_close(
-                switch, upstream,
-                atol=tol[0], rtol=tol[1],
+                switch,
+                upstream,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: long sequence logprobs diverge",
             )
 
@@ -117,15 +124,19 @@ class TestZeroAdapterNoHiding:
 
         cfg = GRANITE4_MINI[model_name]
         upstream, switch = run_zero_adapter_no_hiding_equivalence(
-            cfg, use_control_tokens=False,
-            seq_len=16, tmpdir=tmp_path,
+            cfg,
+            use_control_tokens=False,
+            seq_len=16,
+            tmpdir=tmp_path,
             **_eager_kwargs_if_needed(model_name),
         )
 
         # SingleSwitch is bit-exact (no counting head, no position perturbation)
         torch.testing.assert_close(
-            switch, upstream,
-            atol=0.0, rtol=0.0,
+            switch,
+            upstream,
+            atol=0.0,
+            rtol=0.0,
             msg=f"{model_name}: should be bit-exact with no control tokens",
         )
 
@@ -142,7 +153,9 @@ class TestZeroAdapterEquivalence:
         seq_len = 16
 
         upstream, switch = run_zero_adapter_equivalence(
-            cfg, seq_len=seq_len, tmpdir=tmp_path,
+            cfg,
+            seq_len=seq_len,
+            tmpdir=tmp_path,
             **_eager_kwargs_if_needed(model_name),
         )
 
@@ -152,14 +165,18 @@ class TestZeroAdapterEquivalence:
         tol = get_tolerances(layer_types, long_sequence=False, has_kv_hidden=True)
         if tol is None:
             torch.testing.assert_close(
-                switch[visible], upstream[visible],
-                atol=0.0, rtol=0.0,
+                switch[visible],
+                upstream[visible],
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: logprobs should be bit-exact",
             )
         else:
             assert_close(
-                switch[visible], upstream[visible],
-                atol=tol[0], rtol=tol[1],
+                switch[visible],
+                upstream[visible],
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: short sequence logprobs diverge (zero-adapter)",
             )
 
@@ -172,7 +189,9 @@ class TestZeroAdapterEquivalence:
         seq_len = 64
 
         upstream, switch = run_zero_adapter_equivalence(
-            cfg, seq_len=seq_len, tmpdir=tmp_path,
+            cfg,
+            seq_len=seq_len,
+            tmpdir=tmp_path,
             **_eager_kwargs_if_needed(model_name),
         )
 
@@ -182,13 +201,17 @@ class TestZeroAdapterEquivalence:
         tol = get_tolerances(layer_types, long_sequence=True, has_kv_hidden=True)
         if tol is None:
             torch.testing.assert_close(
-                switch[visible], upstream[visible],
-                atol=0.0, rtol=0.0,
+                switch[visible],
+                upstream[visible],
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: logprobs should be bit-exact",
             )
         else:
             assert_close(
-                switch[visible], upstream[visible],
-                atol=tol[0], rtol=tol[1],
+                switch[visible],
+                upstream[visible],
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: long sequence logprobs diverge (zero-adapter)",
             )

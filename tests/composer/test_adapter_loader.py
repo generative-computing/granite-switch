@@ -2,23 +2,24 @@
 """Unit tests for adapter loading and discovery functions."""
 
 import json
+
 import pytest
 import torch
 import yaml
-from pathlib import Path
 
+from granite_switch.composer.adapter_discovery import (
+    discover_adapters,
+    discover_adapters_from_yaml,
+)
 from granite_switch.composer.adapter_loader import (
-    load_adapter_config,
+    analyze_source_adapters,
     detect_lora_config,
     detect_present_modules,
-    load_adapter_target_modules,
+    load_adapter_config,
     load_adapter_files,
-    analyze_source_adapters,
+    load_adapter_target_modules,
 )
-from granite_switch.composer.arch import ModuleDescriptor, ArchDescriptor
-
-from granite_switch.composer.adapter_discovery import discover_adapters, discover_adapters_from_yaml
-from granite_switch.composer.arch import resolve_arch
+from granite_switch.composer.arch import ArchDescriptor, ModuleDescriptor, resolve_arch
 
 
 @pytest.fixture
@@ -59,14 +60,27 @@ def mock_adapter_dir(tmp_path):
 
     # Create adapter weights (safetensors format)
     weights = {
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.randn(8, 128),
-        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.randn(128, 8),
-        "base_model.model.model.layers.0.self_attn.k_proj.lora_A.weight": torch.randn(8, 128),
-        "base_model.model.model.layers.0.self_attn.k_proj.lora_B.weight": torch.randn(128, 8),
-        "base_model.model.model.layers.0.self_attn.v_proj.lora_A.weight": torch.randn(8, 128),
-        "base_model.model.model.layers.0.self_attn.v_proj.lora_B.weight": torch.randn(128, 8),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.randn(
+            8, 128
+        ),
+        "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight": torch.randn(
+            128, 8
+        ),
+        "base_model.model.model.layers.0.self_attn.k_proj.lora_A.weight": torch.randn(
+            8, 128
+        ),
+        "base_model.model.model.layers.0.self_attn.k_proj.lora_B.weight": torch.randn(
+            128, 8
+        ),
+        "base_model.model.model.layers.0.self_attn.v_proj.lora_A.weight": torch.randn(
+            8, 128
+        ),
+        "base_model.model.model.layers.0.self_attn.v_proj.lora_B.weight": torch.randn(
+            128, 8
+        ),
     }
     from safetensors.torch import save_file
+
     save_file(weights, str(adapter_dir / "adapter_model.safetensors"))
 
     return adapter_dir
@@ -239,7 +253,10 @@ class TestLoadAdapterFiles:
 
         assert len(result) == 1
         state_dict = result[0]
-        assert "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight" in state_dict
+        assert (
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+            in state_dict
+        )
 
     def test_load_pytorch_bin(self, tmp_path, capsys):
         """Load adapter from pytorch bin format."""
@@ -247,14 +264,19 @@ class TestLoadAdapterFiles:
         adapter_dir.mkdir()
 
         weights = {
-            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.randn(8, 128),
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.randn(
+                8, 128
+            ),
         }
         torch.save(weights, str(adapter_dir / "adapter_model.bin"))
 
         result = load_adapter_files([str(adapter_dir)])
 
         assert len(result) == 1
-        assert "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight" in result[0]
+        assert (
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+            in result[0]
+        )
 
     def test_load_missing_files_raises(self, tmp_path):
         """Raise FileNotFoundError when no weight file exists."""
@@ -273,14 +295,15 @@ class TestLoadAdapterFiles:
             adapter_dir.mkdir()
             weights = {f"layer.{i}.weight": torch.randn(8, 8)}
             from safetensors.torch import save_file
+
             save_file(weights, str(adapter_dir / "adapter_model.safetensors"))
             adapters.append(str(adapter_dir))
 
         result = load_adapter_files(adapters)
 
         assert len(result) == 2
-        assert f"layer.0.weight" in result[0]
-        assert f"layer.1.weight" in result[1]
+        assert "layer.0.weight" in result[0]
+        assert "layer.1.weight" in result[1]
 
 
 class TestAnalyzeSourceAdapters:
@@ -302,10 +325,15 @@ class TestAnalyzeSourceAdapters:
         assert "file_info" in result
 
         # Check that q_proj.lora_A is populated
-        assert result["status"]["q_proj.lora_A"][result["adapter_names"][0]] == "populated"
+        assert (
+            result["status"]["q_proj.lora_A"][result["adapter_names"][0]] == "populated"
+        )
 
         # Check that o_proj is not-targeted (not in target_modules)
-        assert result["status"]["o_proj.lora_A"][result["adapter_names"][0]] == "not-targeted"
+        assert (
+            result["status"]["o_proj.lora_A"][result["adapter_names"][0]]
+            == "not-targeted"
+        )
 
     def test_analyze_with_custom_names(self, mock_adapter_dir, capsys):
         """Analyze adapter with custom adapter names."""
@@ -343,9 +371,12 @@ class TestAnalyzeSourceAdapters:
 
         # Create weights with all zeros
         weights = {
-            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(8, 128),
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight": torch.zeros(
+                8, 128
+            ),
         }
         from safetensors.torch import save_file
+
         save_file(weights, str(adapter_dir / "adapter_model.safetensors"))
 
         result = analyze_source_adapters(
@@ -372,7 +403,9 @@ class TestDetectPresentModules:
         # o_proj should not be present
         assert "o_proj" not in present_groups
 
-    def test_detect_absent_modules_reported(self, mock_adapter_dir, simple_arch, capsys):
+    def test_detect_absent_modules_reported(
+        self, mock_adapter_dir, simple_arch, capsys
+    ):
         """Report absent modules in output."""
         present_groups, _ = detect_present_modules(
             [str(mock_adapter_dir)],
@@ -420,33 +453,50 @@ class TestDetectPresentModules:
         # Granite 3.x adapter with gate_proj / up_proj / down_proj weights
         adapter_dir = tmp_path / "granite3_adapter"
         adapter_dir.mkdir()
-        (adapter_dir / "adapter_config.json").write_text(json.dumps({
-            "r": 8,
-            "lora_alpha": 8.0,
-            "target_modules": ["gate_proj", "up_proj", "down_proj"],
-        }))
+        (adapter_dir / "adapter_config.json").write_text(
+            json.dumps(
+                {
+                    "r": 8,
+                    "lora_alpha": 8.0,
+                    "target_modules": ["gate_proj", "up_proj", "down_proj"],
+                }
+            )
+        )
         save_file(
             {
-                "base_model.model.layers.0.mlp.gate_proj.lora_A.weight": torch.randn(8, 64),
-                "base_model.model.layers.0.mlp.gate_proj.lora_B.weight": torch.randn(64, 8),
-                "base_model.model.layers.0.mlp.up_proj.lora_A.weight": torch.randn(8, 64),
-                "base_model.model.layers.0.mlp.up_proj.lora_B.weight": torch.randn(64, 8),
-                "base_model.model.layers.0.mlp.down_proj.lora_A.weight": torch.randn(8, 64),
-                "base_model.model.layers.0.mlp.down_proj.lora_B.weight": torch.randn(64, 8),
+                "base_model.model.layers.0.mlp.gate_proj.lora_A.weight": torch.randn(
+                    8, 64
+                ),
+                "base_model.model.layers.0.mlp.gate_proj.lora_B.weight": torch.randn(
+                    64, 8
+                ),
+                "base_model.model.layers.0.mlp.up_proj.lora_A.weight": torch.randn(
+                    8, 64
+                ),
+                "base_model.model.layers.0.mlp.up_proj.lora_B.weight": torch.randn(
+                    64, 8
+                ),
+                "base_model.model.layers.0.mlp.down_proj.lora_A.weight": torch.randn(
+                    8, 64
+                ),
+                "base_model.model.layers.0.mlp.down_proj.lora_B.weight": torch.randn(
+                    64, 8
+                ),
             },
             str(adapter_dir / "adapter_model.safetensors"),
         )
 
-        with pytest.raises(ValueError, match="not recognized by the current architecture"):
+        with pytest.raises(
+            ValueError, match="not recognized by the current architecture"
+        ):
             detect_present_modules([str(adapter_dir)], granite4_arch)
-
 
 
 class TestAdapterLoadingFromYAML:
     def test_fallback_precedence_and_yaml_parity(self, tmp_path):
         target_model = "granite-4.0-micro"
         adapter_name = "unified-test-adapter"
-        
+
         # 1. Setup: Create a standard 'lora' folder
         lora_dir = tmp_path / adapter_name / target_model / "lora"
         lora_dir.mkdir(parents=True)
@@ -456,7 +506,9 @@ class TestAdapterLoadingFromYAML:
 
         # 2. Setup: Create a custom-named folder (NOT alora/lora)
         # We will promote this to 'alora' via the fallback
-        custom_dir = tmp_path / f"{adapter_name}-latest" / target_model / "experimental-v3"
+        custom_dir = (
+            tmp_path / f"{adapter_name}-latest" / target_model / "experimental-v3"
+        )
         custom_dir.mkdir(parents=True)
         (custom_dir / "io.yaml").write_text("content: fallback-promoted-alora")
         (custom_dir / "adapter_config.json").write_text(json.dumps({"r": 16}))
@@ -466,27 +518,24 @@ class TestAdapterLoadingFromYAML:
         # input_path is the directory
         input_path = str(tmp_path)
         arch = resolve_arch("ibm-granite/granite-4.0-micro")
-        adapters = discover_adapters( # default is to prefer alora
-                    input_path, "granite-4.0-micro", arch, technology_fallback="alora"
-                )
+        adapters = discover_adapters(  # default is to prefer alora
+            input_path, "granite-4.0-micro", arch, technology_fallback="alora"
+        )
         assert len(adapters) == 2
 
         # --- ACTION: YAML MODE ---
         # Create a manifest pointing to the SAME custom folder
         manifest_file = tmp_path / "manifest.yaml"
         manifest_data = {
-            adapter_name: {
-                "path": str(lora_dir.absolute()), 
-                "type": "lora"
-            },
+            adapter_name: {"path": str(lora_dir.absolute()), "type": "lora"},
             f"{adapter_name}-latest": {
-                "path": str(custom_dir.absolute()), 
-                "type": "alora"
-            }
+                "path": str(custom_dir.absolute()),
+                "type": "alora",
+            },
         }
         with open(manifest_file, "w") as f:
             yaml.dump(manifest_data, f)
-        
+
         input_path = str(manifest_file)
         yaml_adapters = discover_adapters_from_yaml(input_path)
 
@@ -495,4 +544,3 @@ class TestAdapterLoadingFromYAML:
         adapters_without_source = [(p, n, t) for p, n, t, _ in adapters]
         yaml_without_source = [(p, n, t) for p, n, t, _ in yaml_adapters]
         assert adapters_without_source == yaml_without_source
-

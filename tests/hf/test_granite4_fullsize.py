@@ -25,12 +25,11 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
-
 from tests.shared.granite4_equivalence import (
-    assert_close,
-    transfer_weights_strict,
-    get_tolerances,
     GRANITE4_FULLSIZE,
+    assert_close,
+    get_tolerances,
+    transfer_weights_strict,
 )
 
 
@@ -44,9 +43,7 @@ def _run_equivalence(cfg_dict, *, seq_len=8):
 
     # Phase 1: upstream model
     torch.manual_seed(0)
-    upstream = GraniteMoeHybridForCausalLM(
-        GraniteMoeHybridConfig(**cfg_dict)
-    ).eval()
+    upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg_dict)).eval()
 
     with torch.no_grad():
         upstream_logits = upstream(input_ids=input_ids, use_cache=False).logits.clone()
@@ -85,9 +82,7 @@ class TestGranite4FullSize:
         cfg = GRANITE4_FULLSIZE[model_name]
 
         torch.manual_seed(0)
-        upstream = GraniteMoeHybridForCausalLM(
-            GraniteMoeHybridConfig(**cfg)
-        ).eval()
+        upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg)).eval()
         upstream_sd = upstream.state_dict()
         del upstream
         gc.collect()
@@ -110,13 +105,17 @@ class TestGranite4FullSize:
         tol = get_tolerances(layer_types)
         if tol is None:
             torch.testing.assert_close(
-                switch_logits, upstream_logits,
-                atol=0.0, rtol=0.0,
+                switch_logits,
+                upstream_logits,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: mamba-only logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_logits, upstream_logits,
-                atol=tol[0], rtol=tol[1],
+                switch_logits,
+                upstream_logits,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: full-size logits diverge",
             )

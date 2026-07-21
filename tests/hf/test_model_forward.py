@@ -13,8 +13,8 @@ from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
 from granite_switch.hf.switch.single import SingleSwitch
 
-
 # ── Helpers ────────────────────────────────────────────────────────
+
 
 def _set_adapter_token_ids(model, token_ids):
     """Populate model.model.adapter_token_ids from a list of ints."""
@@ -40,10 +40,13 @@ def _set_nonzero_lora_B(model, scale=0.1):
                     b.data = torch.randn_like(b) * scale
             # output_linear (SwitchedLoRALinear)
             if hasattr(mlp.output_linear, "lora_B"):
-                mlp.output_linear.lora_B.data = torch.randn_like(mlp.output_linear.lora_B) * scale
+                mlp.output_linear.lora_B.data = (
+                    torch.randn_like(mlp.output_linear.lora_B) * scale
+                )
 
 
 # ── Fixtures ───────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def tiny_single_config():
@@ -69,8 +72,8 @@ def tiny_single_config():
 # 1. Model instantiation
 # ════════════════════════════════════════════════════════════════════
 
-class TestModelInstantiation:
 
+class TestModelInstantiation:
     def test_single_switch_model_creates(self, tiny_config):
         model = GraniteSwitchForCausalLM(tiny_config)
         assert isinstance(model.model.switch, SingleSwitch)
@@ -86,8 +89,8 @@ class TestModelInstantiation:
 # 2. Forward output shape
 # ════════════════════════════════════════════════════════════════════
 
-class TestForwardOutputShape:
 
+class TestForwardOutputShape:
     def test_basic_output_shape(self, tiny_config):
         model = GraniteSwitchForCausalLM(tiny_config).eval()
         _set_adapter_token_ids(model, tiny_config.adapter_token_ids)
@@ -116,8 +119,8 @@ class TestForwardOutputShape:
 # 4. CausalLM output fields
 # ════════════════════════════════════════════════════════════════════
 
-class TestCausalLMOutputFields:
 
+class TestCausalLMOutputFields:
     def test_returns_causal_lm_output(self, tiny_config):
         model = GraniteSwitchForCausalLM(tiny_config).eval()
         _set_adapter_token_ids(model, tiny_config.adapter_token_ids)
@@ -160,6 +163,7 @@ class TestCausalLMOutputFields:
 # 5. Adapter indices wiring
 # ════════════════════════════════════════════════════════════════════
 
+
 class TestAdapterIndicesWiring:
     """End-to-end: switch → adapter_indices → LoRA modifies logits."""
 
@@ -189,10 +193,13 @@ class TestAdapterIndicesWiring:
         # Post-control positions (3+): must differ (adapter active via LoRA)
         post_ctrl = logits_ctrl[0, 3:]
         post_text = logits_text[0, 3:]
-        assert not torch.allclose(post_ctrl, post_text), \
+        assert not torch.allclose(post_ctrl, post_text), (
             "Post-control logits should differ when adapter is active"
+        )
 
-    def test_different_adapters_produce_different_post_control_logits(self, tiny_config):
+    def test_different_adapters_produce_different_post_control_logits(
+        self, tiny_config
+    ):
         """Different control tokens → different adapters → different logits."""
         model = self._make_model(tiny_config)
 
@@ -207,13 +214,15 @@ class TestAdapterIndicesWiring:
         torch.testing.assert_close(logits_a1[0, :2], logits_a2[0, :2])
 
         # Post-control positions: differ (different LoRA weights)
-        assert not torch.allclose(logits_a1[0, 3:], logits_a2[0, 3:]), \
+        assert not torch.allclose(logits_a1[0, 3:], logits_a2[0, 3:]), (
             "Different adapters should produce different post-control logits"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════
 # 6. Activating tokens: switch behavior (explicit adapter_indices)
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestActivatingTokenSwitch:
     """Test that activating tokens properly trigger adapter switching."""
@@ -230,8 +239,9 @@ class TestActivatingTokenSwitch:
 
         ai = model.model._last_adapter_indices
         assert (ai[:, :2] == 0).all(), "Pre-control positions should be base"
-        assert (ai[:, 2:] > 0).all(), \
+        assert (ai[:, 2:] > 0).all(), (
             f"Activating token should set adapter_indices > 0 at pos 2+, got {ai}"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -314,10 +324,12 @@ class TestNativeModeForward:
         model = GraniteSwitchForCausalLM(config).eval()
         _set_adapter_token_ids(model, config.adapter_token_ids)
 
-        input_ids = torch.tensor([
-            [10, 250, 20, 30, 40],
-            [10, 251, 20, 30, 40],
-        ])
+        input_ids = torch.tensor(
+            [
+                [10, 250, 20, 30, 40],
+                [10, 251, 20, 30, 40],
+            ]
+        )
         with torch.no_grad():
             output = model(input_ids=input_ids)
 

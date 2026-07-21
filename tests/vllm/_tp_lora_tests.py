@@ -13,9 +13,10 @@ Integration tests in test_tp_integration.py cover real vLLM TP end-to-end.
 Requires CUDA (SwitchedLoRALinear uses device from base_layer.weight).
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
-from unittest.mock import patch
 from torch import nn
 
 _CUDA_AVAILABLE = torch.cuda.is_available()
@@ -24,6 +25,7 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import():
     try:
         import granite_switch.vllm.core.lora  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -45,8 +47,15 @@ HIDDEN = 64
 OUT = 32
 
 
-def _make_layer(is_column_parallel, is_row_parallel, tp_size, tp_rank,
-                num_slices=1, output_slices=None, reduce_results=False):
+def _make_layer(
+    is_column_parallel,
+    is_row_parallel,
+    tp_size,
+    tp_rank,
+    num_slices=1,
+    output_slices=None,
+    reduce_results=False,
+):
     """Create a SwitchedLoRALinear wrapping a plain nn.Linear.
 
     Manually sets TP attributes after construction to avoid needing
@@ -54,12 +63,20 @@ def _make_layer(is_column_parallel, is_row_parallel, tp_size, tp_rank,
     """
     base = nn.Linear(HIDDEN, OUT, bias=False, dtype=torch.bfloat16, device="cuda")
 
-    with patch("granite_switch.vllm.core.lora.get_tensor_model_parallel_world_size",
-               return_value=tp_size), \
-         patch("granite_switch.vllm.core.lora.get_tensor_model_parallel_rank",
-               return_value=tp_rank):
+    with (
+        patch(
+            "granite_switch.vllm.core.lora.get_tensor_model_parallel_world_size",
+            return_value=tp_size,
+        ),
+        patch(
+            "granite_switch.vllm.core.lora.get_tensor_model_parallel_rank",
+            return_value=tp_rank,
+        ),
+    ):
         layer = SwitchedLoRALinear(
-            base, NUM_ADAPTERS, RANK,
+            base,
+            NUM_ADAPTERS,
+            RANK,
             num_slices=num_slices,
             output_slices=output_slices,
         )
@@ -153,8 +170,12 @@ class TestPackedSlicing:
 
     def test_packed_creates_slices(self):
         layer = _make_layer(
-            True, False, tp_size=2, tp_rank=0,
-            num_slices=3, output_slices=(OUT, OUT, OUT),
+            True,
+            False,
+            tp_size=2,
+            tp_rank=0,
+            num_slices=3,
+            output_slices=(OUT, OUT, OUT),
         )
         assert layer.num_slices == 3
         assert len(layer.lora_A_slices) == 3
@@ -164,8 +185,12 @@ class TestPackedSlicing:
         """Each lora_B slice should be independently sliced on its output dim."""
         slice_sizes = (64, 32, 16)
         layer = _make_layer(
-            True, False, tp_size=2, tp_rank=0,
-            num_slices=3, output_slices=slice_sizes,
+            True,
+            False,
+            tp_size=2,
+            tp_rank=0,
+            num_slices=3,
+            output_slices=slice_sizes,
         )
         for i, full_out in enumerate(slice_sizes):
             w = torch.randn(NUM_ADAPTERS, 1, full_out, RANK)
@@ -180,8 +205,12 @@ class TestPackedSlicing:
         """Column-parallel: each lora_A slice should be unchanged (input is full)."""
         slice_sizes = (64, 32, 16)
         layer = _make_layer(
-            True, False, tp_size=2, tp_rank=0,
-            num_slices=3, output_slices=slice_sizes,
+            True,
+            False,
+            tp_size=2,
+            tp_rank=0,
+            num_slices=3,
+            output_slices=slice_sizes,
         )
         for i in range(3):
             w = torch.randn(NUM_ADAPTERS, 1, RANK, HIDDEN)
@@ -193,12 +222,22 @@ class TestPackedSlicing:
         slice_sizes = (64, 32, 16)
         for i, full_out in enumerate(slice_sizes):
             w = torch.randn(NUM_ADAPTERS, 1, full_out, RANK)
-            r0 = _make_layer(True, False, tp_size=2, tp_rank=0,
-                             num_slices=3, output_slices=slice_sizes
-                             ).slice_lora_b_weight(w, slice_idx=i)
-            r1 = _make_layer(True, False, tp_size=2, tp_rank=1,
-                             num_slices=3, output_slices=slice_sizes
-                             ).slice_lora_b_weight(w, slice_idx=i)
+            r0 = _make_layer(
+                True,
+                False,
+                tp_size=2,
+                tp_rank=0,
+                num_slices=3,
+                output_slices=slice_sizes,
+            ).slice_lora_b_weight(w, slice_idx=i)
+            r1 = _make_layer(
+                True,
+                False,
+                tp_size=2,
+                tp_rank=1,
+                num_slices=3,
+                output_slices=slice_sizes,
+            ).slice_lora_b_weight(w, slice_idx=i)
             assert torch.equal(torch.cat([r0, r1], dim=-2), w), (
                 f"Slice {i}: ranks don't reconstruct full weight"
             )
@@ -214,8 +253,12 @@ class TestWeightLoaderAttached:
 
     def test_packed_slices_have_loaders(self):
         layer = _make_layer(
-            True, False, tp_size=2, tp_rank=0,
-            num_slices=3, output_slices=(OUT, OUT, OUT),
+            True,
+            False,
+            tp_size=2,
+            tp_rank=0,
+            num_slices=3,
+            output_slices=(OUT, OUT, OUT),
         )
         for p in layer.lora_A_slices:
             assert callable(getattr(p, "weight_loader", None))
@@ -236,8 +279,9 @@ class TestWeightLoaderSlices:
         layer = _make_layer(True, False, tp_size=2, tp_rank=0)
         sharded_out = layer.lora_B.shape[-2]
         full_out = sharded_out * 2
-        full_weight = torch.randn(NUM_ADAPTERS, 1, full_out, RANK, device="cuda",
-                                  dtype=torch.bfloat16)
+        full_weight = torch.randn(
+            NUM_ADAPTERS, 1, full_out, RANK, device="cuda", dtype=torch.bfloat16
+        )
         layer.lora_B.weight_loader(layer.lora_B, full_weight)
         expected = full_weight[:, :, :sharded_out, :]
         assert torch.equal(layer.lora_B.data, expected)
@@ -246,8 +290,9 @@ class TestWeightLoaderSlices:
         layer = _make_layer(False, True, tp_size=2, tp_rank=1)
         sharded_in = layer.lora_A.shape[-1]
         full_in = sharded_in * 2
-        full_weight = torch.randn(NUM_ADAPTERS, 1, RANK, full_in, device="cuda",
-                                  dtype=torch.bfloat16)
+        full_weight = torch.randn(
+            NUM_ADAPTERS, 1, RANK, full_in, device="cuda", dtype=torch.bfloat16
+        )
         layer.lora_A.weight_loader(layer.lora_A, full_weight)
         expected = full_weight[:, :, :, sharded_in:]
         assert torch.equal(layer.lora_A.data, expected)

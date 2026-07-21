@@ -6,19 +6,14 @@ They are used by the Router implementation to apply frozen LoRA adapters
 selected by the trainable switch.
 """
 
-from typing import Optional, Tuple, List, Union
-
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
+    GraniteMoeHybridMLP,
     apply_rotary_pos_emb,
     eager_attention_forward,
-    repeat_kv,
-    GraniteMoeHybridMLP,
 )
 
 from granite_switch.config import GraniteSwitchConfig
@@ -79,7 +74,7 @@ class SwitchedLoRALinear(nn.Module):
 
         # Context-passing support: stored adapter_indices for use in modules
         # (like mamba) where the caller can't pass adapter_indices explicitly.
-        self._adapter_indices: Optional[torch.Tensor] = None
+        self._adapter_indices: torch.Tensor | None = None
 
     @property
     def weight(self):
@@ -92,7 +87,7 @@ class SwitchedLoRALinear(nn.Module):
         return self.base_layer.bias
 
     def forward(
-        self, x: torch.Tensor, adapter_indices: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, adapter_indices: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Forward pass with conditional LoRA.
 
@@ -150,7 +145,9 @@ class SwitchedLoRALinear(nn.Module):
                 lora_b = self.lora_B[tensor_idx, 0]  # [out_features, rank]
 
                 # Get tokens for this adapter
-                x_adapter = x_flat[token_indices]  # [num_tokens_with_adapter, in_features]
+                x_adapter = x_flat[
+                    token_indices
+                ]  # [num_tokens_with_adapter, in_features]
 
                 # LoRA computation: x @ A^T @ B_prescaled^T
                 # lora_B is pre-scaled by (alpha/rank) during model loading
@@ -193,7 +190,7 @@ class MergedSwitchedLoRALinear(nn.Module):
     def __init__(
         self,
         in_features: int,
-        output_slices: Tuple[int, ...],
+        output_slices: tuple[int, ...],
         num_adapters: int,
         max_lora_rank: int,
         bias: bool = False,
@@ -217,14 +214,22 @@ class MergedSwitchedLoRALinear(nn.Module):
         # LoRA slices stored as ParameterList (MATCHES vLLM STRUCTURE!)
         # This ensures parameter names are: module.lora_A_slices.0, module.lora_A_slices.1, etc.
         # Shape: [num_adapters, 1, max_lora_rank, features]
-        self.lora_A_slices = nn.ParameterList([
-            nn.Parameter(torch.zeros(self.num_adapters, 1, self.max_lora_rank, in_features))
-            for _ in range(self.num_slices)
-        ])
-        self.lora_B_slices = nn.ParameterList([
-            nn.Parameter(torch.zeros(self.num_adapters, 1, output_size, self.max_lora_rank))
-            for output_size in output_slices
-        ])
+        self.lora_A_slices = nn.ParameterList(
+            [
+                nn.Parameter(
+                    torch.zeros(self.num_adapters, 1, self.max_lora_rank, in_features)
+                )
+                for _ in range(self.num_slices)
+            ]
+        )
+        self.lora_B_slices = nn.ParameterList(
+            [
+                nn.Parameter(
+                    torch.zeros(self.num_adapters, 1, output_size, self.max_lora_rank)
+                )
+                for output_size in output_slices
+            ]
+        )
 
         # Initialize LoRA weights
         for lora_A in self.lora_A_slices:
@@ -234,10 +239,10 @@ class MergedSwitchedLoRALinear(nn.Module):
 
         # Context-passing support: stored adapter_indices for use in modules
         # (like shared_mlp) where the caller can't pass adapter_indices explicitly.
-        self._adapter_indices: Optional[torch.Tensor] = None
+        self._adapter_indices: torch.Tensor | None = None
 
     def forward(
-        self, x: torch.Tensor, adapter_indices: Optional[torch.Tensor] = None
+        self, x: torch.Tensor, adapter_indices: torch.Tensor | None = None
     ) -> torch.Tensor:
         """Forward with packed LoRA applied to each slice.
 
@@ -275,15 +280,19 @@ class MergedSwitchedLoRALinear(nn.Module):
         offset = 0
         for slice_idx, output_size in enumerate(self.output_slices):
             # Get LoRA weights for this slice
-            lora_A = self.lora_A_slices[slice_idx]  # [num_adapters, 1, rank, in_features]
-            lora_B = self.lora_B_slices[slice_idx]  # [num_adapters, 1, output_size, rank]
+            lora_A = self.lora_A_slices[
+                slice_idx
+            ]  # [num_adapters, 1, rank, in_features]
+            lora_B = self.lora_B_slices[
+                slice_idx
+            ]  # [num_adapters, 1, output_size, rank]
 
             # Apply LoRA to this slice's output region
-            output_slice = output_flat[:, offset:offset+output_size]
+            output_slice = output_flat[:, offset : offset + output_size]
             output_slice = self._apply_lora_to_slice(
                 x_flat, output_slice, adapter_indices_flat, lora_A, lora_B
             )
-            output_flat[:, offset:offset+output_size] = output_slice
+            output_flat[:, offset : offset + output_size] = output_slice
 
             offset += output_size
 
@@ -354,7 +363,8 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.head_dim = getattr(
-            config, "projection_head_dim",
+            config,
+            "projection_head_dim",
             self.hidden_size // self.num_heads,
         )
         self.num_key_value_heads = config.num_key_value_heads
@@ -422,13 +432,13 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         adapter_indices: torch.Tensor,
-        position_embeddings: Tuple[torch.Tensor, torch.Tensor],
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Cache]]:
+        cache_position: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         """Forward pass with LoRA and modern Cache API support.
 
         Args:
@@ -455,12 +465,18 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         # Split Q, K, V
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_key_value_heads * self.head_dim
-        query_states, key_states, value_states = qkv.split([q_size, kv_size, kv_size], dim=-1)
+        query_states, key_states, value_states = qkv.split(
+            [q_size, kv_size, kv_size], dim=-1
+        )
 
         # Reshape for attention
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
-        key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
-        value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim)
+        key_states = key_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        )
+        value_states = value_states.view(
+            bsz, q_len, self.num_key_value_heads, self.head_dim
+        )
 
         # QK-norm: per-head RMSNorm before RoPE (Qwen3).
         # Tensors are [batch, seq, heads, head_dim]; RMSNorm normalizes last dim.
@@ -470,12 +486,16 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
 
         # Apply rotary embeddings (precomputed at model level) when present.
         # position_embeddings is None when position_embedding_type == "nope".
-        cos, sin = position_embeddings if position_embeddings is not None else (None, None)
+        cos, sin = (
+            position_embeddings if position_embeddings is not None else (None, None)
+        )
         if position_embeddings is not None:
             # Transpose for RoPE: [batch, seq, heads, dim] -> [batch, heads, seq, dim]
             query_states_t = query_states.transpose(1, 2)
             key_states_t = key_states.transpose(1, 2)
-            query_states_t, key_states_t = apply_rotary_pos_emb(query_states_t, key_states_t, cos, sin)
+            query_states_t, key_states_t = apply_rotary_pos_emb(
+                query_states_t, key_states_t, cos, sin
+            )
             # Transpose back: [batch, heads, seq, dim] -> [batch, seq, heads, dim]
             query_states = query_states_t.transpose(1, 2)
             key_states = key_states_t.transpose(1, 2)
@@ -497,7 +517,9 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         # This gets us FlashAttention, SDPA, FlexAttention, etc. for free
         attention_interface = eager_attention_forward
         if self.config._attn_implementation != "eager":
-            attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -542,7 +564,10 @@ def replace_shared_mlp_projections_with_lora(
         old = mlp.input_linear
         mlp.input_linear = MergedSwitchedLoRALinear(
             old.in_features,
-            output_slices=(config.shared_intermediate_size, config.shared_intermediate_size),
+            output_slices=(
+                config.shared_intermediate_size,
+                config.shared_intermediate_size,
+            ),
             num_adapters=num_adapters,
             max_lora_rank=max_lora_rank,
             bias=old.bias is not None,
@@ -552,12 +577,12 @@ def replace_shared_mlp_projections_with_lora(
     if "shared_output_linear" in config.lora_target_modules:
         old = mlp.output_linear
         mlp.output_linear = SwitchedLoRALinear(
-            old.in_features, old.out_features,
-            num_adapters, max_lora_rank,
+            old.in_features,
+            old.out_features,
+            num_adapters,
+            max_lora_rank,
             bias=old.bias is not None,
         )
         has_output_lora = True
 
     return has_input_lora, has_output_lora
-
-

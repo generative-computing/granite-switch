@@ -47,7 +47,11 @@ class SingleSwitchTokenMatchingCases:
     def test_every_adapter_id_exact(self, adapter_idx):
         """All 32 adapter IDs round-trip exactly under gain compensation."""
         expected_id = adapter_idx + 1
-        seq = [TEXT_TOKEN] * 10 + [ADAPTER_TOKEN_IDS_LIST[adapter_idx]] + [TEXT_TOKEN] * 10
+        seq = (
+            [TEXT_TOKEN] * 10
+            + [ADAPTER_TOKEN_IDS_LIST[adapter_idx]]
+            + [TEXT_TOKEN] * 10
+        )
         result = self._run(seq)
         assert all(v == 0 for v in result[:10])
         assert all(v == expected_id for v in result[10:])
@@ -67,7 +71,14 @@ class SingleSwitchAdapterRetrievalCases:
 
     def test_single_switch_persists(self):
         """After one control token, all subsequent positions return its adapter ID."""
-        seq = [TEXT_TOKEN, ADAPTER_TOKEN_IDS_LIST[2], TEXT_TOKEN, TEXT_TOKEN, TEXT_TOKEN, TEXT_TOKEN]
+        seq = [
+            TEXT_TOKEN,
+            ADAPTER_TOKEN_IDS_LIST[2],
+            TEXT_TOKEN,
+            TEXT_TOKEN,
+            TEXT_TOKEN,
+            TEXT_TOKEN,
+        ]
         result = self._run(seq, num_adapters=4)
         assert all(v == 3 for v in result[2:])
 
@@ -79,8 +90,13 @@ class SingleSwitchAdapterRetrievalCases:
 
     def test_duplicate_control_tokens(self):
         """Same adapter token appearing twice still returns correct ID."""
-        seq = [TEXT_TOKEN, ADAPTER_TOKEN_IDS_LIST[0], TEXT_TOKEN,
-               ADAPTER_TOKEN_IDS_LIST[0], TEXT_TOKEN]
+        seq = [
+            TEXT_TOKEN,
+            ADAPTER_TOKEN_IDS_LIST[0],
+            TEXT_TOKEN,
+            ADAPTER_TOKEN_IDS_LIST[0],
+            TEXT_TOKEN,
+        ]
         result = self._run(seq, num_adapters=4)
         assert all(v == 1 for v in result[1:])
 
@@ -129,8 +145,13 @@ class SingleSwitchEdgeCases:
 
     def test_mixed_adapters_no_crash(self):
         """Two different adapter tokens: must not crash or produce out-of-range."""
-        seq = [TEXT_TOKEN, ADAPTER_TOKEN_IDS_LIST[0], ADAPTER_TOKEN_IDS_LIST[1],
-               TEXT_TOKEN, TEXT_TOKEN]
+        seq = [
+            TEXT_TOKEN,
+            ADAPTER_TOKEN_IDS_LIST[0],
+            ADAPTER_TOKEN_IDS_LIST[1],
+            TEXT_TOKEN,
+            TEXT_TOKEN,
+        ]
         result = self._run(seq, num_adapters=4)
         assert all(0 <= v <= 4 for v in result)
 
@@ -166,18 +187,23 @@ class SingleSwitchContextLengthSweepCases:
     """
 
     @pytest.mark.parametrize("adapter_idx", range(NUM_ADAPTERS))
-    @pytest.mark.parametrize("context_length,control_position", [
-        (100, "early"),
-        (100, "mid"),
-        (100, "late"),
-        (1000, "early"),
-        (1000, "mid"),
-        (1000, "late"),
-        (10000, "early"),
-        (10000, "mid"),
-        (10000, "late"),
-    ])
-    def test_single_switch_at_distance(self, context_length, control_position, adapter_idx):
+    @pytest.mark.parametrize(
+        "context_length,control_position",
+        [
+            (100, "early"),
+            (100, "mid"),
+            (100, "late"),
+            (1000, "early"),
+            (1000, "mid"),
+            (1000, "late"),
+            (10000, "early"),
+            (10000, "mid"),
+            (10000, "late"),
+        ],
+    )
+    def test_single_switch_at_distance(
+        self, context_length, control_position, adapter_idx
+    ):
         """One control token, rest text. Verify adapter persists to end."""
         if control_position == "early":
             ctrl_pos = 1
@@ -233,7 +259,6 @@ class SingleSwitchContextLengthSweepCases:
             f"in context {context_length}"
         )
 
-
     @pytest.mark.parametrize("adapter_idx", [0, 15, 31])
     def test_high_adapter_at_long_context(self, adapter_idx):
         """Gain-compensated geometry preserves precision at 10K for high adapter IDs."""
@@ -273,7 +298,7 @@ class SingleSwitchGainSensitivityCases:
 
         # With gain=1 the tail positions should NOT reliably return adapter 1.
         # We check that at least some of the tail positions have drifted to 0.
-        tail = result[context_length // 2:]
+        tail = result[context_length // 2 :]
         wrong = sum(1 for v in tail if v != 1)
         assert wrong > 0, (
             "Expected low-gain degradation at context 10K but all tail "

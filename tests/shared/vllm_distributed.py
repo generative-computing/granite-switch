@@ -38,6 +38,7 @@ def ensure_distributed(vllm_config=None):
         return
 
     import torch
+
     if torch.distributed.is_initialized():
         # Another module already initialized in this process
         _INITIALIZED = True
@@ -61,6 +62,7 @@ def ensure_distributed(vllm_config=None):
     )
 
     from vllm.config import VllmConfig, set_current_vllm_config
+
     if vllm_config is None:
         vllm_config = VllmConfig()
     with set_current_vllm_config(vllm_config):

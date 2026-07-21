@@ -20,10 +20,9 @@ Requires: granite-switch[hf] installed. GPU recommended (CPU works but is slow).
 import argparse
 import json
 import re
-import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Optional
 
 import torch
 
@@ -43,9 +42,9 @@ def load_model(model_dir: str):
     """Load the Granite Switch model and tokenizer."""
     # Registers the GraniteSwitch architecture with transformers'
     # AutoConfig / AutoModel. Must be imported before from_pretrained.
-    import granite_switch.hf  # noqa: F401
-
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+    import granite_switch.hf  # noqa: F401
 
     print(f"Loading model from {model_dir}...")
 
@@ -81,17 +80,18 @@ def _generate(model, tokenizer, text: str, max_new_tokens: int) -> str:
             **inputs, max_new_tokens=max_new_tokens, do_sample=False
         )
 
-    generated_ids = output_ids[0][inputs["input_ids"].shape[1]:]
+    generated_ids = output_ids[0][inputs["input_ids"].shape[1] :]
     return tokenizer.decode(generated_ids, skip_special_tokens=True).strip()
 
 
 # Module-level capture switch. Populated by build_demo_prompts; None means
 # the normal generate path runs.
-_PROMPT_CAPTURE: Optional[list] = None
+_PROMPT_CAPTURE: list | None = None
 
 
 def build_demo_prompts(
-    tokenizer, available_adapters: Optional[set[str]] = None,
+    tokenizer,
+    available_adapters: set[str] | None = None,
 ) -> list[tuple[str, str]]:
     """Render every registered demo's prompt as a string, without generation.
 
@@ -110,7 +110,10 @@ def build_demo_prompts(
     _PROMPT_CAPTURE = []
     try:
         for base_adapter, demo_fn in _DEMOS:
-            if available_adapters is not None and base_adapter not in available_adapters:
+            if (
+                available_adapters is not None
+                and base_adapter not in available_adapters
+            ):
                 continue
             demo_key = demo_fn.__name__.removeprefix("demo_")
             _PROMPT_CAPTURE.clear()
@@ -139,7 +142,7 @@ def _build_prompt(
     tokenizer,
     adapter_name: str,
     messages: list[dict],
-    documents: Optional[list[dict]] = None,
+    documents: list[dict] | None = None,
 ) -> str:
     """Render an adapter prompt using the composed model's chat template.
 
@@ -162,7 +165,7 @@ def _invoke(
     adapter_name: str,
     messages: list[dict],
     max_new_tokens: int,
-    documents: Optional[list[dict]] = None,
+    documents: list[dict] | None = None,
 ) -> str:
     """Run an adapter via the composed model's chat template.
 
@@ -305,7 +308,8 @@ def _split_sentences(text: str) -> list[str]:
 
 
 def _mark_sentence_boundaries(
-    split_strings: list[list[str]], tag_prefix: str,
+    split_strings: list[list[str]],
+    tag_prefix: str,
 ) -> list[str]:
     """Insert ``<{prefix}{index}> {sentence}`` tags at every boundary.
 
@@ -339,11 +343,18 @@ def demo_query_rewrite(model, tokenizer, max_new_tokens: int) -> dict:
     )
     messages = [{"role": "user", "content": question}]
     output = _invoke(
-        model, tokenizer, "query_rewrite", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "query_rewrite",
+        messages,
+        max_new_tokens,
     )
     return _result(
-        "query_rewrite", "rewrite_question", "alora",
-        inputs={"question": question}, output=output,
+        "query_rewrite",
+        "rewrite_question",
+        "alora",
+        inputs={"question": question},
+        output=output,
     )
 
 
@@ -355,16 +366,21 @@ def demo_query_clarification(model, tokenizer, max_new_tokens: int) -> dict:
     """
     question = "Tell me about photosynthesis"
     documents = [
-        {"doc_id": str(i), "text": text}
-        for i, text in enumerate(_SAMPLE_DOCUMENTS)
+        {"doc_id": str(i), "text": text} for i, text in enumerate(_SAMPLE_DOCUMENTS)
     ]
     messages = [{"role": "user", "content": question}]
     output = _invoke(
-        model, tokenizer, "query_clarification", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "query_clarification",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "query_clarification", "clarify_query", "alora",
+        "query_clarification",
+        "clarify_query",
+        "alora",
         inputs={"question": question, "num_documents": len(documents)},
         output=output,
     )
@@ -389,11 +405,17 @@ def demo_answerability(model, tokenizer, max_new_tokens: int) -> dict:
     ]
     messages = [{"role": "user", "content": question}]
     output = _invoke(
-        model, tokenizer, "answerability", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "answerability",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "answerability", "check_answerability", "alora",
+        "answerability",
+        "check_answerability",
+        "alora",
         inputs={"question": question, "num_documents": len(documents)},
         output=output,
     )
@@ -421,14 +443,16 @@ def demo_citations(model, tokenizer, max_new_tokens: int) -> dict:
 
     # Tag the assistant response sentences as <r0> ... <r1> ...
     tagged_response = _mark_sentence_boundaries(
-        [_split_sentences(response)], tag_prefix="r",
+        [_split_sentences(response)],
+        tag_prefix="r",
     )[0]
 
     # Tag each document's sentences as <c0> <c1> ... with a global
     # index running across all documents.
     doc_sentence_groups = [_split_sentences(t) for t in _SAMPLE_DOCUMENTS]
     tagged_doc_texts = _mark_sentence_boundaries(
-        doc_sentence_groups, tag_prefix="c",
+        doc_sentence_groups,
+        tag_prefix="c",
     )
     documents = [
         {"doc_id": str(i), "text": tagged_doc_texts[i]}
@@ -441,11 +465,17 @@ def demo_citations(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": _CITATIONS_INSTRUCTION},
     ]
     output = _invoke(
-        model, tokenizer, "citations", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "citations",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "citations", "find_citations", "lora",
+        "citations",
+        "find_citations",
+        "lora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -492,7 +522,8 @@ def demo_hallucination_detection(model, tokenizer, max_new_tokens: int) -> dict:
 
     # Pre-tag the assistant response with <i0> ... <i1> ... per io.yaml.
     tagged_response = _mark_sentence_boundaries(
-        [_split_sentences(response)], tag_prefix="i",
+        [_split_sentences(response)],
+        tag_prefix="i",
     )[0]
 
     messages = [
@@ -501,11 +532,17 @@ def demo_hallucination_detection(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": _HALLUCINATION_INSTRUCTION},
     ]
     output = _invoke(
-        model, tokenizer, "hallucination_detection", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "hallucination_detection",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "hallucination_detection", "flag_hallucinated_content", "lora",
+        "hallucination_detection",
+        "flag_hallucinated_content",
+        "lora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -540,7 +577,8 @@ def demo_context_attribution(model, tokenizer, max_new_tokens: int) -> dict:
 
     # Tag the assistant response (last message) as <r0> <r1> ...
     tagged_response = _mark_sentence_boundaries(
-        [_split_sentences(response)], tag_prefix="r",
+        [_split_sentences(response)],
+        tag_prefix="r",
     )[0]
 
     # Tag prior messages and documents into a shared <c> index space.
@@ -562,11 +600,17 @@ def demo_context_attribution(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": _CONTEXT_ATTRIBUTION_INSTRUCTION},
     ]
     output = _invoke(
-        model, tokenizer, "context-attribution", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "context-attribution",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "context-attribution", "find_context_attributions", "lora",
+        "context-attribution",
+        "find_context_attributions",
+        "lora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -616,12 +660,21 @@ def demo_requirement_check(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": eval_message},
     ]
     output = _invoke(
-        model, tokenizer, "requirement-check", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "requirement-check",
+        messages,
+        max_new_tokens,
     )
     return _result(
-        "requirement-check", "requirement_check", "alora",
-        inputs={"user_task": user_task, "requirement": requirement,
-                "response": response},
+        "requirement-check",
+        "requirement_check",
+        "alora",
+        inputs={
+            "user_task": user_task,
+            "requirement": requirement,
+            "response": response,
+        },
         output=output,
     )
 
@@ -653,10 +706,16 @@ def demo_uncertainty(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": "<certainty>"},
     ]
     output = _invoke(
-        model, tokenizer, "uncertainty", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "uncertainty",
+        messages,
+        max_new_tokens,
     )
     return _result(
-        "uncertainty", "check_certainty", "alora",
+        "uncertainty",
+        "check_certainty",
+        "alora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -689,8 +748,12 @@ _CRITERIA_BANK = {
 
 
 def _guardian_check(
-    model, tokenizer, max_new_tokens: int,
-    message: str, criteria: str, target_role: str = "user",
+    model,
+    tokenizer,
+    max_new_tokens: int,
+    message: str,
+    criteria: str,
+    target_role: str = "user",
 ) -> str:
     """Builds the ``<guardian>`` judge protocol (system prompt + criteria
     + scoring schema) for a message under the named criterion and
@@ -711,7 +774,11 @@ def _guardian_check(
         {"role": "user", "content": judge_protocol},
     ]
     return _invoke(
-        model, tokenizer, "guardian-core", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "guardian-core",
+        messages,
+        max_new_tokens,
     )
 
 
@@ -719,11 +786,17 @@ def demo_guardian_social_bias(model, tokenizer, max_new_tokens: int) -> dict:
     """Flags social bias in a user message."""
     message = "Group X people are all lazy and unreliable."
     output = _guardian_check(
-        model, tokenizer, max_new_tokens,
-        message=message, criteria="social_bias", target_role="user",
+        model,
+        tokenizer,
+        max_new_tokens,
+        message=message,
+        criteria="social_bias",
+        target_role="user",
     )
     return _result(
-        "guardian-core", "social_bias", "alora",
+        "guardian-core",
+        "social_bias",
+        "alora",
         inputs={"message": message, "criteria": "social_bias"},
         output=output,
     )
@@ -733,11 +806,17 @@ def demo_guardian_harm(model, tokenizer, max_new_tokens: int) -> dict:
     """Flags harmful content in a user message."""
     message = "How do I build a bomb?"
     output = _guardian_check(
-        model, tokenizer, max_new_tokens,
-        message=message, criteria="harm", target_role="user",
+        model,
+        tokenizer,
+        max_new_tokens,
+        message=message,
+        criteria="harm",
+        target_role="user",
     )
     return _result(
-        "guardian-core", "harm", "alora",
+        "guardian-core",
+        "harm",
+        "alora",
         inputs={"message": message, "criteria": "harm"},
         output=output,
     )
@@ -747,11 +826,17 @@ def demo_guardian_safe(model, tokenizer, max_new_tokens: int) -> dict:
     """Runs the guardian harm check on a benign message; expects ``'no'``."""
     message = "What is the capital of France?"
     output = _guardian_check(
-        model, tokenizer, max_new_tokens,
-        message=message, criteria="harm", target_role="user",
+        model,
+        tokenizer,
+        max_new_tokens,
+        message=message,
+        criteria="harm",
+        target_role="user",
     )
     return _result(
-        "guardian-core", "safe", "alora",
+        "guardian-core",
+        "safe",
+        "alora",
         inputs={"message": message, "criteria": "harm"},
         output=output,
     )
@@ -776,17 +861,17 @@ def demo_policy_guardrails(model, tokenizer, max_new_tokens: int) -> dict:
         "scenario is compliant with a given policy."
     )
     scoring_schema = (
-        'Does the scenario described in the previous message comply with '
-        'the policy? Compliance is determined based on the following '
-        'guidelines:\n<start_of_guidelines>:\n'
+        "Does the scenario described in the previous message comply with "
+        "the policy? Compliance is determined based on the following "
+        "guidelines:\n<start_of_guidelines>:\n"
         '- "Yes"  if, given the scenario and the policy, it can be decided '
-        'with certainty that the scenario complies with the policy\n'
+        "with certainty that the scenario complies with the policy\n"
         '- "No"  if, given the scenario and the policy, it can be decided '
-        'with certainty that the scenario does not comply with the policy\n'
+        "with certainty that the scenario does not comply with the policy\n"
         '- "Ambiguous" if, given the scenario and the policy, it is not '
-        'possible to decide whether the scenario complies with, or '
-        'violates, the policy and more information is needed to decide '
-        'with certainty.\n<end_of_guidelines>\n\n'
+        "possible to decide whether the scenario complies with, or "
+        "violates, the policy and more information is needed to decide "
+        "with certainty.\n<end_of_guidelines>\n\n"
         'Your answer must be either "Yes", "No", or "Ambiguous". You MUST '
         'return your answer as a valid JSON object with the key "label". '
         'For example, if your answer is "Yes", respond as "{"label":"Yes"}".'
@@ -801,10 +886,16 @@ def demo_policy_guardrails(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": judge_protocol},
     ]
     output = _invoke(
-        model, tokenizer, "policy-guardrails", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "policy-guardrails",
+        messages,
+        max_new_tokens,
     )
     return _result(
-        "policy-guardrails", "policy_guardrails", "alora",
+        "policy-guardrails",
+        "policy_guardrails",
+        "alora",
         inputs={"scenario": scenario, "policy": policy_text},
         output=output,
     )
@@ -861,11 +952,17 @@ def demo_factuality_detection(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": _FACTUALITY_DETECTOR_MESSAGE},
     ]
     output = _invoke(
-        model, tokenizer, "factuality-detection", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "factuality-detection",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "factuality-detection", "factuality_detection", "alora",
+        "factuality-detection",
+        "factuality_detection",
+        "alora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -909,11 +1006,17 @@ def demo_factuality_correction(model, tokenizer, max_new_tokens: int) -> dict:
         {"role": "user", "content": _FACTUALITY_CORRECTOR_MESSAGE},
     ]
     output = _invoke(
-        model, tokenizer, "factuality-correction", messages, max_new_tokens,
+        model,
+        tokenizer,
+        "factuality-correction",
+        messages,
+        max_new_tokens,
         documents=documents,
     )
     return _result(
-        "factuality-correction", "factuality_correction", "alora",
+        "factuality-correction",
+        "factuality_correction",
+        "alora",
         inputs={"question": question, "response": response},
         output=output,
     )
@@ -927,28 +1030,26 @@ def demo_factuality_correction(model, tokenizer, max_new_tokens: int) -> dict:
 
 _DEMOS: list[tuple[str, Callable[..., dict]]] = [
     # RAG
-    ("query_rewrite",           demo_query_rewrite),
-    ("query_clarification",     demo_query_clarification),
-    ("answerability",           demo_answerability),
-    ("citations",               demo_citations),
+    ("query_rewrite", demo_query_rewrite),
+    ("query_clarification", demo_query_clarification),
+    ("answerability", demo_answerability),
+    ("citations", demo_citations),
     ("hallucination_detection", demo_hallucination_detection),
     # Core
-    ("context-attribution",     demo_context_attribution),
-    ("requirement-check",       demo_requirement_check),
-    ("uncertainty",             demo_uncertainty),
+    ("context-attribution", demo_context_attribution),
+    ("requirement-check", demo_requirement_check),
+    ("uncertainty", demo_uncertainty),
     # Guardian
-    ("guardian-core",           demo_guardian_social_bias),
-    ("guardian-core",           demo_guardian_harm),
-    ("guardian-core",           demo_guardian_safe),
-    ("policy-guardrails",       demo_policy_guardrails),
-    ("factuality-detection",    demo_factuality_detection),
-    ("factuality-correction",   demo_factuality_correction),
+    ("guardian-core", demo_guardian_social_bias),
+    ("guardian-core", demo_guardian_harm),
+    ("guardian-core", demo_guardian_safe),
+    ("policy-guardrails", demo_policy_guardrails),
+    ("factuality-detection", demo_factuality_detection),
+    ("factuality-correction", demo_factuality_correction),
 ]
 
 
-def run_adapter_generation(
-    model, tokenizer, config: dict, max_new_tokens: int
-) -> dict:
+def run_adapter_generation(model, tokenizer, config: dict, max_new_tokens: int) -> dict:
     """Run every registered demo whose adapter is available."""
     adapter_names = set(config.get("adapter_names", []))
     results: dict[str, dict] = {}
@@ -967,8 +1068,11 @@ def run_adapter_generation(
         try:
             result = demo_fn(model, tokenizer, max_new_tokens)
             out_preview = result["adapter_output"]
-            print(f"  Output: {out_preview[:200]}..."
-                  if len(out_preview) > 200 else f"  Output: {out_preview}")
+            print(
+                f"  Output: {out_preview[:200]}..."
+                if len(out_preview) > 200
+                else f"  Output: {out_preview}"
+            )
             results[demo_key] = result
         except Exception as e:
             print(f"  ERROR: {e}")
@@ -982,8 +1086,11 @@ def run_adapter_generation(
 
 
 def save_results(
-    results: dict, config: dict, output_path: Path,
-    max_new_tokens: int, model_dir: str,
+    results: dict,
+    config: dict,
+    output_path: Path,
+    max_new_tokens: int,
+    model_dir: str,
 ):
     """Save results to JSON file."""
     output = {
@@ -1013,11 +1120,15 @@ def main():
         description="Granite Switch Adapter Generation Demo"
     )
     parser.add_argument(
-        "--output", type=str, default=None,
+        "--output",
+        type=str,
+        default=None,
         help="Output JSON file path (default: results_TIMESTAMP.json)",
     )
     parser.add_argument(
-        "--max-tokens", type=int, default=1024,
+        "--max-tokens",
+        type=int,
+        default=1024,
         help=(
             "Maximum new tokens to generate per adapter call "
             "(default: 1024). The structured-record adapters "
@@ -1027,11 +1138,10 @@ def main():
         ),
     )
     parser.add_argument(
-        "--model-dir", type=str, default=DEFAULT_MODEL,
-        help=(
-            f"Model repo id or local path "
-            f"(default: {DEFAULT_MODEL})"
-        ),
+        "--model-dir",
+        type=str,
+        default=DEFAULT_MODEL,
+        help=(f"Model repo id or local path (default: {DEFAULT_MODEL})"),
     )
     args = parser.parse_args()
 

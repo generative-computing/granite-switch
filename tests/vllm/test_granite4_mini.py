@@ -29,12 +29,11 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
-
 from tests.shared.granite4_equivalence import (
+    GRANITE4_MINI,
     augment_cfg_with_adapters,
     transfer_weights,
     transfer_weights_strict,
-    GRANITE4_MINI,
 )
 
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
@@ -56,9 +55,7 @@ class TestGranite4FamilyWeightTransfer:
         cfg = GRANITE4_MINI[model_name]
 
         torch.manual_seed(0)
-        upstream = GraniteMoeHybridForCausalLM(
-            GraniteMoeHybridConfig(**cfg)
-        ).eval()
+        upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg)).eval()
 
         switch = GraniteSwitchForCausalLM(
             GraniteSwitchConfig(**cfg, num_adapters=0)
@@ -81,22 +78,24 @@ class TestZeroAdapterWeightTransfer:
         cfg = GRANITE4_MINI[model_name]
 
         torch.manual_seed(0)
-        upstream = GraniteMoeHybridForCausalLM(
-            GraniteMoeHybridConfig(**cfg)
-        ).eval()
+        upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg)).eval()
 
         switch_cfg_dict = augment_cfg_with_adapters(cfg)
-        switch = GraniteSwitchForCausalLM(
-            GraniteSwitchConfig(**switch_cfg_dict)
-        ).eval()
+        switch = GraniteSwitchForCausalLM(GraniteSwitchConfig(**switch_cfg_dict)).eval()
 
         unloaded = transfer_weights(upstream.state_dict(), switch.state_dict())
 
         for name in unloaded:
-            assert any(k in name for k in (
-                "lora_A", "lora_B", "switch", "adapter_token_ids",
-                "control_to_substitute_lut",
-            )), f"Unexpected unloaded parameter: {name}"
+            assert any(
+                k in name
+                for k in (
+                    "lora_A",
+                    "lora_B",
+                    "switch",
+                    "adapter_token_ids",
+                    "control_to_substitute_lut",
+                )
+            ), f"Unexpected unloaded parameter: {name}"
 
         assert len(unloaded) > 0, "Expected LoRA/switch params to be unloaded"
 
@@ -111,8 +110,17 @@ _TIMEOUT = 1200
 
 
 def _run_inner_class(class_name):
-    cmd = [sys.executable, "-m", "pytest", str(_INNER),
-           "-v", "-s", "--tb=short", "-k", class_name]
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(_INNER),
+        "-v",
+        "-s",
+        "--tb=short",
+        "-k",
+        class_name,
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
     if result.stdout:
         print(result.stdout[-4000:])

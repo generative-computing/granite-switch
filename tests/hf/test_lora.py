@@ -6,25 +6,27 @@ Section 2: MergedSwitchedLoRALinear (HF-only — fused QKV/gate-up with per-slic
 Section 3: Input shape handling (2D vs 3D, batched vs single consistency)
 """
 
-import pytest
 import torch
 
-from granite_switch.hf.core.lora import SwitchedLoRALinear, MergedSwitchedLoRALinear
-
+from granite_switch.hf.core.lora import MergedSwitchedLoRALinear, SwitchedLoRALinear
 from tests.shared.lora_cases import (
-    IN_FEATURES, OUT_FEATURES, NUM_ADAPTERS, RANK, SEED,
-    _seeded_input,
-    LoRABasePassthroughCases,
+    IN_FEATURES,
+    NUM_ADAPTERS,
+    OUT_FEATURES,
+    RANK,
+    SEED,
     LoRAAdapterActivationCases,
+    LoRABasePassthroughCases,
     LoRABatchIndependenceCases,
     LoRAMathCorrectnessCases,
     LoRAShapeCorrectnessCases,
+    _seeded_input,
 )
-
 
 # ════════════════════════════════════════════════════════════════════
 # Section 1: SwitchedLoRALinear — shared mixin tests
 # ════════════════════════════════════════════════════════════════════
+
 
 class _HFLoRABase:
     """Provides _make_layer() and _run() for shared mixin tests."""
@@ -111,7 +113,9 @@ class TestMergedAdapterActivation:
         # lora_B_slices are zero-initialized; set non-zero weights
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         x = _seeded_input(1, 4, IN_FEATURES, seed=SEED + 21)
 
@@ -121,8 +125,9 @@ class TestMergedAdapterActivation:
         base_output = layer.forward(x, base_indices)
         adapter_output = layer.forward(x, adapter_indices)
 
-        assert not torch.allclose(base_output, adapter_output), \
+        assert not torch.allclose(base_output, adapter_output), (
             "Adapter output should differ from base output"
+        )
 
 
 class TestMergedSliceIndependence:
@@ -150,13 +155,15 @@ class TestMergedSliceIndependence:
 
         # Slice 0 should differ (has LoRA)
         slice_0_end = MERGED_OUTPUT_SLICES[0]
-        assert not torch.allclose(output[:, :, :slice_0_end], base_output[:, :, :slice_0_end]), \
-            "Slice 0 should be modified by LoRA"
+        assert not torch.allclose(
+            output[:, :, :slice_0_end], base_output[:, :, :slice_0_end]
+        ), "Slice 0 should be modified by LoRA"
 
         # Slices 1+ should be identical to base (no LoRA)
         torch.testing.assert_close(
-            output[:, :, slice_0_end:], base_output[:, :, slice_0_end:],
-            msg="Slices 1+ should be unchanged (no LoRA weights)"
+            output[:, :, slice_0_end:],
+            base_output[:, :, slice_0_end:],
+            msg="Slices 1+ should be unchanged (no LoRA weights)",
         )
 
 
@@ -193,11 +200,12 @@ class TestMergedMathCorrectness:
                 lora_a = layer.lora_A_slices[s][tensor_idx, 0]
                 lora_b = layer.lora_B_slices[s][tensor_idx, 0]
                 lora_delta = x @ lora_a.t() @ lora_b.t()
-                expected_slice = base_out[:, :, offset:offset + out_size] + lora_delta
+                expected_slice = base_out[:, :, offset : offset + out_size] + lora_delta
 
                 torch.testing.assert_close(
-                    output[:, :, offset:offset + out_size], expected_slice,
-                    msg=f"Adapter {adapter_id}, slice {s}: math mismatch"
+                    output[:, :, offset : offset + out_size],
+                    expected_slice,
+                    msg=f"Adapter {adapter_id}, slice {s}: math mismatch",
                 )
                 offset += out_size
 
@@ -212,7 +220,9 @@ class TestMergedBatchIndependence:
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         batch_size = NUM_ADAPTERS + 1  # base + all adapters
         seq_len = 4
@@ -227,14 +237,15 @@ class TestMergedBatchIndependence:
         batched_output = layer.forward(x, adapter_indices)
 
         for i in range(batch_size):
-            x_single = x[i:i+1]
-            idx_single = adapter_indices[i:i+1]
+            x_single = x[i : i + 1]
+            idx_single = adapter_indices[i : i + 1]
             single_output = layer.forward(x_single, idx_single)
 
             torch.testing.assert_close(
-                batched_output[i], single_output[0],
+                batched_output[i],
+                single_output[0],
                 msg=f"Row {i} (adapter={adapter_indices[i, 0].item()}) "
-                    f"should match single-sequence result"
+                f"should match single-sequence result",
             )
 
     def test_batch_mixed_within_sequence(self):
@@ -244,15 +255,20 @@ class TestMergedBatchIndependence:
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         x = _seeded_input(3, 5, IN_FEATURES, seed=SEED + 25)
 
-        adapter_indices = torch.tensor([
-            [0, 1, 0, 2, 0],
-            [2, 0, 1, 1, 0],
-            [0, 0, 3, 0, 1],
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 1, 0, 2, 0],
+                [2, 0, 1, 1, 0],
+                [0, 0, 3, 0, 1],
+            ],
+            dtype=torch.long,
+        )
 
         batched_output = layer.forward(x, adapter_indices)
 
@@ -260,19 +276,21 @@ class TestMergedBatchIndependence:
         for row in range(3):
             for pos in range(5):
                 aid = adapter_indices[row, pos].item()
-                x_token = x[row, pos:pos+1].unsqueeze(0)  # (1, 1, features)
+                x_token = x[row, pos : pos + 1].unsqueeze(0)  # (1, 1, features)
                 idx_token = torch.tensor([[aid]], dtype=torch.long)
                 ref = layer.forward(x_token, idx_token)
 
                 torch.testing.assert_close(
-                    batched_output[row, pos], ref[0, 0],
-                    msg=f"Row {row}, pos {pos} (adapter={aid}): cross-talk detected"
+                    batched_output[row, pos],
+                    ref[0, 0],
+                    msg=f"Row {row}, pos {pos} (adapter={aid}): cross-talk detected",
                 )
 
 
 # ════════════════════════════════════════════════════════════════════
 # Section 3: Input shape handling — HF-only
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestInputShapes:
     """2D [num_tokens, features] and 3D [batch, seq, features] both work."""
@@ -315,8 +333,9 @@ class TestInputShapes:
         output_2d = layer.forward(x_2d, indices_1d)
 
         torch.testing.assert_close(
-            output_3d.view(-1, OUT_FEATURES), output_2d,
-            msg="2D and 3D inputs should produce equivalent results"
+            output_3d.view(-1, OUT_FEATURES),
+            output_2d,
+            msg="2D and 3D inputs should produce equivalent results",
         )
 
     def test_merged_2d_and_3d_equivalent(self):
@@ -326,7 +345,9 @@ class TestInputShapes:
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         x_3d = _seeded_input(2, 3, IN_FEATURES, seed=SEED + 31)
         x_2d = x_3d.view(-1, IN_FEATURES)
@@ -338,8 +359,9 @@ class TestInputShapes:
         output_2d = layer.forward(x_2d, indices_1d)
 
         torch.testing.assert_close(
-            output_3d.view(-1, MERGED_TOTAL_OUT), output_2d,
-            msg="2D and 3D inputs should produce equivalent results"
+            output_3d.view(-1, MERGED_TOTAL_OUT),
+            output_2d,
+            msg="2D and 3D inputs should produce equivalent results",
         )
 
 
@@ -358,12 +380,15 @@ class TestBatchedVsSingle:
         seq_len = 5
         x = _seeded_input(batch_size, seq_len, IN_FEATURES, seed=SEED + 32)
 
-        adapter_indices = torch.tensor([
-            [0, 1, 0, 2, 0],
-            [1, 1, 1, 1, 1],
-            [0, 0, 0, 0, 0],
-            [3, 2, 1, 0, 3],
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 1, 0, 2, 0],
+                [1, 1, 1, 1, 1],
+                [0, 0, 0, 0, 0],
+                [3, 2, 1, 0, 3],
+            ],
+            dtype=torch.long,
+        )
 
         # Batched forward
         batched_output = layer.forward(x, adapter_indices)
@@ -371,13 +396,14 @@ class TestBatchedVsSingle:
         # Single-sequence forwards
         singles = []
         for i in range(batch_size):
-            single = layer.forward(x[i:i+1], adapter_indices[i:i+1])
+            single = layer.forward(x[i : i + 1], adapter_indices[i : i + 1])
             singles.append(single)
         stacked = torch.cat(singles, dim=0)
 
         torch.testing.assert_close(
-            batched_output, stacked,
-            msg="Batched forward should match stacked single-sequence forwards"
+            batched_output,
+            stacked,
+            msg="Batched forward should match stacked single-sequence forwards",
         )
 
     def test_merged_batched_vs_single(self):
@@ -387,28 +413,34 @@ class TestBatchedVsSingle:
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         batch_size = 4
         seq_len = 5
         x = _seeded_input(batch_size, seq_len, IN_FEATURES, seed=SEED + 33)
 
-        adapter_indices = torch.tensor([
-            [0, 1, 0, 2, 0],
-            [1, 1, 1, 1, 1],
-            [0, 0, 0, 0, 0],
-            [3, 2, 1, 0, 3],
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 1, 0, 2, 0],
+                [1, 1, 1, 1, 1],
+                [0, 0, 0, 0, 0],
+                [3, 2, 1, 0, 3],
+            ],
+            dtype=torch.long,
+        )
 
         batched_output = layer.forward(x, adapter_indices)
 
         singles = []
         for i in range(batch_size):
-            single = layer.forward(x[i:i+1], adapter_indices[i:i+1])
+            single = layer.forward(x[i : i + 1], adapter_indices[i : i + 1])
             singles.append(single)
         stacked = torch.cat(singles, dim=0)
 
         torch.testing.assert_close(
-            batched_output, stacked,
-            msg="Batched forward should match stacked single-sequence forwards"
+            batched_output,
+            stacked,
+            msg="Batched forward should match stacked single-sequence forwards",
         )

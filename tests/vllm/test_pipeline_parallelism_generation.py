@@ -18,7 +18,6 @@ from pathlib import Path
 
 import pytest
 
-
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 _WORKER = Path(__file__).parent / "_pp_generation_worker.py"
 _REPO_ROOT = _WORKER.parents[2]
@@ -67,9 +66,7 @@ def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path):
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
-        str(_REPO_ROOT)
-        if not pythonpath
-        else f"{_REPO_ROOT}{os.pathsep}{pythonpath}"
+        str(_REPO_ROOT) if not pythonpath else f"{_REPO_ROOT}{os.pathsep}{pythonpath}"
     )
     env["PYTHONUNBUFFERED"] = "1"
 

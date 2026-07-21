@@ -21,8 +21,14 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm.config import VllmConfig  # noqa: F401
-        from vllm.model_executor.layers.attention.attention import Attention  # noqa: F401
-        from vllm.forward_context import ForwardContext, override_forward_context  # noqa: F401
+        from vllm.forward_context import (  # noqa: F401
+            ForwardContext,
+            override_forward_context,
+        )
+        from vllm.model_executor.layers.attention.attention import (
+            Attention,  # noqa: F401
+        )
+
         return True
     except ImportError:
         return False
@@ -38,6 +44,7 @@ pytestmark = pytest.mark.skipif(
 if _VLLM_AVAILABLE:
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.forward_context import ForwardContext, override_forward_context
+
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
     from granite_switch.vllm.switch.single import SingleSwitch
@@ -50,6 +57,7 @@ SEED = 42
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 def _tiny_vllm_config():
     """Minimal GraniteSwitchConfig for single-GPU vLLM tests."""
@@ -99,7 +107,9 @@ from tests.shared.vllm_distributed import ensure_distributed as _ensure_distribu
 def _make_vllm_config(config):
     """Create a VllmConfig with a real ModelConfig from our GraniteSwitchConfig."""
     from vllm.config import ModelConfig
+
     from granite_switch.vllm import register
+
     register()
 
     tmpdir = tempfile.mkdtemp(prefix="granite_switch_test_")
@@ -125,9 +135,9 @@ def _init_model_weights(model):
         for name, param in model.named_parameters():
             if not param.is_floating_point():
                 continue
-            if 'lora_A' in name or 'lora_B' in name:
+            if "lora_A" in name or "lora_B" in name:
                 continue
-            if 'layernorm' in name or 'norm' in name:
+            if "layernorm" in name or "norm" in name:
                 continue
             param.data.normal_(0, 0.02)
 
@@ -152,11 +162,16 @@ def _set_nonzero_lora(model, scale=0.1):
                 for b in mlp.input_linear.lora_B_slices:
                     b.data = torch.randn_like(b) * scale
             if hasattr(mlp.output_linear, "lora_A"):
-                mlp.output_linear.lora_A.data = torch.randn_like(mlp.output_linear.lora_A) * scale
-                mlp.output_linear.lora_B.data = torch.randn_like(mlp.output_linear.lora_B) * scale
+                mlp.output_linear.lora_A.data = (
+                    torch.randn_like(mlp.output_linear.lora_A) * scale
+                )
+                mlp.output_linear.lora_B.data = (
+                    torch.randn_like(mlp.output_linear.lora_B) * scale
+                )
 
 
 # ── Base test class ──────────────────────────────────────────────────
+
 
 class _VLLMModelTestBase:
     """Base class providing model creation and full forward pass machinery."""
@@ -212,7 +227,10 @@ class _VLLMModelTestBase:
     def _setup_single_attn(self, attn, layer_name, num_blocks):
         attn.kv_cache_torch_dtype = torch.bfloat16
         cache_shape = attn.attn_backend.get_kv_cache_shape(
-            num_blocks, BLOCK_SIZE, attn.num_kv_heads, attn.head_size,
+            num_blocks,
+            BLOCK_SIZE,
+            attn.num_kv_heads,
+            attn.head_size,
         )
         kv_cache = torch.zeros(cache_shape, device=self.device, dtype=torch.bfloat16)
         attn.kv_cache = kv_cache
@@ -224,14 +242,18 @@ class _VLLMModelTestBase:
         slot_mapping = torch.arange(seq_len, dtype=torch.int64, device=device)
         num_blocks_needed = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
         block_table = torch.arange(
-            num_blocks_needed, dtype=torch.int32, device=device,
+            num_blocks_needed,
+            dtype=torch.int32,
+            device=device,
         ).unsqueeze(0)
         query_start_loc = torch.tensor(
-            [0, seq_len], dtype=torch.int32, device=device,
+            [0, seq_len],
+            dtype=torch.int32,
+            device=device,
         )
         seq_lens = torch.tensor([seq_len], dtype=torch.int32, device=device)
 
-        backend_name = list(self._attention_map.values())[0].attn_backend.get_name()
+        backend_name = next(iter(self._attention_map.values())).attn_backend.get_name()
         if backend_name == "FLASH_ATTN":
             from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
 
@@ -245,8 +267,9 @@ class _VLLMModelTestBase:
                     get_flash_attn_version,
                     get_scheduler_metadata,
                 )
+
                 if get_flash_attn_version() == 3:
-                    first_attn = list(self._attention_map.values())[0]
+                    first_attn = next(iter(self._attention_map.values()))
                     scheduler_metadata = get_scheduler_metadata(
                         batch_size=1,
                         max_seqlen_q=seq_len,
@@ -281,7 +304,9 @@ class _VLLMModelTestBase:
                 scheduler_metadata=scheduler_metadata,
             )
         else:
-            pytest.skip(f"Backend {backend_name}: metadata not implemented for this test")
+            pytest.skip(
+                f"Backend {backend_name}: metadata not implemented for this test"
+            )
 
         return metadata, slot_mapping
 
@@ -331,8 +356,8 @@ class _VLLMModelTestBase:
 # 1. Model instantiation
 # ════════════════════════════════════════════════════════════════════
 
-class TestModelInstantiation(_VLLMModelTestBase):
 
+class TestModelInstantiation(_VLLMModelTestBase):
     def test_single_switch_model_creates(self):
         assert isinstance(self.model.model.switch, SingleSwitch)
         num_decoder_layers = self.config.num_hidden_layers - 1
@@ -360,8 +385,8 @@ class TestModelInstantiation(_VLLMModelTestBase):
 # 2. Forward output shape
 # ════════════════════════════════════════════════════════════════════
 
-class TestForwardOutputShape(_VLLMModelTestBase):
 
+class TestForwardOutputShape(_VLLMModelTestBase):
     def test_basic_output_shape(self):
         self.model.eval()
         input_ids_list = [10, 20, 30, 40, 50, 60, 70, 80]
@@ -381,8 +406,8 @@ class TestForwardOutputShape(_VLLMModelTestBase):
 # 4. Adapter indices wiring
 # ════════════════════════════════════════════════════════════════════
 
-class TestAdapterIndicesWiring(_VLLMModelTestBase):
 
+class TestAdapterIndicesWiring(_VLLMModelTestBase):
     def test_control_token_activates_adapter(self):
         torch.manual_seed(SEED)
         _set_nonzero_lora(self.model)
@@ -397,8 +422,9 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
 
         torch.testing.assert_close(logits_ctrl[:2], logits_text[:2])
 
-        assert not torch.allclose(logits_ctrl[3:], logits_text[3:]), \
+        assert not torch.allclose(logits_ctrl[3:], logits_text[3:]), (
             "Post-control logits should differ when adapter is active"
+        )
 
     def test_different_adapters_produce_different_logits(self):
         torch.manual_seed(SEED)
@@ -414,16 +440,17 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
 
         torch.testing.assert_close(logits_a1[:2], logits_a2[:2])
 
-        assert not torch.allclose(logits_a1[3:], logits_a2[3:]), \
+        assert not torch.allclose(logits_a1[3:], logits_a2[3:]), (
             "Different adapters should produce different post-control logits"
+        )
 
 
 # ════════════════════════════════════════════════════════════════════
 # 5. KV visibility tests
 # ════════════════════════════════════════════════════════════════════
 
-class TestKVVisibility(_VLLMModelTestBase):
 
+class TestKVVisibility(_VLLMModelTestBase):
     def test_adapter_token_kv_invisible(self):
         torch.manual_seed(SEED)
         self.model.eval()
@@ -434,15 +461,19 @@ class TestKVVisibility(_VLLMModelTestBase):
             logits_a = self._run_forward_and_logits(seq)
 
         with torch.no_grad():
-            perturbation = torch.randn(
-                self.config.hidden_size, device=self.device, dtype=torch.bfloat16
-            ) * 10.0
+            perturbation = (
+                torch.randn(
+                    self.config.hidden_size, device=self.device, dtype=torch.bfloat16
+                )
+                * 10.0
+            )
             self.model.model.embed_tokens.weight.data[250] += perturbation
 
         with torch.no_grad():
             logits_b = self._run_forward_and_logits(seq)
 
         torch.testing.assert_close(
-            logits_a[3:], logits_b[3:],
-            msg="Post-adapter-token logits should be identical"
+            logits_a[3:],
+            logits_b[3:],
+            msg="Post-adapter-token logits should be identical",
         )

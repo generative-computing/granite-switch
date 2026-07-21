@@ -5,8 +5,6 @@ __version__ = "0.1.0"
 
 # Export main classes
 from granite_switch.config import GraniteSwitchConfig
-from .granite_switch_model import GraniteSwitchForCausalLM, GraniteSwitchModel
-from .switch import SingleSwitch
 
 # Export core components (for advanced use)
 from .core import (
@@ -14,23 +12,26 @@ from .core import (
     GraniteSwitchDecoderLayer,
     SwitchedLoRALinear,
 )
+from .granite_switch_model import GraniteSwitchForCausalLM, GraniteSwitchModel
+from .switch import SingleSwitch
 
 __all__ = [
+    "GraniteLoRAEmbeddedAttention",
     # Main API
     "GraniteSwitchConfig",
-    "GraniteSwitchModel",
+    "GraniteSwitchDecoderLayer",
     "GraniteSwitchForCausalLM",
+    "GraniteSwitchModel",
     "SingleSwitch",
-    "register",
     # Core components (advanced)
     "SwitchedLoRALinear",
-    "GraniteLoRAEmbeddedAttention",
-    "GraniteSwitchDecoderLayer",
+    "register",
 ]
 
 # Register config with transformers AutoConfig
 try:
     from transformers import AutoConfig
+
     AutoConfig.register("granite_switch", GraniteSwitchConfig)
 except Exception:
     # Registration may fail if already registered or transformers not available
@@ -48,6 +49,7 @@ def register():
     # Register config with transformers AutoConfig
     try:
         from transformers import AutoConfig
+
         AutoConfig.register("granite_switch", GraniteSwitchConfig)
     except Exception:
         pass

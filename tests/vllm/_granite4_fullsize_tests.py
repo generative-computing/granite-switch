@@ -14,6 +14,7 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm import LLM  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -27,9 +28,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 from tests.shared.granite4_equivalence import (
+    GRANITE4_FULLSIZE,
     assert_close,
     get_tolerances,
-    GRANITE4_FULLSIZE,
 )
 
 _MODEL_NAMES = sorted(GRANITE4_FULLSIZE.keys())
@@ -57,13 +58,17 @@ class TestGranite4FullSizeEquivalence:
         tol = get_tolerances(layer_types)
         if tol is None:
             torch.testing.assert_close(
-                switch, upstream,
-                atol=0.0, rtol=0.0,
+                switch,
+                upstream,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{model_name}: logprobs should be bit-exact",
             )
         else:
             assert_close(
-                switch, upstream,
-                atol=tol[0], rtol=tol[1],
+                switch,
+                upstream,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{model_name}: full-size logprobs diverge",
             )

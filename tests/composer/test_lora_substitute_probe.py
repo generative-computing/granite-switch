@@ -29,6 +29,7 @@ class TestOnRealGraniteTokenizer:
 
     def _tok(self, name):
         from transformers import AutoTokenizer
+
         try:
             return AutoTokenizer.from_pretrained(name)
         except Exception as e:
@@ -59,9 +60,7 @@ class TestOnSyntheticTokenizer:
             chat_template = "<dummy-jinja>"
             unk_token_id = 0
 
-            def apply_chat_template(
-                self, messages, tokenize, add_generation_prompt
-            ):
+            def apply_chat_template(self, messages, tokenize, add_generation_prompt):
                 assert tokenize is False
                 assert add_generation_prompt is False
                 return "<BOS>hello"
@@ -76,45 +75,56 @@ class TestOnSyntheticTokenizer:
 
 
 class TestErrorPaths:
-
     def _minimal_tokenizer_without_template(self):
         class _T:
             chat_template = None
             unk_token_id = 0
+
             def apply_chat_template(self, *a, **kw):
                 raise AssertionError("should not be called")
+
             def __call__(self, text, **kw):
                 raise AssertionError("should not be called")
+
         return _T()
 
     def _tokenizer_whose_template_fails(self):
         class _T:
             chat_template = "<jinja-source>"
             unk_token_id = 0
+
             def apply_chat_template(self, *a, **kw):
                 raise RuntimeError("template exploded")
+
             def __call__(self, text, **kw):
                 raise AssertionError("unreachable")
+
         return _T()
 
     def _tokenizer_emitting_unk(self):
         class _T:
             chat_template = "<jinja-source>"
             unk_token_id = 777
+
             def apply_chat_template(self, messages, tokenize, add_generation_prompt):
                 return "mystery"
+
             def __call__(self, text, **kw):
                 return SimpleNamespace(input_ids=[777])
+
         return _T()
 
     def _tokenizer_emitting_empty(self):
         class _T:
             chat_template = "<jinja-source>"
             unk_token_id = 0
+
             def apply_chat_template(self, messages, tokenize, add_generation_prompt):
                 return ""
+
             def __call__(self, text, **kw):
                 return SimpleNamespace(input_ids=[])
+
         return _T()
 
     def test_missing_chat_template_raises(self):

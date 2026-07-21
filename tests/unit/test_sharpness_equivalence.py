@@ -32,8 +32,8 @@ import torch
 
 from tests.shared.granite4_constants import (
     DEFAULT_CONTROL_TOKEN_GAIN,
-    PRODUCTION_ATTENTION_MULTIPLIERS,
     MAX_POSITION_EMBEDDINGS,
+    PRODUCTION_ATTENTION_MULTIPLIERS,
 )
 
 # Stress adapter IDs: 1 (smallest), 16 (middle), 32 (largest supported)
@@ -70,7 +70,9 @@ def _build_logits_and_values(
     hf_logits[ctrl_pos] = gain_bf16
 
     # vLLM: pre-scale K[0]=±effective_gain, then multiplied by attention_multiplier
-    vllm_pre_scale = torch.full((seq_len,), -effective_gain.item(), dtype=torch.bfloat16)
+    vllm_pre_scale = torch.full(
+        (seq_len,), -effective_gain.item(), dtype=torch.bfloat16
+    )
     vllm_pre_scale[ctrl_pos] = effective_gain
     vllm_logits = vllm_pre_scale * mult_bf16
 
@@ -92,10 +94,15 @@ class TestSoftmaxAdapterRecovery:
     @pytest.mark.parametrize("adapter_id", ADAPTER_IDS)
     @pytest.mark.parametrize("seq_len", [10, 100, 1000, 10000, 32768, 65536])
     def test_both_geometries_recover_adapter(
-        self, attention_multiplier, adapter_id, seq_len,
+        self,
+        attention_multiplier,
+        adapter_id,
+        seq_len,
     ):
         hf_logits, vllm_logits, values = _build_logits_and_values(
-            seq_len, adapter_id, attention_multiplier,
+            seq_len,
+            adapter_id,
+            attention_multiplier,
         )
 
         # Softmax in float32 (matches attention-kernel practice) for fairness;
@@ -128,7 +135,9 @@ class TestSoftmaxWeightDistribution:
     @pytest.mark.parametrize("seq_len", [10, 100, 1000, 10000, 32768, 65536])
     def test_weight_distributions_match(self, attention_multiplier, seq_len):
         hf_logits, vllm_logits, _ = _build_logits_and_values(
-            seq_len, adapter_id=1, attention_multiplier=attention_multiplier,
+            seq_len,
+            adapter_id=1,
+            attention_multiplier=attention_multiplier,
         )
 
         hf_weights = torch.softmax(hf_logits.float(), dim=0)
@@ -152,7 +161,9 @@ class TestControlTokenDominance:
     @pytest.mark.parametrize("seq_len", SEQ_LENS)
     def test_control_dominates_softmax(self, attention_multiplier, seq_len):
         _, vllm_logits, _ = _build_logits_and_values(
-            seq_len, adapter_id=1, attention_multiplier=attention_multiplier,
+            seq_len,
+            adapter_id=1,
+            attention_multiplier=attention_multiplier,
         )
         weights = torch.softmax(vllm_logits.float(), dim=0)
         ctrl_weight = weights[1].item()

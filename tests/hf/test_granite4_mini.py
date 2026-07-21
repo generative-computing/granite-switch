@@ -23,8 +23,8 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
-
 from tests.shared.granite4_equivalence import (
+    GRANITE4_MINI,
     assert_close,
     augment_cfg_with_adapters,
     get_tolerances,
@@ -33,16 +33,13 @@ from tests.shared.granite4_equivalence import (
     transfer_weights,
     transfer_weights_strict,
     zero_lora_weights,
-    GRANITE4_MINI,
 )
 
 
 def _make_pair(cfg_dict):
     """Create upstream + switch model pair with transferred weights."""
     torch.manual_seed(0)
-    upstream = GraniteMoeHybridForCausalLM(
-        GraniteMoeHybridConfig(**cfg_dict)
-    ).eval()
+    upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg_dict)).eval()
     switch = GraniteSwitchForCausalLM(
         GraniteSwitchConfig(**cfg_dict, num_adapters=0)
     ).eval()
@@ -82,14 +79,18 @@ class TestGranite4FamilyEquivalence:
         tol = get_tolerances(layer_types, long_sequence=False)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=0.0, rtol=0.0,
+                switch_out.logits,
+                upstream_out.logits,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits,
+                upstream_out.logits,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: short sequence logits diverge",
             )
 
@@ -108,14 +109,18 @@ class TestGranite4FamilyEquivalence:
         tol = get_tolerances(layer_types, long_sequence=True)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=0.0, rtol=0.0,
+                switch_out.logits,
+                upstream_out.logits,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits,
+                upstream_out.logits,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: long sequence logits diverge",
             )
 
@@ -134,14 +139,18 @@ class TestGranite4FamilyEquivalence:
         tol = get_tolerances(layer_types, long_sequence=False)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=0.0, rtol=0.0,
+                switch_out.logits,
+                upstream_out.logits,
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only batched logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits, upstream_out.logits,
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits,
+                upstream_out.logits,
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: batched logits diverge",
             )
 
@@ -162,24 +171,26 @@ def _make_zero_adapter_pair(cfg_dict):
     the switch actively computes adapter_indices during forward.
     """
     torch.manual_seed(0)
-    upstream = GraniteMoeHybridForCausalLM(
-        GraniteMoeHybridConfig(**cfg_dict)
-    ).eval()
+    upstream = GraniteMoeHybridForCausalLM(GraniteMoeHybridConfig(**cfg_dict)).eval()
 
     switch_cfg_dict = augment_cfg_with_adapters(cfg_dict)
-    switch = GraniteSwitchForCausalLM(
-        GraniteSwitchConfig(**switch_cfg_dict)
-    ).eval()
+    switch = GraniteSwitchForCausalLM(GraniteSwitchConfig(**switch_cfg_dict)).eval()
 
     # Transfer base weights (non-strict: LoRA/switch params left unloaded)
     unloaded = transfer_weights(upstream.state_dict(), switch.state_dict())
 
     # Verify unloaded params are only LoRA and switch related
     for name in unloaded:
-        assert any(k in name for k in (
-            "lora_A", "lora_B", "switch", "adapter_token_ids",
-            "control_to_substitute_lut",
-        )), f"Unexpected unloaded parameter: {name}"
+        assert any(
+            k in name
+            for k in (
+                "lora_A",
+                "lora_B",
+                "switch",
+                "adapter_token_ids",
+                "control_to_substitute_lut",
+            )
+        ), f"Unexpected unloaded parameter: {name}"
 
     # Zero all LoRA weights defensively
     zero_lora_weights(switch)
@@ -214,8 +225,10 @@ class TestZeroAdapterNoHiding:
 
         # SingleSwitch is bit-exact (no counting head, no position perturbation)
         torch.testing.assert_close(
-            switch_out.logits, upstream_out.logits,
-            atol=0.0, rtol=0.0,
+            switch_out.logits,
+            upstream_out.logits,
+            atol=0.0,
+            rtol=0.0,
             msg=f"{name}: should be bit-exact with no control tokens",
         )
 
@@ -257,14 +270,18 @@ class TestZeroAdapterEquivalence:
         tol = get_tolerances(layer_types, long_sequence=False, has_kv_hidden=True)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=0.0, rtol=0.0,
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: short sequence logits diverge (zero-adapter)",
             )
 
@@ -284,14 +301,18 @@ class TestZeroAdapterEquivalence:
         tol = get_tolerances(layer_types, long_sequence=True, has_kv_hidden=True)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=0.0, rtol=0.0,
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: long sequence logits diverge (zero-adapter)",
             )
 
@@ -311,13 +332,17 @@ class TestZeroAdapterEquivalence:
         tol = get_tolerances(layer_types, long_sequence=False, has_kv_hidden=True)
         if tol is None:
             torch.testing.assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=0.0, rtol=0.0,
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=0.0,
+                rtol=0.0,
                 msg=f"{name}: mamba-only batched logits should be bit-exact",
             )
         else:
             assert_close(
-                switch_out.logits[visible], upstream_out.logits[visible],
-                atol=tol[0], rtol=tol[1],
+                switch_out.logits[visible],
+                upstream_out.logits[visible],
+                atol=tol[0],
+                rtol=tol[1],
                 msg=f"{name}: batched logits diverge (zero-adapter)",
             )

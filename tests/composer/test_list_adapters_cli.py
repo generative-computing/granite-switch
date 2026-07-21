@@ -10,9 +10,6 @@ These are fast, CPU-only tests that mock network calls.  They verify:
 import sys
 from unittest.mock import patch
 
-import pytest
-
-
 FAKE_ADAPTERS = [
     {"name": "rag", "technologies": ["alora", "lora"]},
     {"name": "summarize", "technologies": ["lora"]},
@@ -34,8 +31,10 @@ class TestListAdaptersCLI:
         """--list-adapters with a valid (mocked) remote repo returns 0."""
         argv = [
             "compose_granite_switch",
-            "--base-model", "ibm-granite/granite-4.1-3b",
-            "--adapters", "ibm-granite/some-lib",
+            "--base-model",
+            "ibm-granite/granite-4.1-3b",
+            "--adapters",
+            "ibm-granite/some-lib",
             "--list-adapters",
         ]
         with patch(
@@ -50,7 +49,8 @@ class TestListAdaptersCLI:
         """--list-adapters without --adapters returns exit code 1."""
         argv = [
             "compose_granite_switch",
-            "--base-model", "ibm-granite/granite-4.1-3b",
+            "--base-model",
+            "ibm-granite/granite-4.1-3b",
             "--list-adapters",
         ]
         rc = _run_main(argv)
@@ -60,8 +60,10 @@ class TestListAdaptersCLI:
         """--list-adapters with a network error returns exit code 1."""
         argv = [
             "compose_granite_switch",
-            "--base-model", "ibm-granite/granite-4.1-3b",
-            "--adapters", "ibm-granite/some-lib",
+            "--base-model",
+            "ibm-granite/granite-4.1-3b",
+            "--adapters",
+            "ibm-granite/some-lib",
             "--list-adapters",
         ]
         with patch(
@@ -76,8 +78,10 @@ class TestListAdaptersCLI:
         """--list-adapters with no matching adapters still exits 0."""
         argv = [
             "compose_granite_switch",
-            "--base-model", "ibm-granite/granite-4.1-3b",
-            "--adapters", "ibm-granite/some-lib",
+            "--base-model",
+            "ibm-granite/granite-4.1-3b",
+            "--adapters",
+            "ibm-granite/some-lib",
             "--list-adapters",
         ]
         with patch(

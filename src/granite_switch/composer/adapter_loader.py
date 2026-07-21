@@ -6,12 +6,11 @@ source adapter analysis.
 """
 
 import json
-import torch
 from pathlib import Path
-from typing import Dict, List, Tuple
+
+import torch
 
 from .arch import ArchDescriptor
-
 
 # ---------------------------------------------------------------------------
 # Shared config loader
@@ -32,9 +31,7 @@ def load_adapter_config(adapter_path: str) -> dict:
     """
     config_file = Path(adapter_path) / "adapter_config.json"
     if not config_file.exists():
-        raise FileNotFoundError(
-            f"adapter_config.json not found in {adapter_path}"
-        )
+        raise FileNotFoundError(f"adapter_config.json not found in {adapter_path}")
     with open(config_file) as f:
         return json.load(f)
 
@@ -45,8 +42,8 @@ def load_adapter_config(adapter_path: str) -> dict:
 
 
 def detect_lora_config(
-    adapter_paths: List[str],
-) -> Tuple[int, float, List[int], List[float]]:
+    adapter_paths: list[str],
+) -> tuple[int, float, list[int], list[float]]:
     """Detect LoRA rank and alpha from adapter configs.
 
     Supports variable rank/alpha adapters.  Returns maximum rank for tensor
@@ -59,7 +56,7 @@ def detect_lora_config(
         ``(max_lora_rank, default_lora_alpha, adapter_ranks, adapter_alphas)``
     """
     print("Detecting LoRA configuration from adapters...")
-    adapter_info: List[Tuple[int, float]] = []
+    adapter_info: list[tuple[int, float]] = []
 
     for adapter_path in adapter_paths:
         config = load_adapter_config(adapter_path)
@@ -86,13 +83,13 @@ def detect_lora_config(
     unique_configs = set(adapter_info)
 
     if len(unique_configs) == 1:
-        print(f"  Uniform configuration across all adapters:")
+        print("  Uniform configuration across all adapters:")
         print(f"    - Rank: {max_rank}")
         print(f"    - Alpha: {default_alpha}")
         print(f"    - Effective scaling (alpha/rank): {default_alpha / max_rank:.6f}")
     else:
-        print(f"  Variable rank/alpha configuration detected:")
-        print(f"    Adapter configurations:")
+        print("  Variable rank/alpha configuration detected:")
+        print("    Adapter configurations:")
 
         default_scaling = default_alpha / max_rank
 
@@ -100,18 +97,20 @@ def detect_lora_config(
             adapter_scaling = alpha / rank
             scaling_ratio = adapter_scaling / default_scaling
 
-            status = "ok" if (rank == max_rank and alpha == default_alpha) else "variable"
+            status = (
+                "ok" if (rank == max_rank and alpha == default_alpha) else "variable"
+            )
             padding_info = "" if rank == max_rank else f", +{max_rank - rank} padding"
             print(
                 f"      {status} Adapter {idx}: rank={rank}, alpha={alpha}, "
                 + f"scaling={adapter_scaling:.6f}, ratio={scaling_ratio:.4f}x{padding_info}"
             )
 
-        print(f"    Model configuration:")
+        print("    Model configuration:")
         print(f"      - Max rank (for allocation): {max_rank}")
         print(f"      - Default alpha (for config): {default_alpha}")
         print(f"      - Default scaling: {default_scaling:.6f}")
-        print(f"    Per-adapter ranks/alphas will be stored in config")
+        print("    Per-adapter ranks/alphas will be stored in config")
         print(f"    Adapters with rank < {max_rank} will be zero-padded")
 
     return max_rank, default_alpha, adapter_ranks_list, adapter_alphas_list
@@ -136,6 +135,7 @@ def _extract_modules_from_weights(adapter_path: str) -> set:
 
     if safetensors_file.exists():
         from safetensors.torch import load_file
+
         state_dict = load_file(str(safetensors_file))
     elif bin_file.exists():
         state_dict = torch.load(str(bin_file), map_location="cpu")
@@ -156,10 +156,10 @@ def _extract_modules_from_weights(adapter_path: str) -> set:
 
 
 def detect_present_modules(
-    adapter_paths: List[str],
+    adapter_paths: list[str],
     arch: ArchDescriptor,
-    adapter_names: List[str] = None,
-) -> Tuple[List[str], Dict]:
+    adapter_names: list[str] | None = None,
+) -> tuple[list[str], dict]:
     """Detect which module groups have adapters present in at least one adapter.
 
     Analyzes actual adapter weight files (not just configs) to determine which
@@ -176,15 +176,15 @@ def detect_present_modules(
         group names present in at least one adapter, plus the raw analysis dict
         (reusable by :func:`generate_compose_report` to avoid re-loading files).
     """
-    print(f"Detecting present LoRA module groups across {len(adapter_paths)} adapters...")
+    print(
+        f"Detecting present LoRA module groups across {len(adapter_paths)} adapters..."
+    )
 
     # Validate adapter compatibility using actual weight keys (ground truth).
     # This catches mismatches regardless of how target_modules is specified
     # (list or regex pattern) — we check what modules are actually present.
     known_peft = set(arch.all_peft_modules)
-    display_names = adapter_names or [
-        Path(p).parent.parent.name for p in adapter_paths
-    ]
+    display_names = adapter_names or [Path(p).parent.parent.name for p in adapter_paths]
     for idx, adapter_path in enumerate(adapter_paths):
         actual_modules = _extract_modules_from_weights(adapter_path)
         unknown = actual_modules - known_peft
@@ -198,10 +198,11 @@ def detect_present_modules(
                 f"  Was this adapter trained for a different model type?"
             )
 
-    print(f"  Using empirical analysis (checking actual weight files)...")
+    print("  Using empirical analysis (checking actual weight files)...")
 
     analysis = analyze_source_adapters(
-        adapter_paths, peft_modules=arch.all_peft_modules,
+        adapter_paths,
+        peft_modules=arch.all_peft_modules,
         adapter_names=adapter_names,
     )
 
@@ -239,11 +240,13 @@ def detect_present_modules(
             f"  Performance: {len(absent_groups)} module group(s) will not be instantiated"
         )
     else:
-        print(f"  All standard module groups have data")
+        print("  All standard module groups have data")
 
     if problem_count > 0:
-        print(f"\n  WARNING: Found {problem_count} problematic module/adapter combinations")
-        print(f"     Only modules with 'populated' status will be included")
+        print(
+            f"\n  WARNING: Found {problem_count} problematic module/adapter combinations"
+        )
+        print("     Only modules with 'populated' status will be included")
 
     return present_groups, analysis
 
@@ -254,8 +257,8 @@ def detect_present_modules(
 
 
 def load_adapter_target_modules(
-    adapter_paths: List[str],
-) -> List[set]:
+    adapter_paths: list[str],
+) -> list[set]:
     """Load target_modules from each adapter's config.
 
     Returns an explicit list when available. String patterns (regex) cannot
@@ -288,8 +291,8 @@ def load_adapter_target_modules(
 
 
 def load_adapter_files(
-    adapter_paths: List[str],
-) -> List[Dict[str, torch.Tensor]]:
+    adapter_paths: list[str],
+) -> list[dict[str, torch.Tensor]]:
     """Load adapter weight files from disk.
 
     Supports both safetensors and PyTorch bin formats.
@@ -330,10 +333,10 @@ def load_adapter_files(
 
 
 def analyze_source_adapters(
-    adapter_paths: List[str],
-    peft_modules: List[str],
-    adapter_names: List[str] = None,
-) -> Dict:
+    adapter_paths: list[str],
+    peft_modules: list[str],
+    adapter_names: list[str] | None = None,
+) -> dict:
     """Analyze source adapter files to understand their actual content.
 
     Compares what is in the adapter files against what the config declares
@@ -405,23 +408,27 @@ def analyze_source_adapters(
             file_format = "pytorch"
         else:
             print(f"  WARNING: No weight file found for {adapter_name}")
-            file_info.append({
-                "adapter": adapter_name,
-                "file": None,
-                "format": None,
-                "size_mb": 0,
-            })
+            file_info.append(
+                {
+                    "adapter": adapter_name,
+                    "file": None,
+                    "format": None,
+                    "size_mb": 0,
+                }
+            )
             for module_type in module_types:
                 status[module_type][adapter_name] = "no-file"
             continue
 
         file_size_mb = weight_file.stat().st_size / (1024 * 1024)
-        file_info.append({
-            "adapter": adapter_name,
-            "file": str(weight_file.name),
-            "format": file_format,
-            "size_mb": file_size_mb,
-        })
+        file_info.append(
+            {
+                "adapter": adapter_name,
+                "file": str(weight_file.name),
+                "format": file_format,
+                "size_mb": file_size_mb,
+            }
+        )
 
         # Load weights
         if file_format == "safetensors":

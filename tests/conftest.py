@@ -4,15 +4,14 @@
 import os
 
 import pytest
-import torch
 
 from granite_switch.config import GraniteSwitchConfig
-
 
 # ── Multi-GPU xdist worker pinning ────────────────────────────────
 # When running with pytest-xdist (-n N), each worker pins to one GPU
 # from the CUDA_VISIBLE_DEVICES list via round-robin.  With 1 GPU
 # every worker gets GPU 0 (no-op).  Without xdist this is skipped.
+
 
 def pytest_configure(config):
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
@@ -27,10 +26,12 @@ def pytest_configure(config):
         # No restriction set — discover count via nvidia-smi to avoid
         # initializing a CUDA context in the parent process.
         import subprocess
+
         try:
             out = subprocess.check_output(
                 ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
-                text=True, timeout=5,
+                text=True,
+                timeout=5,
             )
             gpus = [line.strip() for line in out.splitlines() if line.strip()]
         except Exception:

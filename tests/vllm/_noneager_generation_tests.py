@@ -22,6 +22,7 @@ _CUDA_AVAILABLE = torch.cuda.is_available()
 def _try_import_vllm():
     try:
         from vllm import LLM  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -37,10 +38,12 @@ pytestmark = pytest.mark.skipif(
 
 def _generate(model_dir, enforce_eager=False):
     import gc
+
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
+
     from granite_switch.vllm import register as register_granite_switch
 
     register_granite_switch()
@@ -69,21 +72,23 @@ def _generate(model_dir, enforce_eager=False):
 
 
 class TestNoSwitch:
-
     def test_generates_tokens(self, tmp_path):
+        import gc
+
+        from granite_switch.vllm import register as register_granite_switch
         from tests.shared.granite4_equivalence import GRANITE4_MINI
         from tests.shared.vllm_equivalence import (
-            save_upstream_model,
             save_switch_model,
+            save_upstream_model,
         )
-        from granite_switch.vllm import register as register_granite_switch
-        import gc
 
         register_granite_switch()
 
         cfg = GRANITE4_MINI["4.0-350m"]
         upstream_dir, upstream_sd = save_upstream_model(
-            cfg, seed=0, tmpdir=tmp_path,
+            cfg,
+            seed=0,
+            tmpdir=tmp_path,
         )
         switch_dir = save_switch_model(upstream_sd, cfg, tmpdir=tmp_path)
         del upstream_sd
@@ -96,10 +101,11 @@ class TestNoSwitch:
 
 
 class TestSingleSwitch:
-
     def test_generates_tokens(self, tmp_path):
         model_dir = save_switch_model(
-            HYBRID_CFG, basic_overrides(HYBRID_CFG), tmpdir=tmp_path,
+            HYBRID_CFG,
+            basic_overrides(HYBRID_CFG),
+            tmpdir=tmp_path,
         )
         generated = _generate(model_dir, enforce_eager=False)
         assert len(generated) == 16, (

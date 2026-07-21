@@ -26,7 +26,6 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from granite_switch.composer import GraniteSwitchComposer
 
-
 SEQ_LEN = 12  # Short fixed sequence — enough to exercise all layer types.
 
 
@@ -61,7 +60,9 @@ def main():
     # ── Phase 1: reference logits ─────────────────────────────────
     print(f"\nPhase 1: loading original model ({model_name})...")
     original = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=dtype, low_cpu_mem_usage=True,
+        model_name,
+        torch_dtype=dtype,
+        low_cpu_mem_usage=True,
     ).eval()
 
     # Fixed input_ids — avoids tokenizer dependency / compatibility issues.
@@ -82,7 +83,8 @@ def main():
     # ── Phase 2: build switch skin ────────────────────────────────
     print("\nPhase 2: building GraniteSwitch skin (num_adapters=0)...")
     switch_model = GraniteSwitchComposer.from_base_and_adapters(
-        model_name, torch_dtype=dtype,
+        model_name,
+        torch_dtype=dtype,
     ).eval()
 
     with torch.no_grad():
@@ -106,7 +108,9 @@ def main():
         print(f"\nPASS: {model_name} — bit-exact equivalence ({dtype})")
         return 0
 
-    print(f"\nFAIL: {model_name} — logits differ (max |diff| = {max_diff:.6e}, dtype={dtype})")
+    print(
+        f"\nFAIL: {model_name} — logits differ (max |diff| = {max_diff:.6e}, dtype={dtype})"
+    )
     return 1
 
 

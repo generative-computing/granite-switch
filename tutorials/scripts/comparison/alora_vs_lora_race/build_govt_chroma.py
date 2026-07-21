@@ -21,18 +21,17 @@ equivalent of this indexing step.
 """
 
 import argparse
-import io
 import json
 import threading
 import urllib.request
 import zipfile
 from pathlib import Path
 
-import torch
 import chromadb
-from chromadb import EmbeddingFunction, Documents, Embeddings
-from transformers import AutoTokenizer, AutoModel
+import torch
+from chromadb import Documents, EmbeddingFunction, Embeddings
 from tqdm import tqdm
+from transformers import AutoModel, AutoTokenizer
 
 EMBEDDING_MODEL_ID = "ibm-granite/granite-embedding-small-english-r2"
 BATCH_SIZE = 256
@@ -66,8 +65,13 @@ class _EmbedFn(EmbeddingFunction):
 
     def __call__(self, input: Documents) -> Embeddings:
         with self._lock:
-            enc = self._tok(list(input), return_tensors="pt",
-                            truncation=True, max_length=512, padding=True)
+            enc = self._tok(
+                list(input),
+                return_tensors="pt",
+                truncation=True,
+                max_length=512,
+                padding=True,
+            )
             enc = {k: v.to(self._device) for k, v in enc.items()}
             with torch.no_grad():
                 out = self._model(**enc)
@@ -77,19 +81,30 @@ class _EmbedFn(EmbeddingFunction):
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--jsonl", default=None,
-                        help="Path to govt.jsonl (unzipped); downloaded automatically if omitted")
-    parser.add_argument("--output", default=str(_HERE / "govt_chroma"),
-                        help="Directory to write the ChromaDB index (default: govt_chroma/)")
-    parser.add_argument("--device", default=None,
-                        help="Torch device for embeddings (default: cuda if available, else cpu)")
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument(
+        "--jsonl",
+        default=None,
+        help="Path to govt.jsonl (unzipped); downloaded automatically if omitted",
+    )
+    parser.add_argument(
+        "--output",
+        default=str(_HERE / "govt_chroma"),
+        help="Directory to write the ChromaDB index (default: govt_chroma/)",
+    )
+    parser.add_argument(
+        "--device",
+        default=None,
+        help="Torch device for embeddings (default: cuda if available, else cpu)",
+    )
     parser.add_argument("--batch-size", type=int, default=BATCH_SIZE)
     args = parser.parse_args()
 
     if args.device is None:
         import torch
+
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     if args.jsonl is None:
@@ -118,11 +133,13 @@ def main() -> None:
     print(f"Indexing {total:,} passages in batches of {args.batch_size}...")
 
     for start in tqdm(range(0, total, args.batch_size), unit="batch"):
-        batch = [json.loads(l) for l in lines[start:start + args.batch_size]]
-        ids       = [d.get("_id", d.get("id", str(start + i))) for i, d in enumerate(batch)]
+        batch = [json.loads(l) for l in lines[start : start + args.batch_size]]
+        ids = [d.get("_id", d.get("id", str(start + i))) for i, d in enumerate(batch)]
         documents = [d["text"] for d in batch]
-        metadatas = [{k: v for k, v in d.items() if k not in ("_id", "id", "text")}
-                     for d in batch]
+        metadatas = [
+            {k: v for k, v in d.items() if k not in ("_id", "id", "text")}
+            for d in batch
+        ]
         collection.upsert(ids=ids, documents=documents, metadatas=metadatas)
 
     print(f"\nDone. Collection '{COLLECTION_NAME}' has {collection.count():,} docs.")

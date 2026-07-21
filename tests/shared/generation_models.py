@@ -58,7 +58,7 @@ def single_overrides(base_cfg):
         "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
         "num_hidden_layers": len(base_layers) + 1,
-        "layer_types": ["attention"] + base_layers,
+        "layer_types": ["attention", *base_layers],
     }
 
 
@@ -67,6 +67,7 @@ basic_overrides = single_overrides
 
 
 # ── Model builder ─────────────────────────────────────────────────
+
 
 def save_switch_model(base_cfg, cfg_overrides, tmpdir):
     """Build a GraniteSwitch model from config and save to disk.

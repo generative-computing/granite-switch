@@ -84,3 +84,25 @@ conflicts = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W", "UP", "RUF"]
+ignore = [
+    "E501",   # line length handled by the formatter
+    "RUF002", # ambiguous unicode in docstrings — intentional math symbols (×, μ, →)
+    "RUF003", # ambiguous unicode in comments — same
+    "RUF012", # mutable class defaults — doesn't fit the config/model-class style
+    "UP038",  # isinstance(x, (A, B)) → A | B — deprecated upstream, slower at runtime
+]
+
+[tool.ruff.lint.per-file-ignores]
+# __init__.py files intentionally re-export names; don't strip them as "unused".
+"**/__init__.py" = ["F401"]
+# Tests/tutorials legitimately import after guards (pytest.skipif, sys.path) or in
+# notebook cells (E402), and use short math-style names like `l` (E741).
+"tests/**" = ["E402", "E741"]
+"tutorials/**" = ["E402", "E741"]

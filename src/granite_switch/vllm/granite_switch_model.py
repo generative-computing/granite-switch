@@ -18,14 +18,12 @@ The switch detects special tokens and selects the appropriate adapter for each t
 All parameters are frozen - no training needed.
 """
 
-from typing import Iterable, Optional, Tuple, Union
+from collections.abc import Iterable
 
 import torch
 from torch import nn
-
-from vllm.v1.attention.backend import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,24 +32,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.sequence import IntermediateTensors
-
-from granite_switch.config import GraniteSwitchConfig
-from .core import (
-    GraniteSwitchDecoderLayer,
-    CompileFriendlyLoRAKernelMeta,
-    LoRAContext,
-)
-from .core.lora import SwitchedLoRALinear
-from .core.decoder import GraniteLoRAEmbeddedAttention
-from .switch import create_switch
-from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
-    PPMissingLayer,
-    is_pp_missing_parameter,
-    make_layers,
-    maybe_prefix,
-)
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -59,19 +39,36 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.utils import (
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sequence import IntermediateTensors
+
+from granite_switch.config import GraniteSwitchConfig
+
 from .audio.processor import (
     AUDIO_MARKER,
     GraniteSwitchASRDummyInputsBuilder,
     GraniteSwitchASRMultiModalProcessor,
     GraniteSwitchASRProcessingInfo,
 )
+from .core import (
+    CompileFriendlyLoRAKernelMeta,
+    GraniteSwitchDecoderLayer,
+    LoRAContext,
+)
+from .core.decoder import GraniteLoRAEmbeddedAttention
+from .core.lora import SwitchedLoRALinear
+from .switch import create_switch
 
 
 def _get_intermediate_tensor(
     tensors: IntermediateTensors,
     name: str,
-) -> Optional[torch.Tensor]:
+) -> torch.Tensor | None:
     try:
         return tensors[name]
     except KeyError:
@@ -87,7 +84,7 @@ class GraniteSwitchModel(nn.Module):
     1. Standard embedding layer
     2. Simple switch (attention-based special token detection)
     3. Base transformer layers with LoRA
-    4. LM head 
+    4. LM head
 
     The switch detects special tokens, selects the appropriate adapter, and
     rewrites each control token's id to its substitute id (token exchange).
@@ -115,7 +112,9 @@ class GraniteSwitchModel(nn.Module):
         self.padding_idx = config.pad_token_id
         lora_vocab = 0
         if hasattr(config, "lora_vocab_size"):
-            lora_vocab = config.lora_vocab_size if config.lora_vocab_size is not None else 0
+            lora_vocab = (
+                config.lora_vocab_size if config.lora_vocab_size is not None else 0
+            )
 
         self.vocab_size = config.vocab_size + lora_vocab
         self.org_vocab_size = config.vocab_size
@@ -166,7 +165,7 @@ class GraniteSwitchModel(nn.Module):
             # that avoids data-dependent branching
             self.lora_meta = CompileFriendlyLoRAKernelMeta(
                 num_adapters=num_adapters,
-                device=torch.device('cuda'),
+                device=torch.device("cuda"),
                 dtype=torch.bfloat16,
             )
 
@@ -190,7 +189,6 @@ class GraniteSwitchModel(nn.Module):
         else:
             layer_offset = 0
             num_decoder_layers = config.num_hidden_layers
-        layer_types = config.layer_types
 
         def _make_decoder_layer(prefix: str):
             """Create attention decoder layer."""
@@ -218,7 +216,7 @@ class GraniteSwitchModel(nn.Module):
             )
             for module in self.modules():
                 if isinstance(module, _ctx_types):
-                    object.__setattr__(module, '_lora_ctx', self.lora_ctx)
+                    object.__setattr__(module, "_lora_ctx", self.lora_ctx)
         else:
             self.lora_ctx = None
 
@@ -267,11 +265,11 @@ class GraniteSwitchModel(nn.Module):
 
     def forward(
         self,
-        input_ids: Optional[torch.Tensor],
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         """
         Forward pass with integrated switch logic.
 
@@ -311,7 +309,9 @@ class GraniteSwitchModel(nn.Module):
                     num_tokens = inputs_embeds.shape[0]
                     device = inputs_embeds.device
                 adapter_indices = torch.zeros(
-                    num_tokens, dtype=torch.long, device=device,
+                    num_tokens,
+                    dtype=torch.long,
+                    device=device,
                 )
                 modified_input_ids = input_ids
 
@@ -340,7 +340,9 @@ class GraniteSwitchModel(nn.Module):
                 adapter_indices = torch.zeros(
                     num_tokens,
                     dtype=torch.long,
-                    device=input_ids.device if input_ids is not None else torch.device('cuda')
+                    device=input_ids.device
+                    if input_ids is not None
+                    else torch.device("cuda"),
                 )
 
         # ═══════════════════════════════════════════════════════════════
@@ -381,8 +383,12 @@ class GraniteSwitchModel(nn.Module):
         # the same fused/separate convention is used throughout.
         if get_pp_group().is_last_rank:
             from granite_switch.vllm.core.decoder import rms_norm_select
+
             hidden_states, _ = rms_norm_select(
-                self.norm, hidden_states, residual, self.config.fused_add_norm,
+                self.norm,
+                hidden_states,
+                residual,
+                self.config.fused_add_norm,
             )
             return hidden_states
         else:
@@ -400,7 +406,12 @@ class GraniteSwitchModel(nn.Module):
     dummy_inputs=GraniteSwitchASRDummyInputsBuilder,
 )
 class GraniteSwitchForCausalLM(
-    nn.Module, HasInnerState, SupportsLoRA, SupportsMultiModal, SupportsPP, IsHybrid,
+    nn.Module,
+    HasInnerState,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    IsHybrid,
 ):
     """
     Granite model with switch for causal language modeling.
@@ -439,7 +450,10 @@ class GraniteSwitchForCausalLM(
         "embed_tokens",
         "lm_head",
     ]
-    embedding_modules = {"embed_tokens": "input_embeddings", "lm_head": "output_embeddings"}
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
     embedding_padding_modules = ["lm_head"]
 
     def __init__(
@@ -545,9 +559,9 @@ class GraniteSwitchForCausalLM(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         """Forward pass returning hidden states.
 
         Switch logic now happens inside GraniteSwitchModel.forward(),
@@ -564,7 +578,7 @@ class GraniteSwitchForCausalLM(
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor | None:
         """Compute logits from hidden states.
 
         Suppression of control tokens is NOT done here — see issue #14.
@@ -584,7 +598,7 @@ class GraniteSwitchForCausalLM(
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load model weights from checkpoint.
 
         Handles two checkpoint formats:
@@ -616,13 +630,14 @@ class GraniteSwitchForCausalLM(
             if name in params_dict:
                 param = params_dict[name]
                 weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader,
+                    param,
+                    "weight_loader",
+                    default_weight_loader,
                 )
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        def _load_expert(param_name, loaded_weight, weight_name,
-                         shard_id, expert_id):
+        def _load_expert(param_name, loaded_weight, weight_name, shard_id, expert_id):
             """Load a per-expert weight into a FusedMoE packed parameter."""
             if is_pp_missing_parameter(param_name, self):
                 return
@@ -631,8 +646,11 @@ class GraniteSwitchForCausalLM(
             param = params_dict[param_name]
             weight_loader = param.weight_loader
             weight_loader(
-                param, loaded_weight, weight_name,
-                shard_id=shard_id, expert_id=expert_id,
+                param,
+                loaded_weight,
+                weight_name,
+                shard_id=shard_id,
+                expert_id=expert_id,
             )
             loaded_params.add(param_name)
 
@@ -651,13 +669,17 @@ class GraniteSwitchForCausalLM(
                     w1_param, w3_param = loaded_weight[e].chunk(2, dim=0)
                     _load_expert(
                         name.replace(".input_linear.", ".experts.w13_"),
-                        w1_param, w1_name,
-                        shard_id="w1", expert_id=e,
+                        w1_param,
+                        w1_name,
+                        shard_id="w1",
+                        expert_id=e,
                     )
                     _load_expert(
                         name.replace(".input_linear.", ".experts.w13_"),
-                        w3_param, w3_name,
-                        shard_id="w3", expert_id=e,
+                        w3_param,
+                        w3_name,
+                        shard_id="w3",
+                        expert_id=e,
                     )
                 continue
 
@@ -670,8 +692,10 @@ class GraniteSwitchForCausalLM(
                     )
                     _load_expert(
                         name.replace(".output_linear.", ".experts.w2_"),
-                        loaded_weight[e], w2_name,
-                        shard_id="w2", expert_id=e,
+                        loaded_weight[e],
+                        w2_name,
+                        shard_id="w2",
+                        expert_id=e,
                     )
                 continue
 
@@ -690,7 +714,9 @@ class GraniteSwitchForCausalLM(
         # Report unloaded parameters
         unloaded_params = [name for name in params_dict if name not in loaded_params]
         if unloaded_params:
-            print(f"Warning: {len(unloaded_params)} parameters were not loaded from checkpoint")
+            print(
+                f"Warning: {len(unloaded_params)} parameters were not loaded from checkpoint"
+            )
             if len(unloaded_params) <= 10:
                 for name in unloaded_params:
                     print(f"  - {name}")

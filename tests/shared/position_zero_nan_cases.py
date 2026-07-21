@@ -29,7 +29,6 @@ import torch.nn.functional as F
 
 from tests.shared.gap_equivalence import SWITCH_TYPES
 
-
 # ════════════════════════════════════════════════════════════════════
 # SDPA NaN cases (backend-agnostic)
 # ════════════════════════════════════════════════════════════════════
@@ -67,7 +66,6 @@ class SDPANaNCases:
         assert self._sdpa_is_finite(q_ctrl_value=0.0, seq_len=8)
 
 
-
 # ════════════════════════════════════════════════════════════════════
 # Model finiteness cases (abstract — backend provides _assert_no_nan)
 # ════════════════════════════════════════════════════════════════════
@@ -93,7 +91,11 @@ class ModelFinitenessCases:
         """Regression: ctrl_pos=0 must produce finite logits (the NaN bug scenario)."""
         self._assert_no_nan(switch_type, ctrl_pos=0, seq_len=8, seed=99)
 
-    @pytest.mark.parametrize("switch_type,ctrl_pos", _CTRL_POS_PARAMS, ids=_CTRL_POS_IDS)
+    @pytest.mark.parametrize(
+        "switch_type,ctrl_pos", _CTRL_POS_PARAMS, ids=_CTRL_POS_IDS
+    )
     def test_finite_all_ctrl_positions(self, switch_type, ctrl_pos):
         """Model output must be finite across all ctrl_pos values including 0."""
-        self._assert_no_nan(switch_type, ctrl_pos=ctrl_pos, seq_len=16, seed=42 + ctrl_pos)
+        self._assert_no_nan(
+            switch_type, ctrl_pos=ctrl_pos, seq_len=16, seed=42 + ctrl_pos
+        )

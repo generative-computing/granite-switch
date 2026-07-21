@@ -8,14 +8,13 @@ from non-normed, and outputs are correct shape.
 All tests run on CPU with random weights (no pretrained checkpoint needed).
 """
 
-import pytest
 import torch
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf.core.lora import GraniteLoRAEmbeddedAttention
 
-
 # ── Helpers ────────────────────────────────────────────────────────
+
 
 def _make_config(qk_norm: bool, num_adapters: int = 0) -> GraniteSwitchConfig:
     """Minimal config for attention layer tests."""
@@ -51,6 +50,7 @@ def _make_position_embeddings(seq_len: int, head_dim: int):
 
 
 # ── Tests ─────────────────────────────────────────────────────────
+
 
 class TestQKNormParameters:
     """Verify QK-norm layers exist (or not) based on config."""
@@ -108,11 +108,13 @@ class TestQKNormForward:
 
         with torch.no_grad():
             out_off, _, _ = attn_off(
-                hidden, adapter_indices,
+                hidden,
+                adapter_indices,
                 position_embeddings=pos_emb,
             )
             out_on, _, _ = attn_on(
-                hidden, adapter_indices,
+                hidden,
+                adapter_indices,
                 position_embeddings=pos_emb,
             )
 
@@ -133,7 +135,8 @@ class TestQKNormForward:
 
         with torch.no_grad():
             out, _, _ = attn(
-                hidden, adapter_indices,
+                hidden,
+                adapter_indices,
                 position_embeddings=pos_emb,
             )
 

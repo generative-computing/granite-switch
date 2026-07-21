@@ -3,8 +3,8 @@
 
 import pytest
 
-from granite_switch.composer.weight_remapper import AdapterRemapper, RemapResult
 from granite_switch.composer.arch import ModuleDescriptor
+from granite_switch.composer.weight_remapper import AdapterRemapper, RemapResult
 
 
 class TestRemapResult:
@@ -24,7 +24,9 @@ class TestRemapResult:
             split_slices=2,
             split_type="duplicate",
         )
-        assert result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices"
+        assert (
+            result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices"
+        )
         assert result.split_slices == 2
         assert result.split_type == "duplicate"
 
@@ -51,9 +53,15 @@ class TestAdapterRemapperMakePattern:
             ab="lora_A",
         )
         # Should match
-        assert pattern.match("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight")
-        assert pattern.match("base_model.model.model.layers.15.self_attn.q_proj.lora_A.weight")
-        assert pattern.match("base_model.model.model.layers.123.self_attn.q_proj.lora_A.weight")
+        assert pattern.match(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+        assert pattern.match(
+            "base_model.model.model.layers.15.self_attn.q_proj.lora_A.weight"
+        )
+        assert pattern.match(
+            "base_model.model.model.layers.123.self_attn.q_proj.lora_A.weight"
+        )
 
     def test_make_pattern_no_match_wrong_module(self):
         """Pattern should not match different module names."""
@@ -64,7 +72,12 @@ class TestAdapterRemapperMakePattern:
             ab="lora_A",
         )
         # Should not match k_proj
-        assert pattern.match("base_model.model.model.layers.0.self_attn.k_proj.lora_A.weight") is None
+        assert (
+            pattern.match(
+                "base_model.model.model.layers.0.self_attn.k_proj.lora_A.weight"
+            )
+            is None
+        )
 
     def test_make_pattern_no_match_wrong_lora_type(self):
         """Pattern should not match different lora type."""
@@ -75,7 +88,12 @@ class TestAdapterRemapperMakePattern:
             ab="lora_A",
         )
         # Should not match lora_B
-        assert pattern.match("base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight") is None
+        assert (
+            pattern.match(
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_B.weight"
+            )
+            is None
+        )
 
     def test_make_pattern_extracts_layer_index(self):
         """Pattern should extract layer index via named group."""
@@ -85,7 +103,9 @@ class TestAdapterRemapperMakePattern:
             peft_mod="q_proj",
             ab="lora_A",
         )
-        match = pattern.match("base_model.model.model.layers.42.self_attn.q_proj.lora_A.weight")
+        match = pattern.match(
+            "base_model.model.model.layers.42.self_attn.q_proj.lora_A.weight"
+        )
         assert match is not None
         assert match.group("layer") == "42"
 
@@ -98,7 +118,12 @@ class TestAdapterRemapperMakePattern:
             ab="lora_A",
         )
         assert pattern.match("model.layers.0.self_attn.q_proj.lora_A.weight")
-        assert pattern.match("base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight") is None
+        assert (
+            pattern.match(
+                "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+            )
+            is None
+        )
 
     def test_make_pattern_mlp_module(self):
         """Pattern should work for MLP modules."""
@@ -108,7 +133,9 @@ class TestAdapterRemapperMakePattern:
             peft_mod="gate_proj",
             ab="lora_B",
         )
-        assert pattern.match("base_model.model.model.layers.5.mlp.gate_proj.lora_B.weight")
+        assert pattern.match(
+            "base_model.model.model.layers.5.mlp.gate_proj.lora_B.weight"
+        )
 
 
 class TestAdapterRemapper:
@@ -220,7 +247,9 @@ class TestAdapterRemapper:
             "base_model.model.model.layers.0.shared_mlp.input_linear.lora_A.weight"
         )
         assert result is not None
-        assert result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices"
+        assert (
+            result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices"
+        )
         assert result.split_slices == 2
         assert result.split_type == "duplicate"
 
@@ -229,7 +258,9 @@ class TestAdapterRemapper:
             "base_model.model.model.layers.0.shared_mlp.input_linear.lora_B.weight"
         )
         assert result is not None
-        assert result.target_name == "model.layers.0.shared_mlp.input_linear.lora_B_slices"
+        assert (
+            result.target_name == "model.layers.0.shared_mlp.input_linear.lora_B_slices"
+        )
         assert result.split_slices == 2
         assert result.split_type == "chunk_dim0"
 
@@ -242,14 +273,20 @@ class TestAdapterRemapper:
             "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight"
         )
         assert result is not None
-        assert result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices.0"
+        assert (
+            result.target_name
+            == "model.layers.0.shared_mlp.input_linear.lora_A_slices.0"
+        )
 
         # up_proj -> shared_mlp.input_linear slice 1
         result = remapper.remap_adapter_name(
             "base_model.model.model.layers.0.mlp.up_proj.lora_A.weight"
         )
         assert result is not None
-        assert result.target_name == "model.layers.0.shared_mlp.input_linear.lora_A_slices.1"
+        assert (
+            result.target_name
+            == "model.layers.0.shared_mlp.input_linear.lora_A_slices.1"
+        )
 
         # down_proj -> shared_mlp.output_linear (non-sliced)
         result = remapper.remap_adapter_name(
@@ -263,19 +300,28 @@ class TestAdapterRemapper:
         remapper = AdapterRemapper(qkv_groups)
 
         # Unknown module
-        assert remapper.remap_adapter_name(
-            "base_model.model.model.layers.0.self_attn.unknown_proj.lora_A.weight"
-        ) is None
+        assert (
+            remapper.remap_adapter_name(
+                "base_model.model.model.layers.0.self_attn.unknown_proj.lora_A.weight"
+            )
+            is None
+        )
 
         # Wrong prefix
-        assert remapper.remap_adapter_name(
-            "wrong_prefix.layers.0.self_attn.q_proj.lora_A.weight"
-        ) is None
+        assert (
+            remapper.remap_adapter_name(
+                "wrong_prefix.layers.0.self_attn.q_proj.lora_A.weight"
+            )
+            is None
+        )
 
         # Non-lora parameter
-        assert remapper.remap_adapter_name(
-            "base_model.model.model.layers.0.self_attn.q_proj.weight"
-        ) is None
+        assert (
+            remapper.remap_adapter_name(
+                "base_model.model.model.layers.0.self_attn.q_proj.weight"
+            )
+            is None
+        )
 
     def test_remap_different_layer_indices(self, qkv_groups):
         """Test that layer indices are correctly extracted and used."""

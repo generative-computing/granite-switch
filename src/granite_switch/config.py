@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for Granite model with adapter switching."""
 
-from typing import List, Optional
-
 from transformers import GraniteMoeHybridConfig
 
 
@@ -104,22 +102,22 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
     def __init__(
         self,
         num_adapters: int = 0,
-        adapter_token_ids: Optional[List[int]] = None,
-        adapter_substitute_token_ids: Optional[List[int]] = None,
+        adapter_token_ids: list[int] | None = None,
+        adapter_substitute_token_ids: list[int] | None = None,
         # SingleSwitch parameters
         control_token_gain: float = 15.0,
         switch_head_dim: int = 32,
         # Adapter parameters
-        adapter_names: Optional[List[str]] = None,
+        adapter_names: list[str] | None = None,
         max_lora_rank: int = 8,
-        adapter_ranks: List[int] = None,
-        lora_target_modules: Optional[List[str]] = None,
+        adapter_ranks: list[int] | None = None,
+        lora_target_modules: list[str] | None = None,
         # Audio (ASR) preprocessing parameters
         asr_enabled: bool = False,
-        asr_model_id: Optional[str] = None,
+        asr_model_id: str | None = None,
         asr_device: str = "cpu",
-        asr_pipeline_kwargs: Optional[dict] = None,
-        asr_generate_kwargs: Optional[dict] = None,
+        asr_pipeline_kwargs: dict | None = None,
+        asr_generate_kwargs: dict | None = None,
         asr_max_audio_clips: int = 32,
         asr_generation_reserve_tokens: int = 8192,
         asr_chunk_length_s: float = 30.0,
@@ -130,7 +128,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Parent class defaults (Granite 4 dense configuration)
         num_local_experts: int = 0,
         position_embedding_type: str = "rope",
-        layer_types: Optional[List[str]] = None,
+        layer_types: list[str] | None = None,
         **kwargs,
     ):
         # Compute default layer_types before parent init.
@@ -285,15 +283,19 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             if self.num_adapters > 0:
                 # Attention modules (present in all attention layers)
                 if any(lt == "attention" for lt in self.layer_types):
-                    lora_target_modules.extend([
-                        "qkv_proj",     # Q/K/V fused
-                        "o_proj",       # O projection
-                    ])
+                    lora_target_modules.extend(
+                        [
+                            "qkv_proj",  # Q/K/V fused
+                            "o_proj",  # O projection
+                        ]
+                    )
 
                 # MLP modules: all Granite 4 models use shared_mlp naming
-                lora_target_modules.extend([
-                    "shared_input_linear",   # shared_mlp input_linear (fused gate+up)
-                    "shared_output_linear",  # shared_mlp output_linear
-                ])
+                lora_target_modules.extend(
+                    [
+                        "shared_input_linear",  # shared_mlp input_linear (fused gate+up)
+                        "shared_output_linear",  # shared_mlp output_linear
+                    ]
+                )
 
         self.lora_target_modules = lora_target_modules

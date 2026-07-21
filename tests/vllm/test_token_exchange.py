@@ -40,9 +40,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 from tests.shared.single_switch_cases import (
+    ADAPTER_TOKEN_IDS_LIST,
     NUM_ADAPTERS,
     TEXT_TOKEN,
-    ADAPTER_TOKEN_IDS_LIST,
 )
 
 # Worker's deterministic substitute mapping: control_id (1000+i) → sub_id (i+1).

@@ -10,7 +10,6 @@ forward pass.  This directly validates the past_key_values.update() fix in
 SingleSwitch.
 """
 
-import pytest
 import torch
 
 from tests.shared.generation_models import (
@@ -19,8 +18,8 @@ from tests.shared.generation_models import (
     make_switch_model,
 )
 
-
 # ── Helpers ───────────────────────────────────────────────────────
+
 
 def _set_nonzero_lora_B(model, scale=0.1):
     """Set non-zero lora_B on every LoRA layer so adapters produce visible deltas."""
@@ -37,7 +36,9 @@ def _set_nonzero_lora_B(model, scale=0.1):
                 for b in mlp.input_linear.lora_B_slices:
                     b.data = torch.randn_like(b) * scale
             if hasattr(mlp.output_linear, "lora_B"):
-                mlp.output_linear.lora_B.data = torch.randn_like(mlp.output_linear.lora_B) * scale
+                mlp.output_linear.lora_B.data = (
+                    torch.randn_like(mlp.output_linear.lora_B) * scale
+                )
 
 
 def _full_prefill_logits(model, input_ids):
@@ -76,11 +77,13 @@ def _incremental_decode_logits(model, input_ids):
 
 # ── SingleSwitch ───────────────────────────────────────────────────
 
-class TestSingleSwitchGeneration:
 
+class TestSingleSwitchGeneration:
     def _make(self, seed=42):
         model, cfg = make_switch_model(
-            DENSE_CFG, basic_overrides(DENSE_CFG), seed=seed,
+            DENSE_CFG,
+            basic_overrides(DENSE_CFG),
+            seed=seed,
         )
         return model, cfg
 

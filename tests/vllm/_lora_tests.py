@@ -14,16 +14,18 @@ Section 1: SwitchedLoRALinear (single slice, num_slices=1)
 Section 2: SwitchedLoRALinear with packed modules (num_slices > 1)
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
-from unittest.mock import patch
 
 _CUDA_AVAILABLE = torch.cuda.is_available()
 
 
 def _try_import_vllm():
     try:
-        from vllm.lora.ops.triton_ops import lora_shrink, lora_expand  # noqa: F401
+        from vllm.lora.ops.triton_ops import lora_expand, lora_shrink  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -54,6 +56,7 @@ PACKED_TOTAL_OUT = sum(PACKED_OUTPUT_SLICES)
 
 
 # ── Helpers ──────────────────────────────────────────────────────────
+
 
 class _VLLMBaseLayer(torch.nn.Module):
     """nn.Linear wrapper returning (output, None) like vLLM parallel layers."""
@@ -87,10 +90,16 @@ class _VLLMLoRATestBase:
             device=self.device,
             dtype=self.dtype,
         )
-        with patch("granite_switch.vllm.core.lora.get_tensor_model_parallel_world_size",
-                   return_value=1), \
-             patch("granite_switch.vllm.core.lora.get_tensor_model_parallel_rank",
-                   return_value=0):
+        with (
+            patch(
+                "granite_switch.vllm.core.lora.get_tensor_model_parallel_world_size",
+                return_value=1,
+            ),
+            patch(
+                "granite_switch.vllm.core.lora.get_tensor_model_parallel_rank",
+                return_value=0,
+            ),
+        ):
             yield
 
     def _make_layer(self, in_features, out_features, num_adapters, rank):
@@ -117,6 +126,7 @@ class _VLLMLoRATestBase:
     def _run_with_meta(self, layer, x_2d, meta):
         """Forward pass with pre-computed metadata tuple."""
         from granite_switch.vllm.core.lora_kernel_meta import LoRAContext
+
         ctx = LoRAContext()
         ctx.token_lora_mapping = meta[0]
         ctx.token_indices_sorted = meta[1]
@@ -133,6 +143,7 @@ class _VLLMLoRATestBase:
     def _run(self, layer, x_2d, adapter_indices_1d):
         """Forward pass returning (output, bias) tuple."""
         from granite_switch.vllm.core.lora_kernel_meta import LoRAContext
+
         punica_indices = adapter_indices_1d.to(self.device) - 1
         ctx = LoRAContext()
         self.lora_meta.prepare_and_store(punica_indices, ctx)
@@ -150,6 +161,7 @@ class _VLLMLoRATestBase:
 # ════════════════════════════════════════════════════════════════════
 # Section 1: SwitchedLoRALinear (single slice, num_slices=1)
 # ════════════════════════════════════════════════════════════════════
+
 
 class TestBasePassthrough(_VLLMLoRATestBase):
     """All-base adapter indices -> output equals base_layer output."""
@@ -197,8 +209,9 @@ class TestAdapterActivation(_VLLMLoRATestBase):
         base_out, _ = self._run(layer, x, base_indices)
         adapter_out, _ = self._run(layer, x, adapter_indices)
 
-        assert not torch.allclose(base_out, adapter_out), \
+        assert not torch.allclose(base_out, adapter_out), (
             "Adapter output should differ from base output"
+        )
 
     def test_different_adapters_produce_different_outputs(self):
         torch.manual_seed(SEED)
@@ -217,8 +230,9 @@ class TestAdapterActivation(_VLLMLoRATestBase):
         out_1, _ = self._run(layer, x, indices_1)
         out_2, _ = self._run(layer, x, indices_2)
 
-        assert not torch.allclose(out_1, out_2), \
+        assert not torch.allclose(out_1, out_2), (
             "Different adapters should produce different outputs"
+        )
 
     def test_base_tokens_unchanged_in_mixed_batch(self):
         torch.manual_seed(SEED)
@@ -230,7 +244,9 @@ class TestAdapterActivation(_VLLMLoRATestBase):
 
         x = torch.randn(6, IN_FEATURES, device=self.device, dtype=self.dtype)
 
-        mixed_indices = torch.tensor([0, 1, 0, 2, 0, 0], dtype=torch.long, device=self.device)
+        mixed_indices = torch.tensor(
+            [0, 1, 0, 2, 0, 0], dtype=torch.long, device=self.device
+        )
         all_base_indices = torch.zeros(6, dtype=torch.long, device=self.device)
 
         mixed_out, _ = self._run(layer, x, mixed_indices)
@@ -238,8 +254,9 @@ class TestAdapterActivation(_VLLMLoRATestBase):
 
         for pos in [0, 2, 4, 5]:
             torch.testing.assert_close(
-                mixed_out[pos], base_out[pos],
-                msg=f"Base token at position {pos} should be unchanged"
+                mixed_out[pos],
+                base_out[pos],
+                msg=f"Base token at position {pos} should be unchanged",
             )
 
 
@@ -264,14 +281,24 @@ class TestMathCorrectness(_VLLMLoRATestBase):
 
         with torch.no_grad():
             for a in range(num_adapters):
-                layer.lora_A.data[a, 0] = torch.eye(RANK, IN_FEATURES, device=self.device, dtype=self.dtype) * 0.1 * (a + 1)
-                layer.lora_B.data[a, 0] = torch.eye(OUT_FEATURES, RANK, device=self.device, dtype=self.dtype) * 0.2 * (a + 1)
+                layer.lora_A.data[a, 0] = (
+                    torch.eye(RANK, IN_FEATURES, device=self.device, dtype=self.dtype)
+                    * 0.1
+                    * (a + 1)
+                )
+                layer.lora_B.data[a, 0] = (
+                    torch.eye(OUT_FEATURES, RANK, device=self.device, dtype=self.dtype)
+                    * 0.2
+                    * (a + 1)
+                )
 
         x = torch.randn(3, IN_FEATURES, device=self.device, dtype=self.dtype)
         torch.manual_seed(SEED + 11)
 
         for adapter_id in range(1, num_adapters + 1):
-            adapter_indices = torch.full((3,), adapter_id, dtype=torch.long, device=self.device)
+            adapter_indices = torch.full(
+                (3,), adapter_id, dtype=torch.long, device=self.device
+            )
             punica_indices = adapter_indices - 1
             meta = lora_meta.prepare_tensors(punica_indices)
             output, _ = self._run_with_meta(layer, x, meta)
@@ -284,8 +311,9 @@ class TestMathCorrectness(_VLLMLoRATestBase):
             expected = base_out + lora_delta
 
             torch.testing.assert_close(
-                output, expected,
-                msg=f"Adapter {adapter_id}: output should match base + x @ A^T @ B^T"
+                output,
+                expected,
+                msg=f"Adapter {adapter_id}: output should match base + x @ A^T @ B^T",
             )
 
 
@@ -307,12 +335,15 @@ class TestShapeCorrectness(_VLLMLoRATestBase):
 # Section 2: SwitchedLoRALinear with packed modules (num_slices > 1)
 # ════════════════════════════════════════════════════════════════════
 
+
 class TestPackedBasePassthrough(_VLLMLoRATestBase):
     """All-base -> base output."""
 
     def test_all_base_equals_base_layer(self):
         torch.manual_seed(SEED)
-        layer = self._make_packed_layer(IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK)
+        layer = self._make_packed_layer(
+            IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK
+        )
         x = torch.randn(10, IN_FEATURES, device=self.device, dtype=self.dtype)
         adapter_indices = torch.zeros(10, dtype=torch.long, device=self.device)
 
@@ -327,12 +358,18 @@ class TestPackedAdapterActivation(_VLLMLoRATestBase):
 
     def test_adapter_modifies_output(self):
         torch.manual_seed(SEED)
-        layer = self._make_packed_layer(IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK)
+        layer = self._make_packed_layer(
+            IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK
+        )
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_A_slices[s].data = torch.randn_like(layer.lora_A_slices[s]) * 0.1
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_A_slices[s].data = (
+                    torch.randn_like(layer.lora_A_slices[s]) * 0.1
+                )
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         x = torch.randn(4, IN_FEATURES, device=self.device, dtype=self.dtype)
 
@@ -342,8 +379,9 @@ class TestPackedAdapterActivation(_VLLMLoRATestBase):
         base_out, _ = self._run(layer, x, base_indices)
         adapter_out, _ = self._run(layer, x, adapter_indices)
 
-        assert not torch.allclose(base_out, adapter_out), \
+        assert not torch.allclose(base_out, adapter_out), (
             "Adapter output should differ from base output"
+        )
 
 
 class TestPackedSliceIndependence(_VLLMLoRATestBase):
@@ -351,7 +389,9 @@ class TestPackedSliceIndependence(_VLLMLoRATestBase):
 
     def test_lora_only_affects_target_slice(self):
         torch.manual_seed(SEED)
-        layer = self._make_packed_layer(IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK)
+        layer = self._make_packed_layer(
+            IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK
+        )
 
         with torch.no_grad():
             for s in range(layer.num_slices):
@@ -370,13 +410,15 @@ class TestPackedSliceIndependence(_VLLMLoRATestBase):
 
         # Slice 0 should differ (has LoRA)
         slice_0_end = PACKED_OUTPUT_SLICES[0]
-        assert not torch.allclose(output[:, :slice_0_end], base_output[:, :slice_0_end]), \
-            "Slice 0 should be modified by LoRA"
+        assert not torch.allclose(
+            output[:, :slice_0_end], base_output[:, :slice_0_end]
+        ), "Slice 0 should be modified by LoRA"
 
         # Slices 1+ should be identical to base (no LoRA)
         torch.testing.assert_close(
-            output[:, slice_0_end:], base_output[:, slice_0_end:],
-            msg="Slices 1+ should be unchanged (no LoRA weights)"
+            output[:, slice_0_end:],
+            base_output[:, slice_0_end:],
+            msg="Slices 1+ should be unchanged (no LoRA weights)",
         )
 
 
@@ -385,23 +427,35 @@ class TestPackedMathCorrectness(_VLLMLoRATestBase):
 
     def test_per_slice_lora_math(self):
         torch.manual_seed(SEED)
-        layer = self._make_packed_layer(IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK)
+        layer = self._make_packed_layer(
+            IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK
+        )
 
         with torch.no_grad():
             for s in range(layer.num_slices):
                 for a in range(NUM_ADAPTERS):
                     out_size = PACKED_OUTPUT_SLICES[s]
                     layer.lora_A_slices[s].data[a, 0] = (
-                        torch.eye(RANK, IN_FEATURES, device=self.device, dtype=self.dtype) * 0.1 * (s + 1) * (a + 1)
+                        torch.eye(
+                            RANK, IN_FEATURES, device=self.device, dtype=self.dtype
+                        )
+                        * 0.1
+                        * (s + 1)
+                        * (a + 1)
                     )
                     layer.lora_B_slices[s].data[a, 0] = (
-                        torch.eye(out_size, RANK, device=self.device, dtype=self.dtype) * 0.2 * (s + 1) * (a + 1)
+                        torch.eye(out_size, RANK, device=self.device, dtype=self.dtype)
+                        * 0.2
+                        * (s + 1)
+                        * (a + 1)
                     )
 
         x = torch.randn(3, IN_FEATURES, device=self.device, dtype=self.dtype)
 
         for adapter_id in range(1, NUM_ADAPTERS + 1):
-            adapter_indices = torch.full((3,), adapter_id, dtype=torch.long, device=self.device)
+            adapter_indices = torch.full(
+                (3,), adapter_id, dtype=torch.long, device=self.device
+            )
             output, _ = self._run(layer, x, adapter_indices)
             base_out = self._base_output(layer, x)
 
@@ -411,11 +465,12 @@ class TestPackedMathCorrectness(_VLLMLoRATestBase):
                 lora_a = layer.lora_A_slices[s][tensor_idx, 0]
                 lora_b = layer.lora_B_slices[s][tensor_idx, 0]
                 lora_delta = x @ lora_a.t() @ lora_b.t()
-                expected_slice = base_out[:, offset:offset + out_size] + lora_delta
+                expected_slice = base_out[:, offset : offset + out_size] + lora_delta
 
                 torch.testing.assert_close(
-                    output[:, offset:offset + out_size], expected_slice,
-                    msg=f"Adapter {adapter_id}, slice {s}: math mismatch"
+                    output[:, offset : offset + out_size],
+                    expected_slice,
+                    msg=f"Adapter {adapter_id}, slice {s}: math mismatch",
                 )
                 offset += out_size
 
@@ -425,25 +480,32 @@ class TestPackedBatchIndependence(_VLLMLoRATestBase):
 
     def test_mixed_adapters_no_crosstalk(self):
         torch.manual_seed(SEED)
-        layer = self._make_packed_layer(IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK)
+        layer = self._make_packed_layer(
+            IN_FEATURES, PACKED_OUTPUT_SLICES, NUM_ADAPTERS, RANK
+        )
 
         with torch.no_grad():
             for s in range(layer.num_slices):
-                layer.lora_B_slices[s].data = torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                layer.lora_B_slices[s].data = (
+                    torch.randn_like(layer.lora_B_slices[s]) * 0.1
+                )
 
         # 8 tokens with mixed adapters
         x = torch.randn(8, IN_FEATURES, device=self.device, dtype=self.dtype)
-        adapter_indices = torch.tensor([0, 1, 0, 2, 3, 0, 1, 4], dtype=torch.long, device=self.device)
+        adapter_indices = torch.tensor(
+            [0, 1, 0, 2, 3, 0, 1, 4], dtype=torch.long, device=self.device
+        )
 
         output, _ = self._run(layer, x, adapter_indices)
 
         # Verify each token independently
         for i in range(8):
-            x_single = x[i:i + 1]
-            idx_single = adapter_indices[i:i + 1]
+            x_single = x[i : i + 1]
+            idx_single = adapter_indices[i : i + 1]
             ref, _ = self._run(layer, x_single, idx_single)
 
             torch.testing.assert_close(
-                output[i], ref[0],
-                msg=f"Token {i} (adapter={adapter_indices[i].item()}): cross-talk detected"
+                output[i],
+                ref[0],
+                msg=f"Token {i} (adapter={adapter_indices[i].item()}): cross-talk detected",
             )

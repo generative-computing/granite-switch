@@ -11,7 +11,6 @@ Markers: slow, requires_model (both defined in pyproject.toml).
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -169,8 +168,7 @@ class TestBuildE2E:
 
         adapters = index["adapters"]
         assert len(adapters) >= 1, (
-            f"Expected at least 1 adapter in adapter_index.json, "
-            f"got {len(adapters)}"
+            f"Expected at least 1 adapter in adapter_index.json, got {len(adapters)}"
         )
 
         for entry in adapters:
@@ -239,7 +237,7 @@ class TestBuildE2E:
 
     def test_model_loads(self, build_output):
         """Verify the model loads with device_map='meta' (no memory used)."""
-        from transformers import AutoConfig, AutoModelForCausalLM
+        from transformers import AutoModelForCausalLM
 
         # Register our custom model class
         import granite_switch.hf  # noqa: F401

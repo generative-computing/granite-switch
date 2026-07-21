@@ -32,14 +32,20 @@ ADAPTER_TESTS = [
         "type": "lora",
         "messages": [
             {"role": "user", "content": "What is photosynthesis?"},
-            {"role": "assistant", "content": "Photosynthesis converts sunlight into glucose."},
-            {"role": "user", "content": (
-                "<guardian>You are a judge agent. Your role is to assess whether "
-                "the provided text meets the given criteria.\n\n"
-                "### Criteria: A factually incorrect response.\n\n"
-                "### Scoring Schema: If the last assistant's text meets the "
-                "criteria, return 'yes'; otherwise, return 'no'."
-            )},
+            {
+                "role": "assistant",
+                "content": "Photosynthesis converts sunlight into glucose.",
+            },
+            {
+                "role": "user",
+                "content": (
+                    "<guardian>You are a judge agent. Your role is to assess whether "
+                    "the provided text meets the given criteria.\n\n"
+                    "### Criteria: A factually incorrect response.\n\n"
+                    "### Scoring Schema: If the last assistant's text meets the "
+                    "criteria, return 'yes'; otherwise, return 'no'."
+                ),
+            },
         ],
     },
     {
@@ -59,7 +65,10 @@ ADAPTER_TESTS = [
 # Helper
 # ---------------------------------------------------------------------------
 
-def _generate(model, tokenizer, messages, adapter_name=None, documents=None, max_new_tokens=30):
+
+def _generate(
+    model, tokenizer, messages, adapter_name=None, documents=None, max_new_tokens=30
+):
     """Generate greedy text from messages using the chat template."""
     kwargs = {}
     if adapter_name:
@@ -74,7 +83,7 @@ def _generate(model, tokenizer, messages, adapter_name=None, documents=None, max
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     return tokenizer.decode(
-        out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True
+        out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
     ).strip()
 
 
@@ -82,12 +91,14 @@ def _generate(model, tokenizer, messages, adapter_name=None, documents=None, max
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def bnb_model():
     """Load granite-switch from HF with BitsAndBytes NF4 quantization."""
     bitsandbytes = pytest.importorskip("bitsandbytes")  # noqa: F841
-    import granite_switch.hf  # noqa: F401
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    import granite_switch.hf  # noqa: F401
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -109,8 +120,9 @@ def bnb_model():
 def quanto_model():
     """Load granite-switch from HF with Quanto INT4 quantization."""
     pytest.importorskip("optimum.quanto")
-    import granite_switch.hf  # noqa: F401
     from transformers import AutoModelForCausalLM, AutoTokenizer, QuantoConfig
+
+    import granite_switch.hf  # noqa: F401
 
     quanto_config = QuantoConfig(weights="int4")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -127,47 +139,59 @@ def quanto_model():
 # Tests: Adapter Activation
 # ---------------------------------------------------------------------------
 
+
 class TestBnBAdapterActivation:
     """BitsAndBytes NF4: adapters must activate (output differs with adapter via chat template)."""
 
-    @pytest.mark.parametrize("case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})")
+    @pytest.mark.parametrize(
+        "case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})"
+    )
     def test_adapter_activates(self, bnb_model, case):
         model, tokenizer = bnb_model
         documents = case.get("documents")
         base_out = _generate(model, tokenizer, case["messages"], documents=documents)
         adapter_out = _generate(
-            model, tokenizer, case["messages"],
-            adapter_name=case["adapter_name"], documents=documents,
+            model,
+            tokenizer,
+            case["messages"],
+            adapter_name=case["adapter_name"],
+            documents=documents,
         )
         assert base_out != adapter_out, (
             f"Adapter {case['adapter_name']} did not activate under BnB NF4.\n"
-            f"Base output:    {repr(base_out[:100])}\n"
-            f"Adapter output: {repr(adapter_out[:100])}"
+            f"Base output:    {base_out[:100]!r}\n"
+            f"Adapter output: {adapter_out[:100]!r}"
         )
 
 
 class TestQuantoAdapterActivation:
     """Quanto INT4: adapters must activate (output differs with adapter via chat template)."""
 
-    @pytest.mark.parametrize("case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})")
+    @pytest.mark.parametrize(
+        "case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})"
+    )
     def test_adapter_activates(self, quanto_model, case):
         model, tokenizer = quanto_model
         documents = case.get("documents")
         base_out = _generate(model, tokenizer, case["messages"], documents=documents)
         adapter_out = _generate(
-            model, tokenizer, case["messages"],
-            adapter_name=case["adapter_name"], documents=documents,
+            model,
+            tokenizer,
+            case["messages"],
+            adapter_name=case["adapter_name"],
+            documents=documents,
         )
         assert base_out != adapter_out, (
             f"Adapter {case['adapter_name']} did not activate under Quanto INT4.\n"
-            f"Base output:    {repr(base_out[:100])}\n"
-            f"Adapter output: {repr(adapter_out[:100])}"
+            f"Base output:    {base_out[:100]!r}\n"
+            f"Adapter output: {adapter_out[:100]!r}"
         )
 
 
 # ---------------------------------------------------------------------------
 # Tests: LoRA Weight Precision
 # ---------------------------------------------------------------------------
+
 
 class TestBnBLoRAPrecision:
     """BitsAndBytes NF4: LoRA weights must remain in full precision."""
@@ -181,7 +205,7 @@ class TestBnBLoRAPrecision:
                 if param.dtype not in full_precision_dtypes:
                     bad_params.append(f"{name}: {param.dtype}")
         assert not bad_params, (
-            f"LoRA params quantized under BnB (should stay full precision):\n"
+            "LoRA params quantized under BnB (should stay full precision):\n"
             + "\n".join(bad_params[:10])
         )
 
@@ -198,7 +222,7 @@ class TestQuantoLoRAPrecision:
                 if param.dtype not in full_precision_dtypes:
                     bad_params.append(f"{name}: {param.dtype}")
         assert not bad_params, (
-            f"LoRA params quantized under Quanto (should stay full precision):\n"
+            "LoRA params quantized under Quanto (should stay full precision):\n"
             + "\n".join(bad_params[:10])
         )
 
@@ -206,6 +230,7 @@ class TestQuantoLoRAPrecision:
 # ---------------------------------------------------------------------------
 # Tests: Base Weight Quantization
 # ---------------------------------------------------------------------------
+
 
 class TestBnBBaseQuantized:
     """BitsAndBytes NF4: base linear layers must actually be quantized."""
@@ -244,12 +269,14 @@ class TestQuantoBaseQuantized:
 # FP8 Tests (Quanto float8 — dequantizes to BF16 at compute time)
 # ===========================================================================
 
+
 @pytest.fixture(scope="module")
 def fp8_model():
     """Load granite-switch from HF with Quanto FP8 quantization."""
     pytest.importorskip("optimum.quanto")
-    import granite_switch.hf  # noqa: F401
     from transformers import AutoModelForCausalLM, AutoTokenizer, QuantoConfig
+
+    import granite_switch.hf  # noqa: F401
 
     quanto_config = QuantoConfig(weights="float8")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
@@ -265,19 +292,24 @@ def fp8_model():
 class TestFP8AdapterActivation:
     """FP8 (Quanto float8): adapters must activate."""
 
-    @pytest.mark.parametrize("case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})")
+    @pytest.mark.parametrize(
+        "case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})"
+    )
     def test_adapter_activates(self, fp8_model, case):
         model, tokenizer = fp8_model
         documents = case.get("documents")
         base_out = _generate(model, tokenizer, case["messages"], documents=documents)
         adapter_out = _generate(
-            model, tokenizer, case["messages"],
-            adapter_name=case["adapter_name"], documents=documents,
+            model,
+            tokenizer,
+            case["messages"],
+            adapter_name=case["adapter_name"],
+            documents=documents,
         )
         assert base_out != adapter_out, (
             f"Adapter {case['adapter_name']} did not activate under FP8.\n"
-            f"Base output:    {repr(base_out[:100])}\n"
-            f"Adapter output: {repr(adapter_out[:100])}"
+            f"Base output:    {base_out[:100]!r}\n"
+            f"Adapter output: {adapter_out[:100]!r}"
         )
 
 
@@ -293,7 +325,7 @@ class TestFP8LoRAPrecision:
                 if param.dtype not in full_precision_dtypes:
                     bad_params.append(f"{name}: {param.dtype}")
         assert not bad_params, (
-            f"LoRA params quantized under FP8 (should stay full precision):\n"
+            "LoRA params quantized under FP8 (should stay full precision):\n"
             + "\n".join(bad_params[:10])
         )
 
@@ -320,12 +352,14 @@ class TestFP8BaseQuantized:
 # FP4 Tests (BnB fp4 — dequantizes to BF16 at compute time)
 # ===========================================================================
 
+
 @pytest.fixture(scope="module")
 def fp4_model():
     """Load granite-switch from HF with BitsAndBytes FP4 quantization."""
     bitsandbytes = pytest.importorskip("bitsandbytes")  # noqa: F841
-    import granite_switch.hf  # noqa: F401
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+    import granite_switch.hf  # noqa: F401
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
@@ -346,19 +380,24 @@ def fp4_model():
 class TestFP4AdapterActivation:
     """FP4 (BnB fp4): adapters must activate."""
 
-    @pytest.mark.parametrize("case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})")
+    @pytest.mark.parametrize(
+        "case", ADAPTER_TESTS, ids=lambda c: f"{c['adapter_name']}({c['type']})"
+    )
     def test_adapter_activates(self, fp4_model, case):
         model, tokenizer = fp4_model
         documents = case.get("documents")
         base_out = _generate(model, tokenizer, case["messages"], documents=documents)
         adapter_out = _generate(
-            model, tokenizer, case["messages"],
-            adapter_name=case["adapter_name"], documents=documents,
+            model,
+            tokenizer,
+            case["messages"],
+            adapter_name=case["adapter_name"],
+            documents=documents,
         )
         assert base_out != adapter_out, (
             f"Adapter {case['adapter_name']} did not activate under FP4.\n"
-            f"Base output:    {repr(base_out[:100])}\n"
-            f"Adapter output: {repr(adapter_out[:100])}"
+            f"Base output:    {base_out[:100]!r}\n"
+            f"Adapter output: {adapter_out[:100]!r}"
         )
 
 
@@ -374,7 +413,7 @@ class TestFP4LoRAPrecision:
                 if param.dtype not in full_precision_dtypes:
                     bad_params.append(f"{name}: {param.dtype}")
         assert not bad_params, (
-            f"LoRA params quantized under FP4 (should stay full precision):\n"
+            "LoRA params quantized under FP4 (should stay full precision):\n"
             + "\n".join(bad_params[:10])
         )
 

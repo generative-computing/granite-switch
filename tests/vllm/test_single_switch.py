@@ -30,15 +30,15 @@ pytestmark = pytest.mark.skipif(
 )
 
 from tests.shared.single_switch_cases import (
+    ADAPTER_TOKEN_IDS_LIST,
     NUM_ADAPTERS,
     TEXT_TOKEN,
-    ADAPTER_TOKEN_IDS_LIST,
-    SingleSwitchTokenMatchingCases,
     SingleSwitchAdapterRetrievalCases,
-    SingleSwitchEdgeCases,
-    SingleSwitchShapeCorrectnessCases,
     SingleSwitchContextLengthSweepCases,
+    SingleSwitchEdgeCases,
     SingleSwitchGainSensitivityCases,
+    SingleSwitchShapeCorrectnessCases,
+    SingleSwitchTokenMatchingCases,
 )
 
 # ── Worker management ─────────────────────────────────────────────
@@ -154,6 +154,7 @@ def _query_geometry():
 # Release the GPU when this module's tests are done, so Pattern B
 # subprocess tests in later files can claim it.
 
+
 @pytest.fixture(autouse=True, scope="module")
 def _worker_lifecycle():
     yield
@@ -161,6 +162,7 @@ def _worker_lifecycle():
 
 
 # ── vLLM _run adapter ───────────────────────────────────────────────
+
 
 class _VLLMSingleSwitchBase:
     """Provides _run() for shared mixin tests via worker subprocess."""
@@ -171,6 +173,7 @@ class _VLLMSingleSwitchBase:
 
 
 # ── Shared test classes (from mixin) ────────────────────────────────
+
 
 class TestTokenMatching(_VLLMSingleSwitchBase, SingleSwitchTokenMatchingCases):
     pass
@@ -188,7 +191,9 @@ class TestShapeCorrectness(_VLLMSingleSwitchBase, SingleSwitchShapeCorrectnessCa
     pass
 
 
-class TestContextLengthSweep(_VLLMSingleSwitchBase, SingleSwitchContextLengthSweepCases):
+class TestContextLengthSweep(
+    _VLLMSingleSwitchBase, SingleSwitchContextLengthSweepCases
+):
     pass
 
 
@@ -216,9 +221,12 @@ class TestGeometry:
 class TestGainRoundTrip:
     """Verify gain compensation round-trips through bf16 exactly."""
 
-    @pytest.mark.parametrize("attention_multiplier", [0.0078125, 0.015625, 0.0625, 0.125, 1.0])
+    @pytest.mark.parametrize(
+        "attention_multiplier", [0.0078125, 0.015625, 0.0625, 0.125, 1.0]
+    )
     def test_gain_roundtrip_bf16(self, attention_multiplier):
         import torch
+
         gain = torch.tensor(15.0, dtype=torch.bfloat16)
         multiplier = torch.tensor(attention_multiplier, dtype=torch.bfloat16)
         effective = gain / multiplier

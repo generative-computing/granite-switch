@@ -9,7 +9,6 @@ import pytest
 
 from granite_switch.config import GraniteSwitchConfig
 
-
 # ── Helper ────────────────────────────────────────────────────────────
 
 
@@ -40,7 +39,6 @@ def _valid_kwargs(num_adapters=2, **overrides):
 
 
 class TestConfigValidation:
-
     def test_negative_num_adapters_raises(self):
         with pytest.raises(ValueError, match="num_adapters must be >= 0"):
             GraniteSwitchConfig(**_valid_kwargs(num_adapters=-1, adapter_ranks=None))
@@ -50,22 +48,18 @@ class TestConfigValidation:
             GraniteSwitchConfig(**_valid_kwargs(adapter_token_ids=[500]))
 
     def test_substitute_ids_required_when_adapters_present(self):
-        with pytest.raises(ValueError, match="adapter_substitute_token_ids is required"):
-            GraniteSwitchConfig(
-                **_valid_kwargs(adapter_substitute_token_ids=None)
-            )
+        with pytest.raises(
+            ValueError, match="adapter_substitute_token_ids is required"
+        ):
+            GraniteSwitchConfig(**_valid_kwargs(adapter_substitute_token_ids=None))
 
     def test_substitute_ids_wrong_length_raises(self):
         with pytest.raises(ValueError, match="adapter_substitute_token_ids length"):
-            GraniteSwitchConfig(
-                **_valid_kwargs(adapter_substitute_token_ids=[1])
-            )
+            GraniteSwitchConfig(**_valid_kwargs(adapter_substitute_token_ids=[1]))
 
     def test_substitute_ids_negative_raises(self):
         with pytest.raises(ValueError, match=">= 0"):
-            GraniteSwitchConfig(
-                **_valid_kwargs(adapter_substitute_token_ids=[-1, 1])
-            )
+            GraniteSwitchConfig(**_valid_kwargs(adapter_substitute_token_ids=[-1, 1]))
 
     def test_duplicate_adapter_token_ids_raises(self):
         with pytest.raises(ValueError, match="adapter_token_ids must be unique"):
@@ -90,7 +84,6 @@ class TestConfigValidation:
 
 
 class TestConfigDefaults:
-
     def test_zero_adapter_default(self):
         cfg = GraniteSwitchConfig(num_adapters=0)
         assert cfg.num_adapters == 0

@@ -23,7 +23,6 @@ Contract for subclasses:
 import pytest
 import torch
 
-
 # ── Defaults ────────────────────────────────────────────────────────
 
 IN_FEATURES = 32
@@ -34,6 +33,7 @@ SEED = 42
 
 
 # ── Helpers ─────────────────────────────────────────────────────────
+
 
 def _seeded_input(batch_size, seq_len, features, seed=SEED):
     """Create reproducible random input."""
@@ -49,6 +49,7 @@ def _single_sequence_result(run_fn, layer, x_row, adapter_row):
 
 
 # ── 1. Base passthrough ────────────────────────────────────────────
+
 
 class LoRABasePassthroughCases:
     """adapter_indices=0 everywhere → output equals base_layer(x).
@@ -83,6 +84,7 @@ class LoRABasePassthroughCases:
 
 # ── 2. Adapter activation ──────────────────────────────────────────
 
+
 class LoRAAdapterActivationCases:
     """adapter_indices > 0 → LoRA modifies output.
 
@@ -107,8 +109,9 @@ class LoRAAdapterActivationCases:
         base_output = self._run(layer, x, base_indices)
         adapter_output = self._run(layer, x, adapter_indices)
 
-        assert not torch.allclose(base_output, adapter_output), \
+        assert not torch.allclose(base_output, adapter_output), (
             "Adapter output should differ from base output"
+        )
 
     def test_different_adapters_produce_different_outputs(self):
         """Adapter 1 ≠ adapter 2."""
@@ -122,14 +125,15 @@ class LoRAAdapterActivationCases:
 
         x = _seeded_input(1, 4, IN_FEATURES, seed=SEED + 4)
 
-        indices_1 = torch.ones(1, 4, dtype=torch.long)      # adapter 1
+        indices_1 = torch.ones(1, 4, dtype=torch.long)  # adapter 1
         indices_2 = torch.full((1, 4), 2, dtype=torch.long)  # adapter 2
 
         out_1 = self._run(layer, x, indices_1)
         out_2 = self._run(layer, x, indices_2)
 
-        assert not torch.allclose(out_1, out_2), \
+        assert not torch.allclose(out_1, out_2), (
             "Different adapters should produce different outputs"
+        )
 
     def test_base_tokens_unchanged_in_mixed_batch(self):
         """Tokens with index 0 get exact base output even when others use adapters."""
@@ -153,12 +157,14 @@ class LoRAAdapterActivationCases:
         base_positions = [0, 2, 4, 5]
         for pos in base_positions:
             torch.testing.assert_close(
-                mixed_output[0, pos], base_output[0, pos],
-                msg=f"Base token at position {pos} should be unchanged"
+                mixed_output[0, pos],
+                base_output[0, pos],
+                msg=f"Base token at position {pos} should be unchanged",
             )
 
 
 # ── 3. Batch independence ──────────────────────────────────────────
+
 
 class LoRABatchIndependenceCases:
     """Batches with mixed adapter assignments — no cross-contamination.
@@ -179,22 +185,24 @@ class LoRABatchIndependenceCases:
 
         x = _seeded_input(4, 5, IN_FEATURES, seed=SEED + 6)
 
-        adapter_indices = torch.tensor([
-            [0, 0, 0, 0, 0],  # all base
-            [1, 1, 1, 1, 1],  # all adapter 1
-            [2, 2, 2, 2, 2],  # all adapter 2
-            [3, 3, 3, 3, 3],  # all adapter 3
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 0, 0, 0, 0],  # all base
+                [1, 1, 1, 1, 1],  # all adapter 1
+                [2, 2, 2, 2, 2],  # all adapter 2
+                [3, 3, 3, 3, 3],  # all adapter 3
+            ],
+            dtype=torch.long,
+        )
 
         batched_output = self._run(layer, x, adapter_indices)
 
         for i in range(4):
-            single = _single_sequence_result(
-                self._run, layer, x[i], adapter_indices[i]
-            )
+            single = _single_sequence_result(self._run, layer, x[i], adapter_indices[i])
             torch.testing.assert_close(
-                batched_output[i], single,
-                msg=f"Row {i} batched result should match single-sequence result"
+                batched_output[i],
+                single,
+                msg=f"Row {i} batched result should match single-sequence result",
             )
 
     def test_batch_base_vs_adapter_isolation(self):
@@ -207,10 +215,13 @@ class LoRABatchIndependenceCases:
 
         x = _seeded_input(2, 5, IN_FEATURES, seed=SEED + 7)
 
-        adapter_indices = torch.tensor([
-            [0, 0, 0, 0, 0],  # all base
-            [2, 2, 2, 2, 2],  # all adapter 2
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 0, 0, 0, 0],  # all base
+                [2, 2, 2, 2, 2],  # all adapter 2
+            ],
+            dtype=torch.long,
+        )
 
         batched_output = self._run(layer, x, adapter_indices)
 
@@ -248,17 +259,19 @@ class LoRABatchIndependenceCases:
             if aid == 0:
                 # Base token
                 torch.testing.assert_close(
-                    output[0, pos], base_output[0, pos],
-                    msg=f"Token {pos} (base) should match base_layer output"
+                    output[0, pos],
+                    base_output[0, pos],
+                    msg=f"Token {pos} (base) should match base_layer output",
                 )
             else:
                 # Adapter token — run single-token to get reference
-                x_token = x[0, pos:pos+1].unsqueeze(0)  # (1, 1, features)
+                x_token = x[0, pos : pos + 1].unsqueeze(0)  # (1, 1, features)
                 idx_token = torch.tensor([[aid]], dtype=torch.long)
                 ref = self._run(layer, x_token, idx_token)
                 torch.testing.assert_close(
-                    output[0, pos], ref[0, 0],
-                    msg=f"Token {pos} (adapter {aid}) should match single-token result"
+                    output[0, pos],
+                    ref[0, 0],
+                    msg=f"Token {pos} (adapter {aid}) should match single-token result",
                 )
 
     def test_batch_all_adapters_simultaneously(self):
@@ -283,13 +296,12 @@ class LoRABatchIndependenceCases:
         batched_output = self._run(layer, x, adapter_indices)
 
         for i in range(batch_size):
-            single = _single_sequence_result(
-                self._run, layer, x[i], adapter_indices[i]
-            )
+            single = _single_sequence_result(self._run, layer, x[i], adapter_indices[i])
             torch.testing.assert_close(
-                batched_output[i], single,
+                batched_output[i],
+                single,
                 msg=f"Row {i} (adapter={adapter_indices[i, 0].item()}) "
-                    f"should match single-sequence result"
+                f"should match single-sequence result",
             )
 
     def test_batch_all_sequences_switching_within(self):
@@ -302,11 +314,14 @@ class LoRABatchIndependenceCases:
 
         x = _seeded_input(3, 5, IN_FEATURES, seed=SEED + 10)
 
-        adapter_indices = torch.tensor([
-            [0, 1, 0, 2, 0],  # seq 0: base/adapter1/base/adapter2/base
-            [2, 0, 1, 1, 0],  # seq 1: adapter2/base/adapter1/adapter1/base
-            [0, 0, 3, 0, 1],  # seq 2: base/base/adapter3/base/adapter1
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 1, 0, 2, 0],  # seq 0: base/adapter1/base/adapter2/base
+                [2, 0, 1, 1, 0],  # seq 1: adapter2/base/adapter1/adapter1/base
+                [0, 0, 3, 0, 1],  # seq 2: base/base/adapter3/base/adapter1
+            ],
+            dtype=torch.long,
+        )
 
         batched_output = self._run(layer, x, adapter_indices)
 
@@ -314,17 +329,19 @@ class LoRABatchIndependenceCases:
         for row in range(3):
             for pos in range(5):
                 aid = adapter_indices[row, pos].item()
-                x_token = x[row, pos:pos+1].unsqueeze(0)
+                x_token = x[row, pos : pos + 1].unsqueeze(0)
                 idx_token = torch.tensor([[aid]], dtype=torch.long)
                 ref = self._run(layer, x_token, idx_token)
                 torch.testing.assert_close(
-                    batched_output[row, pos], ref[0, 0],
+                    batched_output[row, pos],
+                    ref[0, 0],
                     msg=f"Row {row}, pos {pos} (adapter={aid}) "
-                        f"should match single-token result"
+                    f"should match single-token result",
                 )
 
 
 # ── 4. Math correctness ────────────────────────────────────────────
+
 
 class LoRAMathCorrectnessCases:
     """Known weights → verify exact LoRA math.
@@ -361,8 +378,9 @@ class LoRAMathCorrectnessCases:
             expected = base_out + lora_delta
 
             torch.testing.assert_close(
-                output, expected,
-                msg=f"Adapter {adapter_id}: output should match base + x @ A^T @ B^T"
+                output,
+                expected,
+                msg=f"Adapter {adapter_id}: output should match base + x @ A^T @ B^T",
             )
 
     def test_batch_math_correctness(self):
@@ -379,12 +397,15 @@ class LoRAMathCorrectnessCases:
         x = _seeded_input(4, 3, IN_FEATURES, seed=SEED + 12)
 
         # Each row uses a different adapter: 0 (base), 1, 2, 3
-        adapter_indices = torch.tensor([
-            [0, 0, 0],
-            [1, 1, 1],
-            [2, 2, 2],
-            [3, 3, 3],
-        ], dtype=torch.long)
+        adapter_indices = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 1, 1],
+                [2, 2, 2],
+                [3, 3, 3],
+            ],
+            dtype=torch.long,
+        )
 
         output = self._run(layer, x, adapter_indices)
         base_out = layer.base_layer(x)
@@ -401,12 +422,12 @@ class LoRAMathCorrectnessCases:
                 expected = base_out[row] + lora_delta
 
             torch.testing.assert_close(
-                output[row], expected,
-                msg=f"Row {row} (adapter={aid}): math mismatch"
+                output[row], expected, msg=f"Row {row} (adapter={aid}): math mismatch"
             )
 
 
 # ── 5. Shape correctness ──────────────────────────────────────────
+
 
 class LoRAShapeCorrectnessCases:
     """Output shape matches expected for various input shapes.
@@ -414,10 +435,17 @@ class LoRAShapeCorrectnessCases:
     Subclass must implement ``_make_layer`` and ``_run``.
     """
 
-    @pytest.mark.parametrize("batch_size,seq_len", [
-        (1, 1), (1, 5), (1, 20),
-        (2, 5), (4, 10), (8, 3),
-    ])
+    @pytest.mark.parametrize(
+        "batch_size,seq_len",
+        [
+            (1, 1),
+            (1, 5),
+            (1, 20),
+            (2, 5),
+            (4, 10),
+            (8, 3),
+        ],
+    )
     def test_output_shape_matches_expected(self, batch_size, seq_len):
         torch.manual_seed(SEED)
         layer = self._make_layer(IN_FEATURES, OUT_FEATURES, NUM_ADAPTERS, RANK)

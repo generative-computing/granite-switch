@@ -8,19 +8,19 @@ discovered adapters by name patterns or technology type.
 
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
-from .arch import ArchDescriptor
+
 from .adapter_loader import load_adapter_target_modules
+from .arch import ArchDescriptor
 
 
 def discover_adapters(
     root_dir: str,
     target_model_name: str,
     arch: ArchDescriptor,
-    technology_fallback: Optional[str] = None,
-    technology_filter: Optional[str] = None,
-    source: Optional[str] = None,
-) -> List[Tuple[str, str, str, Optional[str]]]:
+    technology_fallback: str | None = None,
+    technology_filter: str | None = None,
+    source: str | None = None,
+) -> list[tuple[str, str, str, str | None]]:
     """Discover adapters for a target model in an adapter library directory.
 
     Scans *root_dir* for the ``adapter_name/model/technology/`` layout and
@@ -77,7 +77,10 @@ def discover_adapters(
                     existing_tech = discovered_by_name[adapter_name][2]
                     if tech == "alora" and existing_tech == "lora":
                         discovered_by_name[adapter_name] = (
-                            str(adapter_dir), adapter_name, tech, source,
+                            str(adapter_dir),
+                            adapter_name,
+                            tech,
+                            source,
                         )
                         print(f"  Found: {adapter_name}/{tech} - replacing lora")
                     else:
@@ -87,7 +90,10 @@ def discover_adapters(
                         )
                 else:
                     discovered_by_name[adapter_name] = (
-                        str(adapter_dir), adapter_name, tech, source,
+                        str(adapter_dir),
+                        adapter_name,
+                        tech,
+                        source,
                     )
                     print(f"  Found: {adapter_name}/{tech}")
 
@@ -101,8 +107,8 @@ def discover_adapters(
 
 
 def discover_adapters_from_yaml(
-    manifest_path: str
-) -> List[Tuple[str, str, str, Optional[str]]]:
+    manifest_path: str,
+) -> list[tuple[str, str, str, str | None]]:
     """Discover adapters from a YAML manifest file.
 
     Reads a YAML manifest that maps adapter names to their paths and types.
@@ -115,12 +121,13 @@ def discover_adapters_from_yaml(
         The source is set to the manifest path for traceability.
     """
     import yaml
+
     path = Path(manifest_path)
     print(f"  Loading adapters manifest: {path.name}")
 
     found = []
     if path.is_file() and path.suffix in (".yaml", ".yml"):
-        with open(path, 'r') as f:
+        with open(path) as f:
             adapters_config = yaml.safe_load(f)
 
         if adapters_config:
@@ -133,9 +140,8 @@ def discover_adapters_from_yaml(
     return found
 
 
-
 def _report_module_contributions(
-    discovered: List[Tuple[str, str, str, Optional[str]]],
+    discovered: list[tuple[str, str, str, str | None]],
     arch: ArchDescriptor,
 ):
     """Report which module groups each adapter contributes to."""
@@ -167,9 +173,7 @@ def _report_module_contributions(
 
     for g in sorted(arch.groups, key=lambda g: g.name):
         contributors = [
-            name
-            for name, info in adapter_modules.items()
-            if g.name in info["groups"]
+            name for name, info in adapter_modules.items() if g.name in info["groups"]
         ]
         if contributors:
             print(
@@ -182,10 +186,10 @@ def _report_module_contributions(
 
 
 def filter_adapters(
-    discovered: List[Tuple[str, str, str, Optional[str]]],
-    include: Optional[List[str]] = None,
-    exclude: Optional[List[str]] = None,
-) -> List[Tuple[str, str, str, Optional[str]]]:
+    discovered: list[tuple[str, str, str, str | None]],
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> list[tuple[str, str, str, str | None]]:
     """Filter a list of discovered adapters by name patterns.
 
     Args:
@@ -206,10 +210,7 @@ def filter_adapters(
     result = list(discovered)
 
     if include:
-        result = [
-            t for t in result
-            if any(fnmatch(t[1], pat) for pat in include)
-        ]
+        result = [t for t in result if any(fnmatch(t[1], pat) for pat in include)]
         for pat in include:
             if not any(fnmatch(t[1], pat) for t in discovered):
                 msg = f"  WARNING: --include-adapters pattern '{pat}' matched nothing"
@@ -217,10 +218,7 @@ def filter_adapters(
 
     if exclude:
         before = len(result)
-        result = [
-            t for t in result
-            if not any(fnmatch(t[1], pat) for pat in exclude)
-        ]
+        result = [t for t in result if not any(fnmatch(t[1], pat) for pat in exclude)]
         dropped = before - len(result)
         if dropped:
             print(f"  Excluded {dropped} adapter(s) via --exclude-adapters")
@@ -234,7 +232,7 @@ def filter_adapters(
 def list_available_adapters(
     root_dir: str,
     target_model_name: str,
-) -> List[Dict[str, object]]:
+) -> list[dict[str, object]]:
     """List all adapters available in an adapter library.
 
     Unlike :func:`discover_adapters`, this returns **all** technology
@@ -249,7 +247,7 @@ def list_available_adapters(
         List of dicts ``{"name": str, "technologies": [str]}``, sorted
         by adapter name.
     """
-    by_name: Dict[str, list] = {}
+    by_name: dict[str, list] = {}
     root_path = Path(root_dir)
 
     for io_yaml_path in root_path.rglob("*/*/*/io.yaml"):
@@ -284,7 +282,7 @@ def is_adapter_library(path: str) -> bool:
 # ------------------------------------------------------------------ #
 
 
-def _list_repo_adapter_names(repo_id: str) -> List[str]:
+def _list_repo_adapter_names(repo_id: str) -> list[str]:
     """Get adapter folder names from a HF repo using metadata-only API calls.
 
     Returns top-level directory names, skipping entries that start with ``_``
@@ -295,7 +293,8 @@ def _list_repo_adapter_names(repo_id: str) -> List[str]:
 
     tree = list_repo_tree(repo_id, repo_type="model")
     return [
-        item.path for item in tree
+        item.path
+        for item in tree
         if isinstance(item, RepoFolder) and not item.path.startswith("_")
     ]
 
@@ -304,23 +303,25 @@ def _resolve_technology(
     repo_id: str,
     adapter_name: str,
     target_model_name: str,
-) -> Optional[str]:
+) -> str | None:
     """Resolve preferred technology for an adapter via Hub metadata.
 
     Prefers ``alora`` over ``lora``. Returns ``None`` if neither exists
     for this adapter/model combination.
     """
     from huggingface_hub import list_repo_tree
-    from huggingface_hub.hf_api import RepoFolder
     from huggingface_hub.errors import EntryNotFoundError
+    from huggingface_hub.hf_api import RepoFolder
 
     try:
         subtree = list_repo_tree(
-            repo_id, repo_type="model",
+            repo_id,
+            repo_type="model",
             path_in_repo=f"{adapter_name}/{target_model_name}",
         )
         technologies = {
-            item.path.split("/")[-1] for item in subtree
+            item.path.split("/")[-1]
+            for item in subtree
             if isinstance(item, RepoFolder)
             and item.path.split("/")[-1] in ("alora", "lora")
         }
@@ -336,11 +337,11 @@ def _resolve_technology(
 
 def _build_allow_patterns(
     repo_id: str,
-    target_model_name: Optional[str] = None,
-    include_adapters: Optional[List[str]] = None,
-    exclude_adapters: Optional[List[str]] = None,
-    technology_filter: Optional[str] = None,
-) -> Optional[List[str]]:
+    target_model_name: str | None = None,
+    include_adapters: list[str] | None = None,
+    exclude_adapters: list[str] | None = None,
+    technology_filter: str | None = None,
+) -> list[str] | None:
     """Build ``allow_patterns`` for selective ``snapshot_download``.
 
     Uses lightweight Hub API calls to discover adapter names, then applies
@@ -360,14 +361,16 @@ def _build_allow_patterns(
     # Apply include filter
     if include_adapters:
         adapter_names = [
-            name for name in adapter_names
+            name
+            for name in adapter_names
             if any(fnmatch(name, pat) for pat in include_adapters)
         ]
 
     # Apply exclude filter
     if exclude_adapters:
         adapter_names = [
-            name for name in adapter_names
+            name
+            for name in adapter_names
             if not any(fnmatch(name, pat) for pat in exclude_adapters)
         ]
 
@@ -378,9 +381,7 @@ def _build_allow_patterns(
             if technology_filter:
                 # Caller explicitly asked for a specific technology; download
                 # only that variant so discovery doesn't later skip the adapter.
-                patterns.append(
-                    f"{name}/{target_model_name}/{technology_filter}/**"
-                )
+                patterns.append(f"{name}/{target_model_name}/{technology_filter}/**")
                 continue
             tech = _resolve_technology(repo_id, name, target_model_name)
             if tech:
@@ -401,7 +402,7 @@ def _build_allow_patterns(
 def list_repo_adapters_remote(
     repo_id: str,
     target_model_name: str,
-) -> List[Dict[str, object]]:
+) -> list[dict[str, object]]:
     """List adapters available in a remote HF repo without downloading.
 
     Uses Hub metadata API calls to discover adapter names and their
@@ -416,8 +417,8 @@ def list_repo_adapters_remote(
         by adapter name.
     """
     from huggingface_hub import list_repo_tree
-    from huggingface_hub.hf_api import RepoFolder
     from huggingface_hub.errors import EntryNotFoundError
+    from huggingface_hub.hf_api import RepoFolder
 
     adapter_names = _list_repo_adapter_names(repo_id)
     results = []
@@ -425,11 +426,13 @@ def list_repo_adapters_remote(
     for name in adapter_names:
         try:
             subtree = list_repo_tree(
-                repo_id, repo_type="model",
+                repo_id,
+                repo_type="model",
                 path_in_repo=f"{name}/{target_model_name}",
             )
             technologies = sorted(
-                item.path.split("/")[-1] for item in subtree
+                item.path.split("/")[-1]
+                for item in subtree
                 if isinstance(item, RepoFolder)
                 and item.path.split("/")[-1] in ("alora", "lora")
             )
@@ -449,10 +452,10 @@ def list_repo_adapters_remote(
 
 def resolve_repo_path(
     path_or_repo: str,
-    target_model_name: Optional[str] = None,
-    include_adapters: Optional[List[str]] = None,
-    exclude_adapters: Optional[List[str]] = None,
-    technology_filter: Optional[str] = None,
+    target_model_name: str | None = None,
+    include_adapters: list[str] | None = None,
+    exclude_adapters: list[str] | None = None,
+    technology_filter: str | None = None,
 ) -> str:
     """Resolve a local path or HuggingFace repo ID to a local directory.
 
@@ -486,8 +489,12 @@ def resolve_repo_path(
 
         # Build selective download patterns
         allow_patterns = None
-        if (target_model_name or include_adapters or exclude_adapters
-                or technology_filter):
+        if (
+            target_model_name
+            or include_adapters
+            or exclude_adapters
+            or technology_filter
+        ):
             try:
                 allow_patterns = _build_allow_patterns(
                     path_or_repo,
@@ -499,11 +506,13 @@ def resolve_repo_path(
                 if allow_patterns:
                     print(f"  Selective download patterns: {allow_patterns}")
             except Exception as e:
-                print(f"  WARNING: Failed to build download filters ({e}), "
-                      f"downloading full repo")
+                print(
+                    f"  WARNING: Failed to build download filters ({e}), "
+                    f"downloading full repo"
+                )
                 allow_patterns = None
 
-        print(f"  Downloading from HuggingFace Hub...")
+        print("  Downloading from HuggingFace Hub...")
         try:
             kwargs = {"repo_id": path_or_repo, "repo_type": "model"}
             if allow_patterns:
@@ -525,5 +534,3 @@ def resolve_repo_path(
         f"  - A valid local directory path\n"
         f"  - A HuggingFace repo ID (e.g., 'org/repo-name')"
     )
-
-

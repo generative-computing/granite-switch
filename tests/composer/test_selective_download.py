@@ -8,11 +8,11 @@ calls (``list_repo_tree``, ``snapshot_download``) are mocked so tests run
 offline, except the ``TestRealHubMetadata`` class which hits the real Hub.
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
-from huggingface_hub.hf_api import RepoFile, RepoFolder
 from huggingface_hub.errors import EntryNotFoundError
+from huggingface_hub.hf_api import RepoFile, RepoFolder
 
 from granite_switch.composer.adapter_discovery import (
     _build_allow_patterns,
@@ -20,7 +20,6 @@ from granite_switch.composer.adapter_discovery import (
     list_repo_adapters_remote,
     resolve_repo_path,
 )
-
 
 # ---------------------------------------------------------------------------
 # Mock helpers
@@ -42,6 +41,7 @@ def _tree_response(tree_map):
     folder/file names that live at that path. Unknown paths raise
     ``EntryNotFoundError`` — matching real HF behavior for missing folders.
     """
+
     def _side_effect(repo_id, repo_type="model", path_in_repo=None):
         key = path_in_repo or ""
         if key not in tree_map:
@@ -49,11 +49,16 @@ def _tree_response(tree_map):
         entries = []
         for entry in tree_map[key]:
             full_path = f"{key}/{entry}" if key else entry
-            if entry.endswith(".txt") or entry.endswith(".md") or entry.endswith(".json"):
+            if (
+                entry.endswith(".txt")
+                or entry.endswith(".md")
+                or entry.endswith(".json")
+            ):
                 entries.append(_file(full_path))
             else:
                 entries.append(_folder(full_path))
         return entries
+
     return _side_effect
 
 
@@ -65,40 +70,48 @@ def _tree_response(tree_map):
 @pytest.fixture
 def default_tree():
     """Three-adapter library with an alora/lora mix for granite-4.1-3b."""
-    return _tree_response({
-        "": ["answerability", "citations", "query_rewrite"],
-        "answerability/granite-4.1-3b": ["alora", "lora"],
-        "citations/granite-4.1-3b": ["lora"],
-        "query_rewrite/granite-4.1-3b": ["alora"],
-    })
+    return _tree_response(
+        {
+            "": ["answerability", "citations", "query_rewrite"],
+            "answerability/granite-4.1-3b": ["alora", "lora"],
+            "citations/granite-4.1-3b": ["lora"],
+            "query_rewrite/granite-4.1-3b": ["alora"],
+        }
+    )
 
 
 @pytest.fixture
 def core_tree():
     """ibm-granite/granitelib-core-r1.0-like layout with an 8b variant."""
-    return _tree_response({
-        "": ["context-attribution", "requirement-check", "uncertainty"],
-        "context-attribution/granite-4.1-3b": ["lora"],
-        "context-attribution/granite-4.1-8b": ["lora"],
-        "requirement-check/granite-4.1-3b": ["alora"],
-        "uncertainty/granite-4.1-3b": ["alora"],
-    })
+    return _tree_response(
+        {
+            "": ["context-attribution", "requirement-check", "uncertainty"],
+            "context-attribution/granite-4.1-3b": ["lora"],
+            "context-attribution/granite-4.1-8b": ["lora"],
+            "requirement-check/granite-4.1-3b": ["alora"],
+            "uncertainty/granite-4.1-3b": ["alora"],
+        }
+    )
 
 
 @pytest.fixture
 def rag_tree():
     """ibm-granite/granitelib-rag-r1.0-like layout with an 8b variant."""
-    return _tree_response({
-        "": [
-            "query_rewrite", "answerability",
-            "citations", "hallucination_detection",
-        ],
-        "query_rewrite/granite-4.1-3b": ["alora"],
-        "query_rewrite/granite-4.1-8b": ["alora"],
-        "answerability/granite-4.1-3b": ["alora"],
-        "citations/granite-4.1-3b": ["lora"],
-        "hallucination_detection/granite-4.1-3b": ["lora"],
-    })
+    return _tree_response(
+        {
+            "": [
+                "query_rewrite",
+                "answerability",
+                "citations",
+                "hallucination_detection",
+            ],
+            "query_rewrite/granite-4.1-3b": ["alora"],
+            "query_rewrite/granite-4.1-8b": ["alora"],
+            "answerability/granite-4.1-3b": ["alora"],
+            "citations/granite-4.1-3b": ["lora"],
+            "hallucination_detection/granite-4.1-3b": ["lora"],
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -108,23 +121,29 @@ def rag_tree():
 
 class TestResolveTechnology:
     def test_prefers_alora_when_both_exist(self):
-        tree = _tree_response({
-            "answerability/granite-4.1-3b": ["alora", "lora"],
-        })
+        tree = _tree_response(
+            {
+                "answerability/granite-4.1-3b": ["alora", "lora"],
+            }
+        )
         with patch("huggingface_hub.list_repo_tree", side_effect=tree):
-            assert _resolve_technology(
-                "org/repo", "answerability", "granite-4.1-3b"
-            ) == "alora"
+            assert (
+                _resolve_technology("org/repo", "answerability", "granite-4.1-3b")
+                == "alora"
+            )
 
     def test_returns_none_when_target_model_missing(self):
         # Adapter exists, but only for a different model size.
-        tree = _tree_response({
-            "answerability/granite-4.1-8b": ["alora"],
-        })
+        tree = _tree_response(
+            {
+                "answerability/granite-4.1-8b": ["alora"],
+            }
+        )
         with patch("huggingface_hub.list_repo_tree", side_effect=tree):
-            assert _resolve_technology(
-                "org/repo", "answerability", "granite-4.1-3b"
-            ) is None
+            assert (
+                _resolve_technology("org/repo", "answerability", "granite-4.1-3b")
+                is None
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +155,8 @@ class TestBuildAllowPatterns:
     def test_all_adapters_with_target_model(self, default_tree):
         with patch("huggingface_hub.list_repo_tree", side_effect=default_tree):
             patterns = _build_allow_patterns(
-                "org/repo", target_model_name="granite-4.1-3b",
+                "org/repo",
+                target_model_name="granite-4.1-3b",
             )
         assert patterns == [
             "answerability/granite-4.1-3b/alora/**",
@@ -190,11 +210,16 @@ class TestResolveRepoPathSelectiveDownload:
 
     def test_hf_repo_passes_allow_patterns(self, tmp_path, default_tree):
         mock_dl = MagicMock(return_value=str(tmp_path))
-        with patch(
-            "huggingface_hub.list_repo_tree", side_effect=default_tree,
-        ), patch("huggingface_hub.snapshot_download", mock_dl):
+        with (
+            patch(
+                "huggingface_hub.list_repo_tree",
+                side_effect=default_tree,
+            ),
+            patch("huggingface_hub.snapshot_download", mock_dl),
+        ):
             resolve_repo_path(
-                "org/repo", target_model_name="granite-4.1-3b",
+                "org/repo",
+                target_model_name="granite-4.1-3b",
             )
         assert mock_dl.call_args.kwargs["allow_patterns"] == [
             "answerability/granite-4.1-3b/alora/**",
@@ -212,20 +237,29 @@ class TestResolveRepoPathSelectiveDownload:
 
     def test_pattern_build_failure_falls_back_to_full_download(self, tmp_path):
         """If metadata pass raises, warn and continue with a full download."""
+
         def _boom(*args, **kwargs):
             raise RuntimeError("HF Hub down")
 
         mock_dl = MagicMock(return_value=str(tmp_path))
-        with patch(
-            "huggingface_hub.list_repo_tree", side_effect=_boom,
-        ), patch("huggingface_hub.snapshot_download", mock_dl):
+        with (
+            patch(
+                "huggingface_hub.list_repo_tree",
+                side_effect=_boom,
+            ),
+            patch("huggingface_hub.snapshot_download", mock_dl),
+        ):
             resolve_repo_path(
-                "org/repo", target_model_name="granite-4.1-3b",
+                "org/repo",
+                target_model_name="granite-4.1-3b",
             )
         assert "allow_patterns" not in mock_dl.call_args.kwargs
 
     def test_shared_include_filter_across_repos_downloads_disjoint_subsets(
-        self, tmp_path, core_tree, rag_tree,
+        self,
+        tmp_path,
+        core_tree,
+        rag_tree,
     ):
         """Issue #3 scenario: the same ``--include-adapters`` applied to two
         repos downloads only each repo's matching subset (no 8b variants, and
@@ -235,9 +269,13 @@ class TestResolveRepoPathSelectiveDownload:
 
         mock_dl = MagicMock(return_value=str(tmp_path))
 
-        with patch(
-            "huggingface_hub.list_repo_tree", side_effect=core_tree,
-        ), patch("huggingface_hub.snapshot_download", mock_dl):
+        with (
+            patch(
+                "huggingface_hub.list_repo_tree",
+                side_effect=core_tree,
+            ),
+            patch("huggingface_hub.snapshot_download", mock_dl),
+        ):
             resolve_repo_path(
                 "ibm-granite/granitelib-core-r1.0",
                 target_model_name=target_model,
@@ -248,9 +286,13 @@ class TestResolveRepoPathSelectiveDownload:
         ]
 
         mock_dl.reset_mock()
-        with patch(
-            "huggingface_hub.list_repo_tree", side_effect=rag_tree,
-        ), patch("huggingface_hub.snapshot_download", mock_dl):
+        with (
+            patch(
+                "huggingface_hub.list_repo_tree",
+                side_effect=rag_tree,
+            ),
+            patch("huggingface_hub.snapshot_download", mock_dl),
+        ):
             resolve_repo_path(
                 "ibm-granite/granitelib-rag-r1.0",
                 target_model_name=target_model,
@@ -279,12 +321,22 @@ class TestRealHubMetadata:
     def test_resolve_technology_matches_published_build(self):
         # context-attribution is documented as 'lora' in the published BUILD.md;
         # requirement-check as 'alora'.
-        assert _resolve_technology(
-            self.REPO, "context-attribution", self.TARGET_MODEL,
-        ) == "lora"
-        assert _resolve_technology(
-            self.REPO, "requirement-check", self.TARGET_MODEL,
-        ) == "alora"
+        assert (
+            _resolve_technology(
+                self.REPO,
+                "context-attribution",
+                self.TARGET_MODEL,
+            )
+            == "lora"
+        )
+        assert (
+            _resolve_technology(
+                self.REPO,
+                "requirement-check",
+                self.TARGET_MODEL,
+            )
+            == "alora"
+        )
 
     def test_list_repo_adapters_remote_includes_known_adapters(self):
         known = {"context-attribution", "requirement-check", "uncertainty"}

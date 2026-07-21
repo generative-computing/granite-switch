@@ -3,16 +3,15 @@
 
 import json
 from collections import defaultdict
-from pathlib import Path
-from typing import Dict, List, Tuple
 from datetime import datetime
+from pathlib import Path
 
 from ..arch import ArchDescriptor
-
 
 # ---------------------------------------------------------------------------
 # Arch-driven parameter categorisation
 # ---------------------------------------------------------------------------
+
 
 def _build_categorizer(arch: ArchDescriptor):
     """Build ``(categorize_fn, category_order, category_names)`` from *arch*.
@@ -20,12 +19,12 @@ def _build_categorizer(arch: ArchDescriptor):
     Returns a classifier that maps a parameter name to a category key, plus
     display metadata (ordered list and pretty-names dict).
     """
-    category_order: List[str] = ["embedding"]
-    category_names: Dict[str, str] = {"embedding": "embedding"}
+    category_order: list[str] = ["embedding"]
+    category_names: dict[str, str] = {"embedding": "embedding"}
 
     # Build group match patterns (most-specific first)
-    group_match: List[Tuple[str, str]] = []
-    seen_parents: List[str] = []
+    group_match: list[tuple[str, str]] = []
+    seen_parents: list[str] = []
 
     for g in arch.groups:
         attr = g.effective_attr_name
@@ -45,12 +44,14 @@ def _build_categorizer(arch: ArchDescriptor):
         category_names[key] = f"{parent} (other)"
 
     category_order.extend(["normalization", "lm_head", "switch", "other"])
-    category_names.update({
-        "normalization": "normalization",
-        "lm_head": "lm_head",
-        "switch": "switch",
-        "other": "other",
-    })
+    category_names.update(
+        {
+            "normalization": "normalization",
+            "lm_head": "lm_head",
+            "switch": "switch",
+            "other": "other",
+        }
+    )
 
     def categorize(param_name: str) -> str:
         if "embed_tokens" in param_name:
@@ -83,15 +84,16 @@ def _classify_adapter_target(target_name: str, arch: ArchDescriptor) -> str:
 # Main report generator
 # ---------------------------------------------------------------------------
 
+
 def generate_compose_report(
-    base_mapping: Dict,
-    adapter_mapping: Dict,
+    base_mapping: dict,
+    adapter_mapping: dict,
     output_path: str,
     model=None,
-    adapter_paths: List[str] = None,
-    adapter_names: List[str] = None,
+    adapter_paths: list[str] | None = None,
+    adapter_names: list[str] | None = None,
     arch: ArchDescriptor = None,
-    source_analysis: Dict = None,
+    source_analysis: dict | None = None,
 ):
     """Generate detailed compose report showing parameter mappings and statistics.
 
@@ -106,12 +108,12 @@ def generate_compose_report(
         source_analysis: Pre-computed source adapter analysis (avoids
             re-loading adapter weight files if already computed).
     """
-    from .population_table import generate_adapter_population_table
     from .adapter_analysis import print_source_adapter_analysis
+    from .population_table import generate_adapter_population_table
 
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("GENERATING COMPOSE REPORT")
-    print("="*80)
+    print("=" * 80)
 
     # Analyze source adapters FIRST - before any loading/transformation
     if adapter_paths:
@@ -143,22 +145,41 @@ def generate_compose_report(
 
     # Generate adapter population table
     adapter_population_table = None
-    if model is not None and adapter_paths and getattr(model.config, "adapter_ranks", None):
+    if (
+        model is not None
+        and adapter_paths
+        and getattr(model.config, "adapter_ranks", None)
+    ):
         adapter_population_table = generate_adapter_population_table(
-            model, adapter_paths, adapter_names=adapter_names, arch=arch,
-            target_module_sets=source_analysis["adapter_targets"] if source_analysis else None,
+            model,
+            adapter_paths,
+            adapter_names=adapter_names,
+            arch=arch,
+            target_module_sets=source_analysis["adapter_targets"]
+            if source_analysis
+            else None,
         )
 
     # ---- Print summary ----
     _print_summary(
-        report, model, base_mapping, adapter_mapping,
-        adapter_population_table, report_path, arch,
+        report,
+        model,
+        base_mapping,
+        adapter_mapping,
+        adapter_population_table,
+        report_path,
+        arch,
     )
 
 
 def _print_summary(
-    report, model, base_mapping, adapter_mapping,
-    adapter_population_table, report_path, arch,
+    report,
+    model,
+    base_mapping,
+    adapter_mapping,
+    adapter_population_table,
+    report_path,
+    arch,
 ):
     """Print the human-readable build report summary."""
     from .population_table import print_adapter_population_table
@@ -191,12 +212,12 @@ def _print_summary(
         fusion_stats[mtype]["targets"] += 1
         fusion_stats[mtype]["sources"] += num_sources
 
-    layer_type_mappings: Dict[str, list] = {k: [] for k in category_order}
+    layer_type_mappings: dict[str, list] = {k: [] for k in category_order}
     for mapping in report["base_model_mapping"]:
         cat = categorize(mapping["target"])
         layer_type_mappings.setdefault(cat, []).append(mapping)
 
-    adapter_layer_type_mappings: Dict[str, list] = {k: [] for k in category_order}
+    adapter_layer_type_mappings: dict[str, list] = {k: [] for k in category_order}
     if adapter_mapping:
         for mapping in report["adapter_mapping"]:
             cat = categorize(mapping["target"])
@@ -210,9 +231,9 @@ def _print_summary(
         )
 
     # ---- Print ----
-    print("\n" + "="*80)
+    print("\n" + "=" * 80)
     print("COMPOSE REPORT SUMMARY")
-    print("="*80)
+    print("=" * 80)
 
     # Model info
     if model is not None:
@@ -224,9 +245,13 @@ def _print_summary(
 
     # Source/target module counts
     base_source_modules = base_mapping["source_params"]
-    adapter_source_modules = adapter_mapping.get("source_params", []) if adapter_mapping else []
+    adapter_source_modules = (
+        adapter_mapping.get("source_params", []) if adapter_mapping else []
+    )
     base_target_modules = base_mapping["target_params"]
-    adapter_target_modules = adapter_mapping.get("target_params", []) if adapter_mapping else []
+    adapter_target_modules = (
+        adapter_mapping.get("target_params", []) if adapter_mapping else []
+    )
 
     base_source_connected = set(base_source_modules) & source_connected
     adapter_source_connected = set(adapter_source_modules) & source_connected
@@ -234,79 +259,118 @@ def _print_summary(
     adapter_target_connected = set(adapter_target_modules) & target_connected
 
     print(f"Source Modules: {len(base_source_modules) + len(adapter_source_modules):,}")
-    print(f"  Base: {len(base_source_modules):,} (connected: {len(base_source_connected):,})")
+    print(
+        f"  Base: {len(base_source_modules):,} (connected: {len(base_source_connected):,})"
+    )
     if adapter_source_modules:
-        print(f"  Adapters: {len(adapter_source_modules):,} (connected: {len(adapter_source_connected):,})")
+        print(
+            f"  Adapters: {len(adapter_source_modules):,} (connected: {len(adapter_source_connected):,})"
+        )
 
-    print(f"\nTarget Modules: {len(base_target_modules) + len(adapter_target_modules):,}")
-    print(f"  Base: {len(base_target_modules):,} (connected: {len(base_target_connected):,})")
+    print(
+        f"\nTarget Modules: {len(base_target_modules) + len(adapter_target_modules):,}"
+    )
+    print(
+        f"  Base: {len(base_target_modules):,} (connected: {len(base_target_connected):,})"
+    )
     if adapter_target_modules:
-        adapter_not_connected = len(adapter_target_modules) - len(adapter_target_connected)
-        print(f"  Adapters: {len(adapter_target_modules):,} (connected: {len(adapter_target_connected):,}, not connected: {adapter_not_connected:,})")
+        adapter_not_connected = len(adapter_target_modules) - len(
+            adapter_target_connected
+        )
+        print(
+            f"  Adapters: {len(adapter_target_modules):,} (connected: {len(adapter_target_connected):,}, not connected: {adapter_not_connected:,})"
+        )
 
     # Adapter mapping type counts
     adapter_mapping_types = {}
     total_adapter_sources = 0
     if adapter_mapping:
-        for mapping in report['adapter_mapping']:
-            mtype = mapping['type']
+        for mapping in report["adapter_mapping"]:
+            mtype = mapping["type"]
             adapter_mapping_types[mtype] = adapter_mapping_types.get(mtype, 0) + 1
-            total_adapter_sources += len(mapping['source'])
+            total_adapter_sources += len(mapping["source"])
 
     # Fusion summary
-    print(f"\nModule Fusion Summary:")
-    if total_source_in_mappings != len(report['base_model_mapping']):
-        print(f"  Base: {total_source_in_mappings} source modules -> {len(report['base_model_mapping'])} target modules")
-        print(f"        (reduction: {total_source_in_mappings - len(report['base_model_mapping'])} modules due to fusion)")
+    print("\nModule Fusion Summary:")
+    if total_source_in_mappings != len(report["base_model_mapping"]):
+        print(
+            f"  Base: {total_source_in_mappings} source modules -> {len(report['base_model_mapping'])} target modules"
+        )
+        print(
+            f"        (reduction: {total_source_in_mappings - len(report['base_model_mapping'])} modules due to fusion)"
+        )
     else:
-        print(f"  Base: {total_source_in_mappings} source modules -> {len(report['base_model_mapping'])} target modules (1->1)")
+        print(
+            f"  Base: {total_source_in_mappings} source modules -> {len(report['base_model_mapping'])} target modules (1->1)"
+        )
 
     if adapter_mapping:
-        print(f"  Adapters: {total_adapter_sources} source modules -> {len(report['adapter_mapping'])} target modules")
-        if total_adapter_sources != len(report['adapter_mapping']):
-            print(f"            (reduction: {total_adapter_sources - len(report['adapter_mapping'])} modules due to stacking)")
+        print(
+            f"  Adapters: {total_adapter_sources} source modules -> {len(report['adapter_mapping'])} target modules"
+        )
+        if total_adapter_sources != len(report["adapter_mapping"]):
+            print(
+                f"            (reduction: {total_adapter_sources - len(report['adapter_mapping'])} modules due to stacking)"
+            )
 
     # Mapping details
-    print(f"\nMapping Details:")
-    total_mappings = len(report['base_model_mapping']) + len(report['adapter_mapping'])
+    print("\nMapping Details:")
+    total_mappings = len(report["base_model_mapping"]) + len(report["adapter_mapping"])
     print(f"  Total mappings: {total_mappings}")
     print(f"    Base model: {len(report['base_model_mapping'])}")
     for mtype in sorted(mapping_types.keys()):
         count = mapping_types[mtype]
         stats = fusion_stats[mtype]
-        if stats['sources'] == stats['targets']:
+        if stats["sources"] == stats["targets"]:
             print(f"      - {mtype}: {count} (1->1)")
         else:
-            ratio = stats['sources'] // stats['targets'] if stats['targets'] > 0 else 0
-            print(f"      - {mtype}: {count} ({ratio}->1, {stats['sources']} sources -> {stats['targets']} targets)")
+            ratio = stats["sources"] // stats["targets"] if stats["targets"] > 0 else 0
+            print(
+                f"      - {mtype}: {count} ({ratio}->1, {stats['sources']} sources -> {stats['targets']} targets)"
+            )
 
     if adapter_mapping and adapter_mapping_types:
         print(f"    Adapters: {len(report['adapter_mapping'])}")
-        sources_per_target = total_adapter_sources // len(report['adapter_mapping']) if report['adapter_mapping'] else 0
-        print(f"      (Each target module stacks {sources_per_target} adapters in dimension 0)")
+        sources_per_target = (
+            total_adapter_sources // len(report["adapter_mapping"])
+            if report["adapter_mapping"]
+            else 0
+        )
+        print(
+            f"      (Each target module stacks {sources_per_target} adapters in dimension 0)"
+        )
 
         _print_adapter_projection_breakdown(
-            adapter_mapping_types, report['adapter_mapping'], arch,
+            adapter_mapping_types,
+            report["adapter_mapping"],
+            arch,
         )
 
     # Layer type breakdown (using shared category_order / category_names)
     _print_layer_type_breakdown(
-        layer_type_mappings, adapter_layer_type_mappings,
-        category_order, category_names, adapter_mapping,
+        layer_type_mappings,
+        adapter_layer_type_mappings,
+        category_order,
+        category_names,
+        adapter_mapping,
     )
 
     # Population table
     if adapter_population_table:
-        print("\n" + "="*80)
+        print("\n" + "=" * 80)
         print("ADAPTER MODULE POPULATION TABLE")
-        print("="*80)
+        print("=" * 80)
         print_adapter_population_table(adapter_population_table)
 
     # Zero-initialized adapter targets
     if zero_initialized_adapter_targets:
-        print(f"\nAdapter Targets Not Loaded from Source: {len(zero_initialized_adapter_targets)}")
-        print(f"  (Expected: These are adapter modules missing from source adapters or zero-padded)")
-        print(f"  (See detailed validation output above for breakdown by reason)")
+        print(
+            f"\nAdapter Targets Not Loaded from Source: {len(zero_initialized_adapter_targets)}"
+        )
+        print(
+            "  (Expected: These are adapter modules missing from source adapters or zero-padded)"
+        )
+        print("  (See detailed validation output above for breakdown by reason)")
 
     # Unmapped base sources
     source_not_connected = sorted(
@@ -314,23 +378,24 @@ def _print_summary(
     )
     if source_not_connected:
         base_source_not_connected = [
-            name for name in source_not_connected
-            if not name.startswith("adapter_")
+            name for name in source_not_connected if not name.startswith("adapter_")
         ]
         if base_source_not_connected:
-            print(f"\n  Base source modules not connected: {len(base_source_not_connected)}")
-            print(f"  (First 10):")
+            print(
+                f"\n  Base source modules not connected: {len(base_source_not_connected)}"
+            )
+            print("  (First 10):")
             for name in base_source_not_connected[:10]:
                 print(f"    - {name}")
             if len(base_source_not_connected) > 10:
                 print(f"  ... and {len(base_source_not_connected) - 10} more")
 
     print(f"\nDetailed report saved to: {report_path}")
-    print("="*80)
+    print("=" * 80)
 
 
 def _print_adapter_projection_breakdown(
-    adapter_mapping_types: Dict[str, int],
+    adapter_mapping_types: dict[str, int],
     adapter_mappings: list,
     arch: ArchDescriptor,
 ):
@@ -339,15 +404,15 @@ def _print_adapter_projection_breakdown(
     Classifies each mapping's target name via the arch descriptor.
     """
     # Count targets and sources per module key
-    module_targets: Dict[str, int] = {}
-    module_sources: Dict[str, int] = {}
+    module_targets: dict[str, int] = {}
+    module_sources: dict[str, int] = {}
     for mapping in adapter_mappings:
-        key = _classify_adapter_target(mapping['target'], arch)
+        key = _classify_adapter_target(mapping["target"], arch)
         module_targets[key] = module_targets.get(key, 0) + 1
-        module_sources[key] = module_sources.get(key, 0) + len(mapping['source'])
+        module_sources[key] = module_sources.get(key, 0) + len(mapping["source"])
 
     # Group by parent for display
-    by_parent: Dict[str, List[str]] = defaultdict(list)
+    by_parent: dict[str, list[str]] = defaultdict(list)
     for key in sorted(module_targets.keys()):
         parent = key.split(".")[0] if "." in key else "other"
         by_parent[parent].append(key)
@@ -358,16 +423,21 @@ def _print_adapter_projection_breakdown(
             target_count = module_targets[key]
             source_count = module_sources.get(key, 0)
             ratio = source_count // target_count if target_count > 0 else 0
-            print(f"        - {key}: {target_count} targets ({source_count} sources, {ratio}->1 stacking)")
+            print(
+                f"        - {key}: {target_count} targets ({source_count} sources, {ratio}->1 stacking)"
+            )
 
 
 def _print_layer_type_breakdown(
-    layer_type_mappings, adapter_layer_type_mappings,
-    category_order, category_names, adapter_mapping,
+    layer_type_mappings,
+    adapter_layer_type_mappings,
+    category_order,
+    category_names,
+    adapter_mapping,
 ):
     """Print layer type breakdown using shared category metadata."""
-    print(f"\nLayer Type Breakdown:")
-    print(f"  Base Model:")
+    print("\nLayer Type Breakdown:")
+    print("  Base Model:")
     has_any = False
     for cat in category_order:
         layer_mappings = layer_type_mappings.get(cat, [])
@@ -380,14 +450,18 @@ def _print_layer_type_breakdown(
         if total_sources == count:
             print(f"    - {display}: {count} modules (1->1)")
         else:
-            print(f"    - {display}: {count} modules ({total_sources} sources -> {count} targets)")
+            print(
+                f"    - {display}: {count} modules ({total_sources} sources -> {count} targets)"
+            )
     if not has_any:
-        print(f"    (none)")
+        print("    (none)")
 
     if adapter_mapping:
-        adapter_has_any = any(adapter_layer_type_mappings.get(cat) for cat in category_order)
+        adapter_has_any = any(
+            adapter_layer_type_mappings.get(cat) for cat in category_order
+        )
         if adapter_has_any:
-            print(f"  Adapters:")
+            print("  Adapters:")
             for cat in category_order:
                 adapter_mappings = adapter_layer_type_mappings.get(cat, [])
                 if not adapter_mappings:

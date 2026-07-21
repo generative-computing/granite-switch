@@ -68,10 +68,11 @@ class TestDebugFieldsFlag:
 
     def test_original_path_excluded_by_default(self):
         """original_path should NOT be in adapter_index.json by default."""
+        import tempfile
+
         from granite_switch.composer.compose_granite_switch import (
             _create_adapter_index,
         )
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # 4-tuple: (path, name, tech, source)
@@ -95,10 +96,11 @@ class TestDebugFieldsFlag:
 
     def test_original_path_included_with_debug_flag(self):
         """original_path should be in adapter_index.json with --debug-fields."""
+        import tempfile
+
         from granite_switch.composer.compose_granite_switch import (
             _create_adapter_index,
         )
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # 4-tuple: (path, name, tech, source)
@@ -125,10 +127,11 @@ class TestDebugFieldsFlag:
 
     def test_local_path_used_when_no_source(self):
         """Local path should be used when source is None."""
+        import tempfile
+
         from granite_switch.composer.compose_granite_switch import (
             _create_adapter_index,
         )
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             local_path = "/home/user/my-adapters/custom-adapter"
@@ -152,10 +155,11 @@ class TestDebugFieldsFlag:
 
     def test_built_in_adapters_no_original_path(self):
         """Built-in adapters have no original_path even with debug flag."""
+        import tempfile
+
         from granite_switch.composer.compose_granite_switch import (
             _create_adapter_index,
         )
-        import tempfile
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             # Built-in adapter has None path

@@ -19,7 +19,6 @@ Dense models use exclusively attention layers.
 
 import torch
 
-
 # ── Assertion helper ──────────────────────────────────────────────
 
 
@@ -91,8 +90,8 @@ def transfer_weights(upstream_sd, switch_sd):
             v_name = f"{prefix}.v_proj.{suffix}"
             if q_name in upstream_sd:
                 fused = torch.cat(
-                    [upstream_sd[q_name], upstream_sd[k_name],
-                     upstream_sd[v_name]], dim=0,
+                    [upstream_sd[q_name], upstream_sd[k_name], upstream_sd[v_name]],
+                    dim=0,
                 )
                 param.data.copy_(fused)
                 loaded.add(name)
@@ -171,7 +170,7 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
 
     # Prepend placeholder entry for switch cache slot (SingleSwitch: 1 slot)
     cfg["num_hidden_layers"] = cfg["num_hidden_layers"] + 1
-    cfg["layer_types"] = ["attention"] + list(cfg["layer_types"])
+    cfg["layer_types"] = ["attention", *list(cfg["layer_types"])]
 
     # Adapter configuration
     cfg["num_adapters"] = num_adapters
@@ -181,9 +180,7 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     cfg["adapter_names"] = adapter_names
 
     # SingleSwitch: num_adapters entries
-    cfg["adapter_token_ids"] = [
-        _ADAPTER_TOKEN_BASE + i for i in range(num_adapters)
-    ]
+    cfg["adapter_token_ids"] = [_ADAPTER_TOKEN_BASE + i for i in range(num_adapters)]
     # Token-exchange substitute ids — use a benign shared id (the BOS-or-
     # equivalent doesn't matter for these synthetic equivalence tests since
     # all LoRA weights are zero, so the embedding is what feeds the decoder).
@@ -301,7 +298,7 @@ GRANITE4_MINI = {
         "hidden_size": 256,
         "num_hidden_layers": 4,
         "num_attention_heads": 4,
-        "num_key_value_heads": 1,       # GQA 4:1, head_dim=64
+        "num_key_value_heads": 1,  # GQA 4:1, head_dim=64
         "intermediate_size": 512,
         "shared_intermediate_size": 512,
         "num_local_experts": 0,
@@ -319,7 +316,7 @@ GRANITE4_MINI = {
         "hidden_size": 512,
         "num_hidden_layers": 4,
         "num_attention_heads": 4,
-        "num_key_value_heads": 1,       # GQA 4:1, head_dim=128
+        "num_key_value_heads": 1,  # GQA 4:1, head_dim=128
         "intermediate_size": 1024,
         "shared_intermediate_size": 1024,
         "num_local_experts": 0,
@@ -337,7 +334,7 @@ GRANITE4_MINI = {
         "hidden_size": 320,
         "num_hidden_layers": 4,
         "num_attention_heads": 5,
-        "num_key_value_heads": 1,       # GQA 5:1, head_dim=64
+        "num_key_value_heads": 1,  # GQA 5:1, head_dim=64
         "intermediate_size": 640,
         "shared_intermediate_size": 640,
         "num_local_experts": 0,

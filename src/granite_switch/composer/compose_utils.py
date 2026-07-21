@@ -5,15 +5,12 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 :mod:`validator` for the heavy lifting.
 """
 
-from pathlib import Path
-
 import torch
-from typing import Dict, List, Optional
 
-from .arch import ArchDescriptor, resolve_arch
 from .adapter_loader import detect_lora_config, detect_present_modules
-from .weight_transfer import transfer_base_weights, transfer_adapter_weights
+from .arch import resolve_arch
 from .validator import validate_all_parameters
+from .weight_transfer import transfer_adapter_weights, transfer_base_weights
 
 
 class GraniteSwitchComposer:
@@ -23,11 +20,11 @@ class GraniteSwitchComposer:
     def from_base_and_adapters(
         cls,
         base_model_name_or_path: str,
-        adapter_paths: Optional[List[str]] = None,
-        adapter_token_ids: Optional[List[int]] = None,
-        adapter_substitute_token_ids: Optional[List[int]] = None,
-        adapter_names: Optional[List[str]] = None,
-        built_in_adapter_names: Optional[List[str]] = None,
+        adapter_paths: list[str] | None = None,
+        adapter_token_ids: list[int] | None = None,
+        adapter_substitute_token_ids: list[int] | None = None,
+        adapter_names: list[str] | None = None,
+        built_in_adapter_names: list[str] | None = None,
         built_in_lora_rank: int = 8,
         built_in_lora_alpha: float = 8.0,
         **kwargs,
@@ -64,6 +61,7 @@ class GraniteSwitchComposer:
         """
         from granite_switch.config import GraniteSwitchConfig
         from granite_switch.hf.modeling_granite_switch import GraniteSwitchForCausalLM
+
         from .arch import load_base_config
 
         if adapter_paths is None:
@@ -86,7 +84,9 @@ class GraniteSwitchComposer:
                 adapter_paths
             )
             lora_target_modules, source_analysis = detect_present_modules(
-                adapter_paths, arch, adapter_names=adapter_names,
+                adapter_paths,
+                arch,
+                adapter_names=adapter_names,
             )
 
             # Extend adapter_ranks with built-in entries
@@ -97,7 +97,9 @@ class GraniteSwitchComposer:
                         f"external adapter rank ({lora_rank}). "
                         f"All adapters must have the same rank."
                     )
-                adapter_ranks = list(adapter_ranks) + [built_in_lora_rank] * num_built_in
+                adapter_ranks = (
+                    list(adapter_ranks) + [built_in_lora_rank] * num_built_in
+                )
                 lora_rank = max(lora_rank, built_in_lora_rank)
         else:
             # Built-in only or zero-adapter skinning
@@ -117,7 +119,7 @@ class GraniteSwitchComposer:
 
         # --- Step 4: Build switch config from arch descriptor ---
         # Copy config fields driven by architecture descriptor
-        config_kwargs: Dict = {}
+        config_kwargs: dict = {}
 
         for field_name in arch.required_config_fields:
             config_kwargs[field_name] = getattr(base_config, field_name)
@@ -130,7 +132,9 @@ class GraniteSwitchComposer:
         # GraniteMoeHybridConfig defaults it to 1024 (not None), so
         # GraniteSwitchConfig's fallback logic doesn't trigger.
         if "shared_intermediate_size" not in config_kwargs:
-            config_kwargs["shared_intermediate_size"] = config_kwargs["intermediate_size"]
+            config_kwargs["shared_intermediate_size"] = config_kwargs[
+                "intermediate_size"
+            ]
 
         # Normalize layer_types: map everything to "attention" (only attention
         # layers are supported).
@@ -142,9 +146,10 @@ class GraniteSwitchComposer:
         if num_total > 0:
             config_kwargs["num_hidden_layers"] = config_kwargs["num_hidden_layers"] + 1
             if config_kwargs.get("layer_types") is not None:
-                config_kwargs["layer_types"] = ["attention"] + list(
-                    config_kwargs["layer_types"]
-                )
+                config_kwargs["layer_types"] = [
+                    "attention",
+                    *list(config_kwargs["layer_types"]),
+                ]
 
         # Switch-specific parameters
         config_kwargs.update(
@@ -165,8 +170,10 @@ class GraniteSwitchComposer:
         switch_config = GraniteSwitchConfig(**config_kwargs)
 
         # --- Step 5: Create model ---
-        print(f"Creating GraniteSwitch model with {num_total} adapters "
-              f"({num_external} external, {num_built_in} built-in)...")
+        print(
+            f"Creating GraniteSwitch model with {num_total} adapters "
+            f"({num_external} external, {num_built_in} built-in)..."
+        )
         model = GraniteSwitchForCausalLM(switch_config)
 
         if switch_config.torch_dtype is not None:
@@ -196,7 +203,8 @@ class GraniteSwitchComposer:
             # Reuse target_module_sets from source_analysis to avoid re-reading configs
             target_module_sets = source_analysis.get("adapter_targets")
             validate_all_parameters(
-                model, arch,
+                model,
+                arch,
                 adapter_paths=adapter_paths,
                 adapter_names=adapter_names[:num_external],
                 target_module_sets=target_module_sets,
@@ -206,13 +214,12 @@ class GraniteSwitchComposer:
 
         print("\nModel created successfully!")
         print(f"  Base model: {base_model_name_or_path}")
-        print(f"  Total adapters: {num_total} ({num_external} external, {num_built_in} built-in)")
+        print(
+            f"  Total adapters: {num_total} ({num_external} external, {num_built_in} built-in)"
+        )
         print(f"  Adapter token IDs: {adapter_token_ids}")
         print("\nSingleSwitch uses attention for adapter selection.")
-        print(
-            "All parameters are frozen. "
-            "Use the special tokens to trigger adapters."
-        )
+        print("All parameters are frozen. Use the special tokens to trigger adapters.")
 
         # Store mappings for report generation
         model._build_mappings = {
@@ -223,7 +230,9 @@ class GraniteSwitchComposer:
             # external adapters are provided, detect_lora_config isn't called
             # and adapter_alphas is a {} dict — surface an empty list in that
             # case so consumers don't need to special-case the shape.
-            "adapter_alphas": list(adapter_alphas) if isinstance(adapter_alphas, (list, tuple)) else [],
+            "adapter_alphas": list(adapter_alphas)
+            if isinstance(adapter_alphas, (list, tuple))
+            else [],
         }
 
         return model

@@ -8,6 +8,7 @@ automatically updates this file's exports.
 """
 
 from granite_switch.config import GraniteSwitchConfig
+
 # TODO: consider moving the GRANITE4_FULLSIZE definition into this file —
 # it's the natural owner of Granite 4 production constants, and other tests
 # that need production geometry would find it here rather than in the
@@ -18,10 +19,14 @@ from granite_switch.config import GraniteSwitchConfig
 # releases new variants or updates existing ones.
 from tests.shared.granite4_equivalence import GRANITE4_FULLSIZE
 
-DEFAULT_CONTROL_TOKEN_GAIN = GraniteSwitchConfig().control_token_gain  # derived from GraniteSwitchConfig default (15.0)
+DEFAULT_CONTROL_TOKEN_GAIN = (
+    GraniteSwitchConfig().control_token_gain
+)  # derived from GraniteSwitchConfig default (15.0)
 
-PRODUCTION_ATTENTION_MULTIPLIERS = sorted({
-    cfg["attention_multiplier"] for cfg in GRANITE4_FULLSIZE.values()
-})  # [0.0078125, 0.015625]
+PRODUCTION_ATTENTION_MULTIPLIERS = sorted(
+    {cfg["attention_multiplier"] for cfg in GRANITE4_FULLSIZE.values()}
+)  # [0.0078125, 0.015625]
 
-MAX_POSITION_EMBEDDINGS = GRANITE4_FULLSIZE["4.0-1b"]["max_position_embeddings"]  # 131072
+MAX_POSITION_EMBEDDINGS = GRANITE4_FULLSIZE["4.0-1b"][
+    "max_position_embeddings"
+]  # 131072

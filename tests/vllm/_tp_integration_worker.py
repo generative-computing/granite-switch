@@ -13,9 +13,7 @@ import os
 import subprocess
 import sys
 
-import torch
 from transformers import AutoConfig, AutoTokenizer
-
 
 PLAIN_PROMPTS = [
     "The capital of France is",
@@ -63,9 +61,13 @@ def cmd_build(args):
 def cmd_build_compose(args):
     """Build a GraniteSwitch model using the CLI compose script."""
     cmd = [
-        sys.executable, "-m", "granite_switch.composer.compose_granite_switch",
-        "--base-model", args.base_model,
-        "--output", args.output_dir,
+        sys.executable,
+        "-m",
+        "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        args.base_model,
+        "--output",
+        args.output_dir,
     ]
     for repo in args.adapter_repos:
         cmd.extend(["--adapters", repo])
@@ -111,7 +113,9 @@ def cmd_run(args):
         (token_id, logprob) sorted descending by logprob."""
         if first_step_logprobs is None:
             return None
-        items = [(int(tid), float(lp.logprob)) for tid, lp in first_step_logprobs.items()]
+        items = [
+            (int(tid), float(lp.logprob)) for tid, lp in first_step_logprobs.items()
+        ]
         items.sort(key=lambda x: -x[1])
         return items
 
@@ -121,10 +125,12 @@ def cmd_run(args):
     for o in outputs:
         completion = o.outputs[0]
         first_step = completion.logprobs[0] if completion.logprobs else None
-        records.append({
-            "text": completion.text,
-            "first_token_topk": _top_logprobs(first_step),
-        })
+        records.append(
+            {
+                "text": completion.text,
+                "first_token_topk": _top_logprobs(first_step),
+            }
+        )
 
     if args.intrinsic_name:
         chat_outputs = llm.chat(
@@ -135,10 +141,12 @@ def cmd_run(args):
         for o in chat_outputs:
             completion = o.outputs[0]
             first_step = completion.logprobs[0] if completion.logprobs else None
-            records.append({
-                "text": completion.text,
-                "first_token_topk": _top_logprobs(first_step),
-            })
+            records.append(
+                {
+                    "text": completion.text,
+                    "first_token_topk": _top_logprobs(first_step),
+                }
+            )
 
     with open(output_path, "w") as f:
         json.dump(records, f)
@@ -165,8 +173,11 @@ def main():
     p_run.add_argument("--model-path", required=True)
     p_run.add_argument("--tp-size", type=int, required=True)
     p_run.add_argument("--output-path", required=True)
-    p_run.add_argument("--intrinsic-name", default=None,
-                       help="If set, adds a chat-template prompt activating this adapter")
+    p_run.add_argument(
+        "--intrinsic-name",
+        default=None,
+        help="If set, adds a chat-template prompt activating this adapter",
+    )
 
     args = parser.parse_args()
     if args.command == "build":

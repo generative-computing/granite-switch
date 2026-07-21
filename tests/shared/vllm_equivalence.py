@@ -22,7 +22,6 @@ import tempfile
 
 import torch
 
-
 # ── Model creation (kept for other tests) ─────────────────────────
 
 
@@ -31,7 +30,8 @@ def make_vllm_config(config, architectures, max_tokens=None):
 
     Writes config.json to a temp directory, then builds ModelConfig from it.
     """
-    from vllm.config import VllmConfig, ModelConfig
+    from vllm.config import ModelConfig, VllmConfig
+
     from granite_switch.vllm import register as register_granite_switch
 
     register_granite_switch()
@@ -271,8 +271,7 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
 # ── Full integration pipeline ─────────────────────────────────────
 
 
-def run_equivalence_integration(cfg_dict, *, seq_len=16, seed=0, tmpdir,
-                                **llm_kwargs):
+def run_equivalence_integration(cfg_dict, *, seq_len=16, seed=0, tmpdir, **llm_kwargs):
     """Full integration equivalence pipeline via vllm.LLM.
 
     1. Create HF upstream model (random weights) -> save_pretrained
@@ -294,6 +293,7 @@ def run_equivalence_integration(cfg_dict, *, seq_len=16, seed=0, tmpdir,
         (upstream_logprobs, switch_logprobs) — each [seq_len-1, vocab_size]
     """
     from granite_switch.vllm import register as register_granite_switch
+
     register_granite_switch()
 
     # Phase 1: save HF models to disk
@@ -309,18 +309,24 @@ def run_equivalence_integration(cfg_dict, *, seq_len=16, seed=0, tmpdir,
 
     # Phase 2: run both models through vLLM's actual serving path
     upstream_logprobs = run_vllm_logprobs(
-        upstream_dir, input_ids, vocab_size, **llm_kwargs,
+        upstream_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
     switch_logprobs = run_vllm_logprobs(
-        switch_dir, input_ids, vocab_size, **llm_kwargs,
+        switch_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
 
     return upstream_logprobs, switch_logprobs
 
 
-def run_zero_adapter_no_hiding_equivalence(cfg_dict, *, use_control_tokens=False,
-                                           seq_len=16, seed=0, tmpdir,
-                                           **llm_kwargs):
+def run_zero_adapter_no_hiding_equivalence(
+    cfg_dict, *, use_control_tokens=False, seq_len=16, seed=0, tmpdir, **llm_kwargs
+):
     """Integration pipeline for zero-adapter switch.
 
     Creates a switch model with adapter infrastructure (LoRA wrappers, switch
@@ -340,6 +346,7 @@ def run_zero_adapter_no_hiding_equivalence(cfg_dict, *, use_control_tokens=False
         (upstream_logprobs, switch_logprobs) -- each [seq_len-1, vocab_size]
     """
     from granite_switch.vllm import register as register_granite_switch
+
     register_granite_switch()
 
     # Phase 1: save HF models to disk
@@ -351,6 +358,7 @@ def run_zero_adapter_no_hiding_equivalence(cfg_dict, *, use_control_tokens=False
     # Generate input
     if use_control_tokens:
         from tests.shared.granite4_equivalence import make_active_adapter_input
+
         input_ids = make_active_adapter_input(1, seq_len, seed=42)
         input_ids = input_ids[0].tolist()
     else:
@@ -360,17 +368,22 @@ def run_zero_adapter_no_hiding_equivalence(cfg_dict, *, use_control_tokens=False
 
     # Phase 2: run both models through vLLM's actual serving path
     upstream_logprobs = run_vllm_logprobs(
-        upstream_dir, input_ids, vocab_size, **llm_kwargs,
+        upstream_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
     switch_logprobs = run_vllm_logprobs(
-        switch_dir, input_ids, vocab_size, **llm_kwargs,
+        switch_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
 
     return upstream_logprobs, switch_logprobs
 
 
-def run_zero_adapter_equivalence(cfg_dict, *, seq_len=16, seed=0,
-                                 tmpdir, **llm_kwargs):
+def run_zero_adapter_equivalence(cfg_dict, *, seq_len=16, seed=0, tmpdir, **llm_kwargs):
     """Integration pipeline for zero-adapter switch with hiding enabled.
 
     Creates a switch model WITH adapter infrastructure and zero LoRA weights.
@@ -387,9 +400,9 @@ def run_zero_adapter_equivalence(cfg_dict, *, seq_len=16, seed=0,
     Returns:
         (upstream_logprobs, switch_logprobs) — each [seq_len-1, vocab_size]
     """
+    from granite_switch.vllm import register as register_granite_switch
     from tests.shared.granite4_equivalence import make_active_adapter_input
 
-    from granite_switch.vllm import register as register_granite_switch
     register_granite_switch()
 
     # Phase 1: save HF models to disk
@@ -405,10 +418,16 @@ def run_zero_adapter_equivalence(cfg_dict, *, seq_len=16, seed=0,
 
     # Phase 2: run both models through vLLM's actual serving path
     upstream_logprobs = run_vllm_logprobs(
-        upstream_dir, input_ids, vocab_size, **llm_kwargs,
+        upstream_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
     switch_logprobs = run_vllm_logprobs(
-        switch_dir, input_ids, vocab_size, **llm_kwargs,
+        switch_dir,
+        input_ids,
+        vocab_size,
+        **llm_kwargs,
     )
 
     return upstream_logprobs, switch_logprobs
@@ -417,8 +436,7 @@ def run_zero_adapter_equivalence(cfg_dict, *, seq_len=16, seed=0,
 # ── Gap equivalence pipeline ──────────────────────────────────────
 
 
-def run_gap_equivalence(cfg_dict, *, seq_len, ctrl_pos, seed=0,
-                        tmpdir, **llm_kwargs):
+def run_gap_equivalence(cfg_dict, *, seq_len, ctrl_pos, seed=0, tmpdir, **llm_kwargs):
     """Integration pipeline for KV hiding gap equivalence via vLLM.
 
     Creates upstream + 1-adapter switch (zero LoRA), inserts a hidden control
@@ -436,9 +454,9 @@ def run_gap_equivalence(cfg_dict, *, seq_len, ctrl_pos, seed=0,
         (upstream_logprobs, switch_logprobs) — each dense logprob tensors.
         upstream: [seq_len-1, vocab_size], switch: [seq_len, vocab_size].
     """
+    from granite_switch.vllm import register as register_granite_switch
     from tests.shared.gap_equivalence import make_gapped_inputs
 
-    from granite_switch.vllm import register as register_granite_switch
     register_granite_switch()
 
     # Phase 1: save HF models to disk
@@ -453,10 +471,16 @@ def run_gap_equivalence(cfg_dict, *, seq_len, ctrl_pos, seed=0,
 
     # Phase 2: run both models through vLLM's actual serving path
     upstream_logprobs = run_vllm_logprobs(
-        upstream_dir, upstream_ids[0].tolist(), vocab_size, **llm_kwargs,
+        upstream_dir,
+        upstream_ids[0].tolist(),
+        vocab_size,
+        **llm_kwargs,
     )
     switch_logprobs = run_vllm_logprobs(
-        switch_dir, switch_ids[0].tolist(), vocab_size, **llm_kwargs,
+        switch_dir,
+        switch_ids[0].tolist(),
+        vocab_size,
+        **llm_kwargs,
     )
 
     return upstream_logprobs, switch_logprobs

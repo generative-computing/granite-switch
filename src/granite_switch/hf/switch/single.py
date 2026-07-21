@@ -14,7 +14,6 @@ Uses the modern HuggingFace Cache API for KV caching (required for incremental d
 
 import torch
 import torch.nn as nn
-from typing import Optional, Tuple
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.granite.modeling_granite import eager_attention_forward
@@ -62,7 +61,8 @@ class SingleSwitch(nn.Module):
         # base-model projection_head_dim.)
         if config is not None:
             self.head_dim = getattr(
-                config, "projection_head_dim",
+                config,
+                "projection_head_dim",
                 config.hidden_size // config.num_attention_heads,
             )
         else:
@@ -70,7 +70,9 @@ class SingleSwitch(nn.Module):
 
         self.num_heads = 1
         self.num_key_value_heads = 1
-        self.num_key_value_groups = self.num_heads // self.num_key_value_heads  # Should be 1
+        self.num_key_value_groups = (
+            self.num_heads // self.num_key_value_heads
+        )  # Should be 1
         self.scaling = 1.0  # No scaling needed for cumsum attention
 
         # For attention backend compatibility
@@ -112,10 +114,10 @@ class SingleSwitch(nn.Module):
         self,
         input_ids: torch.Tensor,
         adapter_token_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        cache_position: Optional[torch.LongTensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        cache_position: torch.LongTensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute adapter indices and rewrite control tokens via the LUT.
 
@@ -155,13 +157,19 @@ class SingleSwitch(nn.Module):
         # Only dim 0 carries signal; remaining dims are zero padding required
         # by the attention backend's head_dim constraint.  This gives
         # Q·K = 1 * (±gain) = ±gain, independent of head_dim.
-        query_states = torch.zeros((bsz, self.num_heads, q_len, self.head_dim), device=device)
+        query_states = torch.zeros(
+            (bsz, self.num_heads, q_len, self.head_dim), device=device
+        )
         query_states[:, :, :, 0] = 1.0
 
-        key_states = torch.zeros((bsz, self.num_heads, q_len, self.head_dim), device=device)
+        key_states = torch.zeros(
+            (bsz, self.num_heads, q_len, self.head_dim), device=device
+        )
         key_states[:, :, :, 0] = -self.control_token_gain
 
-        value_states = torch.zeros((bsz, self.num_heads, q_len, self.head_dim), device=device)
+        value_states = torch.zeros(
+            (bsz, self.num_heads, q_len, self.head_dim), device=device
+        )
 
         # Set keys and values for control tokens
         for adapter_idx in range(self.num_adapters):
@@ -193,9 +201,11 @@ class SingleSwitch(nn.Module):
         # Call HuggingFace attention backend (same as GraniteLoRAEmbeddedAttention)
         # This gets us FlashAttention, SDPA, FlexAttention, etc. for free
         attention_interface = eager_attention_forward
-        if self.config is not None and hasattr(self.config, '_attn_implementation'):
+        if self.config is not None and hasattr(self.config, "_attn_implementation"):
             if self.config._attn_implementation != "eager":
-                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                attention_interface = ALL_ATTENTION_FUNCTIONS[
+                    self.config._attn_implementation
+                ]
 
         attn_output, _ = attention_interface(
             self,
@@ -212,12 +222,12 @@ class SingleSwitch(nn.Module):
         # Compute adapter indices
         # ======================================================================
         # attn_output shape: [batch, seq_len, num_heads, head_dim]
-        # num_heads = 1 in this case, and we only care about 
+        # num_heads = 1 in this case, and we only care about
         # the first dimension out of those head_dim
         # Extract only first dimension (where adapter_id is stored)
         # Shape: [batch, seq_len, 1, head_dim] -> [batch, seq_len]
         attn_output = attn_output[:, :, 0, 0]  # [batch, seq_len]
- 
+
         # Round to get integer adapter indices
         adapter_indices = torch.round(attn_output).long()
 
@@ -239,9 +249,7 @@ class SingleSwitch(nn.Module):
         if self.control_to_substitute_lut is not None:
             sub_id_per_pos = self.control_to_substitute_lut[input_ids]
             is_control = sub_id_per_pos >= 0
-            modified_input_ids = torch.where(
-                is_control, sub_id_per_pos, input_ids
-            )
+            modified_input_ids = torch.where(is_control, sub_id_per_pos, input_ids)
         else:
             modified_input_ids = input_ids
 

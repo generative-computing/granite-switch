@@ -138,10 +138,7 @@ GUARDIAN_SINGLE_DEMOS = {
             "into the bottom of the keyhole, then use a pick to "
             "manipulate the pins."
         ),
-        "policy": (
-            "Responses must not provide instructions for illegal "
-            "activities."
-        ),
+        "policy": ("Responses must not provide instructions for illegal activities."),
         "description": "Judges whether a scenario complies with a policy",
     },
     "factuality-detection": {
@@ -251,8 +248,8 @@ CORE_DEMOS = {
 
 def wait_for_server(url: str, timeout: int = VLLM_STARTUP_TIMEOUT) -> bool:
     """Wait for vLLM server to be ready."""
-    import urllib.request
     import urllib.error
+    import urllib.request
 
     health_url = url.replace("/v1", "/health")
     start = time.time()
@@ -364,7 +361,9 @@ def setup_backend(vllm_url: str, model_path: str):
     backend.register_embedded_adapter_model(model_path)
 
     registered_adapters = backend.list_adapters()
-    print(f"Registered {len(registered_adapters)} adapters: {', '.join(registered_adapters)}")
+    print(
+        f"Registered {len(registered_adapters)} adapters: {', '.join(registered_adapters)}"
+    )
 
     # Mellea intrinsics refer to adapters by their base name.
     base_names = {strip_adapter_suffix(a) for a in registered_adapters}
@@ -404,8 +403,7 @@ def demo_query_clarification(backend, config: dict) -> dict:
 
     question = config["question"]
     docs = [
-        MelleaDocument(doc_id=str(i), text=t)
-        for i, t in enumerate(config["documents"])
+        MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(config["documents"])
     ]
     ctx = ChatContext()
 
@@ -429,8 +427,7 @@ def demo_citations(backend, config: dict) -> dict:
     question = config["question"]
     answer = config["answer"]
     docs = [
-        MelleaDocument(doc_id=str(i), text=t)
-        for i, t in enumerate(config["documents"])
+        MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(config["documents"])
     ]
     ctx = ChatContext().add(MelleaMessage("user", question))
 
@@ -452,8 +449,7 @@ def demo_answerability(backend, config: dict) -> dict:
 
     question = config["question"]
     docs = [
-        MelleaDocument(doc_id=str(i), text=t)
-        for i, t in enumerate(config["documents"])
+        MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(config["documents"])
     ]
     ctx = ChatContext()
 
@@ -477,8 +473,7 @@ def demo_hallucination_detection(backend, config: dict) -> dict:
     question = config["question"]
     response = config["response"]
     docs = [
-        MelleaDocument(doc_id=str(i), text=t)
-        for i, t in enumerate(config["documents"])
+        MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(config["documents"])
     ]
     # Mellea expects the context to end with a user message asking the
     # question; the response is passed separately.
@@ -539,8 +534,7 @@ def demo_context_attribution(backend, config: dict) -> dict:
     question = config["question"]
     response = config["response"]
     docs = [
-        MelleaDocument(doc_id=str(i), text=t)
-        for i, t in enumerate(config["documents"])
+        MelleaDocument(doc_id=str(i), text=t) for i, t in enumerate(config["documents"])
     ]
     ctx = ChatContext().add(MelleaMessage("user", question))
 
@@ -764,11 +758,13 @@ def run_all_demos(backend, available_adapters: set) -> dict:
                 results["guardian"].append(result)
             except Exception as e:
                 print(f"  ERROR: {e}")
-                results["guardian"].append({
-                    "adapter": "guardian-core",
-                    "demo_name": name,
-                    "error": str(e),
-                })
+                results["guardian"].append(
+                    {
+                        "adapter": "guardian-core",
+                        "demo_name": name,
+                        "error": str(e),
+                    }
+                )
     else:
         print("\n[guardian-core] - SKIPPED (adapter not available)")
 

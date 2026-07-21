@@ -24,8 +24,17 @@ _TIMEOUT = 600
 
 
 def _run_inner_class(class_name):
-    cmd = [sys.executable, "-m", "pytest", str(_INNER),
-           "-v", "-s", "--tb=short", "-k", class_name]
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(_INNER),
+        "-v",
+        "-s",
+        "--tb=short",
+        "-k",
+        class_name,
+    ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
     if result.stdout:
         print(result.stdout[-4000:])
@@ -42,5 +51,3 @@ class TestNoSwitch:
 class TestSingleSwitch:
     def test_suite(self):
         _run_inner_class("TestSingleSwitch")
-
-

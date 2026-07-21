@@ -18,7 +18,7 @@ _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocatio
 class MockTokenizer:
     """Mock tokenizer for testing token addition."""
 
-    def __init__(self, initial_vocab_size: int = 100, decode_map: dict = None):
+    def __init__(self, initial_vocab_size: int = 100, decode_map: dict | None = None):
         self._vocab = {}
         self._vocab_size = initial_vocab_size
         self._special_tokens = []
@@ -46,7 +46,9 @@ class MockTokenizer:
 
     def decode(self, token_ids, skip_special_tokens=False):
         """Decode token IDs to string."""
-        return self._decode_map.get(tuple(token_ids), "".join(f"<tok{t}>" for t in token_ids))
+        return self._decode_map.get(
+            tuple(token_ids), "".join(f"<tok{t}>" for t in token_ids)
+        )
 
 
 class TestDecodeAloraInvocationText:
@@ -58,7 +60,9 @@ class TestDecodeAloraInvocationText:
             json.dumps({"alora_invocation_tokens": [1000, 1001]})
         )
         tokenizer = MockTokenizer(decode_map={(1000, 1001): "<requirements>"})
-        assert _decode_alora_invocation_text(str(tmp_path), tokenizer) == "<requirements>"
+        assert (
+            _decode_alora_invocation_text(str(tmp_path), tokenizer) == "<requirements>"
+        )
 
     def test_missing_config_raises(self, tmp_path):
         """FileNotFoundError when adapter_config.json is absent."""
@@ -67,7 +71,9 @@ class TestDecodeAloraInvocationText:
 
     def test_missing_key_raises(self, tmp_path):
         """ValueError when alora_invocation_tokens key is absent from config."""
-        (tmp_path / "adapter_config.json").write_text(json.dumps({"peft_type": "ALORA"}))
+        (tmp_path / "adapter_config.json").write_text(
+            json.dumps({"peft_type": "ALORA"})
+        )
         with pytest.raises(ValueError, match="alora_invocation_tokens"):
             _decode_alora_invocation_text(str(tmp_path), MockTokenizer())
 
@@ -114,8 +120,12 @@ class TestAddControlTokens:
     def test_control_token_ids_sequential(self, capsys):
         """Verify token IDs are assigned sequentially."""
         tokenizer = MockTokenizer(initial_vocab_size=50)
-        adapters = [("/a", "alpha", "alora"), ("/b", "beta", "lora"),
-                    ("/c", "gamma", "alora"), ("/d", "delta", "lora")]
+        adapters = [
+            ("/a", "alpha", "alora"),
+            ("/b", "beta", "lora"),
+            ("/c", "gamma", "alora"),
+            ("/d", "delta", "lora"),
+        ]
 
         token_ids, _ = add_control_tokens(tokenizer, adapters)
 
@@ -144,7 +154,9 @@ class TestAddControlTokens:
     def test_token_format(self, capsys):
         """Verify token format is <|adapter_name|>."""
         tokenizer = MockTokenizer()
-        _, special_tokens = add_control_tokens(tokenizer, [("/path", "my_adapter", "alora")])
+        _, special_tokens = add_control_tokens(
+            tokenizer, [("/path", "my_adapter", "alora")]
+        )
         assert special_tokens[0] == "<|my_adapter|>"
 
 
@@ -196,7 +208,10 @@ class TestConfigureChatTemplate:
         # LoRA entries must NOT have invocation_text
         code_entry_start = tokenizer.chat_template.index("'code'")
         code_entry_end = tokenizer.chat_template.index("}", code_entry_start)
-        assert "invocation_text" not in tokenizer.chat_template[code_entry_start:code_entry_end]
+        assert (
+            "invocation_text"
+            not in tokenizer.chat_template[code_entry_start:code_entry_end]
+        )
 
     def test_namespace_merge_includes_alora_fields(self, capsys):
         """ns namespace gets adapter_token, adapter_type, adapter_invocation_text, alora_target_idx."""
@@ -211,6 +226,8 @@ class TestConfigureChatTemplate:
 
         assert "adapter_token=adapter_token" in tokenizer.chat_template
         assert "adapter_type=adapter_type" in tokenizer.chat_template
-        assert "adapter_invocation_text=adapter_invocation_text" in tokenizer.chat_template
+        assert (
+            "adapter_invocation_text=adapter_invocation_text" in tokenizer.chat_template
+        )
         assert "alora_target_idx=-1" in tokenizer.chat_template
         assert "ns.adapter_token" in tokenizer.chat_template

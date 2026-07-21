@@ -47,13 +47,15 @@ TEXT_TOKEN = 50
 # (see scratch/ISSUE_107_HANDOFF.md §10.2), update the import above; these
 # constants continue to work unchanged.
 _E2E_MAX_POSITION_EMBEDDINGS = max(
-    DENSE_CFG["max_position_embeddings"], MAX_POSITION_EMBEDDINGS,
+    DENSE_CFG["max_position_embeddings"],
+    MAX_POSITION_EMBEDDINGS,
 )
 # vocab_size must fit every adapter token ID. ADAPTER_TOKEN_IDS_LIST goes
 # up to 1031, so DENSE_CFG's default 256 is too small. Derive from the actual
 # token IDs in use rather than hardcoding — auto-tracks if NUM_ADAPTERS grows.
 _E2E_VOCAB_SIZE = max(
-    DENSE_CFG["vocab_size"], max(ADAPTER_TOKEN_IDS_LIST) + 1,
+    DENSE_CFG["vocab_size"],
+    max(ADAPTER_TOKEN_IDS_LIST) + 1,
 )
 
 
@@ -78,7 +80,8 @@ def _make_e2e_model(base_cfg, overrides):
     model, config = make_switch_model(base_cfg, overrides)
     # Inlined from tests/hf/test_model_forward.py:_set_adapter_token_ids.
     model.model.adapter_token_ids.data = torch.tensor(
-        config.adapter_token_ids, dtype=torch.long,
+        config.adapter_token_ids,
+        dtype=torch.long,
     )
     return model, config
 
@@ -194,12 +197,15 @@ class TestE2ELongContext:
 
     @pytest.mark.parametrize("control_position", ["early", "mid", "late"])
     @pytest.mark.parametrize("adapter_idx", [0, 15, 31])  # low / mid / high stress
-    @pytest.mark.parametrize("seq_len", [
-        10_000,
-        32_768,
-        pytest.param(65_536, marks=pytest.mark.slow),
-        pytest.param(131_072, marks=pytest.mark.slow),
-    ])
+    @pytest.mark.parametrize(
+        "seq_len",
+        [
+            10_000,
+            32_768,
+            pytest.param(65_536, marks=pytest.mark.slow),
+            pytest.param(131_072, marks=pytest.mark.slow),
+        ],
+    )
     def test_long_context_e2e(self, e2e_model, seq_len, adapter_idx, control_position):
         """Full model forward at long context with parametrized control position.
 

@@ -2,19 +2,18 @@
 """Unit tests for adapter filtering and listing functions."""
 
 import json
-import os
+
 import pytest
-from pathlib import Path
 
 from granite_switch.composer.adapter_discovery import (
+    discover_adapters,
     filter_adapters,
     list_available_adapters,
-    discover_adapters
 )
-
 from granite_switch.composer.arch import resolve_arch
 
 # -- Fixtures ----------------------------------------------------------------
+
 
 @pytest.fixture
 def sample_discovered():
@@ -60,37 +59,54 @@ class TestTechnologyFilterAdapters:
     def test_test_prefer_alora(self, tmp_path):
         # Load base config early for arch resolution.
         arch = resolve_arch("ibm-granite/granite-4.0-micro")
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("answerability", ["alora", "lora"]),
-            ("citations", ["alora"]),
-        ])
-        adapters = discover_adapters( # default is to prefer alora
-                    root, "granite-4.0-micro", arch, technology_fallback=None,
-                    technology_filter=None,
-                )
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("answerability", ["alora", "lora"]),
+                ("citations", ["alora"]),
+            ],
+        )
+        adapters = discover_adapters(  # default is to prefer alora
+            root,
+            "granite-4.0-micro",
+            arch,
+            technology_fallback=None,
+            technology_filter=None,
+        )
         assert len(adapters) == 2
         assert len([found for found in adapters if found[2] == "alora"]) == 2
-        adapters = discover_adapters( # default is to prefer alora
-                    root, "granite-4.0-micro", arch, technology_fallback=None,
-                    technology_filter="lora",
-                )
+        adapters = discover_adapters(  # default is to prefer alora
+            root,
+            "granite-4.0-micro",
+            arch,
+            technology_fallback=None,
+            technology_filter="lora",
+        )
         assert len(adapters) == 1
         assert len([found for found in adapters if found[2] == "lora"]) == 1
         adapters = discover_adapters(
-                    root, "granite-4.0-micro", arch, technology_fallback="lora",
-                    technology_filter="lora",
-                )
+            root,
+            "granite-4.0-micro",
+            arch,
+            technology_fallback="lora",
+            technology_filter="lora",
+        )
         print(adapters)
         assert len(adapters) == 1
         assert len([found for found in adapters if found[2] == "lora"]) == 1
 
     def test_filter_and_override(self, tmp_path):
         arch = resolve_arch("ibm-granite/granite-4.0-micro")
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("answerability", ["alora", "lora"]),
-            ("citations", ["alora"]),
-        ])
-        adapters = discover_adapters( # default is to prefer alora
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("answerability", ["alora", "lora"]),
+                ("citations", ["alora"]),
+            ],
+        )
+        adapters = discover_adapters(  # default is to prefer alora
             root, "granite-4.0-micro", arch, technology_filter="lora"
         )
         assert len(adapters) == 1
@@ -104,13 +120,17 @@ class TestTechnologyFilterAdapters:
         )
         assert len(adapters) == 3
         adapters = discover_adapters(
-            root, "granite-4.0-micro", arch, technology_fallback="alora", technology_filter="lora"
+            root,
+            "granite-4.0-micro",
+            arch,
+            technology_fallback="alora",
+            technology_filter="lora",
         )
         assert len(adapters) == 1
-        
 
-    
+
 # -- filter_adapters tests ---------------------------------------------------
+
 
 class TestFilterAdapters:
     def test_no_filters_passthrough(self, sample_discovered):
@@ -145,9 +165,7 @@ class TestFilterAdapters:
         assert len(names) == 3
 
     def test_exclude_exact_name(self, sample_discovered):
-        result = filter_adapters(
-            sample_discovered, exclude=["hallucination_detection"]
-        )
+        result = filter_adapters(sample_discovered, exclude=["hallucination_detection"])
         names = [r[1] for r in result]
         assert "hallucination_detection" not in names
         assert len(names) == 5
@@ -184,9 +202,7 @@ class TestFilterAdapters:
 
     def test_preserves_tuple_structure(self, sample_discovered):
         result = filter_adapters(sample_discovered, include=["answerability"])
-        assert result[0] == (
-            "/adapters/answerability/alora", "answerability", "alora"
-        )
+        assert result[0] == ("/adapters/answerability/alora", "answerability", "alora")
 
     def test_preserves_order(self, sample_discovered):
         result = filter_adapters(
@@ -199,12 +215,17 @@ class TestFilterAdapters:
 
 # -- list_available_adapters tests -------------------------------------------
 
+
 class TestListAvailableAdapters:
     def test_lists_all_technologies(self, tmp_path):
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("answerability", ["alora", "lora"]),
-            ("citations", ["alora"]),
-        ])
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("answerability", ["alora", "lora"]),
+                ("citations", ["alora"]),
+            ],
+        )
         result = list_available_adapters(root, "granite-4.0-micro")
         assert len(result) == 2
         ans = next(a for a in result if a["name"] == "answerability")
@@ -213,12 +234,14 @@ class TestListAvailableAdapters:
         assert cit["technologies"] == ["alora"]
 
     def test_filters_by_target_model(self, tmp_path):
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("answerability", ["alora"]),
-        ])
-        _make_adapter_library(
-            tmp_path, "granite-4.1-3b", [("other_adapter", ["lora"])]
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("answerability", ["alora"]),
+            ],
         )
+        _make_adapter_library(tmp_path, "granite-4.1-3b", [("other_adapter", ["lora"])])
         result = list_available_adapters(root, "granite-4.0-micro")
         names = [a["name"] for a in result]
         assert "answerability" in names
@@ -229,22 +252,28 @@ class TestListAvailableAdapters:
         assert result == []
 
     def test_sorted_by_name(self, tmp_path):
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("zebra", ["alora"]),
-            ("alpha", ["alora"]),
-            ("middle", ["lora"]),
-        ])
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("zebra", ["alora"]),
+                ("alpha", ["alora"]),
+                ("middle", ["lora"]),
+            ],
+        )
         result = list_available_adapters(root, "granite-4.0-micro")
         names = [a["name"] for a in result]
         assert names == ["alpha", "middle", "zebra"]
 
     def test_skips_incomplete_adapters(self, tmp_path):
-        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [
-            ("complete", ["alora"]),
-        ])
-        incomplete_dir = (
-            tmp_path / "incomplete" / "granite-4.0-micro" / "alora"
+        root = _make_adapter_library(
+            tmp_path,
+            "granite-4.0-micro",
+            [
+                ("complete", ["alora"]),
+            ],
         )
+        incomplete_dir = tmp_path / "incomplete" / "granite-4.0-micro" / "alora"
         incomplete_dir.mkdir(parents=True)
         (incomplete_dir / "io.yaml").write_text("---\n")
         # Missing adapter_model.safetensors and adapter_config.json

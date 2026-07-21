@@ -28,8 +28,7 @@ import sys
 import torch
 from transformers import AutoConfig
 
-
-FAST_LENGTHS = [64]        # Single medium-length request for quick regression checks.
+FAST_LENGTHS = [64]  # Single medium-length request for quick regression checks.
 FULL_LENGTHS = [3, 7, 16, 32, 64, 128, 192, 256]  # Thorough: short to long.
 TOP_K = 100  # Compare top-100 logprobs per position (sufficient to detect divergence).
 
@@ -64,6 +63,7 @@ def _generate_inputs(vocab_size, request_lengths):
 
 # ── build mode ────────────────────────────────────────────────────
 
+
 def cmd_build(args):
     """Build a GraniteSwitch skin and save inputs + skin to work-dir."""
     from granite_switch.composer import GraniteSwitchComposer
@@ -86,10 +86,11 @@ def cmd_build(args):
     print(f"  saved {len(all_ids)} input sequences to {inputs_path}")
 
     # Build skin
-    print(f"\nBuilding GraniteSwitch skin (num_adapters=0)...")
+    print("\nBuilding GraniteSwitch skin (num_adapters=0)...")
     skin_dir = os.path.join(work_dir, "skin")
     model = GraniteSwitchComposer.from_base_and_adapters(
-        model_name, torch_dtype=dtype,
+        model_name,
+        torch_dtype=dtype,
     )
     print(f"  saving skinned model to {skin_dir}...")
     model.save_pretrained(skin_dir)
@@ -100,12 +101,14 @@ def cmd_build(args):
 
 # ── run mode ──────────────────────────────────────────────────────
 
+
 def cmd_run(args):
     """Load a model in vLLM, extract logprobs, save to JSON."""
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
+
     from granite_switch.vllm import register as register_granite_switch
 
     register_granite_switch()
@@ -118,7 +121,6 @@ def cmd_run(args):
     with open(inputs_path) as f:
         data = json.load(f)
     all_ids = data["inputs"]
-    request_lengths = data["request_lengths"]
 
     # Resolve dtype from config.
     print(f"Loading config for {model_path}...")
@@ -149,7 +151,7 @@ def cmd_run(args):
     # Extract logprobs one request at a time
     all_logprobs = []
     for i, ids in enumerate(all_ids):
-        print(f"  request {i+1}/{len(all_ids)} (len={len(ids)})...")
+        print(f"  request {i + 1}/{len(all_ids)} (len={len(ids)})...")
         prompt = TokensPrompt(prompt_token_ids=ids)
         outputs = llm.generate(prompt, sampling_params=sampling_params)
         # Extract top-K prompt logprobs (skip position 0)
@@ -175,6 +177,7 @@ def cmd_run(args):
 
 # ── compare mode ──────────────────────────────────────────────────
 
+
 def cmd_compare(args):
     """Load two logprob JSONs and check bit-exact match."""
     with open(args.ref) as f:
@@ -196,8 +199,10 @@ def cmd_compare(args):
         rc = max(rc, rc_i)
 
     if rc == 0:
-        print(f"\nPASS: {label} — bit-exact equivalence via vLLM "
-              f"[{len(ref_all)} individual requests]")
+        print(
+            f"\nPASS: {label} — bit-exact equivalence via vLLM "
+            f"[{len(ref_all)} individual requests]"
+        )
     else:
         print(f"\nFAIL: {label} — logprobs differ via vLLM")
     return rc
@@ -230,10 +235,14 @@ def _compare_logprobs(reference, switch, label):
     positions = len(reference)
     print(f"  [{label}] positions: {positions}, entries: {total_entries}")
     if mismatched_keys > 0:
-        print(f"  [{label}] FAIL: {mismatched_keys} positions have different top-K token sets")
+        print(
+            f"  [{label}] FAIL: {mismatched_keys} positions have different top-K token sets"
+        )
         return 1
     if mismatched_values > 0:
-        print(f"  [{label}] FAIL: {mismatched_values} logprob values differ, max |diff| = {max_diff:.6e}")
+        print(
+            f"  [{label}] FAIL: {mismatched_values} logprob values differ, max |diff| = {max_diff:.6e}"
+        )
         return 1
     print(f"  [{label}] OK: bit-exact")
     return 0
@@ -241,16 +250,24 @@ def _compare_logprobs(reference, switch, label):
 
 # ── CLI ───────────────────────────────────────────────────────────
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
 
     # build
     p_build = sub.add_parser("build", help="Build skin and save inputs")
-    p_build.add_argument("--model", required=True, help="HuggingFace model name or path")
-    p_build.add_argument("--work-dir", required=True, help="Working directory for outputs")
-    p_build.add_argument("--fast", action="store_true",
-                         help="Single medium-length request (quick regression check)")
+    p_build.add_argument(
+        "--model", required=True, help="HuggingFace model name or path"
+    )
+    p_build.add_argument(
+        "--work-dir", required=True, help="Working directory for outputs"
+    )
+    p_build.add_argument(
+        "--fast",
+        action="store_true",
+        help="Single medium-length request (quick regression check)",
+    )
 
     # run
     p_run = sub.add_parser("run", help="Load model in vLLM, extract logprobs")

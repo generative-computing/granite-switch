@@ -42,6 +42,7 @@ def _setup():
     os.dup2(2, 1)
 
     from vllm.config import VllmConfig, set_current_vllm_config
+
     from granite_switch.vllm.switch.single import SingleSwitch
 
     BLOCK_SIZE = 16
@@ -86,8 +87,8 @@ def _setup():
         # The Q/K/V tensors in SingleSwitch.forward() are constructed directly
         # on CUDA so they don't otherwise force a .to() call.
         if switch.control_to_substitute_lut is not None:
-            switch.control_to_substitute_lut = (
-                switch.control_to_substitute_lut.to(device)
+            switch.control_to_substitute_lut = switch.control_to_substitute_lut.to(
+                device
             )
     finally:
         torch.set_default_dtype(old_dtype)
@@ -99,7 +100,10 @@ def _setup():
 
     num_blocks = (MAX_TOKENS + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
     cache_shape = attn.attn_backend.get_kv_cache_shape(
-        num_blocks, BLOCK_SIZE, switch.num_kv_heads, switch.head_dim,
+        num_blocks,
+        BLOCK_SIZE,
+        switch.num_kv_heads,
+        switch.head_dim,
     )
     kv_cache = torch.zeros(cache_shape, device=device, dtype=torch.bfloat16)
     attn.kv_cache = kv_cache
@@ -131,10 +135,14 @@ def _build_metadata(harness, seq_len):
     slot_mapping = torch.arange(seq_len, dtype=torch.int64, device=device)
     num_blocks_needed = (seq_len + block_size - 1) // block_size
     block_table = torch.arange(
-        num_blocks_needed, dtype=torch.int32, device=device,
+        num_blocks_needed,
+        dtype=torch.int32,
+        device=device,
     ).unsqueeze(0)
     query_start_loc = torch.tensor(
-        [0, seq_len], dtype=torch.int32, device=device,
+        [0, seq_len],
+        dtype=torch.int32,
+        device=device,
     )
     seq_lens = torch.tensor([seq_len], dtype=torch.int32, device=device)
 
@@ -151,6 +159,7 @@ def _build_metadata(harness, seq_len):
                 get_flash_attn_version,
                 get_scheduler_metadata,
             )
+
             if get_flash_attn_version() == 3:
                 switch = harness["switch"]
                 scheduler_metadata = get_scheduler_metadata(
@@ -215,7 +224,9 @@ def _run(harness, seq, num_adapters, control_token_gain):
 
     input_ids = torch.tensor(seq, dtype=torch.long, device=device)
     adapter_token_ids = torch.tensor(
-        adapter_token_ids_list[:num_adapters], dtype=torch.long, device=device,
+        adapter_token_ids_list[:num_adapters],
+        dtype=torch.long,
+        device=device,
     )
 
     metadata, slot_mapping = _build_metadata(harness, seq_len)
@@ -272,7 +283,9 @@ def _run_with_modified(harness, seq, num_adapters, control_token_gain):
 
     input_ids = torch.tensor(seq, dtype=torch.long, device=device)
     adapter_token_ids = torch.tensor(
-        adapter_token_ids_list[:num_adapters], dtype=torch.long, device=device,
+        adapter_token_ids_list[:num_adapters],
+        dtype=torch.long,
+        device=device,
     )
 
     metadata, slot_mapping = _build_metadata(harness, seq_len)

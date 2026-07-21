@@ -10,7 +10,6 @@ from collections.abc import Sequence
 
 import requests
 
-
 DEFAULT_MAX_MODEL_LEN = 32768  # 32k, fits comfortably on an A100 (40/80 GiB).
 
 
@@ -34,9 +33,11 @@ def launch_vllm(
         str(port),
         "--max-model-len",
         str(max_model_len),
-        "--gpu-memory-utilization", str(gpu_memory_utilization),
-        "--max-num-seqs", str(max_num_seqs),
-        *( ["--enforce-eager"] if enforce_eager else []),
+        "--gpu-memory-utilization",
+        str(gpu_memory_utilization),
+        "--max-num-seqs",
+        str(max_num_seqs),
+        *(["--enforce-eager"] if enforce_eager else []),
         *extra_args,
     ]
 
@@ -48,10 +49,10 @@ def launch_vllm(
 
 # vLLM log keywords in order of progression (last match wins = most advanced stage)
 _VLLM_STAGES = [
-    ("Starting to load model",    "Downloading / loading model"),
-    ("Loading safetensors",       "Loading model weights into GPU"),
-    ("GPU KV cache size",         "Allocating KV cache"),
-    ("Capturing CUDA graphs",     "Warming up — capturing CUDA graphs"),
+    ("Starting to load model", "Downloading / loading model"),
+    ("Loading safetensors", "Loading model weights into GPU"),
+    ("GPU KV cache size", "Allocating KV cache"),
+    ("Capturing CUDA graphs", "Warming up — capturing CUDA graphs"),
     ("Application startup complete", "Starting API server"),
 ]
 
@@ -81,7 +82,12 @@ def wait_for_server(port: int, timeout: int = 600, log_file: str | None = None) 
     last_print_time = -_HEARTBEAT_INTERVAL  # force print on first iteration
     while time.time() - t0 < timeout:
         try:
-            if requests.get(f"http://localhost:{port}/v1/models", timeout=2).status_code == 200:
+            if (
+                requests.get(
+                    f"http://localhost:{port}/v1/models", timeout=2
+                ).status_code
+                == 200
+            ):
                 print(f"  Server ready on :{port} in {int(time.time() - t0)}s")
                 return True
         except Exception:
@@ -110,7 +116,9 @@ def tail_log(log_file: str, n: int = 20) -> None:
 
 def kill_stale_vllm_processes(wait_seconds: int = 5) -> None:
     """Terminate stale vLLM processes that can hold GPU memory after a notebook restart."""
-    r = subprocess.run(["pgrep", "-f", "vllm.entrypoints"], capture_output=True, text=True)
+    r = subprocess.run(
+        ["pgrep", "-f", "vllm.entrypoints"], capture_output=True, text=True
+    )
     pids = [p for p in r.stdout.strip().split("\n") if p]
     if pids:
         print(f"Killing stale vLLM processes: {pids}")
@@ -126,7 +134,11 @@ def kill_stale_vllm_processes(wait_seconds: int = 5) -> None:
 
 def print_gpu_state() -> None:
     r = subprocess.run(
-        ["nvidia-smi", "--query-gpu=name,memory.used,memory.free", "--format=csv,noheader"],
+        [
+            "nvidia-smi",
+            "--query-gpu=name,memory.used,memory.free",
+            "--format=csv,noheader",
+        ],
         capture_output=True,
         text=True,
     )

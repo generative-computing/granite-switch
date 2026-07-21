@@ -15,9 +15,9 @@ from .lora import SwitchedLoRALinear
 from .lora_kernel_meta import CompileFriendlyLoRAKernelMeta, LoRAContext
 
 __all__ = [
-    "SwitchedLoRALinear",
+    "CompileFriendlyLoRAKernelMeta",
     "GraniteLoRAEmbeddedAttention",
     "GraniteSwitchDecoderLayer",
-    "CompileFriendlyLoRAKernelMeta",
     "LoRAContext",
+    "SwitchedLoRALinear",
 ]

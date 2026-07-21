@@ -13,14 +13,13 @@ from the switch. They use vLLM's Punica kernels for efficient LoRA computation
 with torch.compile-friendly metadata preparation.
 """
 
-from typing import Optional, Tuple, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
-
-from vllm.model_executor.layers.attention.attention import Attention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -32,7 +31,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from .lora import SwitchedLoRALinear
 
 if TYPE_CHECKING:
-    from vllm.v1.attention.backend import AttentionMetadata
+    pass
 
 
 class GraniteLoRAEmbeddedAttention(nn.Module):
@@ -71,7 +70,8 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             assert tp_size % self.total_num_kv_heads == 0
         self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
         self.head_dim = getattr(
-            config, "projection_head_dim",
+            config,
+            "projection_head_dim",
             self.hidden_size // self.total_num_heads,
         )
         self.q_size = self.num_heads * self.head_dim
@@ -112,9 +112,7 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         )
 
         if "o_proj" in config.lora_target_modules:
-            self.o_proj = SwitchedLoRALinear(
-                base_o_proj, num_adapters, max_lora_rank
-            )
+            self.o_proj = SwitchedLoRALinear(base_o_proj, num_adapters, max_lora_rank)
             self.has_o_lora = True
         else:
             self.o_proj = base_o_proj
@@ -174,9 +172,9 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
 def rms_norm_select(
     norm: RMSNorm,
     block_output: torch.Tensor,
-    residual: Optional[torch.Tensor],
+    residual: torch.Tensor | None,
     fused: bool,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Select between one-arg and two-arg RMSNorm calling conventions.
 
     Different vLLM model classes use different residual-add-norm patterns.
@@ -223,7 +221,9 @@ def replace_shared_mlp_projections_with_lora(mlp, config):
     if "shared_input_linear" in config.lora_target_modules:
         base = mlp.input_linear
         mlp.input_linear = SwitchedLoRALinear(
-            base, num_adapters, max_lora_rank,
+            base,
+            num_adapters,
+            max_lora_rank,
             num_slices=2,
             output_slices=tuple(base.output_sizes),
         )
@@ -232,7 +232,9 @@ def replace_shared_mlp_projections_with_lora(mlp, config):
     if "shared_output_linear" in config.lora_target_modules:
         base = mlp.output_linear
         mlp.output_linear = SwitchedLoRALinear(
-            base, num_adapters, max_lora_rank,
+            base,
+            num_adapters,
+            max_lora_rank,
         )
         has_output_lora = True
 
@@ -269,6 +271,7 @@ class GraniteSwitchDecoderLayer(nn.Module):
         self.has_experts = getattr(config, "num_local_experts", 0) > 0
         if self.has_experts:
             from vllm.model_executor.models.granitemoehybrid import GraniteMoeMoE
+
             self.block_sparse_moe = GraniteMoeMoE(
                 num_experts=config.num_local_experts,
                 top_k=config.num_experts_per_tok,
@@ -279,6 +282,7 @@ class GraniteSwitchDecoderLayer(nn.Module):
             )
 
         from vllm.model_executor.models.granitemoehybrid import GraniteMoeSharedMLP
+
         self.shared_mlp = GraniteMoeSharedMLP(
             config=config,
             quant_config=vllm_config.quant_config,
@@ -289,18 +293,23 @@ class GraniteSwitchDecoderLayer(nn.Module):
         )
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        residual: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Bit-exact compatibility: match the RMSNorm calling convention used
         # by the original model's vLLM class (see rms_norm_select docstring).
         hidden_states, residual = rms_norm_select(
-            self.input_layernorm, hidden_states, residual, self.fused_add_norm,
+            self.input_layernorm,
+            hidden_states,
+            residual,
+            self.fused_add_norm,
         )
         hidden_states = self.self_attn(
             positions=positions,
@@ -309,7 +318,10 @@ class GraniteSwitchDecoderLayer(nn.Module):
         hidden_states = hidden_states * self.residual_multiplier
 
         hidden_states, residual = rms_norm_select(
-            self.post_attention_layernorm, hidden_states, residual, self.fused_add_norm,
+            self.post_attention_layernorm,
+            hidden_states,
+            residual,
+            self.fused_add_norm,
         )
 
         if self.has_experts:
@@ -322,5 +334,3 @@ class GraniteSwitchDecoderLayer(nn.Module):
 
         hidden_states = hidden_states * self.residual_multiplier
         return hidden_states, residual
-
-

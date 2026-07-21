@@ -5,8 +5,8 @@ import pytest
 import torch
 import torch.nn as nn
 
+from granite_switch.composer.arch import ArchDescriptor, ModuleDescriptor
 from granite_switch.composer.validator import validate_all_parameters
-from granite_switch.composer.arch import ModuleDescriptor, ArchDescriptor
 
 
 @pytest.fixture
@@ -99,7 +99,11 @@ class TestValidateAllParameters:
         # Create adapter directory with config
         adapter_dir = tmp_path / "adapter"
         adapter_dir.mkdir()
-        config = {"r": 8, "lora_alpha": 8.0, "target_modules": ["q_proj", "k_proj", "v_proj"]}
+        config = {
+            "r": 8,
+            "lora_alpha": 8.0,
+            "target_modules": ["q_proj", "k_proj", "v_proj"],
+        }
         (adapter_dir / "adapter_config.json").write_text(json.dumps(config))
 
         model = MockModel()
@@ -166,8 +170,7 @@ class TestValidateAllParameters:
                 self.weight = nn.Parameter(torch.randn(10, 10))
                 # These should be skipped
                 self.register_parameter(
-                    "adapter_token_ids_param",
-                    nn.Parameter(torch.zeros(4))
+                    "adapter_token_ids_param", nn.Parameter(torch.zeros(4))
                 )
 
             def named_parameters(self, **kwargs):
@@ -180,7 +183,10 @@ class TestValidateAllParameters:
 
         captured = capsys.readouterr()
         # Should not report adapter_token_ids as uninitialized
-        assert "adapter_token_ids" not in captured.out or "uninitialized" not in captured.out
+        assert (
+            "adapter_token_ids" not in captured.out
+            or "uninitialized" not in captured.out
+        )
 
     def test_parameter_count_summary(self, simple_arch, capsys):
         """Verify parameter count summary is printed."""

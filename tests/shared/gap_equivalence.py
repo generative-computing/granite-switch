@@ -9,7 +9,6 @@ import torch
 
 from tests.shared.granite4_equivalence import _ADAPTER_TOKEN_BASE
 
-
 # ── Constants ─────────────────────────────────────────────────────
 
 # Switch types available for testing (MVP: SingleSwitch only)
@@ -44,26 +43,35 @@ def make_gapped_inputs(seq_len, ctrl_pos, seed=42):
     upstream_ids = torch.randint(0, 100, (1, seq_len))
 
     ctrl = ctrl_token()
-    switch_ids = torch.cat([
-        upstream_ids[:, :ctrl_pos],
-        torch.tensor([[ctrl]]),
-        upstream_ids[:, ctrl_pos:],
-    ], dim=1)
+    switch_ids = torch.cat(
+        [
+            upstream_ids[:, :ctrl_pos],
+            torch.tensor([[ctrl]]),
+            upstream_ids[:, ctrl_pos:],
+        ],
+        dim=1,
+    )
 
     return upstream_ids, switch_ids
 
 
 def extract_visible_batched(tensor, ctrl_pos):
     """Remove the ctrl_pos index on dim=1 — for HF [batch, seq, ...] tensors."""
-    return torch.cat([
-        tensor[:, :ctrl_pos],
-        tensor[:, ctrl_pos + 1:],
-    ], dim=1)
+    return torch.cat(
+        [
+            tensor[:, :ctrl_pos],
+            tensor[:, ctrl_pos + 1 :],
+        ],
+        dim=1,
+    )
 
 
 def extract_visible_flat(tensor, ctrl_pos):
     """Remove the ctrl_pos index on dim=0 — for vLLM [seq, ...] tensors."""
-    return torch.cat([
-        tensor[:ctrl_pos],
-        tensor[ctrl_pos + 1:],
-    ], dim=0)
+    return torch.cat(
+        [
+            tensor[:ctrl_pos],
+            tensor[ctrl_pos + 1 :],
+        ],
+        dim=0,
+    )
