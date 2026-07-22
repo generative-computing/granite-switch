@@ -530,7 +530,7 @@ class GraniteSwitchForCausalLM(
         input_ids: torch.Tensor,
         multimodal_embeddings=None,
         *,
-        is_multimodal: Optional[torch.Tensor] = None,
+        is_multimodal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Embed token ids; scatter multimodal embeddings into their positions.
 
