@@ -71,13 +71,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 against one request triggering an unbounded number of synchronous
                 ASR transcriptions, and bounds the startup profiling pass. Default:
                 32.
-            asr_generation_reserve_tokens (int): Tokens held back from the context
-                window for the model's generated answer (and prompt overhead) when
-                computing how many transcript tokens the audio may occupy. The
-                per-request audio budget is roughly
-                ``max_model_len - asr_generation_reserve_tokens - prompt_tokens``,
-                split across the request's clips. Replaces the old fixed 2048-token
-                transcript cap with a context-derived one. Default: 8192.
             asr_chunk_length_s (float): Window length (seconds) our own long-audio
                 chunker splits a clip into before transcribing each window. Only
                 used for backends that do not self-chunk (see asr_self_chunks); the
@@ -119,7 +112,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         asr_pipeline_kwargs: dict | None = None,
         asr_generate_kwargs: dict | None = None,
         asr_max_audio_clips: int = 32,
-        asr_generation_reserve_tokens: int = 8192,
         asr_chunk_length_s: float = 30.0,
         asr_chunk_overlap_s: float = 5.0,
         asr_self_chunks: bool = True,
@@ -215,18 +207,13 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # and default decode kwargs (applied per call, per-request overridable).
         self.asr_pipeline_kwargs = asr_pipeline_kwargs
         self.asr_generate_kwargs = asr_generate_kwargs
-        # Long-audio / multi-clip preprocessing. The transcript token budget is
-        # derived from the context window at runtime (max_model_len minus the
-        # generation reserve, split across clips) rather than a fixed cap; the
-        # chunker settings only apply to backends that do not self-chunk.
+        # Long-audio / multi-clip preprocessing. The transcript is spliced into
+        # the prompt as ordinary text tokens; a clip that makes the prompt exceed
+        # the context is rejected by vLLM's standard length check (no truncation).
+        # The chunker settings only apply to backends that do not self-chunk.
         if asr_max_audio_clips < 1:
             raise ValueError(
                 f"asr_max_audio_clips must be >= 1, got {asr_max_audio_clips}"
-            )
-        if asr_generation_reserve_tokens < 0:
-            raise ValueError(
-                f"asr_generation_reserve_tokens must be >= 0, got "
-                f"{asr_generation_reserve_tokens}"
             )
         if asr_chunk_overlap_s >= asr_chunk_length_s:
             raise ValueError(
@@ -234,7 +221,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 f"asr_chunk_length_s ({asr_chunk_length_s})"
             )
         self.asr_max_audio_clips = asr_max_audio_clips
-        self.asr_generation_reserve_tokens = asr_generation_reserve_tokens
         self.asr_chunk_length_s = asr_chunk_length_s
         self.asr_chunk_overlap_s = asr_chunk_overlap_s
         self.asr_self_chunks = asr_self_chunks

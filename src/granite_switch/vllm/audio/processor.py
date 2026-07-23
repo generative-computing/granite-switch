@@ -51,7 +51,6 @@ from vllm.multimodal.processing import (
 from .asr import (
     DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
     DEFAULT_ASR_MODEL_ID,
-    audio_token_budget,
     get_transcriber,
     resolve_generate_kwargs,
 )
@@ -94,16 +93,13 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
     ) -> Optional[Mapping[str, int]]:
         if not self._asr_enabled():
             return {}
-        # Per-clip transcript bound derived from the context window vLLM passes in
-        # (seq_len), minus the generation reserve, split across the max clip count.
-        # This is the worst case for profiling; the runtime budget also subtracts
-        # the prompt length, so it is never larger than this.
+        # Worst-case transcript positions one clip can occupy, used only to size
+        # the encoder cache and profiling pass — NOT to bound requests. A clip
+        # cannot transcribe to more than the whole context (a longer prompt is
+        # rejected by vLLM's standard length check), so the per-clip share of the
+        # context window is the honest upper bound. vLLM calls this with count=1.
         count = mm_counts.get("audio", 1) or 1
-        return {
-            "audio": audio_token_budget(
-                seq_len, self._asr_generation_reserve_tokens(), count
-            )
-        }
+        return {"audio": max(1, seq_len // count)}
 
     def get_data_parser(self) -> MultiModalDataParser:
         # Resample incoming audio to the ASR sample rate.
@@ -130,10 +126,6 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
     def _asr_max_audio_clips(self) -> int:
         cfg = self.get_hf_config()
         return int(getattr(cfg, "asr_max_audio_clips", 32) or 32)
-
-    def _asr_generation_reserve_tokens(self) -> int:
-        cfg = self.get_hf_config()
-        return int(getattr(cfg, "asr_generation_reserve_tokens", 8192) or 0)
 
     def _asr_self_chunks(self) -> bool:
         cfg = self.get_hf_config()
@@ -192,9 +184,12 @@ class GraniteSwitchASRMultiModalProcessor(
         self,
         audio,
         generate_kwargs: Optional[Mapping[str, object]] = None,
-        budget: Optional[int] = None,
     ) -> list[int]:
-        """Transcribe one audio item to a list of token ids (capped at ``budget``).
+        """Transcribe one audio item to a list of token ids (full transcript).
+
+        The transcript is spliced into the prompt as ordinary text tokens; it is
+        never truncated here. A clip whose transcript makes the prompt exceed the
+        context is rejected by vLLM's standard prompt-length check.
 
         Long audio is handled by the backend itself (Whisper) or by our
         encoder-agnostic chunker, per the checkpoint's ``asr_self_chunks`` flag.
@@ -214,10 +209,7 @@ class GraniteSwitchASRMultiModalProcessor(
             chunk_overlap_s=self.info._asr_chunk_overlap_s(),
         )
         tokenizer = self.info.get_tokenizer()
-        ids = tokenizer.encode(text, add_special_tokens=False)
-        # Cap to the per-clip transcript budget so the spliced sequence fits the
-        # context window vLLM profiled for.
-        return ids[:budget] if budget is not None else ids
+        return tokenizer.encode(text, add_special_tokens=False)
 
     def _call_hf_processor(
         self,
@@ -244,18 +236,10 @@ class GraniteSwitchASRMultiModalProcessor(
 
         input_ids = tokenizer.encode(prompt, add_special_tokens=False)
 
-        # Per-clip transcript budget: the served context minus the generation
-        # reserve and the prompt already present, split across this request's
-        # clips. Derived from the context window rather than a fixed cap.
-        budget = audio_token_budget(
-            self.info._max_model_len(),
-            self.info._asr_generation_reserve_tokens(),
-            len(audios),
-            prompt_tokens=len(input_ids),
-        )
-
         # Transcribe each audio to token ids; concatenate flat with per-item sizes.
-        per_item_ids = [self._transcribe(a, generate_kwargs, budget) for a in audios]
+        # Transcripts are spliced in full — an oversized request is rejected by
+        # vLLM's prompt-length check, not silently truncated here.
+        per_item_ids = [self._transcribe(a, generate_kwargs) for a in audios]
         sizes = [len(ids) for ids in per_item_ids]
         flat_ids = [tid for ids in per_item_ids for tid in ids]
 

@@ -113,27 +113,6 @@ class TestTranscriber:
         assert t._pipeline is sentinel
 
 
-class TestAudioTokenBudget:
-    def test_single_clip_uses_context_minus_reserve(self):
-        assert asr.audio_token_budget(131072, 8192, 1) == 131072 - 8192
-
-    def test_split_across_clips(self):
-        # (131072 - 8192) // 4
-        assert asr.audio_token_budget(131072, 8192, 4) == (131072 - 8192) // 4
-
-    def test_prompt_tokens_subtracted(self):
-        assert asr.audio_token_budget(8192, 4096, 2, prompt_tokens=1000) == (
-            (8192 - 4096 - 1000) // 2
-        )
-
-    def test_floors_at_one_when_no_room(self):
-        # Reserve exceeds context -> still at least one placeholder per clip.
-        assert asr.audio_token_budget(100, 200, 1) == 1
-
-    def test_zero_clip_count_treated_as_one(self):
-        assert asr.audio_token_budget(1000, 0, 0) == 1000
-
-
 class TestChunkedTranscribe:
     """self_chunks=False routes through the split/transcribe/merge chunker."""
 

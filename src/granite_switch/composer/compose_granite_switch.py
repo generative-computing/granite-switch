@@ -614,13 +614,6 @@ Examples:
              "--enable-audio.",
     )
     parser.add_argument(
-        "--asr-generation-reserve-tokens",
-        type=int,
-        default=None,
-        help="Context tokens held back for the generated answer when sizing the "
-             "per-clip transcript budget (default 8192). Implies --enable-audio.",
-    )
-    parser.add_argument(
         "--asr-self-chunks",
         dest="asr_self_chunks",
         action="store_true",
@@ -862,7 +855,6 @@ def build():
         or args.asr_pipeline_kwargs is not None
         or args.asr_generate_kwargs is not None
         or args.asr_max_audio_clips is not None
-        or args.asr_generation_reserve_tokens is not None
         or args.asr_self_chunks is not None
         or args.asr_chunk_length_s is not None
         or args.asr_chunk_overlap_s is not None
@@ -952,10 +944,6 @@ def build():
         # config keeps the constructor defaults otherwise.
         if args.asr_max_audio_clips is not None:
             model.config.asr_max_audio_clips = args.asr_max_audio_clips
-        if args.asr_generation_reserve_tokens is not None:
-            model.config.asr_generation_reserve_tokens = (
-                args.asr_generation_reserve_tokens
-            )
         if args.asr_self_chunks is not None:
             model.config.asr_self_chunks = args.asr_self_chunks
         if args.asr_chunk_length_s is not None:

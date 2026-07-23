@@ -240,34 +240,6 @@ def resolve_generate_kwargs(
     return merged
 
 
-def audio_token_budget(
-    context_len: int,
-    reserve_tokens: int,
-    num_clips: int,
-    prompt_tokens: int = 0,
-) -> int:
-    """Max transcript tokens allowed per audio clip, derived from the context.
-
-    Replaces the old fixed 2048-token cap. The audio in a request may occupy the
-    context window minus what is held back for the generated answer (and any
-    prompt text already present), split evenly across the request's clips::
-
-        (context_len - reserve_tokens - prompt_tokens) // num_clips
-
-    Two call sites, both vLLM-free so this is unit-testable on CPU:
-      * startup profiling knows only ``context_len`` (seq_len) and the clip count
-        (``prompt_tokens`` defaults to 0), giving the worst-case per-clip bound;
-      * at request time the real prompt length is subtracted too, so the actual
-        transcript is always <= what profiling reserved.
-
-    Floored at 1 so every clip contributes at least one placeholder token (vLLM
-    rejects a multimodal item with zero placeholders).
-    """
-    clips = max(1, num_clips)
-    available = context_len - reserve_tokens - prompt_tokens
-    return max(1, available // clips)
-
-
 def _freeze(value: Any) -> Any:
     """Recursively convert dicts/lists into a hashable, order-stable form."""
     if isinstance(value, Mapping):
