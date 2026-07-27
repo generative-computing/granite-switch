@@ -10,9 +10,10 @@ Document-as-audio: ``documents=[{"text": "<|audio|>"}]`` — the Granite templat
 renders each document with ``doc | tojson``, so the marker lands in the
 ``<documents>`` block where the ASR processor splices the transcript. The
 ``<|answerability|>`` control token is inserted by the same template (aLoRA
-fallback path). Ground truth is one real clip (librispeech_asr_dummy row 0)
-driving both classes; the questions are distinctive enough to survive ASR
-word-errors, so this tests the decision, not transcription accuracy (WER).
+fallback path). Ground truth is one committed speech clip (fixtures/, generated
+with SpeechT5 — MIT) driving both classes; the questions key on content that
+transcribes cleanly, so this tests the decision, not transcription accuracy
+(WER).
 
 Markers: slow + requires_model + gpu (opt-in via -m).
 """
@@ -20,6 +21,7 @@ Markers: slow + requires_model + gpu (opt-in via -m).
 import importlib.util
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -57,11 +59,12 @@ BASE_MODEL_PAIRS = _DEFAULT_BASE_MODEL_PAIRS + _load_experimental_pairs()
 COMPOSE_TIMEOUT_S = 1800  # matches the other E2E compose fixtures
 _AUDIO_MARKER = "<|audio|>"
 
-# librispeech_asr_dummy row 0; the fixture soft-checks the live reference so a
-# dataset change skips rather than silently mis-tests.
-_EXPECTED_REF_SUBSTRING = "apostle of the middle classes"
+# Committed speech clip; spoken sentence is "The Eiffel Tower is located in the
+# city of Paris in France." The location words transcribe cleanly (the proper
+# noun does not, hence the questions key on the location, not the name).
+_AUDIO_FIXTURE = Path(__file__).parent / "fixtures" / "eiffel_tower_paris.wav"
 _ANSWERABILITY_CASES = [
-    ("Who is the apostle of the middle classes?", "answerable"),
+    ("In which city is the tower located?", "answerable"),
     ("What is the boiling point of water?", "unanswerable"),
 ]
 
@@ -141,32 +144,14 @@ def _answerability_adapter_name(config):
 
 
 @pytest.fixture(scope="module")
-def librispeech_clip():
-    """One real 16 kHz speech clip + reference transcript (row 0)."""
-    import io
-
+def speech_clip():
+    """The committed 16 kHz mono speech clip as (waveform, sample_rate)."""
     import soundfile as sf
-    from datasets import Audio, load_dataset
 
-    ds = load_dataset(
-        "hf-internal-testing/librispeech_asr_dummy", "clean", split="validation"
-    )
-    # Decode FLAC bytes with soundfile: datasets>=4 defers audio decoding to
-    # torchcodec, an optional dep we don't want to require of the test env.
-    ds = ds.cast_column("audio", Audio(decode=False))
-    row = ds[0]
-    reference = row["text"]
-    if _EXPECTED_REF_SUBSTRING not in reference.lower():
-        pytest.skip(
-            "librispeech_asr_dummy row 0 changed; expected reference containing "
-            f"{_EXPECTED_REF_SUBSTRING!r}, got {reference!r}"
-        )
-    audio = row["audio"]
-    raw = audio["bytes"] if audio.get("bytes") else open(audio["path"], "rb").read()
-    waveform, sr = sf.read(io.BytesIO(raw), dtype="float32")
+    waveform, sr = sf.read(_AUDIO_FIXTURE, dtype="float32")
     if waveform.ndim > 1:
         waveform = waveform.mean(axis=1)
-    return {"waveform": waveform, "sr": sr, "reference": reference}
+    return {"waveform": waveform, "sr": sr}
 
 
 def _build_answerability_prompt(tokenizer, adapter_name, question):
@@ -197,9 +182,7 @@ def _parse_label(text):
     _ANSWERABILITY_CASES,
     ids=[c[1] for c in _ANSWERABILITY_CASES],
 )
-def test_answerability_over_audio_document(
-    served, librispeech_clip, question, expected
-):
+def test_answerability_over_audio_document(served, speech_clip, question, expected):
     """Answerability adapter reaches the correct verdict on an audio document."""
     from vllm import SamplingParams
 
@@ -210,7 +193,7 @@ def test_answerability_over_audio_document(
         {
             "prompt": prompt,
             "multi_modal_data": {
-                "audio": [(librispeech_clip["waveform"], librispeech_clip["sr"])]
+                "audio": [(speech_clip["waveform"], speech_clip["sr"])]
             },
         },
         SamplingParams(max_tokens=8, temperature=0.0),
