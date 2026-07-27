@@ -27,9 +27,13 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from jinja2 import Environment
 
-from granite_switch.composer.tokenizer_setup import configure_chat_template
+from granite_switch.composer.tokenizer_setup import (
+    configure_audio_chat_template,
+    configure_chat_template,
+)
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
 
@@ -531,3 +535,102 @@ class TestEndToEndAdapterConfigToRender:
         assert "<|answerability|>" not in result_none
         assert "<|context_relevance|>" not in result_none
         assert "<|summarization|>" not in result_none
+
+
+# ════════════════════════════════════════════════════════════════════
+# Audio: <|audio|> marker preservation, and coexistence with adapters
+# ════════════════════════════════════════════════════════════════════
+
+
+def _audio_messages(text="transcribe this", audio_type="audio"):
+    """A user turn whose content is a parts list carrying an audio clip."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": audio_type, audio_type: "clip-placeholder"},
+            ],
+        }
+    ]
+
+
+class TestAudioChatTemplate:
+    """configure_audio_chat_template emits the <|audio|> marker for audio parts."""
+
+    def test_audio_part_emits_marker(self):
+        tokenizer = _make_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" in result
+        assert "transcribe this" in result
+
+    def test_marker_dropped_without_injection(self):
+        # Regression canary: the un-injected base template drops the audio part.
+        tokenizer = _make_tokenizer()
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" not in result
+        assert "transcribe this" in result
+
+    def test_input_audio_and_audio_url_types_emit_marker(self):
+        for audio_type in ("input_audio", "audio_url"):
+            tokenizer = _make_tokenizer()
+            configure_audio_chat_template(tokenizer)
+            result = _render(
+                tokenizer,
+                messages=_audio_messages(audio_type=audio_type),
+                add_generation_prompt=True,
+            )
+            assert "<|audio|>" in result, f"marker missing for type={audio_type!r}"
+
+    def test_custom_marker_string(self):
+        tokenizer = _make_tokenizer()
+        configure_audio_chat_template(tokenizer, marker="<|snd|>")
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|snd|>" in result
+
+    def test_missing_anchor_raises(self):
+        tokenizer = SimpleNamespace(chat_template="{{ messages }}")
+        with pytest.raises(ValueError, match="content-part loop"):
+            configure_audio_chat_template(tokenizer)
+
+    def test_none_template_is_noop(self):
+        tokenizer = SimpleNamespace(chat_template=None)
+        configure_audio_chat_template(tokenizer)
+        assert tokenizer.chat_template is None
+
+
+class TestAudioAndAdapterInjectionsCompose:
+    """Adapter and audio injections applied in sequence leave both intact."""
+
+    def test_lora_prefix_and_audio_marker_coexist(self):
+        tokenizer = _make_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
+        configure_audio_chat_template(tokenizer)
+
+        result = _render(
+            tokenizer,
+            messages=_audio_messages(),
+            add_generation_prompt=True,
+            adapter_name="ctx_rel",
+        )
+        assert result.startswith("<|ctx_rel|>"), result[:80]
+        assert "<|audio|>" in result
+        assert "transcribe this" in result
+
+    def test_no_adapter_still_emits_audio_marker(self):
+        tokenizer = _make_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
+        configure_audio_chat_template(tokenizer)
+
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" in result
+        assert "<|ctx_rel|>" not in result
