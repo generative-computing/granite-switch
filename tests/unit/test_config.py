@@ -158,3 +158,33 @@ class TestAudioConfig:
         assert loaded.asr_model_id == "openai/whisper-large-v3"
         assert loaded.asr_pipeline_kwargs == {"chunk_length_s": 15, "batch_size": 4}
         assert loaded.asr_generate_kwargs == {"language": "de", "task": "transcribe"}
+
+    def test_adapters_and_audio_coexist_round_trip(self, tmp_path):
+        """Adapters and the audio cascade coexist and survive save→load."""
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(num_adapters=3),
+            asr_enabled=True,
+            asr_model_id="distil-whisper/distil-small.en",
+            asr_max_audio_clips=4,
+        )
+        assert cfg.num_adapters == 3
+        assert cfg.adapter_token_ids == [500, 501, 502]
+        assert cfg.asr_enabled is True
+
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.num_adapters == 3
+        assert loaded.adapter_token_ids == [500, 501, 502]
+        assert loaded.adapter_names == ["adapter_0", "adapter_1", "adapter_2"]
+        assert loaded.adapter_ranks == [8, 8, 8]
+        assert loaded.adapter_substitute_token_ids == [1, 1, 1]
+        assert loaded.asr_enabled is True
+        assert loaded.asr_model_id == "distil-whisper/distil-small.en"
+        assert loaded.asr_max_audio_clips == 4
+
+    def test_adapter_token_ids_do_not_collide_with_reserved_audio_row(self, tmp_path):
+        """Enabling audio does not perturb adapter token ids."""
+        before = GraniteSwitchConfig(**_valid_kwargs(num_adapters=2))
+        after = GraniteSwitchConfig(**_valid_kwargs(num_adapters=2), asr_enabled=True)
+        assert before.adapter_token_ids == after.adapter_token_ids
+        assert before.adapter_substitute_token_ids == after.adapter_substitute_token_ids

@@ -315,3 +315,135 @@ class TestMultiClipAndBudget:
         assert capture["self_chunks"] is False
         assert capture["chunk_length_s"] == 20.0
         assert capture["chunk_overlap_s"] == 3.0
+
+
+def _make_processor_transcribing(info, monkeypatch, text, *, ids_for):
+    """Processor whose transcriber returns a fixed ``text``; ``ids_for`` maps it to ids."""
+    info.get_tokenizer = lambda: SimpleNamespace(
+        encode=lambda t, add_special_tokens=False: ids_for(t)
+    )
+    proc = object.__new__(GraniteSwitchASRMultiModalProcessor)
+    proc.info = info
+
+    class FakeTranscriber:
+        def transcribe(
+            self,
+            audio,
+            sampling_rate=None,
+            generate_kwargs=None,
+            self_chunks=True,
+            chunk_length_s=30.0,
+            chunk_overlap_s=5.0,
+        ):
+            return text
+
+    monkeypatch.setattr(
+        proc_mod,
+        "get_transcriber",
+        lambda model_id=None, device="cpu", pipeline_kwargs=None: FakeTranscriber(),
+    )
+    return proc
+
+
+class TestEmptyAndSilentClip:
+    """A silent clip transcribes to "" -> zero transcript tokens, marker elided."""
+
+    def _ids_for(self, text):
+        return [] if text == "" else [1, 2, 3]
+
+    def test_empty_transcript_yields_zero_length_item(self, monkeypatch):
+        import torch
+
+        info = _make_info(asr_enabled=True, asr_model_id="w")
+        proc = _make_processor_transcribing(
+            info, monkeypatch, "", ids_for=self._ids_for
+        )
+
+        bf = proc._call_hf_processor(
+            prompt="<|audio|>",
+            mm_data={"audios": [np.zeros(1600, dtype=np.float32)]},
+            mm_kwargs={},
+            tok_kwargs={},
+        )
+        assert bf["audio_num_tokens"].tolist() == [0]
+        assert len(bf["audio_token_ids"]) == 0
+        assert bf["audio_token_ids"].dtype == torch.long
+
+    def test_empty_clip_replacement_is_empty(self, monkeypatch):
+        info = _make_info(asr_enabled=True, asr_model_id="w")
+        proc = _make_processor_transcribing(
+            info, monkeypatch, "", ids_for=self._ids_for
+        )
+
+        class _Kwargs:
+            def __init__(self, data):
+                self._data = data
+
+            def get_data(self):
+                return self._data
+
+        import torch
+
+        out = _Kwargs(
+            {
+                "audio_num_tokens": torch.tensor([0], dtype=torch.long),
+                "audio_token_ids": torch.zeros(0, dtype=torch.long),
+            }
+        )
+        updates = proc._get_prompt_updates(None, {}, out)
+        assert len(updates) == 1
+        assert updates[0].replacement(0) == []
+
+    def test_mixed_empty_and_nonempty_clips(self, monkeypatch):
+        info = _make_info(asr_enabled=True, asr_max_audio_clips=4, asr_model_id="w")
+        texts = iter(["", "words"])
+        info.get_tokenizer = lambda: SimpleNamespace(
+            encode=lambda t, add_special_tokens=False: self._ids_for(t)
+        )
+        proc = object.__new__(GraniteSwitchASRMultiModalProcessor)
+        proc.info = info
+
+        class FakeTranscriber:
+            def transcribe(self, audio, **kw):
+                return next(texts)
+
+        monkeypatch.setattr(
+            proc_mod,
+            "get_transcriber",
+            lambda model_id=None, device="cpu", pipeline_kwargs=None: FakeTranscriber(),
+        )
+
+        bf = proc._call_hf_processor(
+            prompt="<|audio|> <|audio|>",
+            mm_data={
+                "audios": [
+                    np.zeros(1600, dtype=np.float32),
+                    np.zeros(1600, dtype=np.float32),
+                ]
+            },
+            mm_kwargs={},
+            tok_kwargs={},
+        )
+        assert bf["audio_num_tokens"].tolist() == [0, 3]
+        assert len(bf["audio_token_ids"]) == 3
+
+
+class TestClipCeiling:
+    """get_supported_mm_limits publishes asr_max_audio_clips as the clip ceiling."""
+
+    def test_ceiling_equals_configured_max(self):
+        assert _make_info(asr_enabled=True).get_supported_mm_limits() == {"audio": 32}
+        assert _make_info(
+            asr_enabled=True, asr_max_audio_clips=1
+        ).get_supported_mm_limits() == {"audio": 1}
+        assert _make_info(
+            asr_enabled=True, asr_max_audio_clips=8
+        ).get_supported_mm_limits() == {"audio": 8}
+
+    def test_per_item_bound_never_exceeds_context(self):
+        info = _make_info(asr_enabled=True, asr_max_audio_clips=32)
+        seq_len = 4096
+        for count in (1, 2, 8, 32):
+            bound = info.get_mm_max_tokens_per_item(seq_len, {"audio": count})["audio"]
+            assert bound == seq_len // count
+            assert bound <= seq_len
