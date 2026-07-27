@@ -113,7 +113,6 @@ class TestAudioConfig:
     def test_longaudio_defaults(self):
         cfg = GraniteSwitchConfig(num_adapters=0)
         assert cfg.asr_max_audio_clips == 32
-        assert cfg.asr_generation_reserve_tokens == 8192
         assert cfg.asr_chunk_length_s == 30.0
         assert cfg.asr_chunk_overlap_s == 5.0
         assert cfg.asr_self_chunks is True
@@ -123,7 +122,6 @@ class TestAudioConfig:
             num_adapters=0,
             asr_enabled=True,
             asr_max_audio_clips=4,
-            asr_generation_reserve_tokens=4096,
             asr_chunk_length_s=20.0,
             asr_chunk_overlap_s=3.0,
             asr_self_chunks=False,
@@ -131,7 +129,6 @@ class TestAudioConfig:
         cfg.save_pretrained(tmp_path)
         loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
         assert loaded.asr_max_audio_clips == 4
-        assert loaded.asr_generation_reserve_tokens == 4096
         assert loaded.asr_chunk_length_s == 20.0
         assert loaded.asr_chunk_overlap_s == 3.0
         assert loaded.asr_self_chunks is False

@@ -70,10 +70,12 @@ editing that file directly — no re-compose and no patched package:
 
 ### Long audio & multiple clips
 
-The transcript token budget is derived from the **served context window**, not a
-fixed cap. Per request, the audio may occupy roughly
-`max_model_len − asr_generation_reserve_tokens − prompt_tokens`, split across the
-request's clips. Relevant config fields (all optional, sensible defaults):
+The transcript is spliced into the prompt as ordinary text tokens — it is **not**
+truncated to fit. A request behaves exactly like a long text request: if the
+prompt plus the transcript(s) leaves no room for the answer within the served
+`max_model_len`, vLLM rejects it with its standard prompt-length error (HTTP 400).
+Shorten the audio or serve with a larger `--max-model-len`. Relevant config fields
+(all optional, sensible defaults):
 
 - `asr_max_audio_clips` (default `32`) — how many audio clips one request may
   carry; each is spliced at its own `<|audio|>` marker. `--limit-mm-per-prompt`
@@ -81,8 +83,6 @@ request's clips. Relevant config fields (all optional, sensible defaults):
   Clips cost no extra KV (transcripts are ordinary text tokens bounded by the
   context); the ceiling guards against one request triggering an unbounded number
   of synchronous transcriptions.
-- `asr_generation_reserve_tokens` (default `8192`) — context held back for the
-  generated answer (and prompt overhead) when sizing the transcript budget.
 
 **Long single clips** are handled two ways, selected by `asr_self_chunks`:
 

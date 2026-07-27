@@ -75,13 +75,15 @@ class TestProcessingInfoGating:
         assert info3.get_supported_mm_limits() == {"audio": 3}
 
     def test_max_tokens_per_item_is_context_derived(self):
-        # Budget = (seq_len - generation_reserve) // clip_count (default reserve 8192).
+        # Profiling/encoder-cache hint = per-clip share of the context (seq_len //
+        # clip_count), the worst case one clip can occupy. Not a request bound —
+        # an oversized transcript is rejected by vLLM's prompt-length check.
         info = _make_info(asr_enabled=True)
         assert info.get_mm_max_tokens_per_item(20000, {"audio": 1}) == {
-            "audio": 20000 - 8192
+            "audio": 20000
         }
         assert info.get_mm_max_tokens_per_item(20000, {"audio": 4}) == {
-            "audio": (20000 - 8192) // 4
+            "audio": 20000 // 4
         }
 
 
@@ -114,7 +116,6 @@ class TestProcessingInfoAsrAccessors:
     def test_longaudio_accessor_defaults(self):
         info = _make_info(asr_enabled=True)
         assert info._asr_max_audio_clips() == 32
-        assert info._asr_generation_reserve_tokens() == 8192
         assert info._asr_self_chunks() is True
         assert info._asr_chunk_length_s() == 30.0
         assert info._asr_chunk_overlap_s() == 5.0
@@ -123,13 +124,11 @@ class TestProcessingInfoAsrAccessors:
         info = _make_info(
             asr_enabled=True,
             asr_max_audio_clips=2,
-            asr_generation_reserve_tokens=4096,
             asr_self_chunks=False,
             asr_chunk_length_s=20.0,
             asr_chunk_overlap_s=3.0,
         )
         assert info._asr_max_audio_clips() == 2
-        assert info._asr_generation_reserve_tokens() == 4096
         assert info._asr_self_chunks() is False
         assert info._asr_chunk_length_s() == 20.0
         assert info._asr_chunk_overlap_s() == 3.0
@@ -270,7 +269,7 @@ class TestCallHfProcessorMerge:
 
 
 class TestMultiClipAndBudget:
-    """#1 (multiple clips) + #2 (context-derived per-clip token budget)."""
+    """Multiple clips, each transcribed in full and spliced at its marker."""
 
     def test_two_clips_produce_two_transcripts(self, monkeypatch):
         capture = {}
@@ -291,16 +290,15 @@ class TestMultiClipAndBudget:
         assert bf["audio_num_tokens"].tolist() == [3, 3]
         assert len(bf["audio_token_ids"]) == 6
 
-    def test_transcribe_truncates_to_budget(self, monkeypatch):
+    def test_transcribe_returns_full_transcript(self, monkeypatch):
+        # The transcript is never truncated here — it is spliced in full and an
+        # oversized prompt is rejected downstream by vLLM's length check.
         capture = {}
         info = _make_info(asr_enabled=True, asr_model_id="w")
         proc = _make_processor(info, monkeypatch, capture)
-        # Override tokenizer to emit 5 ids so the budget cut is visible.
         info.get_tokenizer = lambda: SimpleNamespace(
             encode=lambda text, add_special_tokens=False: [1, 2, 3, 4, 5]
         )
-        assert proc._transcribe(np.zeros(1600, dtype=np.float32), {}, budget=2) == [1, 2]
-        # No budget -> untruncated.
         assert proc._transcribe(np.zeros(1600, dtype=np.float32), {}) == [1, 2, 3, 4, 5]
 
     def test_self_chunks_and_chunk_params_forwarded(self, monkeypatch):
