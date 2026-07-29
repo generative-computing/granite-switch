@@ -172,11 +172,33 @@ class TestConfigureChatTemplate:
         assert "Warning" in captured.out
         assert "does not have a chat template" in captured.out
 
+    def test_unrecognized_template_format_raises(self):
+        """Raise ValueError when the template has neither role marker.
+
+        A marker-less template cannot receive control-token injection, so the
+        composer must fail loudly rather than ship a checkpoint whose adapters
+        can never be activated.
+        """
+        tokenizer = MockTokenizer()
+        # Valid Jinja, but uses no recognized role marker (no <|start_of_role|>
+        # and no <|im_start|>), so detect_template_format returns None.
+        tokenizer.chat_template = (
+            "{%- for message in messages %}\n{{- message.content }}\n{%- endfor %}\n"
+            "{%- if add_generation_prompt %}\n{{- 'assistant:' }}\n{%- endif %}"
+        )
+        # Use a lora adapter so mapping construction skips the alora invocation
+        # decode (which would read a nonexistent adapter_config.json) and the
+        # call reaches detect_template_format, which is what we're exercising.
+        with pytest.raises(ValueError, match="unrecognized role-marker format"):
+            configure_chat_template(tokenizer, [("/path/code", "code", "lora")])
+
     def test_adapter_map_in_template(self, capsys):
         """Template contains adapter_map with token and type entries."""
         tokenizer = MockTokenizer()
+        # Include a granite-format role marker so detect_template_format recognizes the
+        # template; the rest is minimal since this test only checks adapter_map.
         tokenizer.chat_template = (
-            "{%- if messages[0] %}\n{{- messages[0] }}\n{%- endif %}\n"
+            "{%- if messages[0] %}\n{{- '<|start_of_role|>' }}{{- messages[0] }}\n{%- endif %}\n"
             "{%- if add_generation_prompt %}\n{{- 'assistant:' }}\n{%- endif %}"
         )
         with patch(_PATCH_TARGET, return_value="<requirements>"):
@@ -196,7 +218,7 @@ class TestConfigureChatTemplate:
         """ALoRA adapter entries include invocation_text; LoRA entries do not."""
         tokenizer = MockTokenizer()
         tokenizer.chat_template = (
-            "{%- if messages[0] %}\n{{- messages[0] }}\n{%- endif %}\n"
+            "{%- if messages[0] %}\n{{- '<|start_of_role|>' }}{{- messages[0] }}\n{%- endif %}\n"
             "{%- if add_generation_prompt %}\n{{- 'end' }}\n{%- endif %}"
         )
         with patch(_PATCH_TARGET, return_value="<requirements>"):
@@ -218,7 +240,7 @@ class TestConfigureChatTemplate:
         tokenizer = MockTokenizer()
         tokenizer.chat_template = (
             "{%- set ns = namespace(found=false) %}\n"
-            "{%- for message in messages %}\n{{- message }}\n{%- endfor %}\n"
+            "{%- for message in messages %}\n{{- '<|start_of_role|>' }}{{- message }}\n{%- endfor %}\n"
             "{%- if add_generation_prompt %}\n{{- 'gen' }}\n{%- endif %}"
         )
         with patch(_PATCH_TARGET, return_value="<requirements>"):

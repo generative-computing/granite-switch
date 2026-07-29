@@ -426,6 +426,20 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
 
     def __init__(self, config: GraniteSwitchConfig):
+        # Only declare lm_head as tied to embed_tokens when the config actually
+        # ties them. Granite 4.0/4.1 tie (shared matrix); Granite 4.2 sets
+        # tie_word_embeddings=False and ships a distinct LM head. Setting the
+        # instance attribute to {} for the untied case keeps lm_head.weight a
+        # first-class parameter through save/load, mirroring the vLLM backend's
+        # `if config.tie_word_embeddings:` alias in granite_switch_model.py.
+        #
+        # On transformers 5.9 the framework already gates tie-key expansion on
+        # config.tie_word_embeddings, so the static class attribute is harmless
+        # for an untied config; this instance override makes the intent explicit
+        # and robust to future HF changes.
+        if not getattr(config, "tie_word_embeddings", True):
+            self._tied_weights_keys = {}
+
         super().__init__(config)
 
         self.model = GraniteSwitchModel(config)

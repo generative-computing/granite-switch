@@ -14,6 +14,7 @@ tests verify:
    render, or emits an unknown token.
 """
 
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -21,6 +22,8 @@ import pytest
 from granite_switch.composer.compose_granite_switch import (
     _probe_lora_substitute_token_id,
 )
+
+_FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
 class TestOnRealGraniteTokenizer:
@@ -46,6 +49,69 @@ class TestOnRealGraniteTokenizer:
         sub_id = _probe_lora_substitute_token_id(tok)
         assert sub_id == 100264
         assert tok.convert_ids_to_tokens([sub_id])[0] == "<|start_of_role|>"
+
+    def test_granite_4_2_chatml(self):
+        """Granite 4.2 (ChatML): the probe returns <|im_start|> (id 100256).
+
+        The 4.2 base ships on a local path (env GRANITE_4_2_BASE), not the Hub;
+        skips when unavailable so the suite still runs locally.
+        """
+        path = os.environ.get("GRANITE_4_2_BASE")
+        if not path or not os.path.exists(path):
+            pytest.skip("GRANITE_4_2_BASE not set / path missing")
+        tok = self._tok(path)
+        sub_id = _probe_lora_substitute_token_id(tok)
+        assert tok.convert_ids_to_tokens([sub_id])[0] == "<|im_start|>"
+
+
+class TestChatMLMultiShapeConstancy:
+    """A6: the probe's core assumption — a constant input_ids[0] across all
+    render modes — must hold for the ChatML template, which branches more than
+    the granite-format one (thinking on/off, system/no-system, tools/no-tools).
+
+    Uses the ChatML fixture with a minimal fake tokenizer that records the
+    first token of each rendered shape and asserts they all agree. On Vela the
+    real-tokenizer test above pins the concrete id (<|im_start|>)."""
+
+    def test_input_ids_0_constant_across_chatml_shapes(self):
+        from jinja2 import Environment
+
+        with open(os.path.join(_FIXTURES, "granite_chatml_template.jinja")) as f:
+            template = f.read()
+        env = Environment().from_string(template)
+
+        shapes = [
+            dict(
+                messages=[{"role": "user", "content": "hi"}],
+                add_generation_prompt=False,
+            ),
+            dict(
+                messages=[{"role": "user", "content": "hi"}], add_generation_prompt=True
+            ),
+            dict(
+                messages=[{"role": "user", "content": "hi"}],
+                add_generation_prompt=True,
+                enable_thinking=False,
+            ),
+            dict(
+                messages=[
+                    {"role": "system", "content": "sys"},
+                    {"role": "user", "content": "hi"},
+                ],
+                add_generation_prompt=True,
+            ),
+        ]
+        # The rendered text of every shape must start with the same role marker
+        # (ignoring leading whitespace the tokenizer strips), so input_ids[0] is
+        # constant regardless of which shape the probe happens to render.
+        firsts = set()
+        for shape in shapes:
+            rendered = env.render(**shape).lstrip("\n")
+            firsts.add(rendered[: len("<|im_start|>")])
+        assert firsts == {"<|im_start|>"}, (
+            f"ChatML template does not emit a constant first marker across "
+            f"render shapes: {firsts}"
+        )
 
 
 class TestOnSyntheticTokenizer:

@@ -45,6 +45,7 @@ import shutil
 import time
 from pathlib import Path
 
+import torch
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
@@ -65,6 +66,7 @@ from granite_switch.composer.tokenizer_setup import (
     configure_chat_template,
     get_alora_first_invocation_token_id,
 )
+from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
 
 # ---------------------------------------------------------------------------
 # Utility helpers (kept local — not worth a separate module)
@@ -88,10 +90,12 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
 
     Assumption (Granite 4.x): the chat template emits a constant
     ``input_ids[0]`` regardless of message content, system prompt presence,
-    or generation-prompt flag. Empirically verified — every realistic render
-    of the Granite 4.1 template yields ``<|start_of_role|>`` (id 100264) at
-    position 0. The probe renders a single minimal chat to read that
-    constant out of the template.
+    or generation-prompt flag. Empirically verified for both template
+    families — every realistic render of the Granite 4.1 role-marker template
+    yields ``<|start_of_role|>`` (id 100264) at position 0, and every render of
+    the Granite 4.2 ChatML template (thinking on/off, with/without system
+    prompt) yields ``<|im_start|>`` (id 100256) at position 0. The probe
+    renders a single minimal chat to read that constant out of the template.
 
     A future model whose chat template branches on inputs at position 0
     (e.g. emits BOS only when no system message is present) would break
@@ -137,6 +141,41 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
             "appears to emit content outside the tokenizer's vocabulary."
         )
     return sub_id
+
+
+def initialize_untied_control_token_lm_head_rows(
+    model, adapter_token_ids, adapter_substitute_token_ids
+):
+    """Initialize new control-token rows in an untied ``lm_head``.
+
+    Only relevant when ``config.tie_word_embeddings`` is False (e.g. Granite
+    4.2): ``resize_token_embeddings`` extends the *separate* ``lm_head`` matrix
+    with HF-default (small random) rows for the new control tokens and leaves
+    them uncorrected. Since control tokens are freely generatable (no logit
+    suppression), those random rows would give each control token an arbitrary,
+    checkpoint-nondeterministic output logit.
+
+    Policy: copy each control token's token-exchange *substitute* row from the
+    LM head into the control token's row, so the control token is as (un)likely
+    to be emitted as the substitute it is swapped to at the input side. This
+    keeps the input-side embedding swap and the output-side logits symmetric.
+
+    Args:
+        model: A ``GraniteSwitchForCausalLM`` after ``resize_token_embeddings``.
+        adapter_token_ids: Control-token ids, one per adapter.
+        adapter_substitute_token_ids: Substitute-token ids, one per adapter
+            (ALoRA: first invocation token; LoRA: probed sequence-start token).
+    """
+    lm_head_weight = model.get_output_embeddings().weight
+    with torch.no_grad():
+        for control_id, substitute_id in zip(
+            adapter_token_ids, adapter_substitute_token_ids
+        ):
+            lm_head_weight[control_id].copy_(lm_head_weight[substitute_id])
+    print(
+        f"  Untied LM head: initialized {len(adapter_token_ids)} control-token "
+        f"row(s) from their substitute rows"
+    )
 
 
 def _get_directory_size(directory):
@@ -200,10 +239,21 @@ def _extract_hf_snapshot_commit(adapter_path):
     return None
 
 
-def _copy_io_configs(discovered_adapters, output_path):
-    """Copy io.yaml files to *output_path/io_configs/<adapter_name>/*.
+# A minimal io.yaml synthesized when --create-ioyaml is set and an adapter
+# ships none. All fields null; the caller/consumer can fill them in later.
+_MINIMAL_IO_YAML = "name: ~\nmodel: ~\nresponse_format: ~\ntransformations: ~\n"
+
+
+def _copy_io_configs(discovered_adapters, output_path, create_ioyaml=False):
+    """Copy each adapter's io.yaml to *output_path/io_configs/<adapter_name>/*.
 
     Skips built-in adapters (adapter_path is None).
+
+    When an external adapter has no io.yaml:
+      * ``create_ioyaml=False`` (default): raise ``FileNotFoundError`` — the
+        adapter is expected to ship an io.yaml.
+      * ``create_ioyaml=True``: synthesize a minimal io.yaml (all fields null)
+        on the fly so composition can proceed.
     """
     print("\nCopying io.yaml configuration files...")
     io_config_paths = []
@@ -214,14 +264,24 @@ def _copy_io_configs(discovered_adapters, output_path):
             # Built-in adapter — no io.yaml to copy
             io_config_paths.append(None)
             continue
-        io_config_dir = Path(output_path) / "io_configs" / adapter_name
-        io_config_dir.mkdir(parents=True, exist_ok=True)
         source = Path(adapter_path) / "io.yaml"
+        io_config_dir = Path(output_path) / "io_configs" / adapter_name
         dest = io_config_dir / "io.yaml"
-        shutil.copy2(source, dest)
-        rel_path = dest.relative_to(output_path)
-        io_config_paths.append(str(rel_path))
-        print(f"  [{i}] {rel_path}")
+        if source.is_file():
+            io_config_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, dest)
+            print(f"  [{i}] {dest.relative_to(output_path)}")
+        elif create_ioyaml:
+            io_config_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_text(_MINIMAL_IO_YAML)
+            print(f"  [{i}] {dest.relative_to(output_path)} (synthesized minimal)")
+        else:
+            raise FileNotFoundError(
+                f"Adapter '{adapter_name}' has no io.yaml at {source}. "
+                f"Pass --create-ioyaml to synthesize a minimal io.yaml, or add "
+                f"an io.yaml to the adapter."
+            )
+        io_config_paths.append(str(dest.relative_to(output_path)))
 
     copied = sum(1 for p in io_config_paths if p is not None)
     print(f"Copied {copied} io.yaml file(s)")
@@ -566,6 +626,16 @@ Examples:
         default=False,
         help="Include debug fields (original_path) in adapter_index.json",
     )
+    parser.add_argument(
+        "--create-ioyaml",
+        action="store_true",
+        default=False,
+        help=(
+            "If an adapter has no io.yaml, synthesize a minimal one "
+            "(all fields null) instead of failing. Default: fail when an "
+            "adapter's io.yaml is missing."
+        ),
+    )
     return parser
 
 
@@ -870,6 +940,18 @@ def build():
     new_embed_size = model.model.embed_tokens.weight.shape[0]
     print(f"Embeddings resized: {old_embed_size} -> {new_embed_size}")
 
+    # Untied LM head: resize_token_embeddings extends lm_head with HF-default
+    # (small random) rows for the new control tokens. Those rows are never
+    # corrected otherwise, giving control tokens arbitrary, nondeterministic
+    # output logits. Copy each control token's token-exchange substitute row
+    # so a control token is as (un)likely to be emitted as its substitute on
+    # the output side too — symmetric with the input-side embedding swap.
+    # No-op on the tied path (embed and head share one matrix).
+    if not getattr(model.config, "tie_word_embeddings", True):
+        initialize_untied_control_token_lm_head_rows(
+            model, adapter_token_ids, adapter_substitute_token_ids
+        )
+
     print(f"\nStep 3 complete in {time.time() - step_start:.2f}s")
 
     return (
@@ -908,7 +990,9 @@ def save_and_validate_model_artifacts(
     print("=" * 80)
     step_start = time.time()
     os.makedirs(args.output, exist_ok=True)
-    io_config_paths = _copy_io_configs(all_discovered, args.output)
+    io_config_paths = _copy_io_configs(
+        all_discovered, args.output, create_ioyaml=args.create_ioyaml
+    )
     adapter_index = _create_adapter_index(
         all_discovered,
         io_config_paths,
@@ -943,6 +1027,15 @@ def save_and_validate_model_artifacts(
     # Validate what save_pretrained wrote/overwrote
     after_snapshot = _snapshot_directory(args.output)
     _validate_save_pretrained_writes(before_snapshot, after_snapshot, args.output)
+
+    # Untied bases (e.g. Granite 4.2) must keep a distinct lm_head in the
+    # checkpoint; confirm it was not dropped by any tied-alias dedupe.
+    if not getattr(model.config, "tie_word_embeddings", True):
+        validate_untied_lm_head_saved(
+            args.output,
+            expected_vocab_size=model.config.vocab_size,
+            hidden_size=model.config.hidden_size,
+        )
 
     # Write compose-specific BUILD.md. The upstream README.md is excluded
     # from _copy_upstream_auxiliary_files so the composed output describes

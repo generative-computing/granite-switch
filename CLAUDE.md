@@ -328,6 +328,14 @@ model can produce any control token during generation.
 - **ALORA adapters**: Token placed either in user message by matching invocation sequence or right before generation prompt
 - **LORA adapters**: Token placed at sequence beginning
 
+### 3a. Dual Chat-Template Formats
+
+Two Granite chat-template families are supported, auto-detected by
+`detect_template_format` from the base tokenizer's template: the
+`<|start_of_role|>…<|end_of_role|>` role-marker format (4.0/4.1) and the ChatML
+`<|im_start|>…<|im_end|>` format (4.2). All adapter control-token injection is
+driven by the detected `TemplateFormat` rather than hardcoded per format.
+
 ### 4. Granite vs Llama Differences
 
 - Granite uses `logits_scaling` (typically 8.0)
