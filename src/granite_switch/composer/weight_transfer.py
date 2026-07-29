@@ -5,9 +5,12 @@ Driven by :class:`ArchDescriptor` fusion rules instead of inline if/elif chains.
 """
 
 import gc
+import json
 import re
+from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from tqdm import tqdm
 
 from .arch import ArchDescriptor
@@ -694,3 +697,67 @@ def _validate_adapter_transfer(
         )
 
     print(f"All {len(expected_lora_params)} LoRA parameters accounted for")
+
+
+# ---------------------------------------------------------------------------
+# Untied LM head save-time validation
+# ---------------------------------------------------------------------------
+
+
+def read_saved_lm_head_shape(output_path):
+    """Return the shape of ``lm_head.weight`` in a saved checkpoint, or ``None``.
+
+    Pure inspection helper (no assertions): reads the safetensors index (or a
+    single-file safetensors) and returns ``lm_head.weight``'s shape as a list,
+    or ``None`` if the tensor is absent from the checkpoint. Shared by the
+    compose-time check below and the untied round-trip test so both agree on
+    exactly what "the head survived save" means.
+    """
+    out = Path(output_path)
+    index_path = out / "model.safetensors.index.json"
+    if index_path.exists():
+        with open(index_path) as f:
+            weight_map = json.load(f).get("weight_map", {})
+        if "lm_head.weight" not in weight_map:
+            return None
+        target_files = [out / weight_map["lm_head.weight"]]
+    else:
+        target_files = sorted(out.glob("*.safetensors"))
+
+    for tf in target_files:
+        with safe_open(tf, framework="pt") as sf:
+            if "lm_head.weight" in sf.keys():
+                return list(sf.get_slice("lm_head.weight").get_shape())
+    return None
+
+
+def validate_untied_lm_head_saved(output_path, expected_vocab_size, hidden_size):
+    """Assert an untied checkpoint saved a distinct ``lm_head.weight``.
+
+    On the untied path (``tie_word_embeddings: false``) the LM head is a
+    separate matrix from the input embeddings and MUST survive
+    ``save_pretrained`` as its own tensor. This is a **compose-time guard on the
+    real produced checkpoint** (not just the fixed-version unit test): it catches
+    a `transformers`-version regression where a tied-alias dedupe would drop the
+    head at save time on an actual model. Uses the shared
+    :func:`read_saved_lm_head_shape` reader.
+
+    Raises:
+        ValueError: if the head is missing or has the wrong shape.
+    """
+    shape = read_saved_lm_head_shape(output_path)
+    if shape is None:
+        raise ValueError(
+            "Untied checkpoint does not contain a distinct lm_head.weight "
+            f"tensor in {output_path}. The distinct LM head was dropped on "
+            "save — check _tied_weights_keys handling for the untied path."
+        )
+    if shape != [expected_vocab_size, hidden_size]:
+        raise ValueError(
+            f"Untied lm_head.weight has shape {shape}, "
+            f"expected [{expected_vocab_size}, {hidden_size}]."
+        )
+    print(
+        f"  Untied LM head validated: lm_head.weight present, shape "
+        f"[{expected_vocab_size}, {hidden_size}]"
+    )

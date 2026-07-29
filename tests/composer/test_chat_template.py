@@ -29,13 +29,18 @@ from unittest.mock import patch
 
 from jinja2 import Environment
 
-from granite_switch.composer.tokenizer_setup import configure_chat_template
+from granite_switch.composer.tokenizer_setup import (
+    configure_chat_template,
+    detect_template_format,
+)
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 with open(os.path.join(_FIXTURES, "granite_chat_template.jinja")) as _f:
     _GRANITE_TEMPLATE = _f.read()
+with open(os.path.join(_FIXTURES, "granite_chatml_template.jinja")) as _f:
+    _CHATML_TEMPLATE = _f.read()
 
 
 def _make_tokenizer():
@@ -531,3 +536,251 @@ class TestEndToEndAdapterConfigToRender:
         assert "<|answerability|>" not in result_none
         assert "<|context_relevance|>" not in result_none
         assert "<|summarization|>" not in result_none
+
+
+# ---------------------------------------------------------------------------
+# ChatML (Granite 4.2) render-level tests
+# ---------------------------------------------------------------------------
+
+
+def _make_chatml_tokenizer():
+    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+
+
+class TestDetectTemplateFormat:
+    """detect_template_format() classifies the two Granite template families."""
+
+    def test_detects_chatml(self):
+        fmt = detect_template_format(_CHATML_TEMPLATE)
+        assert fmt is not None
+        assert fmt.name == "chatml"
+        assert fmt.role_open_marker == "<|im_start|>"
+        assert fmt.content_accessor == "content"
+        assert fmt.loop_var_source == "loop_messages"
+        assert fmt.ns_merge_last is True
+
+    def test_detects_granite_format(self):
+        fmt = detect_template_format(_GRANITE_TEMPLATE)
+        assert fmt is not None
+        assert fmt.name == "granite_format"
+        assert fmt.role_open_marker == "<|start_of_role|>"
+        assert fmt.content_accessor == "content.val"
+        assert fmt.loop_var_source == "messages"
+        assert fmt.ns_merge_last is False
+
+    def test_unknown_returns_none(self):
+        assert detect_template_format("no markers here") is None
+        assert detect_template_format("") is None
+        assert detect_template_format(None) is None
+
+    def test_chatml_wins_when_both_markers_present(self):
+        both = "<|start_of_role|> and <|im_start|>"
+        assert detect_template_format(both).name == "chatml"
+
+
+class TestConfigureChatTemplateChatML:
+    """configure_chat_template() against the real Granite 4.2 ChatML template.
+
+    The trained 4.2 aLoRA adapters use the assistant-boundary invocation
+    (``<|im_start|>assistant\\n``) → ALoRA fallback path. A hypothetical
+    user-message invocation (``<context>``) exercises Pass 1 / Pass 2.
+    """
+
+    def test_lora_prefix_path(self):
+        """LoRA: control token at sequence start, first <|im_start|> suppressed.
+
+        The rendered output opens with ``<|my_lora|>system\\n`` (skip-once
+        consumed the leading ``<|im_start|>``), not
+        ``<|my_lora|><|im_start|>system``.
+        """
+        tokenizer = _make_chatml_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "my_lora", "lora")])
+
+        result = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "Hello"}],
+            add_generation_prompt=True,
+            adapter_name="my_lora",
+        )
+        # apply_chat_template strips leading whitespace at tokenize time; the
+        # jinja renderer leaves a leading newline, so strip before asserting.
+        assert result.lstrip("\n").startswith("<|my_lora|>system\n"), (
+            f"expected '<|my_lora|>system' at start (skip-once suppressed "
+            f"<|im_start|>), got {result[:80]!r}"
+        )
+        # The control token must be followed by the role name, not <|im_start|>.
+        pos = result.index("<|my_lora|>")
+        after = result[pos + len("<|my_lora|>") :]
+        assert not after.startswith("<|im_start|>")
+
+    def test_skip_once_is_single_shot(self):
+        """Only the first <|im_start|> after a LoRA token is suppressed."""
+        tokenizer = _make_chatml_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "my_lora", "lora")])
+
+        no_adapter = _render(
+            _make_chatml_tokenizer(),
+            messages=[
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "second"},
+            ],
+            add_generation_prompt=True,
+        )
+        with_adapter = _render(
+            tokenizer,
+            messages=[
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "second"},
+            ],
+            add_generation_prompt=True,
+            adapter_name="my_lora",
+        )
+        # Exactly one <|im_start|> is suppressed relative to the no-adapter
+        # render (and one control token is added).
+        assert (
+            with_adapter.count("<|im_start|>") == no_adapter.count("<|im_start|>") - 1
+        )
+        assert with_adapter.count("<|my_lora|>") == 1
+
+    def test_alora_fallback_path(self):
+        """ALoRA assistant-boundary: token before <|im_start|>assistant\\n<think>.
+
+        The 4.2 adapters' invocation decodes to ``<|im_start|>assistant\\n``,
+        which never appears in a user message, so Pass 1 leaves
+        alora_target_idx == -1 and the fallback fires before the generation
+        prompt. Skip-once suppresses the generation-prompt <|im_start|>, leaving
+        ``<|gsm8k|>assistant\\n<think>`` — the runtime swap restores <|im_start|>.
+        """
+        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
+
+        result = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "What is 2+2?"}],
+            add_generation_prompt=True,
+            adapter_name="gsm8k",
+        )
+        assert "<|gsm8k|>" in result
+        pos = result.rindex("<|gsm8k|>")
+        after = result[pos + len("<|gsm8k|>") :]
+        # <|im_start|> is suppressed; assistant\n<think> is preserved.
+        assert after.startswith("assistant\n<think>"), (
+            f"expected 'assistant\\n<think>' immediately after <|gsm8k|>, "
+            f"got {after[:40]!r}"
+        )
+        # Control token appears exactly once.
+        assert result.count("<|gsm8k|>") == 1
+
+    def test_alora_fallback_thinking_off(self):
+        """ALoRA fallback works with enable_thinking=False (<think></think>)."""
+        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
+
+        result = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "hi"}],
+            add_generation_prompt=True,
+            enable_thinking=False,
+            adapter_name="gsm8k",
+        )
+        pos = result.rindex("<|gsm8k|>")
+        after = result[pos + len("<|gsm8k|>") :]
+        assert after.startswith("assistant\n<think></think>"), f"got {after[:40]!r}"
+
+    def test_alora_pass2_user_message(self):
+        """ALoRA Pass 1+2 for a user-message invocation under ChatML.
+
+        Uses a hypothetical ``<context>`` invocation to exercise the plain
+        ``content`` string mutation (not ``content.val``). The control token is
+        inserted before the invocation text with its first char dropped.
+        """
+        with patch(_PATCH_TARGET, return_value="<context>"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "ctxrel", "alora")])
+
+        result = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "<context>docs</context>"}],
+            add_generation_prompt=True,
+            adapter_name="ctxrel",
+        )
+        assert "<|ctxrel|>context>" in result
+        assert "<|ctxrel|><context>" not in result
+        # Fallback must NOT fire: no control token right before the gen prompt.
+        gen = "<|im_start|>assistant\n"
+        last = result.rindex(gen)
+        assert result[last - len("<|ctxrel|>") : last] != "<|ctxrel|>"
+
+    def test_alora_pass2_index_alignment_with_system(self):
+        """Pass 1/Pass 2 index alignment when a system message is present.
+
+        ChatML strips the system message into ``loop_messages``; Pass 1 must
+        iterate the same list so its recorded index matches the main loop.
+        A misaligned index would target the wrong message or crash.
+        """
+        with patch(_PATCH_TARGET, return_value="<context>"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "ctxrel", "alora")])
+
+        result = _render(
+            tokenizer,
+            messages=[
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "first turn"},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "<context>docs</context>"},
+            ],
+            add_generation_prompt=True,
+            adapter_name="ctxrel",
+        )
+        assert "<|ctxrel|>context>" in result
+        assert result.count("<|ctxrel|>") == 1
+
+    def test_no_adapter_equals_original(self):
+        """Without adapter_name the ChatML render is byte-identical to base."""
+        messages = [{"role": "user", "content": "Hello"}]
+        original = _render(
+            _make_chatml_tokenizer(), messages=messages, add_generation_prompt=True
+        )
+        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(
+                tokenizer,
+                [("/path/a", "gsm8k", "alora"), ("/path/b", "my_lora", "lora")],
+            )
+        modified = _render(tokenizer, messages=messages, add_generation_prompt=True)
+        assert modified == original
+
+    def test_multi_turn_tool_conversation_single_control_token(self):
+        """Regression: a full multi-turn conversation (system + tools +
+        assistant + tool responses) renders with the ALoRA control token in
+        exactly one place under ChatML's more complex message handling."""
+        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
+            tokenizer = _make_chatml_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "What's the weather?"},
+            {
+                "role": "assistant",
+                "content": "Let me check.",
+            },
+            {"role": "tool", "content": "sunny, 72F"},
+            {"role": "user", "content": "Thanks, and in Paris?"},
+        ]
+        result = _render(
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="gsm8k",
+        )
+        assert result.count("<|gsm8k|>") == 1
+        # Assistant-boundary fallback: control token right before final gen prompt.
+        pos = result.rindex("<|gsm8k|>")
+        after = result[pos + len("<|gsm8k|>") :]
+        assert after.startswith("assistant\n<think>")

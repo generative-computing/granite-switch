@@ -7,9 +7,27 @@ automatically from the HuggingFace `config.model_type` field.
 
 | Model Family | `model_type` | Support | KV Cache Hiding |
 |---|---|---|:---:|
-| Granite 4.x Dense | `granite` | **Full** | Yes |
+| Granite 4.0 / 4.1 Dense | `granite` | **Full** | Yes |
+| Granite 4.2 Dense (ChatML) | `granite` | **Full** | Yes |
 
 - **Full**: Primary development target with comprehensive test coverage.
+
+### Chat-template formats
+
+Granite ships two chat-template families, both fully supported. The format is
+auto-detected from the base tokenizer's template at compose time (see
+`detect_template_format` in `composer/tokenizer_setup.py`):
+
+| Format | Models | Role markers | Word embeddings |
+|---|---|---|---|
+| `granite_format` | 4.0 / 4.1 | `<\|start_of_role\|>ROLE<\|end_of_role\|>` … `<\|end_of_text\|>` | tied |
+| `chatml` | 4.2 | `<\|im_start\|>ROLE\n` … `<\|im_end\|>`, plus a `<think>` block | untied |
+
+Adapter control-token injection (LoRA prefix, ALoRA user-message invocation,
+ALoRA assistant-boundary fallback) works identically for both formats. Granite
+4.2 additionally sets `tie_word_embeddings: false`; the composer preserves the
+distinct LM head and initializes new control-token output rows from their
+token-exchange substitute rows.
 
 ### Example Models
 
@@ -23,9 +41,10 @@ that do not fit in a single GPU's memory are not yet supported.
 
 | Model Tag | Size | Variant |
 |---|---|---|
-| `ibm-granite/granite-4.1-3b` | 3B | Dense, instruct |
-| `ibm-granite/granite-4.1-8b` | 8B | Dense, instruct |
-| `ibm-granite/granite-4.0-micro` | 3B | Dense, instruct |
+| `ibm-granite/granite-4.1-3b` | 3B | Dense, instruct (role-marker template) |
+| `ibm-granite/granite-4.1-8b` | 8B | Dense, instruct (role-marker template) |
+| `ibm-granite/granite-4.0-micro` | 3B | Dense, instruct (role-marker template) |
+| Granite 4.2 3B | 3B | Dense, instruct (ChatML template, untied embeddings) |
 
 Base variants (`granite-4.1-3b-base`, `granite-4.1-8b-base`) are also supported.
 
