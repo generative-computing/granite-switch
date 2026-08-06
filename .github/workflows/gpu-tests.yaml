@@ -1,23 +1,397 @@
 # SPDX-License-Identifier: Apache-2.0
+#
+# GPU Tests — launched via /gpu-test, /gpu-test-short or /gpu-test-dev, and runs on
+# the self-hosted GPU runner. The three commands differ only in the `suite` input
+# below; each reports under its own status context so a quick check cannot mask a
+# full-suite failure.
+#
+# COPY THIS FILE INTO: granite-switch/.github/workflows/gpu-tests.yaml
+#
+# HOW IT SATISFIES THE THREE REQUIREMENTS:
+#   1. Runs on our GPUs — `runs-on: [self-hosted, gpu]` targets the self-hosted
+#      runner, which launches the actual tests on the GPU cluster.
+#   2. Maintainer-only   — `workflow_dispatch` only (no pull_request trigger, so
+#      fork PRs can never auto-run on the hardware) AND the `check_role.sh` gate
+#      below, which rejects anyone without the Maintain or Admin role. The gate
+#      lives in the image, not the repo, so a PR cannot edit it — and it covers
+#      EVERY entry point, including a direct dispatch from the Actions tab
+#      (which needs only *write* access and would otherwise bypass the
+#      /gpu-test comment check). This replaces the old `environment: gpu`
+#      required-reviewer approval, so runs no longer pause for a click.
+#   3. Result on the PR  — posts a commit STATUS against the tested SHA, a
+#      sticky PR COMMENT, and uploads the full pytest log as an ARTIFACT.
+#
+# The workflow itself holds no GPU and no cluster credentials, and contains no
+# inline logic: every step invokes a script baked into the runner image at
+# /opt/gsw on the runner image. That keeps infrastructure details out of this
+# repo and keeps this file readable.
 
 name: GPU Tests
 
 on:
-  workflow_dispatch:   # admin-only trigger (requires write access)
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full commit SHA to test (exact checkout on the GPU cluster)."
+        required: true
+        type: string
+      pr_number:
+        description: "PR number to comment on (optional; derived from the SHA when omitted)."
+        required: false
+        type: string
+      # A CLOSED VOCABULARY, not a path string. This is dispatchable by anyone with
+      # *write* access from the Actions tab, and raw paths would reach both a
+      # `sed s#__TEST_PATHS__#…#g` (a literal # breaks the delimiter) and the pod's
+      # `pytest __TEST_PATHS__` command line. Three names resolved in one trusted
+      # place — the step below — removes that surface entirely.
+      #
+      # The mapping lives here rather than in the runner image so changing it needs
+      # no rebuild. It is equally trusted either way: gpu_test_command.sh dispatches
+      # with --ref <default branch>, so this file always comes from main and a pull
+      # request cannot alter its own test scope.
+      # THE list of test families. gpu_test_command.sh derives the suite name from
+      # the comment (/gpu-test-<x> -> x) and reads this line to validate it, so a new
+      # family is added HERE and nowhere else -- this entry plus its arm in the
+      # Resolve test scope step below.
+      suite:
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs)."
+        required: false
+        default: full
+        type: choice
+        options: [full, short, dev, audio, multi]
+
+# Per-SHA-and-suite concurrency: re-dispatching the same commit with the same scope
+# cancels its stale run. Different PRs (different SHAs) may run in parallel; excess
+# cluster pods simply sit Pending until GPUs free up.
+#
+# The suite is in the group on purpose. Without it, a quick /gpu-test-dev on a commit
+# would CANCEL the multi-hour /gpu-test already running against it — losing most of a
+# day's work to a two-minute smoke check.
+#
+# NOTE: this is workflow-level, so the matrix legs below share one group and do
+# NOT cancel each other.
+concurrency:
+  group: gpu-tests-${{ inputs.sha || github.sha }}-${{ inputs.suite || 'full' }}
+  cancel-in-progress: true
+
+permissions:
+  statuses: write        # post the commit status check
+  pull-requests: write   # post/update the sticky PR comment
+  contents: read
 
 jobs:
   gpu-tests:
-    name: GPU Tests
+    # The suite is in the job name because it cannot be read from env.LEG here --
+    # this is evaluated before any step runs.
+    name: GPU Tests (${{ matrix.label }} · ${{ inputs.suite || 'full' }})
+    # granite-switch supports two mutually-exclusive vLLM lines and both must be
+    # tested. They cannot share a venv (pyproject declares vllm19/vllm20 as
+    # conflicting groups), so each gets its own cluster pod. Only the dev* groups
+    # used because the bare vllm19/vllm20 groups omit pytest.
+    strategy:
+      fail-fast: false   # a vllm19 failure must not hide the vllm20 result
+      matrix:
+        include:
+          - label: vllm19
+            dep_group: dev
+          - label: vllm20
+            dep_group: dev-vllm20
     runs-on: [self-hosted, gpu]
+
+    # MUST be set explicitly. GitHub's default is 360 minutes, which is exactly the
+    # in-pod deadline, so GitHub would cancel the job at the same moment the pod's
+    # own timeout fires -- and the script's watchdog at 390 min could never run at
+    # all. A five-suite run is expected to exceed 360 min outright, so on the
+    # default this job gets cancelled mid-run regardless of whether the tests pass.
+    #
+    # Three related numbers, from innermost out. Raise one and check the others:
+    #   in-pod `timeout`   21600s = 360 min  (submit_and_poll.sh DEADLINE)
+    #   script watchdog    23400s = 390 min  (DEADLINE + 1800)
+    #   this job cap                420 min  (watchdog + 30 min of slack)
+    #
+    # Ordered so the innermost limit is normally what ends a wedged run: the pod
+    # kills its own tests, else the script reaps the job, and GitHub cancelling is
+    # the last resort -- which is the only one of the three that leaves an orphaned
+    # AppWrapper if the SIGTERM trap does not land.
+    timeout-minutes: 420
+
+    # Resolve the commit under test once, so every step below agrees on it.
+    env:
+      TARGET_SHA: ${{ inputs.sha || github.sha }}
+      # Clone from whichever repo dispatched this run, so a fork tests its own
+      # commits without editing anything.
+      TARGET_REPO: github.com/${{ github.repository }}.git
     steps:
-      - uses: actions/checkout@v4
+      # No checkout: submit_and_poll.sh and the helper scripts are baked into the
+      # runner image at /opt/gsw. Avoids a cross-instance checkout and keeps
+      # cluster configuration out of this repo.
 
-      - uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - run: uv sync --frozen --group dev --extra hf --extra vllm --extra compose
-
-      - name: Run GPU tests
+      # Turn the suite NAME into the three things that depend on it, once, so no
+      # later step has to know the mapping. Pure string work — no cluster access, no
+      # credentials — so it is safe to run ahead of the role gate.
+      #
+      #   TEST_PATHS  pytest targets, or empty for the full suite
+      #   GPU_COUNT   GPUs per pod, or empty to take submit_and_poll.sh's default
+      #   JOB_SUFFIX  keeps the cluster job name distinct (see LEG note below)
+      #   LEG         the reporting identity: status context, sticky comment,
+      #               artifact, dashboard label
+      #
+      # LEG matters more than it looks. Everything published keys off it, and if a
+      # narrowed run reused the plain label, a passing /gpu-test-dev would OVERWRITE
+      # a failing /gpu-test — same status context, same sticky-comment marker — and
+      # the PR would look healthy while the full suite was still broken. A full run
+      # keeps the bare label, so existing statuses keep their identity.
+      - name: Resolve test scope
+        env:
+          SUITE: ${{ inputs.suite || 'full' }}
+          LABEL: ${{ matrix.label }}
         run: |
-          uv run pytest tests/vllm/ tests/integration/ -v -s --tb=short -x
+          set -euo pipefail
+          # Default for every scope: empty, meaning no --gpus flag, meaning
+          # submit_and_poll.sh's own default of 1. Set once here rather than in each
+          # arm so a new arm cannot silently inherit another's GPU count.
+          PATHS=""
+          SUFFIX=""
+          GPU_COUNT=""
+          case "$SUITE" in
+            # No --tests at all: submit_and_poll.sh's committed default stays the
+            # single definition of "everything", so adding a suite there needs no
+            # change here.
+            full)
+              PATHS=""
+              SUFFIX=""
+              LEG="$LABEL"
+              ;;
+            # The two suites that need CUDA.
+            short)
+              PATHS="tests/vllm/ tests/integration/"
+              SUFFIX="short"
+              LEG="$LABEL-short"
+              ;;
+            # One fast file that still exercises the GPU — ~30s of pytest, a couple
+            # of minutes end to end once pod startup and uv sync are counted. A
+            # CPU-only pick would pass with a broken CUDA venv.
+            dev)
+              PATHS="tests/vllm/test_single_switch.py"
+              SUFFIX="dev"
+              LEG="$LABEL-dev"
+              ;;
+            # The audio/ASR family, selected by MARKER rather than by path: the
+            # `audio` mark spans 8 files across unit, composer, vllm and integration,
+            # so a path list would be long and would drift silently every time a
+            # marked test is added. A marker cannot drift.
+            #
+            # "and not deep" is not optional. pytest's -m is single-valued and the
+            # command line REPLACES pyproject's addopts `-m "not deep"` rather than
+            # adding to it, so a bare `-m audio` would quietly start running the
+            # expensive deep audio tests that every other scope excludes.
+            #
+            # The quotes survive sed -> YAML -> helm -> the pod's shell; the
+            # neighbouring `python -c "..."` lines in the job template rely on the
+            # same thing. The one forbidden character is #, the sed delimiter.
+            audio)
+              PATHS='-m "audio and not deep" tests/'
+              SUFFIX="audio"
+              LEG="$LABEL-audio"
+              ;;
+            # Everything `full` runs, but on TWO GPUs. Not a different test
+            # selection -- a different SHAPE of pod.
+            #
+            # This is the only scope that unlocks tests rather than narrowing them:
+            # tests/vllm/test_tp_integration.py and
+            # tests/vllm/test_pipeline_parallelism_generation.py both carry
+            # `skipif(device_count() < 2)`, so on the 1-GPU pods every other scope
+            # uses they have NEVER run -- they are part of the "19 skipped" in a
+            # normal result line.
+            #
+            # Deliberately kept separate from `full` rather than raising `full` to 2:
+            # doubling every run's GPU demand to unlock a handful of tests is a bad
+            # trade, and `full` is what runs most often.
+            multi)
+              PATHS=""
+              SUFFIX="multi"
+              LEG="$LABEL-multi"
+              GPU_COUNT="2"
+              ;;
+            # Fail rather than defaulting to full: silently running the wrong scope
+            # is worse than not running, and `type: choice` already rejects unknown
+            # values, so reaching this means the options list above gained an entry
+            # without an arm here.
+            *)
+              echo "::error::unknown suite '$SUITE' — no mapping arm for it"
+              exit 1
+              ;;
+          esac
+          {
+            echo "TEST_PATHS=$PATHS"
+            echo "JOB_SUFFIX=$SUFFIX"
+            echo "LEG=$LEG"
+            echo "GPU_COUNT=$GPU_COUNT"
+          } >> "$GITHUB_ENV"
+          echo "suite=$SUITE leg=$LEG gpus=${GPU_COUNT:-1} tests=${PATHS:-<all five suites>}"
+
+      # The gate. First step that touches anything outside this runner.
+      - name: Verify launcher is Maintain/Admin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: /opt/gsw/check_role.sh "$ACTOR"
+
+      - name: Post pending status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          /opt/gsw/post_status.sh "$TARGET_SHA" pending \
+            "GPU tests running on the cluster…" "${{ env.LEG }}"
+
+      # Register the run as in-progress on the internal dashboard, so a multi-hour
+      # run is visible while it is still going rather than only after it ends.
+      # Best-effort by construction: the script exits 0 even when the dashboard is
+      # unreachable or unconfigured, and continue-on-error means a problem here can
+      # never fail the GPU run. The dashboard address is NOT in this file — it comes
+      # from GSW_DASHBOARD_URL on the runner, so nothing internal is disclosed here.
+      - name: Register run start
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GSW_RUN_KEY: ${{ github.run_id }}-${{ env.LEG }}
+          GSW_REPO: ${{ github.repository }}
+          GSW_SHA: ${{ env.TARGET_SHA }}
+          GSW_PR: ${{ inputs.pr_number }}
+          GSW_LABEL: ${{ env.LEG }}
+          GSW_DEP_GROUP: ${{ matrix.dep_group }}
+          GSW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # Nothing this script prints reaches the public console. It is telemetry
+        # for whoever runs the dashboard, of no use to a public reader, and on a
+        # curl failure it quotes the internal service host it could not reach.
+        #
+        # A file rather than /dev/null: the script always exits 0, so this output
+        # is the only evidence archiving failed, and the runner streams step logs
+        # to GitHub rather than to the container console, so `oc logs` would not
+        # show it. Read it with:
+        #   oc exec deploy/gsw-gpu-listener -- tail -40 /tmp/archive_run.log
+        run: /opt/gsw/archive_run.sh start >>/tmp/archive_run.log 2>&1
+
+      - name: Run GPU tests on the cluster
+        id: run
+        # --raw-log sends the verbose run to a FILE. Nothing verbose reaches this
+        # console, because stdout here is the GitHub Actions job log: PUBLIC on a
+        # public repo, and the surface people actually open. All it receives is the
+        # heartbeat the script synthesizes from a fixed vocabulary of phase words
+        # and elapsed minutes.
+        #
+        # This replaces piping the run through a regex redactor. That worked most
+        # of the time, which is the problem -- a denylist publishes anything it has
+        # no rule for, and it was demonstrably leaking a quoted namespace and a
+        # .svc hostname. Nothing arbitrary is printed here now, so there is nothing
+        # to get wrong.
+        #
+        # The two consumers of the detail are unaffected: the next step builds the
+        # public report from the file (allowlisted -- header fields by name, the
+        # pytest block by range), and the archive step ships the full file to the
+        # internal dashboard.
+        env:
+          # submit_and_poll.sh reports the pod name to the dashboard as soon as it
+          # submits, and needs the same run key the start step used to address the
+          # row. Without this the report silently no-ops and the pod column stays
+          # empty until finish.
+          GSW_RUN_KEY: ${{ github.run_id }}-${{ env.LEG }}
+        run: |
+          # Both flags are omitted entirely when empty, which is the `full` case:
+          # no --tests means the script's own default applies, so "everything" has
+          # exactly one definition. Read from env with ${VAR:+...} rather than through
+          # an Actions expression -- the value must reach the script as ONE argument,
+          # and nothing GitHub-controlled belongs in this shell.
+          #
+          # Do NOT write an empty Actions expression anywhere in a run: block, not
+          # even in a comment. Block-scalar content is scanned for expressions (YAML
+          # comments are stripped before that, block scalars are not), so one cost a
+          # dispatch with "HTTP 422 ... An expression was expected".
+          #
+          # --job-suffix keeps the cluster job name unique per scope. The name is
+          # gsw-gpu-<sha12>-<group>, and the script DELETES a pre-existing job of the
+          # same name before submitting — so without the suffix, launching a dev run
+          # would reap the full run already testing that commit.
+          /opt/gsw/submit_and_poll.sh \
+            --sha "$TARGET_SHA" \
+            --repo "$TARGET_REPO" \
+            --dep-group "${{ matrix.dep_group }}" \
+            ${TEST_PATHS:+--tests "$TEST_PATHS"} \
+            ${GPU_COUNT:+--gpus "$GPU_COUNT"} \
+            ${JOB_SUFFIX:+--job-suffix "$JOB_SUFFIX"} \
+            --raw-log gpu-tests-raw.log
+        # Cluster credentials come from the runner's own environment, never from
+        # GitHub secrets — this workflow neither holds nor sees them.
+
+      # The raw log is for cluster debugging and stays on the runner. Everything
+      # published — this console, the artifact and the PR comment — comes from the
+      # cleaned report, which keeps the pytest output verbatim and redacts
+      # infrastructure detail. if: always() so a failed run still produces a
+      # readable report.
+      #
+      # tee, so the report is also printed here: with the verbose run no longer
+      # streaming, this is the only thing that puts test results in the job log,
+      # and "which test failed?" should not require downloading an artifact.
+      - name: Build public test report
+        if: always()
+        run: |
+          set -o pipefail
+          /opt/gsw/clean_log.sh gpu-tests-raw.log "${{ env.LEG }}" | tee gpu-tests.log
+
+      # Send the COMPLETE raw log to the internal dashboard — the only place it is
+      # kept. The run itself already shipped it in batches, so this is the
+      # authoritative copy that replaces those: it closes any chunk that failed to
+      # send, and covers the case where nothing shipped at all. Same best-effort
+      # contract as the start step.
+      - name: Archive raw log
+        if: always()
+        continue-on-error: true
+        env:
+          GSW_RUN_KEY: ${{ github.run_id }}-${{ env.LEG }}
+        # Redirected for the same reason as the start step: nothing here is for a
+        # public reader, and the failure path names the internal dashboard host.
+        run: |
+          {
+            if [[ "${{ steps.run.outcome }}" == "success" ]]; then
+              /opt/gsw/archive_run.sh finish passed gpu-tests-raw.log
+            elif [[ "${{ steps.run.outcome }}" == "cancelled" ]]; then
+              /opt/gsw/archive_run.sh finish cancelled gpu-tests-raw.log
+            else
+              /opt/gsw/archive_run.sh finish failed gpu-tests-raw.log
+            fi
+          } >>/tmp/archive_run.log 2>&1
+
+      - name: Upload test log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-tests-log-${{ env.LEG }}-${{ env.TARGET_SHA }}
+          path: gpu-tests.log
+          if-no-files-found: warn
+
+      - name: Post final commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          if [[ "${{ steps.run.outcome }}" == "success" ]]; then
+            /opt/gsw/post_status.sh "$TARGET_SHA" success "GPU tests passed" "${{ env.LEG }}"
+          else
+            /opt/gsw/post_status.sh "$TARGET_SHA" failure "GPU tests failed" "${{ env.LEG }}"
+          fi
+
+      - name: Update sticky PR comment
+        # Runs on pass AND fail (that is the point — a failure comment carries the
+        # log excerpt). Whether it actually comments depends on resolving a PR,
+        # which the script handles.
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          /opt/gsw/update_sticky_comment.sh "$TARGET_SHA" "${{ steps.run.outcome }}" \
+            gpu-tests.log "${{ env.LEG }}" "$PR_NUMBER"

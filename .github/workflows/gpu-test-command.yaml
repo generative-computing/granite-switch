@@ -1,0 +1,66 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Slash-command launcher for /gpu-test, /gpu-test-short and /gpu-test-dev.
+#
+# The `if:` below is a cheap prefix prefilter, NOT the command parser: it lets any
+# /gpu-test* comment start this job, and gpu_test_command.sh then matches the
+# command exactly and declines anything else. Keeping the list in one place means
+# adding a command does not need an edit here.
+#
+# Deployed to granite-switch as .github/workflows/gpu-test-command.yaml, together
+# with .github/scripts/check_role.sh and .github/scripts/gpu_test_command.sh.
+#
+# WHY THOSE TWO SCRIPTS ARE CHECKED IN RATHER THAN BAKED INTO THE RUNNER IMAGE:
+# this job runs on a GitHub-HOSTED runner, which cannot read the image's scripts,
+# so they must come from the repository. Both contain only GitHub API calls.
+#
+# This is a convenience entry point, NOT the security boundary: gpu-tests.yaml
+# re-checks the role via /opt/gsw/check_role.sh, which a pull request cannot edit.
+#
+# NOTE: issue_comment workflows only fire when the file is on the DEFAULT branch.
+# It will not react to comments until merged to main.
+
+name: GPU Test Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write         # dispatch gpu-tests.yaml
+  pull-requests: write   # react to the comment and post feedback
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch GPU tests
+    runs-on: ubuntu-latest
+    # Only for `/gpu-test` comments on a pull request (not plain issues).
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/gpu-test')
+    steps:
+      - name: Checkout scripts (trusted default branch)
+        uses: actions/checkout@v4
+
+      - name: Handle /gpu-test command
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SCRIPT_DIR: ${{ github.workspace }}/.github/scripts
+          # The test families live in this file's `suite` input and nowhere else.
+          # The handler reads them out of it to validate the command and to build
+          # its decline message, so adding a family is a one-file change there.
+          WORKFLOW_FILE: ${{ github.workspace }}/.github/workflows/gpu-tests.yaml
+          # GitHub-controlled values pass through env, never interpolated into the
+          # script body — prevents shell injection via a crafted login.
+          ACTOR: ${{ github.event.comment.user.login }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          # The body decides WHICH scope runs (/gpu-test, -short or -dev). Entirely
+          # attacker-controlled text, so it follows the same rule as the login: env
+          # var, then a quoted positional arg, never an Actions expression inside the
+          # run block.
+          BODY: ${{ github.event.comment.body }}
+        run: .github/scripts/gpu_test_command.sh "$ACTOR" "$PR_NUMBER" "$COMMENT_ID" "$BODY"
