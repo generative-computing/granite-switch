@@ -157,6 +157,98 @@ class GraniteSwitchASRMultiModalProcessor(
 ):
     """Runs ASR and splices the transcript tokens into the prompt."""
 
+    def _marker_id(self) -> int:
+        """Token id of the audio marker, or ``-1`` when it isn't registered.
+
+        ``convert_tokens_to_ids`` answers with the *unk* id for an unknown token
+        rather than ``None``, which would silently make every count come out
+        wrong, so an unregistered marker is reported as ``-1`` instead.
+        """
+        tokenizer = self.info.get_tokenizer()
+        token_id = tokenizer.convert_tokens_to_ids(AUDIO_MARKER)
+        if token_id is None or token_id == getattr(tokenizer, "unk_token_id", None):
+            return -1
+        return int(token_id)
+
+    def _count_markers(self, prompt) -> int:
+        """Occurrences of the audio marker in a str or token-id prompt."""
+        if isinstance(prompt, str):
+            return prompt.count(AUDIO_MARKER)
+        marker_id = self._marker_id()
+        if marker_id < 0:
+            return 0
+        return sum(1 for token_id in prompt if token_id == marker_id)
+
+    def _validate_marker_count(self, prompt, num_audio_items: int) -> None:
+        """Require exactly one audio marker per audio item.
+
+        ``<|audio|>`` is a registered special token, so text a caller types is
+        tokenized into the *real* marker. vLLM pairs markers with audio items
+        positionally and stops once every item is matched, leaving any extra
+        marker in the prompt verbatim — so a spoofed marker silently moves the
+        transcript to a caller-chosen position (and, in a multi-clip request,
+        shifts every transcript onto the wrong clip) while vLLM's own
+        ``_validate_mm_placeholders`` still sees matching counts and passes.
+
+        The reverse case — markers with no audio payload — is the vector behind
+        vLLM's own CVE-2026-44222 (GHSA-hpv8-x276-m59f), where models indexing a
+        grid from a spoofed placeholder hit an unhandled ``IndexError``.
+        """
+        num_markers = self._count_markers(prompt)
+        if num_markers == num_audio_items:
+            return
+        raise ValueError(
+            f"Prompt contains {num_markers} {AUDIO_MARKER} marker(s) but the "
+            f"request carries {num_audio_items} audio item(s); they must match "
+            f"exactly. {AUDIO_MARKER} is reserved for audio placement and cannot "
+            f"appear in message text."
+        )
+
+    def _prompt_and_audio_count(self, *args, **kwargs):
+        """Pull (prompt, audio item count) out of whichever ``apply()`` shape.
+
+        vLLM changed ``apply()``'s parameters across the versions this package
+        supports: newer builds take a single ``ProcessorInputs`` (carrying
+        ``prompt`` and already-parsed ``mm_data_items``), older ones take
+        ``(prompt, mm_data, ...)`` with raw mm data. Both are handled here so the
+        check does not depend on which is installed.
+        """
+        inputs = args[0] if args else kwargs.get("inputs")
+
+        # Newer shape: a ProcessorInputs with items already parsed.
+        if hasattr(inputs, "prompt") and hasattr(inputs, "mm_data_items"):
+            items = inputs.mm_data_items
+            count = len(items["audio"]) if "audio" in items else 0
+            return inputs.prompt, count
+
+        # Older shape: (prompt, mm_data, ...) with raw mm data to parse.
+        prompt = inputs if args else kwargs.get("prompt")
+        mm_data = args[1] if len(args) > 1 else kwargs.get("mm_data")
+        if prompt is None or mm_data is None:
+            raise RuntimeError(
+                "Cannot read the prompt and audio items from this vLLM's "
+                "MultiModalProcessor.apply() signature, so the audio marker "
+                "count cannot be validated. Refusing rather than skipping a "
+                "security check silently."
+            )
+        if not mm_data:
+            return prompt, 0
+        items = self.info.get_data_parser().parse_mm_data(mm_data)
+        count = len(items["audio"]) if "audio" in items else 0
+        return prompt, count
+
+    def apply(self, *args, **kwargs):
+        """Validate marker/item agreement, then delegate unchanged.
+
+        Enforced here rather than in ``_call_hf_processor`` because that runs with
+        only the *cache-missing* items: on a processor-cache hit its item count is
+        smaller than the request's, so the comparison would be wrong. ``apply()``
+        is the one entry point that always sees the whole request.
+        """
+        prompt, num_audio_items = self._prompt_and_audio_count(*args, **kwargs)
+        self._validate_marker_count(prompt, num_audio_items)
+        return super().apply(*args, **kwargs)
+
     def _transcribe(
         self,
         audio,
@@ -199,7 +291,52 @@ class GraniteSwitchASRMultiModalProcessor(
                 "prompt placeholder for this audio item. Choose an "
                 "_EMPTY_TRANSCRIPT_TEXT this tokenizer encodes to >=1 token."
             )
+        self._reject_reserved_ids(ids)
         return ids
+
+    def _reserved_token_ids(self) -> set[int]:
+        """Token ids a transcript must never contain.
+
+        The audio marker (a transcript carrying one would mint a phantom
+        placeholder) plus every adapter control token (the switch reads raw
+        ``input_ids``, so one arriving via the transcript would steer adapter
+        selection from audio content).
+        """
+        reserved: set[int] = set()
+        marker_id = self._marker_id()
+        if marker_id >= 0:
+            reserved.add(marker_id)
+        control_ids = getattr(self.info.get_hf_config(), "adapter_token_ids", None)
+        for token_id in control_ids or ():
+            reserved.add(int(token_id))
+        return reserved
+
+    def _reject_reserved_ids(self, ids: Sequence[int]) -> None:
+        """Refuse a transcript that tokenized into reserved control tokens.
+
+        ``encode(..., add_special_tokens=False)`` only suppresses *added* BOS/EOS;
+        special-token strings already present in the text are still parsed into
+        the real ids. So an ASR result containing ``<|audio|>`` or an adapter
+        control token would inject genuine control tokens into the prompt.
+
+        Rejected rather than neutralized (which ``split_special_tokens=True``
+        would do) so the condition is visible instead of silently rewriting model
+        output: a transcript containing these strings means either an attack or a
+        badly misbehaving ASR backend, and both are worth surfacing.
+        """
+        reserved = self._reserved_token_ids()
+        if not reserved:
+            return
+        found = sorted({int(t) for t in ids if int(t) in reserved})
+        if not found:
+            return
+        tokenizer = self.info.get_tokenizer()
+        names = [tokenizer.convert_ids_to_tokens(t) for t in found]
+        raise ValueError(
+            f"Transcript tokenized into reserved control token(s) {names} "
+            f"(ids {found}); refusing to splice it into the prompt. Reserved "
+            f"tokens must not originate from audio content."
+        )
 
     def _call_hf_processor(
         self,
