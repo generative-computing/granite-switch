@@ -811,3 +811,127 @@ class TestMarkerSpoofingRejected:
         info.get_tokenizer = lambda: _MarkerTokenizer()
 
         assert proc._transcribe(np.zeros(1600, dtype=np.float32)) == _TRANSCRIPT_IDS
+
+
+class TestAudioDurationLimits:
+    """Over-long audio must be refused before anything transcribes it.
+
+    ``asr_max_audio_clips`` bounds clip *count* only, and vLLM's prompt-length
+    check runs after preprocessing — so without a duration bound a caller can
+    have a multi-hour file fully transcribed and only then rejected. The bar here
+    is not just "raises" but "raises without the ASR pipeline being touched".
+    """
+
+    def _items(self, *durations_s, sr=16_000):
+        from vllm.multimodal.parse import AudioProcessorItems, MultiModalDataItems
+
+        clips = [
+            np.zeros(int(seconds * sr), dtype=np.float32) for seconds in durations_s
+        ]
+        return MultiModalDataItems({"audio": AudioProcessorItems(clips)})
+
+    def _proc(self, monkeypatch, **cfg):
+        """Processor whose transcriber records whether it was ever reached."""
+        info = _make_info(asr_enabled=True, asr_model_id="w", **cfg)
+        info.get_tokenizer = lambda: _MarkerTokenizer()
+        proc = object.__new__(GraniteSwitchASRMultiModalProcessor)
+        proc.info = info
+
+        calls = []
+
+        def fake_get_transcriber(**kw):
+            calls.append(kw)
+            raise AssertionError("ASR must not be reached for a rejected request")
+
+        monkeypatch.setattr(proc_mod, "get_transcriber", fake_get_transcriber)
+
+        from vllm.multimodal.processing import BaseMultiModalProcessor
+
+        monkeypatch.setattr(
+            BaseMultiModalProcessor,
+            "apply",
+            lambda self, *a, **k: _DELEGATED,
+            raising=False,
+        )
+        return proc, calls
+
+    def _apply(self, proc, items):
+        prompt = proc_mod.AUDIO_MARKER * len(items["audio"])
+        return proc.apply(SimpleNamespace(prompt=prompt, mm_data_items=items))
+
+    def test_overlong_clip_rejected_without_transcribing(self, monkeypatch):
+        proc, calls = self._proc(monkeypatch, asr_max_audio_seconds_per_clip=60.0)
+
+        with pytest.raises(ValueError, match="per-clip limit"):
+            self._apply(proc, self._items(90.0))
+
+        assert calls == [], "ASR was invoked for a request that should be rejected"
+
+    def test_total_across_clips_rejected_without_transcribing(self, monkeypatch):
+        proc, calls = self._proc(
+            monkeypatch,
+            asr_max_audio_seconds_per_clip=60.0,
+            asr_max_total_audio_seconds=100.0,
+        )
+
+        # Each clip is legal on its own; together they are not.
+        with pytest.raises(ValueError, match="total limit"):
+            self._apply(proc, self._items(50.0, 50.0, 50.0))
+
+        assert calls == []
+
+    def test_sample_cap_rejected_without_transcribing(self, monkeypatch):
+        """The rate-independent backstop fires even when the seconds pass."""
+        proc, calls = self._proc(
+            monkeypatch,
+            asr_max_audio_seconds_per_clip=1000.0,
+            asr_max_total_audio_seconds=1000.0,
+            asr_max_audio_samples=16_000,  # 1 second's worth
+        )
+
+        with pytest.raises(ValueError, match="sample limit"):
+            self._apply(proc, self._items(5.0))
+
+        assert calls == []
+
+    def test_error_names_the_offending_size_and_knob(self, monkeypatch):
+        proc, _ = self._proc(monkeypatch, asr_max_audio_seconds_per_clip=30.0)
+
+        with pytest.raises(ValueError) as exc:
+            self._apply(proc, self._items(45.0))
+
+        message = str(exc.value)
+        assert "45.0s" in message and "30.0s" in message
+        assert "asr_max_audio_seconds_per_clip" in message
+
+    def test_within_limits_is_accepted(self, monkeypatch):
+        """Negative control: legal audio must still get through."""
+        proc, _ = self._proc(
+            monkeypatch,
+            asr_max_audio_seconds_per_clip=60.0,
+            asr_max_total_audio_seconds=120.0,
+        )
+
+        assert self._apply(proc, self._items(10.0, 20.0)) is _DELEGATED
+
+    def test_boundary_is_inclusive(self, monkeypatch):
+        """Exactly at the limit is allowed; the check is > not >=."""
+        proc, _ = self._proc(monkeypatch, asr_max_audio_seconds_per_clip=10.0)
+
+        assert self._apply(proc, self._items(10.0)) is _DELEGATED
+
+    def test_defaults_allow_ordinary_clips(self, monkeypatch):
+        """A checkpoint with no limits configured keeps working."""
+        proc, _ = self._proc(monkeypatch)
+
+        assert self._apply(proc, self._items(5.0)) is _DELEGATED
+
+    def test_text_only_request_unaffected(self, monkeypatch):
+        from vllm.multimodal.parse import MultiModalDataItems
+
+        proc, _ = self._proc(monkeypatch)
+        empty = MultiModalDataItems({})
+
+        assert proc.apply(SimpleNamespace(prompt="hi", mm_data_items=empty)) is (
+            _DELEGATED
+        )

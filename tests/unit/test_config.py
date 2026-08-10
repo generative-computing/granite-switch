@@ -155,6 +155,51 @@ class TestAudioConfig:
                 num_adapters=0, asr_chunk_length_s=10.0, asr_chunk_overlap_s=10.0
             )
 
+    # ── Audio duration bounds ──
+    # These cap how much audio one request may carry, and are enforced before any
+    # transcription runs. NaN and inf are rejected explicitly: they compare False
+    # against every threshold, so an unvalidated one would silently disable the
+    # limit it configures rather than loosening it.
+
+    def test_duration_limit_defaults(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_max_audio_seconds_per_clip == 600.0
+        assert cfg.asr_max_total_audio_seconds == 1800.0
+        assert cfg.asr_max_audio_samples == 0  # 0 = derive from the total
+
+    @pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf")])
+    def test_invalid_seconds_per_clip_raises(self, bad):
+        with pytest.raises(ValueError, match="asr_max_audio_seconds_per_clip"):
+            GraniteSwitchConfig(num_adapters=0, asr_max_audio_seconds_per_clip=bad)
+
+    @pytest.mark.parametrize("bad", [0, -1.0, float("nan"), float("inf")])
+    def test_invalid_total_seconds_raises(self, bad):
+        with pytest.raises(ValueError, match="asr_max_total_audio_seconds"):
+            GraniteSwitchConfig(num_adapters=0, asr_max_total_audio_seconds=bad)
+
+    @pytest.mark.parametrize("bad", [-1, float("nan"), float("inf")])
+    def test_invalid_max_audio_samples_raises(self, bad):
+        with pytest.raises(ValueError, match="asr_max_audio_samples"):
+            GraniteSwitchConfig(num_adapters=0, asr_max_audio_samples=bad)
+
+    def test_zero_max_audio_samples_allowed(self):
+        cfg = GraniteSwitchConfig(num_adapters=0, asr_max_audio_samples=0)
+        assert cfg.asr_max_audio_samples == 0
+
+    def test_duration_limits_round_trip(self, tmp_path):
+        GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_max_audio_seconds_per_clip=42.0,
+            asr_max_total_audio_seconds=84.0,
+            asr_max_audio_samples=1234,
+        ).save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+
+        assert loaded.asr_max_audio_seconds_per_clip == 42.0
+        assert loaded.asr_max_total_audio_seconds == 84.0
+        assert loaded.asr_max_audio_samples == 1234
+
     def test_asr_kwargs_round_trip(self, tmp_path):
         # Pipeline/generate kwargs must survive save_pretrained → from_pretrained
         # so the checkpoint stays self-describing about its ASR front-end.

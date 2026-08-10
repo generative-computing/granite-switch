@@ -107,6 +107,24 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
         cfg = self.get_hf_config()
         return int(getattr(cfg, "asr_max_audio_clips", 32) or 32)
 
+    def _asr_max_audio_seconds_per_clip(self) -> float:
+        cfg = self.get_hf_config()
+        value = getattr(cfg, "asr_max_audio_seconds_per_clip", None)
+        return float(value) if value else 600.0
+
+    def _asr_max_total_audio_seconds(self) -> float:
+        cfg = self.get_hf_config()
+        value = getattr(cfg, "asr_max_total_audio_seconds", None)
+        return float(value) if value else 1800.0
+
+    def _asr_max_audio_samples(self) -> int:
+        """Absolute decoded-sample cap; derived from the second-based total if 0."""
+        cfg = self.get_hf_config()
+        value = getattr(cfg, "asr_max_audio_samples", None)
+        if value:
+            return int(value)
+        return int(self._asr_max_total_audio_seconds() * _TARGET_SR)
+
     def _asr_self_chunks(self) -> bool:
         cfg = self.get_hf_config()
         return bool(getattr(cfg, "asr_self_chunks", True))
@@ -247,7 +265,75 @@ class GraniteSwitchASRMultiModalProcessor(
         """
         prompt, num_audio_items = self._prompt_and_audio_count(*args, **kwargs)
         self._validate_marker_count(prompt, num_audio_items)
+        self._validate_audio_limits(*args, **kwargs)
         return super().apply(*args, **kwargs)
+
+    def _audio_items(self, *args, **kwargs):
+        """The request's parsed audio items, or ``None`` if unavailable."""
+        inputs = args[0] if args else kwargs.get("inputs")
+        if hasattr(inputs, "mm_data_items"):
+            items = inputs.mm_data_items
+        else:
+            mm_data = args[1] if len(args) > 1 else kwargs.get("mm_data")
+            if not mm_data:
+                return None
+            items = self.info.get_data_parser().parse_mm_data(mm_data)
+        return items["audio"] if "audio" in items else None
+
+    def _validate_audio_limits(self, *args, **kwargs) -> None:
+        """Reject over-long audio *before* anything transcribes it.
+
+        ``asr_max_audio_clips`` bounds how many clips a request may carry but says
+        nothing about their length, and vLLM's prompt-length check runs *after*
+        preprocessing — so without this an unauthenticated caller can have a
+        multi-hour file fully transcribed and only then rejected. That is both a
+        free denial-of-service lever and a synchronous block of vLLM's input path
+        for the duration of the transcription.
+
+        Enforced in ``apply()``, ahead of ``_call_hf_processor``, so no ASR model
+        is loaded and no audio is transcribed or chunked for a rejected request.
+        The audio has already been resampled to 16 kHz by the data parser at this
+        point, which is far cheaper than transcription but not free — bounding
+        that too would mean owning the parser.
+        """
+        items = self._audio_items(*args, **kwargs)
+        if items is None or len(items) == 0:
+            return
+
+        max_per_clip = self.info._asr_max_audio_seconds_per_clip()
+        max_total = self.info._asr_max_total_audio_seconds()
+        max_samples = self.info._asr_max_audio_samples()
+
+        total_samples = 0
+        for idx in range(len(items)):
+            try:
+                num_samples = items.get_audio_length(idx)
+            except (ValueError, AttributeError):
+                # A cached item carries no waveform to measure; it was bounded
+                # when it was first seen.
+                continue
+            total_samples += num_samples
+            seconds = num_samples / _TARGET_SR
+            if seconds > max_per_clip:
+                raise ValueError(
+                    f"Audio clip {idx} is {seconds:.1f}s, over the "
+                    f"{max_per_clip:.1f}s per-clip limit "
+                    f"(asr_max_audio_seconds_per_clip). Split it or raise the "
+                    f"limit; it is enforced before transcription runs."
+                )
+
+        total_seconds = total_samples / _TARGET_SR
+        if total_seconds > max_total:
+            raise ValueError(
+                f"Request carries {total_seconds:.1f}s of audio across "
+                f"{len(items)} clip(s), over the {max_total:.1f}s total limit "
+                f"(asr_max_total_audio_seconds)."
+            )
+        if total_samples > max_samples:
+            raise ValueError(
+                f"Request decodes to {total_samples} audio samples, over the "
+                f"{max_samples} sample limit (asr_max_audio_samples)."
+            )
 
     def _transcribe(
         self,
