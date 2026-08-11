@@ -302,26 +302,7 @@ jobs:
           #
           # The GPU pod fetches the commit under test as a tarball. On a PUBLIC repo
           # that is an anonymous codeload request and needs no credential, which is
-          # why this is commented out by default: the committed file is the PUBLIC
-          # repo's version, and leaving it alone preserves exactly the old behaviour.
-          #
-          # On a private repo the anonymous fetch 404s, and the pod needs a token.
-          # This one is scoped to the repository whose workflow minted it, already
-          # covered by the `contents: read` permission declared above, and expires
-          # with this job — which matters, because a Vela pod can sit Pending for
-          # hours before it gets as far as fetching source.
-          #
-          # It reaches the pod as a plaintext env var in the AppWrapper spec; see the
-          # GIT_TOKEN comment in ci/vela_gpu_tests.yaml.tmpl for why that trade was
-          # taken over creating and reaping a Kubernetes Secret per job.
-          #
-          # Uncommenting it in EVERY repo, public included, is also valid and keeps
-          # the copies byte-identical — a public repo simply fetches public content
-          # over the authenticated path. deploy_workflow.sh will otherwise report
-          # this file as MODIFIED for the private repo forever, which is expected
-          # but does cost you the "already in sync" signal.
-          #
-          # GH_FETCH_TOKEN: ${{ github.token }}
+          GH_FETCH_TOKEN: ${{ github.token }}
         run: |
           # Both flags are omitted entirely when empty, which is the `full` case:
           # no --tests means the script's own default applies, so "everything" has
