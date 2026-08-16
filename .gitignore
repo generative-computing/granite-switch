@@ -41,6 +41,10 @@ tmp/
 # Ollama tutorial: cached RAG adapter io.yaml configs (fetched at runtime)
 .rag_io_cache/
 
+# RAG tutorials: govt corpus + ChromaDB index built at runtime
+govt.jsonl
+govt_chroma/
+
 # Build outputs (multi-GB model checkpoints)
 modular-granite/
 my-modular-model/
