@@ -4,6 +4,9 @@
 # Claude Code
 .claude/
 
+# IDEs
+.idea/
+
 # Python cache files
 *.pyc
 __pycache__/
@@ -34,6 +37,9 @@ tmp/
 
 # Model/adapter download cache (regression tests)
 .cache/
+
+# Ollama tutorial: cached RAG adapter io.yaml configs (fetched at runtime)
+.rag_io_cache/
 
 # Build outputs (multi-GB model checkpoints)
 modular-granite/

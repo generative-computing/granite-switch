@@ -2479,6 +2479,17 @@ compose = [
 hf = [
     { name = "accelerate" },
 ]
+ollama = [
+    { name = "huggingface-hub" },
+    { name = "ipython" },
+    { name = "mellea" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "rich" },
+    { name = "safetensors" },
+    { name = "tqdm" },
+]
 tutorials = [
     { name = "accelerate" },
     { name = "chromadb" },
@@ -2536,16 +2547,22 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'hf'", specifier = ">=0.20.0" },
     { name = "chromadb", marker = "extra == 'tutorials'", specifier = ">=0.4.0" },
     { name = "datasets", marker = "extra == 'tutorials'", specifier = ">=2.0.0" },
+    { name = "granite-switch", extras = ["compose"], marker = "extra == 'ollama'" },
     { name = "granite-switch", extras = ["hf", "vllm", "compose"], marker = "extra == 'tutorials'" },
     { name = "httpx", marker = "extra == 'tutorials'", specifier = ">=0.24.0" },
     { name = "huggingface-hub", marker = "extra == 'build'" },
     { name = "huggingface-hub", marker = "extra == 'compose'" },
+    { name = "ipython", marker = "extra == 'ollama'", specifier = ">=8.10.0" },
     { name = "ipython", marker = "extra == 'tutorials'", specifier = ">=8.10.0" },
+    { name = "mellea", marker = "extra == 'ollama'", specifier = "==0.6.0" },
     { name = "mellea", marker = "extra == 'tutorials'", specifier = "==0.6.0" },
+    { name = "python-dotenv", marker = "extra == 'ollama'", specifier = ">=1.0.0" },
     { name = "python-dotenv", marker = "extra == 'tutorials'", specifier = ">=1.0.0" },
     { name = "pyyaml", marker = "extra == 'build'" },
     { name = "pyyaml", marker = "extra == 'compose'" },
+    { name = "requests", marker = "extra == 'ollama'", specifier = ">=2.31.0" },
     { name = "requests", marker = "extra == 'tutorials'", specifier = ">=2.31.0" },
+    { name = "rich", marker = "extra == 'ollama'", specifier = ">=13.0.0" },
     { name = "rich", marker = "extra == 'tutorials'", specifier = ">=13.0.0" },
     { name = "safetensors", marker = "extra == 'build'" },
     { name = "safetensors", marker = "extra == 'compose'" },
@@ -2557,7 +2574,7 @@ requires-dist = [
     { name = "vllm", marker = "extra == 'vllm'", specifier = ">=0.19.1,<0.20.0" },
     { name = "vllm", marker = "extra == 'vllm20'", specifier = ">=0.20.0,<0.21.0" },
 ]
-provides-extras = ["hf", "vllm", "vllm20", "compose", "build", "tutorials"]
+provides-extras = ["hf", "vllm", "vllm20", "compose", "build", "tutorials", "ollama"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -6464,7 +6481,9 @@ source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "absl-py" },
     { name = "nltk" },
-    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" } },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-14-granite-switch-tutorials' or extra == 'extra-14-granite-switch-vllm' or extra == 'group-14-granite-switch-dev' or extra == 'group-14-granite-switch-test' or extra == 'group-14-granite-switch-vllm19'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.13' and extra == 'extra-14-granite-switch-vllm20') or (python_full_version < '3.13' and extra == 'group-14-granite-switch-dev-vllm20') or (python_full_version < '3.13' and extra == 'group-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'extra-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'group-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'extra-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'group-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-dev') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-test') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-vllm19') or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-vllm20') or (extra == 'group-14-granite-switch-dev-vllm20' and extra == 'group-14-granite-switch-test') or (extra == 'group-14-granite-switch-dev-vllm20' and extra == 'group-14-granite-switch-vllm19') or (extra == 'group-14-granite-switch-test' and extra == 'group-14-granite-switch-vllm20') or (extra == 'group-14-granite-switch-vllm19' and extra == 'group-14-granite-switch-vllm20')" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.13' and extra == 'extra-14-granite-switch-vllm20') or (python_full_version >= '3.13' and extra == 'group-14-granite-switch-dev-vllm20') or (python_full_version >= '3.13' and extra != 'extra-14-granite-switch-tutorials' and extra != 'extra-14-granite-switch-vllm' and extra != 'group-14-granite-switch-dev' and extra != 'group-14-granite-switch-test' and extra != 'group-14-granite-switch-vllm19') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-dev') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-test') or (extra == 'extra-14-granite-switch-vllm20' and extra == 'group-14-granite-switch-vllm19') or (extra == 'group-14-granite-switch-dev-vllm20' and extra == 'group-14-granite-switch-test') or (extra == 'group-14-granite-switch-dev-vllm20' and extra == 'group-14-granite-switch-vllm19') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'extra-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'extra-14-granite-switch-tutorials' and extra == 'group-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'extra-14-granite-switch-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'extra-14-granite-switch-vllm' and extra == 'group-14-granite-switch-vllm20') or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-dev-vllm20') or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-vllm20') or (extra == 'group-14-granite-switch-test' and extra == 'group-14-granite-switch-vllm20') or (extra == 'group-14-granite-switch-vllm19' and extra == 'group-14-granite-switch-vllm20') or (extra != 'extra-14-granite-switch-tutorials' and extra != 'extra-14-granite-switch-vllm' and extra != 'extra-14-granite-switch-vllm20' and extra != 'group-14-granite-switch-dev' and extra != 'group-14-granite-switch-dev-vllm20' and extra != 'group-14-granite-switch-test' and extra != 'group-14-granite-switch-vllm19' and extra != 'group-14-granite-switch-vllm20')" },
     { name = "six" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/e2/c5/9136736c37022a6ad27fea38f3111eb8f02fe75d067f9a985cc358653102/rouge_score-0.1.2.tar.gz", hash = "sha256:c7d4da2683e68c9abf0135ef915d63a46643666f848e558a1b9f7ead17ff0f04", size = 17400, upload-time = "2022-07-22T22:46:22.909Z" }
