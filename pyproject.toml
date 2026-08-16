@@ -36,6 +36,22 @@ tutorials = [
     "sentence-transformers>=3.0.0",
     "datasets>=2.0.0",
 ]
+# Ollama-backed tutorials (macOS / no-CUDA). Deliberately excludes vLLM so the
+# environment installs on Apple Silicon: adapters are driven through a local
+# `ollama serve` via mellea instead of a vLLM server. Sync with:
+#   uv sync --extra ollama --no-default-groups
+# (--no-default-groups skips the default vllm19 group, which pulls CUDA.)
+ollama = [
+    "granite-switch[compose]",
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "mellea==0.6.0",
+    "ipython>=8.10.0",
+    "python-dotenv>=1.0.0",
+    "chromadb>=0.4.0",
+    "httpx>=0.24.0",
+    "sentence-transformers>=3.0.0",
+]
 
 [project.entry-points."vllm.general_plugins"]
 register_granite_switch = "granite_switch.vllm:register"
