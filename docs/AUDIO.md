@@ -107,6 +107,23 @@ Shorten the audio or serve with a larger `--max-model-len`. Relevant config fiel
   Clips cost no extra KV (transcripts are ordinary text tokens bounded by the
   context); the ceiling guards against one request triggering an unbounded number
   of synchronous transcriptions.
+- `asr_max_audio_seconds_per_clip` (default `600.0`) — longest single clip.
+- `asr_max_total_audio_seconds` (default `1800.0`) — longest total across all
+  clips in one request.
+- `asr_max_audio_samples` (default `0` = derive from the total above at 16 kHz) —
+  absolute decoded-sample cap, as a rate-independent backstop.
+
+These three bound *duration*, which the clip count does not. They are enforced
+**before any transcription runs**, which matters because vLLM's prompt-length
+check happens after preprocessing: without them a caller could have a multi-hour
+file fully transcribed and only then rejected — a free denial-of-service lever,
+and a synchronous block of vLLM's input path for as long as the transcription
+takes. An over-long request is refused with a message naming the offending size
+and the knob that rejected it.
+
+Raise them if you serve genuinely long recordings; the defaults are a policy
+choice, not a technical limit. Note that long *single* clips are still handled by
+chunking (below) — these limits cap the input, not the transcript.
 
 **Long single clips** are handled two ways, selected by `asr_self_chunks`:
 

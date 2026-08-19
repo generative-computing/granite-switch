@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for Granite model with adapter switching."""
 
+import math
+
 from transformers import GraniteMoeHybridConfig
 
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
@@ -63,6 +65,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 synchronous transcriptions one request can trigger and the startup
                 profiling pass; ``--limit-mm-per-prompt`` may lower it, not raise
                 it. Default: 32.
+            asr_max_audio_seconds_per_clip (float): Longest single clip accepted,
+                in seconds. Enforced before any transcription, so an oversized
+                clip is rejected instead of transcribed and then discarded.
+                Default: 600.0 (10 min).
+            asr_max_total_audio_seconds (float): Longest total audio accepted
+                across all clips in one request, in seconds. Default: 1800.0
+                (30 min).
+            asr_max_audio_samples (int): Absolute cap on decoded samples per
+                request, as a rate-independent backstop to the second-based
+                limits. ``0`` derives it from asr_max_total_audio_seconds at the
+                16 kHz working rate. Default: 0.
             asr_chunk_length_s (float): Chunker window length in seconds. Only
                 used when asr_self_chunks is False. Default: 30.0.
             asr_chunk_overlap_s (float): Overlap in seconds between chunker
@@ -98,6 +111,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         asr_pipeline_kwargs: dict | None = None,
         asr_generate_kwargs: dict | None = None,
         asr_max_audio_clips: int = 32,
+        asr_max_audio_seconds_per_clip: float = 600.0,
+        asr_max_total_audio_seconds: float = 1800.0,
+        asr_max_audio_samples: int = 0,
         asr_chunk_length_s: float = 30.0,
         asr_chunk_overlap_s: float = 5.0,
         asr_self_chunks: bool = True,
@@ -203,7 +219,25 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 f"asr_chunk_overlap_s ({asr_chunk_overlap_s}) must be < "
                 f"asr_chunk_length_s ({asr_chunk_length_s})"
             )
+        # Duration bounds. Checked for finiteness as well as sign: NaN and inf
+        # compare False against every threshold, so an unvalidated one silently
+        # disables the limit it was meant to impose.
+        for name, value in (
+            ("asr_max_audio_seconds_per_clip", asr_max_audio_seconds_per_clip),
+            ("asr_max_total_audio_seconds", asr_max_total_audio_seconds),
+        ):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be a finite number > 0, got {value!r}")
+        if not math.isfinite(asr_max_audio_samples) or asr_max_audio_samples < 0:
+            raise ValueError(
+                "asr_max_audio_samples must be a finite integer >= 0 "
+                f"(0 derives it from asr_max_total_audio_seconds), "
+                f"got {asr_max_audio_samples!r}"
+            )
         self.asr_max_audio_clips = asr_max_audio_clips
+        self.asr_max_audio_seconds_per_clip = float(asr_max_audio_seconds_per_clip)
+        self.asr_max_total_audio_seconds = float(asr_max_total_audio_seconds)
+        self.asr_max_audio_samples = int(asr_max_audio_samples)
         self.asr_chunk_length_s = asr_chunk_length_s
         self.asr_chunk_overlap_s = asr_chunk_overlap_s
         self.asr_self_chunks = asr_self_chunks
