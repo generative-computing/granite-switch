@@ -11,10 +11,11 @@ the same hooks — see [Design](#design) below.
 
 ## Installing
 
-The audio path needs `soundfile` and `librosa` on top of the vLLM backend — they
-decode and resample the incoming waveform. They live in the `audio` extra, which is
-**not** part of `vllm`, so a plain `uv sync --extra vllm` gives you a checkpoint that
-fails on any non-16 kHz input:
+The audio path needs vLLM's audio deps (`av`, `soundfile`, `resampy`, `scipy`) to
+decode and resample the incoming waveform. They come from vLLM's own `[audio]`
+extra, which the `audio` extra here pulls in (as `vllm[audio]`). A plain
+`uv sync --extra vllm` omits them, so it gives you a checkpoint that fails on any
+non-16 kHz input:
 
 ```bash
 # Serving an audio-enabled checkpoint

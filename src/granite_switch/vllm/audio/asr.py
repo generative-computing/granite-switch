@@ -332,15 +332,10 @@ def _to_mono_float32(samples: np.ndarray) -> np.ndarray:
 
 
 def _resample(samples: np.ndarray, orig_sr: int, target_sr: int) -> np.ndarray:
-    """Resample to ``target_sr`` Hz. No-op when already at the target rate."""
+    """Resample to ``target_sr`` Hz via vLLM's ``AudioResampler``. No-op at target."""
     if orig_sr == target_sr:
         return samples
-    try:
-        import librosa
-    except ImportError as exc:  # pragma: no cover - exercised only without librosa
-        raise RuntimeError(
-            f"Audio sampled at {orig_sr} Hz must be resampled to {target_sr} Hz, "
-            "but librosa is not installed. Install the audio extra: "
-            "`uv sync --extra audio` (or `pip install librosa`)."
-        ) from exc
-    return librosa.resample(samples, orig_sr=orig_sr, target_sr=target_sr)
+    # Local import so the module's other helpers still load without vLLM.
+    from vllm.multimodal.audio import AudioResampler
+
+    return AudioResampler(target_sr=target_sr).resample(samples, orig_sr=orig_sr)

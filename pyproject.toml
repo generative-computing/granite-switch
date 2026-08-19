@@ -24,10 +24,9 @@ vllm = ["vllm>=0.19.1,<0.20.0"]
 vllm20 = ["vllm>=0.20.0,<0.21.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
-# Audio (ASR) preprocessing — speech-to-text cascade in the vLLM backend.
-# transformers ships the ASR model itself (already a core dep); these add
-# audio decoding/resampling.
-audio = ["librosa", "soundfile"]
+# Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
+# tracks the active vLLM).
+audio = ["vllm[audio]"]
 tutorials = [
     "granite-switch[hf,vllm,compose]",
     "chromadb>=0.4.0",
@@ -60,8 +59,8 @@ markers = [
 vllm19     = ["vllm>=0.19.1,<0.20.0"]
 vllm20     = ["vllm>=0.20.0,<0.21.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
-# soundfile/librosa at runtime, and no group pulled them in before (integration
-# tests failed with ModuleNotFoundError on a synced pod).
+# vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
+# in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm19" }, "granite-switch[hf,compose,audio]"]
 dev-vllm20 = ["pytest", "pytest-cov", { include-group = "vllm20" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]

@@ -86,20 +86,20 @@ class TestMonoAndResample:
         a = np.zeros(1600, dtype=np.float32)
         assert asr._resample(a, 16000, 16000) is a
 
-    def test_resample_without_librosa_raises_clear_error(self):
-        # When librosa is unavailable, a non-target rate must raise a clear error.
-        import builtins
-
-        real_import = builtins.__import__
-
-        def fake_import(name, *args, **kwargs):
-            if name == "librosa":
-                raise ImportError("no librosa")
-            return real_import(name, *args, **kwargs)
-
-        with mock.patch("builtins.__import__", side_effect=fake_import):
-            with pytest.raises(RuntimeError, match="librosa"):
-                asr._resample(np.zeros(800, dtype=np.float32), 8000, 16000)
+    @pytest.mark.parametrize("orig_sr,target_sr", [(8000, 16000), (44100, 16000)])
+    def test_resample_real_vllm_backend(self, orig_sr, target_sr):
+        # Real resampling via vLLM's AudioResampler (CPU): a 1s tone keeps its
+        # duration and pitch at the new rate.
+        pytest.importorskip("vllm.multimodal.audio")
+        freq = 220.0
+        t = np.linspace(0, 1.0, orig_sr, endpoint=False, dtype=np.float32)
+        tone = np.sin(2 * np.pi * freq * t).astype(np.float32)
+        out = asr._resample(tone, orig_sr, target_sr)
+        assert abs(len(out) - target_sr) <= max(4, target_sr // 100)
+        assert np.isfinite(out).all()
+        spectrum = np.abs(np.fft.rfft(out))
+        peak_hz = np.fft.rfftfreq(len(out), 1.0 / target_sr)[spectrum.argmax()]
+        assert abs(peak_hz - freq) < 5.0
 
 
 class TestTranscriber:
