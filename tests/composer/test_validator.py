@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for post-build parameter validation."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn as nn
 
 from granite_switch.composer.arch import ArchDescriptor, ModuleDescriptor
-from granite_switch.composer.validator import validate_all_parameters
+from granite_switch.composer.validator import (
+    validate_all_parameters,
+    validate_control_lut,
+)
 
 
 @pytest.fixture
@@ -273,3 +278,73 @@ class TestValidatorEdgeCases:
         captured = capsys.readouterr()
         # Both qkv and o_proj should be considered populated (by different adapters)
         assert "Parameter summary" in captured.out
+
+
+class _MockSwitch(nn.Module):
+    """Switch carrying a control->substitute table of a chosen length."""
+
+    def __init__(self, lut_size: int | None):
+        super().__init__()
+        if lut_size is None:
+            self.control_to_substitute_lut = None
+        else:
+            self.register_buffer(
+                "control_to_substitute_lut",
+                torch.full((lut_size,), -1, dtype=torch.long),
+            )
+
+
+class _MockSwitchModel(nn.Module):
+    """Minimal stand-in exposing the attributes validate_control_lut reads."""
+
+    def __init__(self, vocab_size, lut_size: int | None, with_switch: bool = True):
+        super().__init__()
+        self.config = SimpleNamespace(vocab_size=vocab_size)
+        self.model = nn.Module()
+        if with_switch:
+            self.model.switch = _MockSwitch(lut_size)
+
+
+class TestValidateControlLut:
+    """The table length must match the config.vocab_size the checkpoint ships.
+
+    A mismatch is not recoverable at load time: from_pretrained discards the
+    stored tensor and leaves the buffer uninitialised, so every id reads as a
+    control id. Compose has to reject it rather than write it out.
+    """
+
+    def test_matching_length_passes(self):
+        validate_control_lut(_MockSwitchModel(vocab_size=200, lut_size=200))
+
+    def test_one_row_short_raises(self):
+        """The <|audio|> off-by-one: vocab grew after the switch was built."""
+        model = _MockSwitchModel(vocab_size=100365, lut_size=100364)
+
+        with pytest.raises(ValueError, match="control_to_substitute_lut") as exc:
+            validate_control_lut(model)
+
+        # Both numbers must appear — the delta is the whole diagnosis.
+        assert "100364" in str(exc.value)
+        assert "100365" in str(exc.value)
+
+    def test_longer_than_vocab_raises(self):
+        """Also catches the shrink direction (e.g. a padded base vocab)."""
+        with pytest.raises(ValueError):
+            validate_control_lut(_MockSwitchModel(vocab_size=100365, lut_size=102400))
+
+    def test_no_switch_is_not_an_error(self):
+        """Zero-adapter checkpoints have no switch to validate."""
+        validate_control_lut(
+            _MockSwitchModel(vocab_size=200, lut_size=None, with_switch=False)
+        )
+
+    def test_switch_without_mapping_is_not_an_error(self):
+        """No token-exchange mapping configured -> nothing to check."""
+        validate_control_lut(_MockSwitchModel(vocab_size=200, lut_size=None))
+
+    def test_config_without_vocab_size_is_skipped(self):
+        """Don't invent a failure when there is nothing to compare against."""
+        model = _MockSwitchModel(vocab_size=200, lut_size=64)
+        del model.config.vocab_size
+
+        validate_control_lut(model)

@@ -19,6 +19,35 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.granite.modeling_granite import eager_attention_forward
 
 
+def build_control_to_substitute_lut(config) -> torch.Tensor | None:
+    """Derive the control->substitute lookup table from *config*.
+
+    Shape ``[max(vocab_size, max_ctrl_id + 1)]``: ``-1`` at every non-control id
+    and the substitute id at each control slot. The ``max`` keeps every control
+    id addressable even when ``vocab_size`` lags the tokenizer.
+
+    Returns ``None`` when *config* carries no token-exchange mapping, in which
+    case the switch leaves ``input_ids`` untouched.
+
+    Single source of truth for the sizing rule: the table is a pure function of
+    ``vocab_size``, ``adapter_token_ids`` and ``adapter_substitute_token_ids``,
+    so anything that changes those must re-derive it (see
+    :meth:`SingleSwitch.rebuild_control_to_substitute_lut`).
+    """
+    if config is None:
+        return None
+    ctrl_ids = getattr(config, "adapter_token_ids", None)
+    sub_ids = getattr(config, "adapter_substitute_token_ids", None)
+    if not ctrl_ids or not sub_ids:
+        return None
+
+    lut_size = max(getattr(config, "vocab_size", 0), max(ctrl_ids) + 1)
+    lut = torch.full((lut_size,), -1, dtype=torch.long)
+    for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
+        lut[ctrl_id] = sub_id
+    return lut
+
+
 class SingleSwitch(nn.Module):
     """Single-head attention-based switch for adapter selection.
 
@@ -89,21 +118,43 @@ class SingleSwitch(nn.Module):
         # control-token positions carry the substitute id by the time the
         # decoder embeds them. The decoder is then oblivious — it just calls
         # embed_tokens(input_ids) and gets the right result by construction.
-        if (
-            config is not None
-            and getattr(config, "adapter_token_ids", None) is not None
-            and getattr(config, "adapter_substitute_token_ids", None) is not None
-        ):
-            ctrl_ids = config.adapter_token_ids
-            sub_ids = config.adapter_substitute_token_ids
-            max_ctrl_id = max(ctrl_ids)
-            lut_size = max(getattr(config, "vocab_size", 0), max_ctrl_id + 1)
-            lut = torch.full((lut_size,), -1, dtype=torch.long)
-            for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
-                lut[ctrl_id] = sub_id
+        lut = build_control_to_substitute_lut(config)
+        if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut)
         else:
             self.control_to_substitute_lut = None
+
+    def rebuild_control_to_substitute_lut(self, config=None) -> bool:
+        """Re-derive the control->substitute table after a vocabulary change.
+
+        ``__init__`` sizes the table from ``config.vocab_size``, so anything that
+        grows the vocabulary afterwards — notably
+        ``resize_token_embeddings`` when compose adds control and marker tokens —
+        leaves the buffer shorter than the config it will be saved alongside.
+
+        That matters because the buffer is persistent. On ``from_pretrained``,
+        a stored tensor whose shape disagrees with the freshly-constructed one is
+        discarded and the buffer is left as uninitialised memory (there is no
+        ``_init_weights`` rule for it), so every id reads as a control id and the
+        rewrite sends out-of-range ids into the embedding gather. Re-derive the
+        table before saving so the checkpoint and its config agree.
+
+        Returns ``True`` if a table was rebuilt, ``False`` if this switch has no
+        token-exchange mapping to rebuild.
+        """
+        lut = build_control_to_substitute_lut(
+            config if config is not None else self.config
+        )
+        if lut is None:
+            return False
+
+        existing = getattr(self, "control_to_substitute_lut", None)
+        if existing is not None:
+            lut = lut.to(device=existing.device)
+            self.control_to_substitute_lut = lut
+        else:
+            self.register_buffer("control_to_substitute_lut", lut)
+        return True
 
     @property
     def num_cache_layers(self) -> int:

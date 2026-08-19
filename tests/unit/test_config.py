@@ -93,3 +93,111 @@ class TestConfigDefaults:
     def test_projection_head_dim_inferred_from_hidden_size(self):
         cfg = GraniteSwitchConfig(**_valid_kwargs())
         assert cfg.projection_head_dim == 64 // 4
+
+
+# ════════════════════════════════════════════════════════════════════
+# 3. Audio (ASR) preprocessing fields
+# ════════════════════════════════════════════════════════════════════
+
+
+@pytest.mark.audio
+class TestAudioConfig:
+    def test_asr_defaults_off(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_enabled is False
+        assert cfg.asr_model_id is None
+        assert cfg.asr_device == "cpu"
+        assert cfg.asr_dtype is None
+        assert cfg.asr_pipeline_kwargs is None
+        assert cfg.asr_generate_kwargs is None
+
+    def test_asr_dtype_round_trip(self, tmp_path):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0, asr_enabled=True, asr_device="cuda:0", asr_dtype="float32"
+        )
+        cfg.save_pretrained(tmp_path)
+        assert GraniteSwitchConfig.from_pretrained(tmp_path).asr_dtype == "float32"
+
+    def test_invalid_asr_dtype_raises(self):
+        with pytest.raises(ValueError, match="asr_dtype"):
+            GraniteSwitchConfig(num_adapters=0, asr_dtype="fp8")
+
+    def test_longaudio_defaults(self):
+        cfg = GraniteSwitchConfig(num_adapters=0)
+        assert cfg.asr_max_audio_clips == 32
+        assert cfg.asr_chunk_length_s == 30.0
+        assert cfg.asr_chunk_overlap_s == 5.0
+        assert cfg.asr_self_chunks is True
+
+    def test_longaudio_round_trip(self, tmp_path):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_max_audio_clips=4,
+            asr_chunk_length_s=20.0,
+            asr_chunk_overlap_s=3.0,
+            asr_self_chunks=False,
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_max_audio_clips == 4
+        assert loaded.asr_chunk_length_s == 20.0
+        assert loaded.asr_chunk_overlap_s == 3.0
+        assert loaded.asr_self_chunks is False
+
+    def test_invalid_max_audio_clips_raises(self):
+        with pytest.raises(ValueError, match="asr_max_audio_clips"):
+            GraniteSwitchConfig(num_adapters=0, asr_max_audio_clips=0)
+
+    def test_overlap_ge_window_raises(self):
+        with pytest.raises(ValueError, match="asr_chunk_overlap_s"):
+            GraniteSwitchConfig(
+                num_adapters=0, asr_chunk_length_s=10.0, asr_chunk_overlap_s=10.0
+            )
+
+    def test_asr_kwargs_round_trip(self, tmp_path):
+        # Pipeline/generate kwargs must survive save_pretrained → from_pretrained
+        # so the checkpoint stays self-describing about its ASR front-end.
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_model_id="openai/whisper-large-v3",
+            asr_pipeline_kwargs={"chunk_length_s": 15, "batch_size": 4},
+            asr_generate_kwargs={"language": "de", "task": "transcribe"},
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_enabled is True
+        assert loaded.asr_model_id == "openai/whisper-large-v3"
+        assert loaded.asr_pipeline_kwargs == {"chunk_length_s": 15, "batch_size": 4}
+        assert loaded.asr_generate_kwargs == {"language": "de", "task": "transcribe"}
+
+    def test_adapters_and_audio_coexist_round_trip(self, tmp_path):
+        """Adapters and the audio cascade coexist and survive save→load."""
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(num_adapters=3),
+            asr_enabled=True,
+            asr_model_id="distil-whisper/distil-small.en",
+            asr_max_audio_clips=4,
+        )
+        assert cfg.num_adapters == 3
+        assert cfg.adapter_token_ids == [500, 501, 502]
+        assert cfg.asr_enabled is True
+
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.num_adapters == 3
+        assert loaded.adapter_token_ids == [500, 501, 502]
+        assert loaded.adapter_names == ["adapter_0", "adapter_1", "adapter_2"]
+        assert loaded.adapter_ranks == [8, 8, 8]
+        assert loaded.adapter_substitute_token_ids == [1, 1, 1]
+        assert loaded.asr_enabled is True
+        assert loaded.asr_model_id == "distil-whisper/distil-small.en"
+        assert loaded.asr_max_audio_clips == 4
+
+    def test_adapter_token_ids_do_not_collide_with_reserved_audio_row(self, tmp_path):
+        """Enabling audio does not perturb adapter token ids."""
+        before = GraniteSwitchConfig(**_valid_kwargs(num_adapters=2))
+        after = GraniteSwitchConfig(**_valid_kwargs(num_adapters=2), asr_enabled=True)
+        assert before.adapter_token_ids == after.adapter_token_ids
+        assert before.adapter_substitute_token_ids == after.adapter_substitute_token_ids

@@ -13,6 +13,39 @@ import torch
 from .arch import ArchDescriptor
 
 
+def validate_control_lut(model) -> None:
+    """Check the switch's control->substitute table matches the shipped config.
+
+    The table is a persistent buffer sized from ``config.vocab_size``, so a
+    checkpoint whose buffer length disagrees with its own ``config.json`` is
+    internally inconsistent. Loading one is not a graceful degradation:
+    ``from_pretrained`` discards the mismatched tensor and leaves the buffer as
+    uninitialised memory, which turns every token into a "control" token and
+    sends out-of-range ids into the embedding gather — surfacing as an opaque
+    CUDA ``srcIndex < srcSelectDimSize`` device-side assert far from the cause.
+
+    Raises:
+        ValueError: if the table length differs from ``config.vocab_size``.
+    """
+    switch = getattr(getattr(model, "model", None), "switch", None)
+    lut = getattr(switch, "control_to_substitute_lut", None)
+    if lut is None:
+        return  # no token-exchange mapping on this model
+
+    expected = getattr(model.config, "vocab_size", None)
+    if expected is None or lut.numel() == expected:
+        return
+
+    raise ValueError(
+        f"control_to_substitute_lut has {lut.numel()} entries but "
+        f"config.vocab_size is {expected}. Saving this model would produce a "
+        f"checkpoint that cannot be loaded correctly. The table is derived from "
+        f"vocab_size and the adapter token ids, so rebuild it after any "
+        f"vocabulary change with "
+        f"switch.rebuild_control_to_substitute_lut(model.config)."
+    )
+
+
 def validate_all_parameters(
     model,
     arch: ArchDescriptor,

@@ -94,6 +94,79 @@ def add_control_tokens(
     return adapter_token_ids, special_tokens
 
 
+def add_audio_token(
+    tokenizer,
+    marker: str = "<|audio|>",
+    keep_special_tokens: list[str] | None = None,
+) -> int:
+    """Add the audio placeholder marker token to the tokenizer.
+
+    Used for the audio cascade: this single special token is placed in the
+    prompt and the vLLM ASR processor replaces it with the transcript tokens at
+    request time (see granite_switch.vllm.audio). Registering it as one special
+    token keeps the processor's prompt-replacement match clean.
+
+    ``keep_special_tokens`` must list every token an earlier
+    ``add_special_tokens({"additional_special_tokens": ...})`` call registered —
+    in practice the adapter control tokens from :func:`add_control_tokens`.
+    That call *replaces* the additional-special-tokens list instead of appending
+    to it, and transformers exposes no way to read the current list back, so any
+    token not re-passed here silently drops out of ``all_special_tokens`` and
+    out of the saved ``tokenizer_config.json``. Re-passing an already-added
+    token is free: it keeps its id and does not grow the vocabulary.
+
+    Must be called before the model's embedding resize so the new row is sized
+    in. Returns the marker's token id.
+    """
+    print(f"\nAdding audio marker token: {marker}")
+    # Marker last so it takes the next free id and the kept tokens keep theirs.
+    kept = [t for t in (keep_special_tokens or []) if t != marker]
+    tokenizer.add_special_tokens({"additional_special_tokens": [*kept, marker]})
+    token_id = tokenizer.convert_tokens_to_ids(marker)
+    print(f"  {marker}: {token_id}")
+    if kept:
+        print(f"  (preserved {len(kept)} existing special token(s))")
+    return token_id
+
+
+def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
+    """Make the chat template emit the audio marker for audio content parts.
+
+    The Granite content-part loop only handles ``entry.type == 'text'`` and
+    silently drops other parts. vLLM passes multimodal chat content to the
+    template as a *list of parts*, so without this the ``<|audio|>`` marker never
+    reaches the rendered prompt and the ASR processor's prompt replacement fails
+    (``Failed to apply prompt replacement for mm_items['audio'][0]``).
+
+    We inject an ``elif`` that appends the marker for any part whose ``type``
+    contains ``'audio'`` (covers ``audio`` / ``input_audio`` / ``audio_url``).
+    Call after :func:`configure_chat_template`, gated on audio being enabled.
+    """
+    template = tokenizer.chat_template
+    if template is None:
+        print("Warning: no chat template; skipping audio chat-template handling")
+        return
+
+    # The text-only branch of the Granite content-part loop:
+    old = (
+        "                    {%- set content.val = content.val + entry.text %}\n"
+        "                {%- endif %}"
+    )
+    if old not in template:
+        raise ValueError(
+            "Could not find the Granite content-part loop to inject audio "
+            "handling; the base chat template may have changed."
+        )
+    new = (
+        "                    {%- set content.val = content.val + entry.text %}\n"
+        "                {%- elif 'audio' in entry.type %}\n"
+        "                    {%- set content.val = content.val + '" + marker + "' %}\n"
+        "                {%- endif %}"
+    )
+    tokenizer.chat_template = template.replace(old, new, 1)
+    print(f"  Audio chat-template handling added (emits {marker} for audio parts)")
+
+
 def configure_chat_template(
     tokenizer,
     discovered_adapters: list[tuple[str | None, str, str, str | None]],

@@ -36,6 +36,7 @@ from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
+    SupportsMultiModal,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
@@ -43,10 +44,17 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from granite_switch.config import GraniteSwitchConfig
 
+from .audio.processor import (
+    AUDIO_MARKER,
+    GraniteSwitchASRDummyInputsBuilder,
+    GraniteSwitchASRMultiModalProcessor,
+    GraniteSwitchASRProcessingInfo,
+)
 from .core import (
     CompileFriendlyLoRAKernelMeta,
     GraniteSwitchDecoderLayer,
@@ -285,18 +293,24 @@ class GraniteSwitchModel(nn.Module):
         # Step 1: Switch — determine adapter for each token and rewrite
         # control tokens via token-exchange. Only runs on first rank.
         if get_pp_group().is_first_rank:
-            if self.switch is not None:
+            if self.switch is not None and input_ids is not None:
                 adapter_indices, modified_input_ids = self.switch(
                     input_ids=input_ids,
                     adapter_token_ids=self.adapter_token_ids,
                 )
             else:
-                # No switch — all tokens use base model (adapter_id = 0).
-                num_tokens = input_ids.shape[0]
+                # No switch, or the multimodal path (input_ids is None because
+                # vLLM pre-merged inputs_embeds): run on base, adapter_id 0.
+                if input_ids is not None:
+                    num_tokens = input_ids.shape[0]
+                    device = input_ids.device
+                else:
+                    num_tokens = inputs_embeds.shape[0]
+                    device = inputs_embeds.device
                 adapter_indices = torch.zeros(
                     num_tokens,
                     dtype=torch.long,
-                    device=input_ids.device,
+                    device=device,
                 )
                 modified_input_ids = input_ids
 
@@ -385,10 +399,16 @@ class GraniteSwitchModel(nn.Module):
             return intermediate_tensors
 
 
+@MULTIMODAL_REGISTRY.register_processor(
+    GraniteSwitchASRMultiModalProcessor,
+    info=GraniteSwitchASRProcessingInfo,
+    dummy_inputs=GraniteSwitchASRDummyInputsBuilder,
+)
 class GraniteSwitchForCausalLM(
     nn.Module,
     HasInnerState,
     SupportsLoRA,
+    SupportsMultiModal,
     SupportsPP,
     IsHybrid,
 ):
@@ -396,7 +416,27 @@ class GraniteSwitchForCausalLM(
     Granite model with switch for causal language modeling.
 
     This wraps GraniteSwitchModel with an LM head for token prediction.
+
+    Multimodal (audio): the registered ASR processor transcribes audio and
+    replaces an ``<|audio|>`` marker with the transcript tokens before the
+    decoder runs (see granite_switch.vllm.audio). ``embed_multimodal`` supplies
+    the embeddings for those positions — for the alpha, the transcript's own
+    text embeddings, which is the seam a future trained audio encoder reuses.
+    Audio capability is gated per-checkpoint by ``config.asr_enabled`` (the
+    processor reports no audio modality when disabled).
     """
+
+    supports_multimodal = True
+
+    # Without this, the multimodal path passes only inputs_embeds and the switch
+    # cannot see control tokens — audio requests would bypass adapters.
+    requires_raw_input_tokens = True
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int):
+        if modality.startswith("audio"):
+            return AUDIO_MARKER
+        return None
 
     # LoRA specific attributes
     supported_lora_modules = [
@@ -463,9 +503,54 @@ class GraniteSwitchForCausalLM(
         )
         self.sampler = None  # Will be set by vLLM
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Apply token embeddings to input_ids."""
-        return self.model.embed_input_ids(input_ids)
+    def embed_multimodal(self, **kwargs) -> list:
+        """Embeddings for the audio placeholder positions (one tensor per item).
+
+        ALPHA: the transcript token ids produced by the ASR processor are
+        embedded with the model's own token table — identical to embedding them
+        as ordinary text. Returned UN-scaled; the Granite embedding_multiplier
+        is applied later in the forward, so these rows scale consistently with
+        normal tokens. A future trained audio encoder swaps in here.
+        """
+        audio_token_ids = kwargs.get("audio_token_ids")
+        if audio_token_ids is None:
+            return []
+        embeds = self.model.embed_tokens(audio_token_ids)
+        num_tokens = kwargs.get("audio_num_tokens")
+        if num_tokens is None:
+            return [embeds]
+        sizes = [int(n) for n in num_tokens]
+        return list(torch.split(embeds, sizes))
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Embed token ids; scatter multimodal embeddings into their positions.
+
+        Returns UN-scaled embeddings (the model forward applies the Granite
+        embedding_multiplier once over everything).
+
+        Applies the switch's token-exchange rewrite (control -> substitute ids)
+        before embedding, so adapter control tokens get their in-distribution
+        embeddings exactly as on the text path. Adapter *detection* still runs in
+        forward on the raw input_ids (passed because requires_raw_input_tokens).
+        """
+        ids = input_ids
+        switch = getattr(self.model, "switch", None)
+        if switch is not None:
+            ids = switch.apply_token_exchange(input_ids)
+        inputs_embeds = self.model.embed_tokens(ids)
+        if multimodal_embeddings is not None and is_multimodal is not None:
+            mm = multimodal_embeddings
+            if isinstance(mm, (list, tuple)):
+                mm = torch.cat(list(mm)) if len(mm) else None
+            if mm is not None:
+                inputs_embeds[is_multimodal] = mm.to(inputs_embeds.dtype)
+        return inputs_embeds
 
     def forward(
         self,

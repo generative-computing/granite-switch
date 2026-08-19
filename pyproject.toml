@@ -24,6 +24,9 @@ vllm = ["vllm>=0.19.1,<0.20.0"]
 vllm20 = ["vllm>=0.20.0,<0.21.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
+# Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
+# tracks the active vLLM).
+audio = ["vllm[audio]"]
 tutorials = [
     "granite-switch[hf,vllm,compose]",
     "chromadb>=0.4.0",
@@ -49,13 +52,17 @@ markers = [
     "slow: takes > 30s",
     "deep: expensive code-theory tests (m=8 / 256-dim); run with: pytest -m deep",
     "requires_model: needs a real model checkpoint",
+    "audio: exercises the audio/ASR path; run with: pytest -m audio",
 ]
 
 [dependency-groups]
 vllm19     = ["vllm>=0.19.1,<0.20.0"]
 vllm20     = ["vllm>=0.20.0,<0.21.0"]
-dev        = ["pytest", "pytest-cov", { include-group = "vllm19" }, "granite-switch[hf,compose]"]
-dev-vllm20 = ["pytest", "pytest-cov", { include-group = "vllm20" }, "granite-switch[hf,compose]"]
+# `audio` is included so the audio tests can actually run: the ASR path needs
+# vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
+# in before (integration tests failed with ModuleNotFoundError on a synced pod).
+dev        = ["pytest", "pytest-cov", { include-group = "vllm19" }, "granite-switch[hf,compose,audio]"]
+dev-vllm20 = ["pytest", "pytest-cov", { include-group = "vllm20" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]

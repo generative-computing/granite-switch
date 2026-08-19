@@ -8,6 +8,7 @@ import pytest
 
 from granite_switch.composer.tokenizer_setup import (
     _decode_alora_invocation_text,
+    add_audio_token,
     add_control_tokens,
     configure_chat_template,
 )
@@ -29,15 +30,21 @@ class MockTokenizer:
         return self._vocab_size
 
     def add_special_tokens(self, special_tokens_dict):
-        """Add special tokens and return count added."""
+        """Add special tokens and return count added.
+
+        Mirrors transformers: tokens new to the vocabulary are appended and keep
+        their id, but ``additional_special_tokens`` is *replaced* by the list
+        passed in rather than extended. A second call therefore drops whatever
+        the first one registered unless the caller re-passes it.
+        """
         tokens = special_tokens_dict.get("additional_special_tokens", [])
         num_added = 0
         for token in tokens:
             if token not in self._vocab:
                 self._vocab[token] = self._vocab_size
                 self._vocab_size += 1
-                self._special_tokens.append(token)
                 num_added += 1
+        self._special_tokens = list(tokens)
         return num_added
 
     def convert_tokens_to_ids(self, token):
@@ -158,6 +165,79 @@ class TestAddControlTokens:
             tokenizer, [("/path", "my_adapter", "alora")]
         )
         assert special_tokens[0] == "<|my_adapter|>"
+
+
+class TestAddAudioToken:
+    """add_audio_token must not evict the control tokens added before it.
+
+    ``add_special_tokens`` replaces ``additional_special_tokens`` instead of
+    extending it, and transformers exposes no way to read the current list back,
+    so the marker call has to re-pass whatever it wants to keep.
+    """
+
+    _ADAPTERS = [
+        ("/path/to/rag", "rag", "alora"),
+        ("/path/to/code", "code", "lora"),
+    ]
+
+    def test_marker_takes_the_next_free_id(self, capsys):
+        """The marker is added after the control tokens, so it gets the next id."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        _, special_tokens = add_control_tokens(tokenizer, self._ADAPTERS)
+
+        token_id = add_audio_token(tokenizer, keep_special_tokens=special_tokens)
+
+        assert token_id == 102
+        assert len(tokenizer) == 103
+
+    def test_control_tokens_survive_the_marker(self, capsys):
+        """Both the controls and the marker stay registered as special."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        _, special_tokens = add_control_tokens(tokenizer, self._ADAPTERS)
+
+        add_audio_token(tokenizer, keep_special_tokens=special_tokens)
+
+        assert tokenizer._special_tokens == ["<|rag|>", "<|code|>", "<|audio|>"]
+
+    def test_control_token_ids_are_unchanged(self, capsys):
+        """Re-passing an added token keeps its id and does not grow the vocab."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        ctrl_ids, special_tokens = add_control_tokens(tokenizer, self._ADAPTERS)
+
+        add_audio_token(tokenizer, keep_special_tokens=special_tokens)
+
+        assert [tokenizer.convert_tokens_to_ids(t) for t in special_tokens] == ctrl_ids
+
+    def test_omitting_keep_evicts_the_control_tokens(self, capsys):
+        """Witness for why keep_special_tokens exists.
+
+        Without it the marker call drops every control token from the
+        additional-special-tokens list — silently, since the ids and the
+        vocabulary are untouched.
+        """
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        add_control_tokens(tokenizer, self._ADAPTERS)
+
+        add_audio_token(tokenizer)
+
+        assert tokenizer._special_tokens == ["<|audio|>"]
+
+    def test_marker_not_duplicated_when_already_kept(self, capsys):
+        """Passing the marker in keep_special_tokens must not register it twice."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+
+        add_audio_token(tokenizer, keep_special_tokens=["<|audio|>", "<|rag|>"])
+
+        assert tokenizer._special_tokens == ["<|rag|>", "<|audio|>"]
+        assert len(tokenizer) == 102
+
+    def test_custom_marker(self, capsys):
+        """A non-default marker is honored."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+
+        token_id = add_audio_token(tokenizer, marker="<|sound|>")
+
+        assert tokenizer.convert_tokens_to_ids("<|sound|>") == token_id
 
 
 class TestConfigureChatTemplate:
