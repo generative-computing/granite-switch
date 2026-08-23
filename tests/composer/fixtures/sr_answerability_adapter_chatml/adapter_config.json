@@ -1,0 +1,25 @@
+{
+  "peft_type": "LORA",
+  "task_type": "CAUSAL_LM",
+  "r": 32,
+  "lora_alpha": 32,
+  "bias": "none",
+  "target_modules": [
+    "q_proj",
+    "o_proj",
+    "gate_proj",
+    "up_proj",
+    "down_proj",
+    "cross_stream"
+  ],
+  "rank_pattern": {
+    "base_model.model.model.layers.0.cross_stream": 96
+  },
+  "alpha_pattern": {
+    "base_model.model.model.layers.0.cross_stream": 96
+  },
+  "last_context_token": "</think>",
+  "last_context_token_id": 49154,
+  "last_token": "<|im_end|>",
+  "last_token_id": 49155
+}

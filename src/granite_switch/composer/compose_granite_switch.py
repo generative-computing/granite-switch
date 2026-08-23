@@ -58,13 +58,16 @@ from granite_switch.composer.adapter_discovery import (
     list_repo_adapters_remote,
     resolve_repo_path,
 )
+from granite_switch.composer.adapter_loader import is_shadow_residual_adapter
 from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
+    ANCHOR_MODE_ALORA,
+    ANCHOR_MODE_SR,
     add_control_tokens,
     configure_chat_template,
-    get_alora_first_invocation_token_id,
+    load_activation_anchor,
 )
 from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
 
@@ -796,7 +799,21 @@ def build():
     # Combine external + built-in adapter lists.
     # External adapters occupy slots 0..N-1, built-ins occupy N..N+M-1.
     # Tuples are 4-element: (path, name, technology, source)
-    external_discovered = list(discovered_adapters)
+    # Shadow Residual is read out of the weights, not out of the
+    # adapter_name/model/technology/ path (which only ever spells alora/lora, and
+    # which no SR training run produces). The label decides where the control
+    # token lands, and SR has exactly one usable activation point — the anchor at
+    # the end of the generation prompt — so a mislabelled SR checkpoint must not
+    # be able to fall through to aLoRA or sequence-start placement.
+    external_discovered = [
+        (
+            path,
+            name,
+            ANCHOR_MODE_SR if path and is_shadow_residual_adapter(path) else tech,
+            source,
+        )
+        for path, name, tech, source in discovered_adapters
+    ]
     built_in_discovered = [
         (None, name, "builtin", None) for name in (args.built_in_adapters or [])
     ]
@@ -845,8 +862,11 @@ def build():
     # Non-Granite models preserve the upstream template verbatim because
     # the injection targets Granite-specific Jinja patterns.
     normalized_type = getattr(base_config, "model_type", "").replace("_switch", "")
+    sr_substitute_token_ids: dict[str, int] = {}
     if normalized_type.startswith("granite"):
-        configure_chat_template(tokenizer, all_discovered)
+        _fmt_name, sr_substitute_token_ids = configure_chat_template(
+            tokenizer, all_discovered
+        )
     else:
         print("  Skipping chat template configuration (non-Granite model)")
 
@@ -873,19 +893,31 @@ def build():
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
 
-    # Token-exchange substitute choice (must mirror the token that appears
-    # right after the control token in the rendered chat prompt, so the
-    # swap keeps the residual stream in-distribution):
-    #   - ALoRA: first token of the adapter's alora_invocation_tokens.
+    # Token-exchange substitute choice (must mirror the token the control token
+    # displaced in the rendered chat prompt, so the swap keeps the residual
+    # stream in-distribution):
+    #   - ALoRA: first token of the adapter's alora_invocation_tokens, which the
+    #     control token is inserted in front of.
+    #   - Shadow Residual: the token the control token replaced in the
+    #     generation prompt. Usually the adapter's last_context_token, but on a
+    #     template whose branches do not all emit it (Granite 4.2's
+    #     enable_thinking) configure_chat_template resolves an earlier token
+    #     common to every branch, so its answer wins over the adapter config's.
     #   - LoRA/builtin: whatever the tokenizer's chat template emits at
     #     the very start of a no-adapter user turn. For Granite 4.x that's
     #     <|start_of_role|>; the probe derives this from the template at
     #     compose time so other base models work by construction.
+    # Driven by the same resolver the chat template used, so the substitute
+    # cannot disagree with the placement.
     lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
     adapter_substitute_token_ids = []
-    for adapter_path, _name, technology, _source in all_discovered:
-        if technology == "alora":
-            sub_id = get_alora_first_invocation_token_id(adapter_path)
+    for adapter_path, name, technology, _source in all_discovered:
+        if technology == ANCHOR_MODE_SR and name in sr_substitute_token_ids:
+            sub_id = sr_substitute_token_ids[name]
+        elif technology in (ANCHOR_MODE_ALORA, ANCHOR_MODE_SR):
+            _anchor_text, sub_id, _mode = load_activation_anchor(
+                adapter_path, tokenizer
+            )
         else:
             sub_id = lora_sub_id
         adapter_substitute_token_ids.append(sub_id)

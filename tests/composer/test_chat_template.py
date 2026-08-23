@@ -784,3 +784,266 @@ class TestConfigureChatTemplateChatML:
         pos = result.rindex("<|gsm8k|>")
         after = result[pos + len("<|gsm8k|>") :]
         assert after.startswith("assistant\n<think>")
+
+
+# ---------------------------------------------------------------------------
+# Shadow Residual anchor placement
+# ---------------------------------------------------------------------------
+
+
+class _SRTokenizer:
+    """Tokenizer that can encode a Shadow Residual anchor to a single id.
+
+    ``encode_map`` pins the ids the tests assert on; everything else falls
+    through to a greedy special-token-then-character split, which is enough for
+    the composer's only question — is this candidate substitution site exactly
+    one token?  Real Granite tokenizers answer yes for ``<think>`` and no for
+    ``\\n<think>``, and so does this.
+    """
+
+    _SPECIALS = (
+        "<|start_of_role|>",
+        "<|end_of_role|>",
+        "<|end_of_text|>",
+        "<|im_start|>",
+        "<|im_end|>",
+        "</think>",
+        "<think>",
+    )
+
+    def __init__(self, chat_template, encode_map):
+        self.chat_template = chat_template
+        self._encode_map = encode_map
+
+    def encode(self, text, add_special_tokens=False):
+        if text in self._encode_map:
+            return self._encode_map[text]
+        ids, pos = [], 0
+        while pos < len(text):
+            for special in self._SPECIALS:
+                if text.startswith(special, pos):
+                    ids.append(hash(special) % 10000)
+                    pos += len(special)
+                    break
+            else:
+                ids.append(ord(text[pos]))
+                pos += 1
+        return ids
+
+
+class TestShadowResidualAnchorPlacement:
+    """SR: the control token *replaces* last_context_token at the end of the
+    generation prompt, so the post-swap id sequence equals a no-adapter render.
+
+    Unlike aLoRA there is no invocation-sequence search and no first-character
+    drop: the anchor is a single token by construction, and the runtime
+    embedding swap puts its embedding back at the control token's position.
+    """
+
+    _SR_GRANITE = os.path.join(_FIXTURES, "sr_answerability_adapter")
+    _SR_CHATML = os.path.join(_FIXTURES, "sr_answerability_adapter_chatml")
+
+    def test_granite_anchor_replaces_generation_prompt_tail(self):
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
+        configure_chat_template(tokenizer, [(self._SR_GRANITE, "answerability", "sr")])
+
+        result = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "Is this answerable?"}],
+            add_generation_prompt=True,
+            adapter_name="answerability",
+        )
+        assert result.count("<|answerability|>") == 1
+        # The generation prompt keeps its role marker and role name; only the
+        # trailing <|end_of_role|> becomes the control token.
+        assert result.endswith("<|start_of_role|>assistant<|answerability|>"), (
+            f"expected the control token in place of the generation prompt's "
+            f"<|end_of_role|>, got {result[-70:]!r}"
+        )
+
+    def test_granite_earlier_anchors_survive(self):
+        """Only the generation prompt's anchor is replaced.
+
+        <|end_of_role|> also closes every earlier role marker; replacing those
+        would corrupt the history, so the transform is confined to the
+        add_generation_prompt block.
+        """
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
+        configure_chat_template(tokenizer, [(self._SR_GRANITE, "answerability", "sr")])
+
+        messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "reply"},
+            {"role": "user", "content": "second"},
+        ]
+        no_adapter = _render(
+            _SRTokenizer(_GRANITE_TEMPLATE, {}),
+            messages=messages,
+            add_generation_prompt=True,
+        )
+        with_adapter = _render(
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="answerability",
+        )
+        # Exactly one <|end_of_role|> is consumed — the generation prompt's.
+        assert with_adapter.count("<|end_of_role|>") == (
+            no_adapter.count("<|end_of_role|>") - 1
+        )
+        # And substituting the anchor back reproduces the no-adapter render
+        # verbatim: that is the invariant the embedding swap preserves.
+        assert (
+            with_adapter.replace("<|answerability|>", "<|end_of_role|>") == no_adapter
+        )
+
+    def test_granite_no_adapter_render_unchanged(self):
+        """With no adapter_name the SR-patched template renders as the original."""
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
+        configure_chat_template(tokenizer, [(self._SR_GRANITE, "answerability", "sr")])
+
+        messages = [{"role": "user", "content": "Hello"}]
+        assert _render(tokenizer, messages=messages, add_generation_prompt=True) == (
+            _render(
+                _SRTokenizer(_GRANITE_TEMPLATE, {}),
+                messages=messages,
+                add_generation_prompt=True,
+            )
+        )
+
+    def test_chatml_anchor_replaces_opening_think_in_both_branches(self):
+        """4.2: the site moves back to <think>, which both render paths emit.
+
+        The declared last_context_token </think> only exists in the
+        enable_thinking=False prompt, so substituting it would leave the
+        *default* render with no control token and ship an inert adapter.
+        <think> is the last token of the two branches' common prefix, so one
+        control token with one substitute embedding serves both.
+        """
+        tokenizer = _SRTokenizer(_CHATML_TEMPLATE, {"</think>": [49154]})
+        configure_chat_template(tokenizer, [(self._SR_CHATML, "answerability", "sr")])
+
+        messages = [{"role": "user", "content": "Is this answerable?"}]
+        for enable_thinking, expected_tail in (
+            (False, "<|im_start|>assistant\n<|answerability|></think>"),
+            (True, "<|im_start|>assistant\n<|answerability|>\n"),
+        ):
+            result = _render(
+                tokenizer,
+                messages=messages,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+                adapter_name="answerability",
+            )
+            assert result.count("<|answerability|>") == 1, (
+                f"enable_thinking={enable_thinking}: expected exactly one "
+                f"control token, got {result[-70:]!r}"
+            )
+            assert result.endswith(expected_tail), (
+                f"enable_thinking={enable_thinking}: expected the control token "
+                f"in place of <think>, got {result[-70:]!r}"
+            )
+
+    def test_chatml_history_think_tags_survive(self):
+        """<think> appears in history and truncation logic, not only in emissions.
+
+        A blanket literal replacement would break `.split('</think>')` and the
+        assistant turns' own tags; the transform must only touch the generation
+        prompt.  Substituting the site back reproduces the no-adapter render
+        verbatim, in *both* thinking modes — that is the invariant the runtime
+        embedding swap preserves.
+        """
+        tokenizer = _SRTokenizer(_CHATML_TEMPLATE, {"</think>": [49154]})
+        configure_chat_template(tokenizer, [(self._SR_CHATML, "answerability", "sr")])
+
+        messages = [
+            {"role": "user", "content": "first"},
+            {"role": "assistant", "content": "<think>reasoning</think>reply"},
+            {"role": "user", "content": "second"},
+        ]
+        for enable_thinking in (False, True):
+            no_adapter = _render(
+                _SRTokenizer(_CHATML_TEMPLATE, {}),
+                messages=messages,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+            with_adapter = _render(
+                tokenizer,
+                messages=messages,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+                adapter_name="answerability",
+            )
+            assert with_adapter.replace("<|answerability|>", "<think>") == no_adapter, (
+                f"enable_thinking={enable_thinking}"
+            )
+
+    def test_chatml_substitute_id_is_the_resolved_site_not_the_anchor(self):
+        """The returned substitute id restores <think>, not the declared </think>.
+
+        The runtime swap keys on the control token's id, so there is exactly one
+        substitute embedding per adapter; if it did not match the token actually
+        displaced, the post-swap sequence would diverge from a no-adapter render.
+        """
+        tokenizer = _SRTokenizer(_CHATML_TEMPLATE, {"</think>": [49154]})
+        _fmt, substitutes = configure_chat_template(
+            tokenizer, [(self._SR_CHATML, "answerability", "sr")]
+        )
+        assert substitutes == {
+            "answerability": tokenizer.encode("<think>", add_special_tokens=False)[0]
+        }
+        assert substitutes["answerability"] != 49154
+
+    def test_every_generation_prompt_branch_must_be_patched(self):
+        """A branch left without a control token is a compose-time error.
+
+        This is the failure the old count>0 guard let through: on 4.2 only the
+        enable_thinking=False branch emits </think>, so patching it satisfied
+        "something was patched" while the *default* render shipped an adapter
+        that never activates.
+        """
+        import pytest
+
+        # Two branches whose only shared literal is the role marker, which the
+        # anchor is not part of and which is not a candidate site here because
+        # the branches diverge immediately after it.
+        template = _CHATML_TEMPLATE.replace(
+            "{{- '<|im_start|>assistant\\n<think>\\n' }}",
+            "{{- '<|im_start|>assistant\\n' }}",
+        )
+        assert template != _CHATML_TEMPLATE
+        tokenizer = _SRTokenizer(template, {"</think>": [49154]})
+        with pytest.raises(ValueError, match="render paths that do not all emit"):
+            configure_chat_template(
+                tokenizer, [(self._SR_CHATML, "answerability", "sr")]
+            )
+
+    def test_sr_anchor_is_a_single_token(self):
+        """A multi-token anchor is a compose-time error, not a silent miss.
+
+        The runtime swap replaces exactly one embedding, so an anchor that does
+        not encode to one id cannot be honored.
+        """
+        import pytest
+
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [1, 2, 3]})
+        with pytest.raises(ValueError, match="encodes to 3 tokens"):
+            configure_chat_template(
+                tokenizer, [(self._SR_GRANITE, "answerability", "sr")]
+            )
+
+    def test_sr_anchor_id_must_match_the_tokenizer(self):
+        """A recorded id that disagrees with this tokenizer is a hard error.
+
+        It means the adapter was trained against a different tokenizer, which
+        would place the activation somewhere else entirely.
+        """
+        import pytest
+
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [12345]})
+        with pytest.raises(ValueError, match="last_context_token_id=49153"):
+            configure_chat_template(
+                tokenizer, [(self._SR_GRANITE, "answerability", "sr")]
+            )

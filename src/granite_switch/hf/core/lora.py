@@ -14,6 +14,7 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
     GraniteMoeHybridMLP,
     apply_rotary_pos_emb,
     eager_attention_forward,
+    rotate_half,
 )
 
 from granite_switch.config import GraniteSwitchConfig
@@ -381,12 +382,16 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             self.q_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.k_norm = nn.RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Fused QKV projection - conditionally add LoRA based on config
+        # Fused QKV projection (matches vLLM structure).  This is the single
+        # canonical layout for every adapter kind — Shadow Residual adapters
+        # trained against separate q/k/v projections compose into it losslessly,
+        # because the LoRA side is stored as independent per-slice (A, B) pairs.
         q_size = self.num_heads * self.head_dim
         kv_size = self.num_key_value_heads * self.head_dim
+        self.q_size = q_size
+        self.kv_size = kv_size
 
         if "qkv_proj" in config.lora_target_modules:
-            # QKV with merged switched LoRA (matches vLLM!)
             num_adapters = config.num_adapters
             max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
             self.qkv_proj = MergedSwitchedLoRALinear(
@@ -398,7 +403,6 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             )
             self.has_qkv_lora = True
         else:
-            # No LoRA adapters for QKV - use plain linear layer
             self.qkv_proj = nn.Linear(
                 self.hidden_size,
                 q_size + 2 * kv_size,  # Q + K + V
@@ -438,6 +442,7 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: torch.LongTensor | None = None,
+        return_kv: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, Cache | None]:
         """Forward pass with LoRA and modern Cache API support.
 
@@ -450,21 +455,20 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             output_attentions: Whether to return attention weights
             use_cache: Whether to return updated cache
             cache_position: Token positions for cache indexing
+            return_kv: Also return the post-cache ``(key_states, value_states)``,
+                so a Shadow Residual adapter stream can attend against them.
 
         Returns:
             Tuple of (attention_output, attention_weights, cache)
         """
         bsz, q_len, _ = hidden_states.size()
+        q_size, kv_size = self.q_size, self.kv_size
 
-        # Fused QKV projection - conditionally use LoRA
+        # Fused QKV: single matmul then split
         if self.has_qkv_lora:
             qkv = self.qkv_proj(hidden_states, adapter_indices)
         else:
             qkv = self.qkv_proj(hidden_states)
-
-        # Split Q, K, V
-        q_size = self.num_heads * self.head_dim
-        kv_size = self.num_key_value_heads * self.head_dim
         query_states, key_states, value_states = qkv.split(
             [q_size, kv_size, kv_size], dim=-1
         )
@@ -544,7 +548,115 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
 
         # Return Cache object if use_cache, else None
         # Cache object is updated in-place by cache.update() above
-        return attn_output, attn_weights, past_key_values if use_cache else None
+        result = (attn_output, attn_weights, past_key_values if use_cache else None)
+        if return_kv:
+            # Return K/V states for dual-stream: adapter stream reuses these
+            return (*result, (key_states, value_states))
+        return result
+
+    def forward_dual_stream(
+        self,
+        hidden_states: torch.Tensor,
+        adapter_indices: torch.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+        base_kv: tuple[torch.Tensor, torch.Tensor] | None = None,
+        cache_position: torch.LongTensor | None = None,
+    ) -> torch.Tensor:
+        """SR dual-stream forward: compute Q with LoRA, use base stream's K/V.
+
+        K/V are computed from base hidden states (by the base stream's
+        attention) and reused by the adapter stream. The adapter stream only
+        computes Q (with LoRA delta) and attends against the base K/V.
+
+        The base_kv tuple contains full-sequence K/V (post-cache-update), so
+        autoregressive decode works correctly — the base stream's attention
+        already accumulated K/V history in the shared cache.
+
+        Args:
+            hidden_states: Adapter stream's normed hidden states [B, S, H]
+            adapter_indices: Per-token adapter selection [B, S]
+            position_embeddings: Precomputed (cos, sin) for RoPE
+            attention_mask: Causal attention mask
+            base_kv: (key_states, value_states) from base stream's attention,
+                shape [B, kv_heads, full_seq_len, dim] (includes cache history)
+            cache_position: Token positions for cache indexing
+
+        Returns:
+            attn_output: Attention output [B, S, H]
+        """
+        bsz, q_len, _ = hidden_states.size()
+
+        # Compute Q only (K/V come from base stream)
+        if self.has_qkv_lora:
+            qkv = self.qkv_proj(hidden_states, adapter_indices)
+        else:
+            qkv = self.qkv_proj(hidden_states)
+        query_states = qkv[:, :, : self.q_size]
+
+        # Reshape Q
+        query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim)
+
+        # QK-norm on Q only (K already normed in base stream)
+        if self.qk_norm:
+            query_states = self.q_norm(query_states)
+
+        # Apply RoPE to Q only (K already has RoPE from base stream)
+        cos, sin = (
+            position_embeddings if position_embeddings is not None else (None, None)
+        )
+        if position_embeddings is not None:
+            query_states = query_states.transpose(1, 2)
+            query_states = _apply_rotary_pos_emb_q_only(query_states, cos, sin)
+        else:
+            query_states = query_states.transpose(1, 2)
+
+        # K/V from base stream (full sequence including cache history)
+        key_states, value_states = base_kv
+
+        # Attention
+        attention_interface = eager_attention_forward
+        if self.config._attn_implementation != "eager":
+            attention_interface = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
+
+        attn_output, _ = attention_interface(
+            self,
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            dropout=0.0 if not self.training else self.attention_dropout,
+            scaling=self.scaling,
+            sliding_window=getattr(self.config, "sliding_window", None),
+        )
+
+        # Reshape and project output with LoRA
+        attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
+        if self.has_o_lora:
+            attn_output = self.o_proj(attn_output, adapter_indices)
+        else:
+            attn_output = self.o_proj(attn_output)
+
+        return attn_output
+
+
+def _apply_rotary_pos_emb_q_only(
+    q: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    unsqueeze_dim: int = 1,
+) -> torch.Tensor:
+    """Apply RoPE to Q only (K already has RoPE from base stream).
+
+    q shape: [B, heads, S, dim]. cos/sin shape: [B, S, dim].
+    unsqueeze_dim=1 broadcasts cos/sin to [B, 1, S, dim] for heads dimension.
+    """
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    return q_embed
 
 
 def replace_shared_mlp_projections_with_lora(
