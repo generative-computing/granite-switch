@@ -16,6 +16,12 @@ Examples:
   # Built-in adapter slots only
   python compose_granite_switch.py --built-in-adapters base
 
+  # MultiSwitch with a return-to-base control token (<|base_reset|>), so one
+  # request can route base -> adapter -> base -> another adapter
+  python compose_granite_switch.py \\
+      --adapters ibm-granite/granitelib-core-r1.0 \\
+      --switch-type multi --base-reset-token
+
   # Include only specific adapters from a library
   python compose_granite_switch.py \\
       --adapters ibm-granite/granitelib-rag-r1.0 \\
@@ -63,12 +69,13 @@ from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
-    ANCHOR_MODE_ALORA,
     ANCHOR_MODE_SR,
     add_control_tokens,
+    build_substitute_token_ids,
     configure_chat_template,
     load_activation_anchor,
 )
+from granite_switch.composer.validator import validate_base_reset_switch_type
 from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
 
 # ---------------------------------------------------------------------------
@@ -79,6 +86,39 @@ from granite_switch.composer.weight_transfer import validate_untied_lm_head_save
 def _load_tokenizer(model_name_or_path):
     """Load tokenizer from a Granite base model."""
     return AutoTokenizer.from_pretrained(model_name_or_path)
+
+
+def build_control_token_lists(tokenizer, all_discovered, switch_type, base_reset):
+    """Add the control tokens and build their index-aligned substitute ids.
+
+    Kept as one function because the two lists must agree in length and order:
+    ``GraniteSwitchConfig`` validates the lengths and the token-exchange LUT zips
+    them, so growing one without the other shifts every adapter's substitute by
+    one. The switch-type guard runs first, before the tokenizer is mutated, so a
+    rejected combination leaves nothing half-applied.
+
+    Args:
+        tokenizer: HuggingFace tokenizer (mutated: control tokens are added).
+        all_discovered: ``(adapter_path, adapter_name, technology, source)`` tuples.
+        switch_type: Requested switch engine, or None for the default.
+        base_reset: Whether to also emit the ``<|base_reset|>`` control token.
+
+    Returns:
+        ``(adapter_token_ids, special_tokens, adapter_substitute_token_ids)``
+    """
+    validate_base_reset_switch_type(base_reset, switch_type)
+    adapter_token_ids, special_tokens = add_control_tokens(
+        tokenizer, all_discovered, base_reset=base_reset
+    )
+    # Token-exchange substitute choice (must mirror the token that appears right
+    # after the control token in the rendered chat prompt, so the swap keeps the
+    # residual stream in-distribution) — see build_substitute_token_ids.
+    adapter_substitute_token_ids = build_substitute_token_ids(
+        all_discovered,
+        _probe_lora_substitute_token_id(tokenizer),
+        base_reset=base_reset,
+    )
+    return adapter_token_ids, special_tokens, adapter_substitute_token_ids
 
 
 def _probe_lora_substitute_token_id(tokenizer) -> int:
@@ -304,13 +344,29 @@ def _create_adapter_index(
     Args:
         discovered_adapters: List of (path, name, technology, source) tuples.
         io_config_paths: List of io.yaml relative paths.
-        adapter_token_ids: List of control token IDs.
+        adapter_token_ids: Control token IDs, in control-token order: one per
+            adapter, optionally preceded by the base-reset slot.
         output_path: Output directory path.
         base_model_name: Base model name/path.
         include_debug_fields: If True, include original_path in output.
     """
     print("\nCreating adapter index file...")
     model_name_only = base_model_name.split("/")[-1]
+
+    # adapter_token_ids may be one longer than discovered_adapters: composing with
+    # --base-reset-token puts <|base_reset|> in the LEADING slot
+    # (tokenizer_setup.add_control_tokens), and that slot is not an adapter. The
+    # lookup below is per-adapter, so it has to skip the offset -- otherwise every
+    # adapter records its predecessor's id and the last adapter's id is never
+    # written, with no IndexError to reveal it.
+    token_id_offset = len(adapter_token_ids) - len(discovered_adapters)
+    if token_id_offset not in (0, 1):
+        raise ValueError(
+            f"adapter_token_ids has {len(adapter_token_ids)} entries for "
+            f"{len(discovered_adapters)} adapter(s); expected the same count, or one "
+            f"more when a leading base-reset slot is present. The per-adapter "
+            f"control-token ids recorded in adapter_index.json cannot be aligned."
+        )
 
     index = {
         "model_info": {
@@ -325,7 +381,7 @@ def _create_adapter_index(
     ):
         adapter_path, adapter_name, technology = adapter_info[:3]
         source = adapter_info[3] if len(adapter_info) > 3 else None
-        token_id = adapter_token_ids[adapter_idx]
+        token_id = adapter_token_ids[adapter_idx + token_id_offset]
 
         entry = {
             "adapter_index": adapter_idx + 1,
@@ -532,6 +588,7 @@ Examples:
   python compose_granite_switch.py --adapters ibm-granite/granitelib-guardian-r1.0 --exclude-adapters factuality-detection
   python compose_granite_switch.py --adapters ibm-granite/granitelib-rag-r1.0 --technology-filter lora
   python compose_granite_switch.py --adapters ibm-granite/granitelib-rag-r1.0 --list-adapters
+  python compose_granite_switch.py --adapters ibm-granite/granitelib-core-r1.0 --switch-type multi --base-reset-token
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -572,6 +629,39 @@ Examples:
         type=int,
         default=None,
         help="Dimension of Q/K/V vectors in switch attention",
+    )
+    parser.add_argument(
+        "--switch-type",
+        type=str,
+        default=None,
+        choices=["single", "multi"],
+        help="Adapter-selection engine embedded in the composed checkpoint. "
+        "'single' (default) uses the SingleSwitch attention router; "
+        "'multi' is the native multi-transition Kerdock/DG coded-memory "
+        "engine. Persisted to config.json so from_pretrained rebuilds the "
+        "matching engine.",
+    )
+    parser.add_argument(
+        "--ms-code-m",
+        type=int,
+        default=None,
+        choices=[6, 8],
+        help="multi (coded) only: Kerdock/DG parameter m (N = 2^m). Default 6.",
+    )
+    parser.add_argument(
+        "--ms-memory-gain",
+        type=float,
+        default=None,
+        help="multi (coded) only: memory-head key scaling. Default 28.0.",
+    )
+    parser.add_argument(
+        "--base-reset-token",
+        action="store_true",
+        help=(
+            "multi only: also emit a <|base_reset|> control token that returns "
+            "routing to the base model mid-sequence. Yields num_adapters + 1 "
+            "control tokens with the base-reset slot first. Off by default."
+        ),
     )
     parser.add_argument(
         "--built-in-adapters",
@@ -644,6 +734,11 @@ Examples:
 
 def build():
     args = _compose_argparser().parse_args()
+
+    # Argument-compatibility checks first: everything below resolves and downloads
+    # the base model (~7 GB), so an incompatible flag pair must be rejected before
+    # that, not in STEP 1. build_control_token_lists re-checks for direct callers.
+    validate_base_reset_switch_type(args.base_reset_token, args.switch_type)
 
     if args.target_model is None and args.base_model:
         args.target_model = args.base_model.split("/")[-1]
@@ -856,7 +951,18 @@ def build():
     original_vocab_size = len(tokenizer)
     print(f"Original vocabulary size: {original_vocab_size}")
 
-    adapter_token_ids, special_tokens = add_control_tokens(tokenizer, all_discovered)
+    # Control tokens + their token-exchange substitutes, built together so the two
+    # lists cannot drift apart. The substitute probe renders a NO-ADAPTER chat, and
+    # a no-adapter render is byte-identical before and after the template injection
+    # below (asserted by test_chat_template.py::test_no_adapter_render_unchanged),
+    # so probing here rather than after configure_chat_template is equivalent.
+    (
+        adapter_token_ids,
+        _special_tokens,
+        adapter_substitute_token_ids,
+    ) = build_control_token_lists(
+        tokenizer, all_discovered, args.switch_type, args.base_reset_token
+    )
 
     # Configure chat template with adapter mappings (Granite models only).
     # Non-Granite models preserve the upstream template verbatim because
@@ -892,35 +998,42 @@ def build():
     optional_kwargs = {}
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
+    # Switch-engine selection + coded-engine params. These flow through
+    # from_base_and_adapters(**kwargs) -> config_kwargs -> GraniteSwitchConfig,
+    # so they persist to config.json and from_pretrained rebuilds the right
+    # engine via create_switch(config.switch_type).
+    if args.switch_type is not None:
+        optional_kwargs["switch_type"] = args.switch_type
+    if args.ms_code_m is not None:
+        optional_kwargs["ms_code_m"] = args.ms_code_m
+    if args.ms_memory_gain is not None:
+        optional_kwargs["ms_memory_gain"] = args.ms_memory_gain
 
-    # Token-exchange substitute choice (must mirror the token the control token
-    # displaced in the rendered chat prompt, so the swap keeps the residual
-    # stream in-distribution):
-    #   - ALoRA: first token of the adapter's alora_invocation_tokens, which the
-    #     control token is inserted in front of.
-    #   - Shadow Residual: the token the control token replaced in the
-    #     generation prompt. Usually the adapter's last_context_token, but on a
-    #     template whose branches do not all emit it (Granite 4.2's
-    #     enable_thinking) configure_chat_template resolves an earlier token
-    #     common to every branch, so its answer wins over the adapter config's.
-    #   - LoRA/builtin: whatever the tokenizer's chat template emits at
-    #     the very start of a no-adapter user turn. For Granite 4.x that's
-    #     <|start_of_role|>; the probe derives this from the template at
-    #     compose time so other base models work by construction.
-    # Driven by the same resolver the chat template used, so the substitute
-    # cannot disagree with the placement.
-    lora_sub_id = _probe_lora_substitute_token_id(tokenizer)
-    adapter_substitute_token_ids = []
-    for adapter_path, name, technology, _source in all_discovered:
-        if technology == ANCHOR_MODE_SR and name in sr_substitute_token_ids:
-            sub_id = sr_substitute_token_ids[name]
-        elif technology in (ANCHOR_MODE_ALORA, ANCHOR_MODE_SR):
-            _anchor_text, sub_id, _mode = load_activation_anchor(
-                adapter_path, tokenizer
-            )
-        else:
-            sub_id = lora_sub_id
-        adapter_substitute_token_ids.append(sub_id)
+    # adapter_substitute_token_ids was built alongside adapter_token_ids in STEP 1
+    # (see build_control_token_lists), so the two lists cannot drift apart and the
+    # base-reset slot (index 0, when present) stays aligned.
+    #
+    # Shadow Residual is resolved HERE rather than in STEP 1 because it needs
+    # configure_chat_template's answer: an SR adapter's substitute is the token the
+    # control token replaced in the generation prompt -- usually its
+    # last_context_token, but on a template whose branches do not all emit it
+    # (Granite 4.2's enable_thinking) the resolver picks an earlier token common to
+    # every branch, and that answer wins over the adapter config's. Overwriting in
+    # place preserves the STEP 1 length/order invariant.
+    _sub_offset = len(adapter_substitute_token_ids) - len(all_discovered)
+    if _sub_offset not in (0, 1):
+        raise ValueError(
+            f"adapter_substitute_token_ids ({len(adapter_substitute_token_ids)}) must be "
+            f"len(all_discovered) ({len(all_discovered)}) or one more (base-reset slot); "
+            f"got offset {_sub_offset}."
+        )
+    for _i, (_path, _name, _tech, _src) in enumerate(all_discovered):
+        if _tech == ANCHOR_MODE_SR:
+            if _name in sr_substitute_token_ids:
+                _sub = sr_substitute_token_ids[_name]
+            else:
+                _anchor_text, _sub, _mode = load_activation_anchor(_path, tokenizer)
+            adapter_substitute_token_ids[_sub_offset + _i] = _sub
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,

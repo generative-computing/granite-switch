@@ -10,5 +10,11 @@ except PackageNotFoundError:
     __version__ = "0.0.0+unknown"
 
 from .config import GraniteSwitchConfig
+from .conversation import Conversation, KVHistoryPolicy
 
-__all__ = ["GraniteSwitchConfig", "__version__"]
+__all__ = [
+    "Conversation",
+    "GraniteSwitchConfig",
+    "KVHistoryPolicy",
+    "__version__",
+]

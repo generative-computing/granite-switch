@@ -3,6 +3,13 @@
 
 from transformers import GraniteMoeHybridConfig
 
+# Switch engines that support multi-transition routing, and therefore the
+# optional ``num_adapters + 1`` control-token layout whose leading slot is a
+# base-reset token (writes expert id 0 -> return to base mid-request).
+# SingleSwitch is excluded: its +/-gain attention averages competing control
+# tokens and it has no mechanism to re-select base.
+MULTI_SWITCH_TYPES = ("multi",)
+
 
 class GraniteSwitchConfig(GraniteMoeHybridConfig):
     """Configuration class for GraniteSwitch model.
@@ -58,9 +65,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         num_adapters: int = 0,
         adapter_token_ids: list[int] | None = None,
         adapter_substitute_token_ids: list[int] | None = None,
+        # Switch engine selection: "single" (sticky, one transition) or
+        # "multi" (Kerdock/DG coded memory; arbitrary transitions per request).
+        switch_type: str = "single",
         # SingleSwitch parameters
         control_token_gain: float = 15.0,
         switch_head_dim: int = 32,
+        # MultiSwitch (coded engine) parameters
+        ms_code_m: int = 6,
+        ms_code_type: str = "kerdock",
+        ms_memory_gain: float = 28.0,
+        ms_counting_head_dim: int = 32,
         # Adapter parameters
         adapter_names: list[str] | None = None,
         max_lora_rank: int = 8,
@@ -103,12 +118,35 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             raise ValueError(f"num_adapters must be >= 0, got {num_adapters}")
         self.num_adapters = num_adapters
 
+        # Switch engine selection. "multi" is the Kerdock/DG coded-memory engine.
+        valid_switch_types = ("single", "multi")
+        if switch_type not in valid_switch_types:
+            raise ValueError(
+                f"switch_type must be one of {valid_switch_types}, got {switch_type!r}"
+            )
+        self.switch_type = switch_type
+        # MultiSwitch coded-memory params (unused when switch_type == 'single').
+        self.ms_code_m = ms_code_m
+        self.ms_code_type = ms_code_type
+        self.ms_memory_gain = ms_memory_gain
+        self.ms_counting_head_dim = ms_counting_head_dim
+
+        # Allowed control-token-list lengths. SingleSwitch: exactly num_adapters
+        # (adapter_token_ids[i] fires adapter i+1; base is implicit). MultiSwitch:
+        # num_adapters (no base slot) OR num_adapters+1 (leading base-reset token
+        # that writes expert_id 0, enabling return-to-base mid-request).
+        _is_multi = switch_type in MULTI_SWITCH_TYPES
+        _allowed_lens = (
+            (num_adapters, num_adapters + 1) if _is_multi else (num_adapters,)
+        )
+
         # Validate adapter_token_ids if provided
         if num_adapters > 0 and adapter_token_ids is not None:
-            if len(adapter_token_ids) != num_adapters:
+            if len(adapter_token_ids) not in _allowed_lens:
                 raise ValueError(
-                    f"adapter_token_ids length ({len(adapter_token_ids)}) must equal "
-                    f"num_adapters ({num_adapters})."
+                    f"adapter_token_ids length ({len(adapter_token_ids)}) must be "
+                    f"one of {_allowed_lens} for switch_type={switch_type!r} "
+                    f"(num_adapters={num_adapters})."
                 )
             # Token-exchange builds the control→substitute LUT keyed by adapter token id;
             # duplicates would silently collapse to a single slot.
@@ -126,11 +164,20 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     "Every adapter needs a substitute token id whose embedding replaces "
                     "the control-token embedding before the decoder runs."
                 )
-            if len(adapter_substitute_token_ids) != num_adapters:
+            if len(adapter_substitute_token_ids) not in _allowed_lens:
                 raise ValueError(
                     f"adapter_substitute_token_ids length "
-                    f"({len(adapter_substitute_token_ids)}) must equal num_adapters "
-                    f"({num_adapters})."
+                    f"({len(adapter_substitute_token_ids)}) must be one of "
+                    f"{_allowed_lens} for switch_type={switch_type!r} "
+                    f"(num_adapters={num_adapters})."
+                )
+            if adapter_token_ids is not None and len(
+                adapter_substitute_token_ids
+            ) != len(adapter_token_ids):
+                raise ValueError(
+                    "adapter_token_ids and adapter_substitute_token_ids must have "
+                    f"the same length; got {len(adapter_token_ids)} and "
+                    f"{len(adapter_substitute_token_ids)}."
                 )
             if any(sid < 0 for sid in adapter_substitute_token_ids):
                 raise ValueError(

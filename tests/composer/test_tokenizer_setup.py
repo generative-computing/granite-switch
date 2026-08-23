@@ -9,6 +9,7 @@ import pytest
 from granite_switch.composer.tokenizer_setup import (
     _decode_alora_invocation_text,
     add_control_tokens,
+    build_substitute_token_ids,
     configure_chat_template,
 )
 
@@ -170,6 +171,97 @@ class TestAddControlTokens:
             tokenizer, [("/path", "my_adapter", "alora")]
         )
         assert special_tokens[0] == "<|my_adapter|>"
+
+
+class TestBaseResetToken:
+    """``base_reset=True`` prepends a return-to-base control token.
+
+    The engine reads ``adapter_token_ids[0]`` as the base-reset slot when the
+    list has ``num_adapters + 1`` entries (``_expert_id_offset = 0``), so the
+    token MUST come first — a trailing one would fire adapter 1, not base.
+    """
+
+    def test_base_reset_token_is_first(self, capsys):
+        """With base_reset=True the list is num_adapters+1 long, base first."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        adapters = [("/a", "rag", "alora"), ("/b", "code", "lora")]
+
+        token_ids, special_tokens = add_control_tokens(
+            tokenizer, adapters, base_reset=True
+        )
+
+        assert special_tokens == ["<|base_reset|>", "<|rag|>", "<|code|>"]
+        assert len(token_ids) == len(adapters) + 1
+        assert token_ids[0] == tokenizer.convert_tokens_to_ids("<|base_reset|>")
+
+    def test_default_emits_no_base_reset_token(self, capsys):
+        """Default is unchanged: one token per adapter, no base slot."""
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        adapters = [("/a", "rag", "alora"), ("/b", "code", "lora")]
+
+        token_ids, special_tokens = add_control_tokens(tokenizer, adapters)
+
+        assert special_tokens == ["<|rag|>", "<|code|>"]
+        assert len(token_ids) == len(adapters)
+
+    def test_adapter_named_base_reset_raises(self, capsys):
+        """A collision would make two entries share one token id.
+
+        ``add_special_tokens`` de-duplicates, so the base-reset slot and the
+        adapter would resolve to the SAME id: the config's uniqueness check
+        would reject the checkpoint, or worse the LUT would collapse both to
+        one entry. Fail at compose time with a name the user can act on.
+        """
+        tokenizer = MockTokenizer(initial_vocab_size=100)
+        adapters = [("/a", "base_reset", "lora")]
+
+        with pytest.raises(ValueError, match="base_reset"):
+            add_control_tokens(tokenizer, adapters, base_reset=True)
+
+
+class TestBuildSubstituteTokenIds:
+    """Substitutes must stay index-aligned with ``adapter_token_ids``.
+
+    ``config.py`` requires equal lengths and the token-exchange LUT zips the two
+    lists, so a missing leading entry would shift every adapter's substitute by
+    one — silently swapping each control token to the wrong embedding.
+    """
+
+    _ALORA_GETTER = (
+        "granite_switch.composer.tokenizer_setup.get_alora_first_invocation_token_id"
+    )
+
+    def test_alora_uses_invocation_token_lora_uses_probe(self):
+        adapters = [("/a", "rag", "alora", None), ("/b", "code", "lora", None)]
+
+        with patch(self._ALORA_GETTER, return_value=77):
+            subs = build_substitute_token_ids(adapters, lora_substitute_id=42)
+
+        assert subs == [77, 42]
+
+    def test_base_reset_prepends_the_probed_substitute(self):
+        """The base-reset slot takes the sequence-start token, like LoRA does.
+
+        It is emitted at a turn boundary, where the role-open marker is exactly
+        what the decoder expects to see at that position after the swap.
+        """
+        adapters = [("/a", "rag", "alora", None), ("/b", "code", "lora", None)]
+
+        with patch(self._ALORA_GETTER, return_value=77):
+            subs = build_substitute_token_ids(
+                adapters, lora_substitute_id=42, base_reset=True
+            )
+
+        assert subs == [42, 77, 42]
+        assert len(subs) == len(adapters) + 1
+
+    def test_builtin_technology_uses_the_probed_substitute(self):
+        """Built-in (empty LoRA) slots are not aLoRA and must not be probed."""
+        adapters = [(None, "spare", "builtin", None)]
+
+        subs = build_substitute_token_ids(adapters, lora_substitute_id=42)
+
+        assert subs == [42]
 
 
 class TestConfigureChatTemplate:

@@ -408,7 +408,29 @@ authoritative check — both the upstream and skinned models use the same fused-
 architecture there. The HF skinning tests in `tests/composer/test_skinning_equivalence.py` are
 skipped for this reason.
 
-### 10. Pre-Fusion SR Checkpoints Must Be Re-Composed
+### 10. Known Limitation: bf16 Caps the vLLM MultiSwitch Counting Head at 188 Control Tokens
+
+The coded engine recovers a control token's write address from a `1/(1+n)` attention signal.
+The HF backend forces that signal to fp32 and is exact past 4095; the vLLM backend's heads are
+paged-KV `vllm.Attention` modules, so the signal takes the KV-cache dtype and bf16 inverts
+exactly only up to `n = 188` (189 aliases). This is a different limit from the codebook's
+`capacity == 2048`, which bounds the memory head, not the counting head. Handled only in
+`Conversation`, and by fallback rather than refusal: above `MAX_RETAINED_CONTROL_TOKENS = 188` it
+re-prefills the turn, resetting the count to one and losing history's adapter attribution (logged;
+counted in `Conversation.reprefills`). A raw `/v1/completions` request still bypasses this entirely.
+`--kv-cache-dtype fp8` is also unguarded and would saturate `_NEG_INF` and `code(n) * 28`.
+See section 8 of [docs/MULTISWITCH_EXPLAINED.html](docs/MULTISWITCH_EXPLAINED.html).
+
+### 11. `MultiSwitch`'s Debug Attributes Exist Only Under `enforce_eager`
+
+`_debug_write_addresses` and `_debug_counting_signal` are written behind
+`if not torch.compiler.is_compiling():` (`src/granite_switch/vllm/switch/multi.py`), and the switch
+runs inside the `@support_torch_compile` region (`src/granite_switch/vllm/granite_switch_model.py`).
+`is_compiling()` is True during tracing, so the body is absent from the compiled graph — a
+default-configured server never sets them. Any test reading them must pass `enforce_eager=True` and
+must assert they are present, not skip on `None`. The same reason is why a host-side validation check
+cannot live in `MultiSwitch.forward`.
+### 12. Pre-Fusion SR Checkpoints Must Be Re-Composed
 
 SR used to build unfused Q/K/V and gate/up/down projections (`unfused_qkv=True`); it now uses
 the same fused projections as everything else. Since `transformers` silently keeps unknown

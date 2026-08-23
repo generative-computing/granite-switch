@@ -11,6 +11,12 @@ from dataclasses import dataclass
 
 from .adapter_loader import load_adapter_config
 
+# Name of the optional return-to-base control token (``<|base_reset|>``). It is
+# NOT an adapter: it occupies ``adapter_token_ids[0]`` and writes expert id 0, so
+# a request can route back to the base model mid-sequence. See
+# ``add_control_tokens(base_reset=True)``.
+BASE_RESET_ADAPTER_NAME = "base_reset"
+
 # ---------------------------------------------------------------------------
 # Chat-template format abstraction
 # ---------------------------------------------------------------------------
@@ -528,6 +534,7 @@ def _replace_anchor_in_generation_prompt(
 def add_control_tokens(
     tokenizer,
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
+    base_reset: bool = False,
 ) -> tuple[list[int], list[str]]:
     """Add control tokens to the tokenizer for each adapter.
 
@@ -536,15 +543,39 @@ def add_control_tokens(
     Args:
         tokenizer: HuggingFace tokenizer.
         discovered_adapters: List of ``(adapter_path, adapter_name, technology, source)`` tuples.
+        base_reset: When True, prepend the return-to-base control token
+            ``<|base_reset|>``, yielding ``num_adapters + 1`` ids. MultiSwitch
+            reads ``adapter_token_ids[0]`` as the base-reset slot (expert id 0)
+            precisely when the list is one longer than ``num_adapters``, so the
+            token MUST be first — appended at the end it would fire adapter 1.
 
     Returns:
         ``(adapter_token_ids, special_tokens)``
 
-        adapter_token_ids has length ``num_adapters``.
+        adapter_token_ids has length ``num_adapters``, or ``num_adapters + 1``
+        when ``base_reset`` is set (base-reset slot first).
+
+    Raises:
+        ValueError: if ``base_reset`` is set and an adapter is already named
+            ``base_reset`` — both would resolve to one token id.
     """
     print(f"\nAdding control tokens for {len(discovered_adapters)} adapter(s)...")
 
     special_tokens = []
+    if base_reset:
+        clashing = [
+            a[1] for a in discovered_adapters if a[1] == BASE_RESET_ADAPTER_NAME
+        ]
+        if clashing:
+            raise ValueError(
+                f"--base-reset-token needs the name {BASE_RESET_ADAPTER_NAME!r}, but an "
+                f"adapter already uses it. add_special_tokens de-duplicates, so the "
+                f"base-reset slot and that adapter would share one token id: the config's "
+                f"uniqueness check would reject the checkpoint, and the token-exchange LUT "
+                f"would keep only one of the two substitutes. Rename the adapter (e.g. via "
+                f"its io.yaml) or compose without --base-reset-token."
+            )
+        special_tokens.append(f"<|{BASE_RESET_ADAPTER_NAME}|>")
     for adapter_info in discovered_adapters:
         adapter_name = adapter_info[1]
         special_tokens.append(f"<|{adapter_name}|>")
@@ -557,17 +588,53 @@ def add_control_tokens(
     print(f"Added {num_added} special tokens")
     print(f"  New vocabulary size: {new_vocab_size}")
 
-    # Get token IDs
+    # Get token IDs. Iterating ``special_tokens`` (not ``discovered_adapters``)
+    # keeps id order identical to token order, so the base-reset slot stays at
+    # index 0 by construction rather than by a second, parallel branch.
     print("\nToken ID mapping:")
     adapter_token_ids = []
-    for adapter_info in discovered_adapters:
-        adapter_name = adapter_info[1]
-        token_name = f"<|{adapter_name}|>"
+    for token_name in special_tokens:
         token_id = tokenizer.convert_tokens_to_ids(token_name)
         adapter_token_ids.append(token_id)
         print(f"  {token_name}: {token_id}")
 
     return adapter_token_ids, special_tokens
+
+
+def build_substitute_token_ids(
+    discovered_adapters: list[tuple[str | None, str, str, str | None]],
+    lora_substitute_id: int,
+    base_reset: bool = False,
+) -> list[int]:
+    """Build the token-exchange substitute ids, index-aligned with the control tokens.
+
+    The substitute must mirror the token that appears right after the control
+    token in the rendered prompt, so swapping the embedding keeps the residual
+    stream in-distribution:
+
+      * ALoRA: the first token of the adapter's ``alora_invocation_tokens``.
+      * LoRA / built-in: ``lora_substitute_id`` — whatever the chat template
+        emits at the start of a no-adapter turn (probed at compose time).
+      * base-reset: ``lora_substitute_id`` as well. The token is placed at a turn
+        boundary, where the role-open marker is exactly what the decoder expects
+        at that position.
+
+    Args:
+        discovered_adapters: ``(adapter_path, adapter_name, technology, source)`` tuples.
+        lora_substitute_id: Probed sequence-start token id.
+        base_reset: When True, prepend the base-reset slot's substitute so the
+            list stays aligned with ``add_control_tokens(base_reset=True)``.
+
+    Returns:
+        One substitute id per control token, in the same order.
+    """
+    substitute_ids = [lora_substitute_id] if base_reset else []
+    for adapter_path, _name, technology, _source in discovered_adapters:
+        if technology == "alora":
+            substitute_ids.append(get_alora_first_invocation_token_id(adapter_path))
+        else:
+            substitute_ids.append(lora_substitute_id)
+    return substitute_ids
 
 
 def configure_chat_template(

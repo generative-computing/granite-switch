@@ -304,28 +304,54 @@ def _validate_base_transfer(
     lora_target_modules,
     arch: ArchDescriptor,
 ):
-    """Validate that all expected base parameters were loaded."""
+    """Validate that all expected base parameters were loaded.
+
+    MultiSwitch-aware in one respect: the switch module registers its OWN
+    params/buffers (the coded engine's ``codebook`` / counting+memory attention
+    state, plus ``control_to_substitute_lut``). These are self-initialized by the
+    switch, not transferred from the base model, so they must never be counted
+    among the params "expected from base". Rather than chase every engine's
+    buffer names, exclude the whole switch subtree (any key under ``switch``).
+
+    ``loaded_switch_params`` is deliberately NOT filtered by presence in
+    ``switch_state_dict``. Every mapped target does exist for both engines: the
+    composer inflates ``num_hidden_layers`` by ``_switch_cache_layers(switch_type)``
+    (``compose_utils.py``) and the model subtracts the same count in
+    ``modeling_granite_switch.py``, so the composed backbone retains every base
+    decoder layer. Filtering on presence would make ``missing_in_switch`` a subset
+    of ``expected_switch_params`` by construction -- it could never fire -- and
+    that would silence precisely the failure this check exists for: if the
+    inflate/subtract pair ever drifts, the last base layer maps to a nonexistent
+    ``model.layers.{L-1}``, the transfer loop skips it (see the
+    ``switch_name in switch_state_dict`` guard above), and compose would report
+    "All base model parameters successfully validated" for a checkpoint missing a
+    whole decoder layer.
+    """
     exclude_keywords = arch.lora_keywords + arch.buffer_keywords
+
+    def _is_switch_owned(name: str) -> bool:
+        # Switch-module params/buffers are self-initialized, not base weights.
+        return name.startswith("switch.") or ".switch." in name
+
     expected_switch_params = {
         name
         for name in switch_state_dict.keys()
-        if not any(kw in name for kw in exclude_keywords)
+        if not any(kw in name for kw in exclude_keywords) and not _is_switch_owned(name)
     }
 
     loaded_switch_params = set(base_to_switch.values())
 
-    # Add fused params
+    # Add fused params.
     groups_by_name = {g.name: g for g in arch.groups}
     for (layer_idx, target_name), _collection in fused_collections.items():
         g = groups_by_name[target_name]
         parent = g.parent
         attr = g.effective_attr_name
         if target_name in lora_target_modules:
-            loaded_switch_params.add(
-                f"model.layers.{layer_idx}.{parent}.{attr}.base_layer.weight"
-            )
+            fused_name = f"model.layers.{layer_idx}.{parent}.{attr}.base_layer.weight"
         else:
-            loaded_switch_params.add(f"model.layers.{layer_idx}.{parent}.{attr}.weight")
+            fused_name = f"model.layers.{layer_idx}.{parent}.{attr}.weight"
+        loaded_switch_params.add(fused_name)
 
     missing_in_switch = loaded_switch_params - expected_switch_params
     if missing_in_switch:

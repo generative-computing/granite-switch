@@ -16,6 +16,9 @@ Step-by-step walkthroughs covering adapter function invocation, pipeline constru
 | [hello_adapter.ipynb](notebooks/hello_adapter.ipynb) | Minimal adapter function invocation with HuggingFace | 5 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_adapter.ipynb) |
 | [granite_switch_with_hf.ipynb](notebooks/granite_switch_with_hf.ipynb) | Compose + HuggingFace backend, `adapter_name=` invocation, Core + Guardian adapter functions in a multi-turn conversation | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_switch_with_hf.ipynb) |
 | [granite_speech_demo.ipynb](notebooks/granite_speech_demo.ipynb) | Real-time voice assistant: Granite Speech STT + Granite Switch LLM + Granite Libraries validation, orchestrated by Mellea over WebRTC | 10 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_speech_demo.ipynb) |
+| [hello_multiswitch.ipynb](notebooks/hello_multiswitch.ipynb) | MultiSwitch from the top: which switch engine you need (CPU, no download), composing with `--switch-type multi`, several adapters routed in one prompt, and a multi-turn loop with `Conversation` | 10 min (CPU) + 30 min | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_multiswitch.ipynb) |
+| [multi_turn_multiswitch.ipynb](notebooks/multi_turn_multiswitch.ipynb) | Multi-turn conversations on MultiSwitch: one turn after another with `Conversation`, `RE_PREFILL` vs `PRESERVE_MIXED_HISTORY`, cross-turn control tokens, and prefix-cache reuse | 15 min (CPU) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/multi_turn_multiswitch.ipynb) |
+| [multiswitch_serving.ipynb](notebooks/multiswitch_serving.ipynb) | Serve a `multi` checkpoint on vLLM: a two-adapter prompt sent as token ids over HTTP, cross-request isolation under batching, and the serving flags that matter | 40 min (GPU) | [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/multiswitch_serving.ipynb) |
 
 ## Guides
 
@@ -75,6 +78,16 @@ HuggingFace inference examples demonstrate how adapter functions are activated v
 2. [Hello Adapter](notebooks/hello_adapter.ipynb) — see control tokens in action [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_adapter.ipynb)
 3. [Granite Switch with HuggingFace](notebooks/granite_switch_with_hf.ipynb) — detailed walkthrough [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/granite_switch_with_hf.ipynb)
 
+
+
+### Path 5: Several Adapters in One Request (MultiSwitch)
+
+Best for: One request or one dialogue that has to route to more than one adapter
+
+The default `single` switch engine is sticky — it holds one adapter per sequence. `multi` lets a control token re-route mid-sequence, which is what per-step agent routing and adapter-attributed conversation history need.
+1. [Hello MultiSwitch](notebooks/hello_multiswitch.ipynb) — pick an engine on CPU with no download, then compose one and route two adapters in a single prompt [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/hello_multiswitch.ipynb)
+2. [Multi-turn MultiSwitch](notebooks/multi_turn_multiswitch.ipynb) — one turn after another, each on its own adapter, with history that keeps routing to the adapter that produced it [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/multi_turn_multiswitch.ipynb)
+3. [Serving MultiSwitch](notebooks/multiswitch_serving.ipynb) — put it behind vLLM and check that batching does not leak between requests [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/generative-computing/granite-switch/blob/main/tutorials/notebooks/multiswitch_serving.ipynb)
 
 
 ### Reference Scripts
