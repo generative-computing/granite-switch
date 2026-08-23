@@ -375,6 +375,9 @@ def stack_adapters(
     adapter_ranks: list[int],
     adapter_alphas: list[float],
     verbose: bool = True,
+    cross_stream_rank: int | None = None,
+    cross_stream_adapter_ranks: list[int] | None = None,
+    cross_stream_adapter_alphas: list[float] | None = None,
 ):
     """Stack adapter weights into ``[num_adapters, 1, ...]`` tensors.
 
@@ -397,6 +400,12 @@ def stack_adapters(
         adapter_ranks: Per-adapter ranks.
         adapter_alphas: Per-adapter alpha values.
         verbose: Print remapping information.
+        cross_stream_rank: Max cross_stream rank (overrides max_lora_rank for
+            cross_stream modules). None means use max_lora_rank.
+        cross_stream_adapter_ranks: Per-adapter cross_stream ranks. None means
+            use adapter_ranks.
+        cross_stream_adapter_alphas: Per-adapter cross_stream alphas. None means
+            use adapter_alphas.
 
     Returns:
         ``(stacked, mappings)`` — stacked state dict ready for Granite Switch,
@@ -419,6 +428,19 @@ def stack_adapters(
 
             tagged_src = f"adapter_{adapter_idx}::{src_name}"
 
+            # For cross_stream modules, use dedicated rank/max_rank/alpha
+            is_cross_stream = "cross_stream" in result.target_name
+            effective_rank = adapter_rank
+            effective_alpha = adapter_alpha
+            effective_max_rank = max_lora_rank
+            if is_cross_stream:
+                if cross_stream_adapter_ranks is not None:
+                    effective_rank = cross_stream_adapter_ranks[adapter_idx]
+                if cross_stream_adapter_alphas is not None:
+                    effective_alpha = cross_stream_adapter_alphas[adapter_idx]
+                if cross_stream_rank is not None:
+                    effective_max_rank = cross_stream_rank
+
             if result.split_slices:
                 # Fused-to-sliced split: distribute tensor across slices
                 _stack_split(
@@ -426,10 +448,10 @@ def stack_adapters(
                     result,
                     tensor,
                     adapter_idx,
-                    adapter_rank,
-                    adapter_alpha,
+                    effective_rank,
+                    effective_alpha,
                     num_adapters,
-                    max_lora_rank,
+                    effective_max_rank,
                     src_name,
                 )
                 # Record mapping for each produced slice
@@ -444,10 +466,10 @@ def stack_adapters(
                     target_name,
                     tensor,
                     adapter_idx,
-                    adapter_rank,
-                    adapter_alpha,
+                    effective_rank,
+                    effective_alpha,
                     num_adapters,
-                    max_lora_rank,
+                    effective_max_rank,
                     src_name,
                 )
                 source_map.setdefault(target_name, set()).add(tagged_src)
@@ -591,7 +613,7 @@ def transfer_adapter_weights(
     Returns:
         Mapping record dict, or None if *return_mapping* is False.
     """
-    from .adapter_loader import load_adapter_files
+    from .adapter_loader import load_adapter_files, resolve_cross_stream_rank_alpha
 
     mapping_record = {
         "source_params": [],
@@ -612,6 +634,18 @@ def transfer_adapter_weights(
     # Remap and stack — adapter remapping is derived from arch descriptor
     print("Remapping and stacking adapter weights...")
     adapter_remapper = arch.build_adapter_remapper()
+    # Per-adapter cross_stream ranks/alphas from adapter configs (for proper padding)
+    cs_rank = getattr(model.config, "cross_stream_rank", None)
+    cs_adapter_ranks = None
+    cs_adapter_alphas = None
+    if cs_rank is not None:
+        cs_adapter_ranks = []
+        cs_adapter_alphas = []
+        for ap in adapter_paths:
+            per_rank, per_alpha = resolve_cross_stream_rank_alpha(ap)
+            cs_adapter_ranks.append(per_rank)
+            cs_adapter_alphas.append(per_alpha)
+
     stacked_adapters, adapter_mappings = stack_adapters(
         adapter_state_dicts=adapter_state_dicts,
         remapper=adapter_remapper,
@@ -620,6 +654,9 @@ def transfer_adapter_weights(
         adapter_ranks=model.config.adapter_ranks[: len(adapter_paths)],
         adapter_alphas=adapter_alphas,
         verbose=True,
+        cross_stream_rank=cs_rank,
+        cross_stream_adapter_ranks=cs_adapter_ranks,
+        cross_stream_adapter_alphas=cs_adapter_alphas,
     )
 
     # Record target params and mappings

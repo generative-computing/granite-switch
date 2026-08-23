@@ -13,6 +13,45 @@ import torch
 from .arch import ArchDescriptor
 
 
+def validate_cross_stream_population(model):
+    """Check that every adapter in a Shadow Residual checkpoint loaded its
+    ``cross_stream`` weights.
+
+    An all-zero slot means the base→adapter injection never fires for that
+    adapter, which almost always means its weights didn't reach the model.
+
+    Args:
+        model: Composed dual-stream model with ``cross_stream`` allocated.
+    """
+    print("\nValidating cross_stream population...")
+
+    empty: list[str] = []
+
+    for name, param in model.named_parameters():
+        if "cross_stream" not in name or "lora_B" not in name:
+            continue
+        # lora_B is the gate: lora_A is kaiming-initialized even for unpopulated
+        # slots in a freshly built model, but lora_B decides whether the branch
+        # contributes anything.
+        for adapter_idx in range(param.shape[0]):
+            if bool(torch.all(param[adapter_idx] == 0)):
+                empty.append(f"{name}[{adapter_idx}]")
+
+    if empty:
+        # Not fatal — an SR adapter may legitimately skip cross_stream on some
+        # layers — but it almost always means the adapter didn't load.
+        print(
+            f"  WARNING: {len(empty)} cross_stream slots are all-zero "
+            f"(adapter may not have loaded):"
+        )
+        for entry in empty[:10]:
+            print(f"    - {entry}")
+        if len(empty) > 10:
+            print(f"    ... and {len(empty) - 10} more")
+    else:
+        print("  OK: every adapter has cross_stream weights.")
+
+
 def validate_all_parameters(
     model,
     arch: ArchDescriptor,

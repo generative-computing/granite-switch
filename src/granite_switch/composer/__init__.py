@@ -9,7 +9,9 @@ from .arch import (
     ArchDescriptor,
     ModuleDescriptor,
     granite_dense_arch,
+    granite_dense_sr_arch,
     granite_moe_hybrid_arch,
+    granite_moe_hybrid_sr_arch,
     resolve_arch,
 )
 from .compose_utils import GraniteSwitchComposer
@@ -22,6 +24,8 @@ __all__ = [
     "ModuleDescriptor",
     "RemapResult",
     "granite_dense_arch",
+    "granite_dense_sr_arch",
     "granite_moe_hybrid_arch",
+    "granite_moe_hybrid_sr_arch",
     "resolve_arch",
 ]

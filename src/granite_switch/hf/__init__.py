@@ -21,3 +21,22 @@ try:
 except Exception:
     # Registration may fail if already registered or transformers not available
     pass
+
+
+def load_model(path: str):
+    """Load a GraniteSwitch model from a saved checkpoint.
+
+    Args:
+        path: Path to saved model directory (with config.json).
+
+    Returns:
+        GraniteSwitchForCausalLM instance.
+    """
+    from pathlib import Path
+
+    config_file = Path(path) / "config.json"
+    if not config_file.exists():
+        raise FileNotFoundError(f"No config.json found at {path}")
+
+    config = GraniteSwitchConfig.from_pretrained(path)
+    return GraniteSwitchForCausalLM.from_pretrained(path, config=config)

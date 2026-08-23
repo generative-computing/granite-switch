@@ -36,6 +36,18 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         lora_target_modules (List[str]): List of module GROUP names to apply LoRA to.
             Module groups: "qkv_proj", "o_proj", "shared_input_linear", "shared_output_linear".
             Default: all four groups
+
+        Shadow Residual (SR) parameters:
+            dual_stream (bool): Whole-checkpoint decoder mode. ``False`` (default) =
+                ordinary LoRA/aLoRA, one stream. ``True`` = Shadow Residual, every
+                adapter runs a base stream plus an adapter stream and takes K/V from
+                the base stream. A checkpoint holds either SR adapters or
+                LoRA/aLoRA adapters, never both, so this is a single flag rather
+                than a per-adapter list.
+            cross_stream_rank (int): LoRA rank of the layer-level ``cross_stream``
+                injection site. Required when ``dual_stream`` is True; must be
+                ``None`` otherwise, since the site is not allocated at all.
+
         **kwargs: Additional arguments passed to GraniteConfig.
     """
 
@@ -54,6 +66,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         max_lora_rank: int = 8,
         adapter_ranks: list[int] | None = None,
         lora_target_modules: list[str] | None = None,
+        # Shadow Residual (SR) parameters
+        cross_stream_rank: int | None = None,
+        dual_stream: bool = False,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -133,6 +148,31 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.control_token_gain = control_token_gain
         self.switch_head_dim = switch_head_dim
         self.fused_add_norm = fused_add_norm
+
+        # Shadow Residual (SR).
+        # Pre-fusion SR checkpoints carried unfused_qkv; their weight layout is
+        # incompatible with the fused one. transformers silently keeps unknown
+        # config keys, so without this an old checkpoint would load into a fused
+        # model and quietly mismatch keys.
+        if kwargs.get("unfused_qkv"):
+            raise ValueError(
+                "This checkpoint sets unfused_qkv=True, so it was composed with the "
+                "old unfused Shadow Residual layout. Re-compose it from its PEFT "
+                "adapters with the current composer."
+            )
+        self.dual_stream = bool(dual_stream)
+        self.cross_stream_rank = cross_stream_rank
+        if self.dual_stream and cross_stream_rank is None:
+            raise ValueError(
+                "cross_stream_rank is required when dual_stream is True "
+                "(the cross_stream site must be allocated)."
+            )
+        if not self.dual_stream and cross_stream_rank is not None:
+            raise ValueError(
+                f"cross_stream_rank must be None when dual_stream is False; got "
+                f"{cross_stream_rank}. The cross_stream site only exists in a "
+                "Shadow Residual checkpoint."
+            )
 
         # Adapter names
         self.adapter_names = adapter_names

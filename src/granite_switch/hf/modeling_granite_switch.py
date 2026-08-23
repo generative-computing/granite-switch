@@ -31,6 +31,7 @@ from granite_switch.config import GraniteSwitchConfig
 
 from .core.lora import (
     GraniteLoRAEmbeddedAttention,
+    SwitchedLoRALinear,
     replace_shared_mlp_projections_with_lora,
 )
 from .switch import create_switch
@@ -45,9 +46,13 @@ _TRANSFORMERS_GE_5_9 = _parse_version(transformers.__version__) >= _parse_versio
 
 
 class GraniteSwitchAttentionDecoderLayer(nn.Module):
-    """Attention decoder layer with LoRA and adapter routing.
+    """Single-stream attention decoder layer with LoRA and adapter routing.
 
     Supports optional MoE (frozen) alongside shared_mlp when num_local_experts > 0.
+
+    This is the layer for plain LoRA / aLoRA checkpoints.  Shadow Residual
+    checkpoints use :class:`SRSwitchDecoderLayer`, which subclasses this one and
+    holds exactly the same parameters plus a ``cross_stream`` site.
     """
 
     def __init__(self, config: GraniteSwitchConfig, layer_idx: int):
@@ -85,6 +90,22 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         if self._has_shared_output_lora:
             self.shared_mlp.output_linear._adapter_indices = adapter_indices
 
+    def _mlp_block(
+        self, hidden_states: torch.Tensor, adapter_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        """MoE (when present) + shared MLP for one stream."""
+        if self.has_experts:
+            moe_output, _router_logits = self.block_sparse_moe(hidden_states)
+            self._set_shared_mlp_context(adapter_indices)
+            shared_output = self.shared_mlp(hidden_states)
+            self._set_shared_mlp_context(None)
+            return moe_output + shared_output
+
+        self._set_shared_mlp_context(adapter_indices)
+        output = self.shared_mlp(hidden_states)
+        self._set_shared_mlp_context(None)
+        return output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -117,18 +138,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         # MLP
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
-
-        if self.has_experts:
-            moe_output, _router_logits = self.block_sparse_moe(hidden_states)
-            self._set_shared_mlp_context(adapter_indices)
-            shared_output = self.shared_mlp(hidden_states)
-            self._set_shared_mlp_context(None)
-            hidden_states = moe_output + shared_output
-        else:
-            self._set_shared_mlp_context(adapter_indices)
-            hidden_states = self.shared_mlp(hidden_states)
-            self._set_shared_mlp_context(None)
-
+        hidden_states = self._mlp_block(hidden_states, adapter_indices)
         hidden_states = residual + hidden_states * self.residual_multiplier
 
         outputs = (hidden_states,)
@@ -143,6 +153,112 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
 GraniteSwitchDecoderLayer = GraniteSwitchAttentionDecoderLayer
 
 
+class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
+    """Shadow Residual decoder layer: frozen base stream + LoRA'd adapter stream.
+
+    Holds exactly the parameters of its single-stream parent — the projections
+    are fused identically — plus one ``cross_stream`` injection site.  Every
+    module is shared between the two streams: the base stream simply calls them
+    with ``adapter_indices=None``, which makes each ``SwitchedLoRALinear`` fall
+    back to its base weight.
+
+    Subclassing (rather than a parallel ``nn.Module``) is deliberate: there is
+    no second ``__init__`` that can forget a base-model submodule such as
+    ``block_sparse_moe``.
+    """
+
+    def __init__(self, config: GraniteSwitchConfig, layer_idx: int):
+        super().__init__(config, layer_idx)
+
+        # Cross-stream injection site (base -> adapter).  A SwitchedLoRALinear
+        # with a zeroed base weight, so it contributes *only* the selected
+        # adapter's LoRA delta.
+        self.cross_stream = SwitchedLoRALinear(
+            in_features=config.hidden_size,
+            out_features=config.hidden_size,
+            num_adapters=config.num_adapters,
+            max_lora_rank=config.cross_stream_rank,
+            bias=False,
+        )
+        nn.init.zeros_(self.cross_stream.base_layer.weight)
+
+    def forward(
+        self,
+        hidden_states: tuple[torch.Tensor, torch.Tensor],
+        attention_mask: torch.Tensor | None = None,
+        position_ids: torch.LongTensor | None = None,
+        past_key_values: Cache | None = None,
+        output_attentions: bool | None = False,
+        use_cache: bool | None = False,
+        cache_position: torch.LongTensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        adapter_indices: torch.Tensor | None = None,
+        **kwargs,
+    ) -> tuple:
+        """Dual-stream forward.
+
+        Args:
+            hidden_states: The pair ``(h_base, h_adapt)``, each ``[B, S, H]``.
+
+        Returns:
+            ``((h_base, h_adapt), ...)`` — element 0 is the stream pair.  Only
+            the adapter stream reaches the LM head.
+        """
+        h_base, h_adapt = hidden_states
+
+        residual_base, residual_adapt = h_base, h_adapt
+        normed_base = self.input_layernorm(h_base)
+        normed_adapt = self.input_layernorm(h_adapt)
+
+        # The base stream owns the one cache write; K/V are base-clean because
+        # Shadow Residual attends against the base stream by construction.
+        attn_base, _, present_key_values, base_kv = self.self_attn(
+            hidden_states=normed_base,
+            adapter_indices=None,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            output_attentions=False,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            return_kv=True,
+        )
+        # Adapter stream: Q with LoRA, K/V reused from the cache write above,
+        # o_proj with LoRA.
+        attn_adapt = self.self_attn.forward_dual_stream(
+            hidden_states=normed_adapt,
+            adapter_indices=adapter_indices,
+            position_embeddings=position_embeddings,
+            attention_mask=attention_mask,
+            base_kv=base_kv,
+            cache_position=cache_position,
+        )
+
+        h_base = residual_base + attn_base * self.residual_multiplier
+        h_adapt = residual_adapt + attn_adapt * self.residual_multiplier
+
+        # --- MLP block ---
+        residual_base, residual_adapt = h_base, h_adapt
+        normed_base = self.post_attention_layernorm(h_base)
+        normed_adapt = self.post_attention_layernorm(h_adapt)
+
+        mlp_base = self._mlp_block(normed_base, None)
+        mlp_adapt = self._mlp_block(normed_adapt, adapter_indices)
+
+        h_base = residual_base + mlp_base * self.residual_multiplier
+        h_adapt = residual_adapt + mlp_adapt * self.residual_multiplier
+
+        # --- Cross-stream injection: base -> adapter ---
+        h_adapt = h_adapt + self.cross_stream(h_base, adapter_indices)
+
+        outputs = ((h_base, h_adapt),)
+        if output_attentions:
+            outputs += (None,)
+        if use_cache:
+            outputs += (present_key_values,)
+        return outputs
+
+
 class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
     """PreTrainedModel base class for GraniteSwitch.
 
@@ -152,7 +268,10 @@ class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
 
     config_class = GraniteSwitchConfig
     base_model_prefix = "model"
-    _no_split_modules = ["GraniteSwitchAttentionDecoderLayer"]
+    _no_split_modules = [
+        "GraniteSwitchAttentionDecoderLayer",
+        "SRSwitchDecoderLayer",
+    ]
     _is_stateful = True
 
 
@@ -217,11 +336,18 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             num_decoder_layers = config.num_hidden_layers
             layer_offset = 0
 
-        # All layers are attention decoder layers.
+        # All layers are attention decoder layers, of one kind for the whole
+        # checkpoint: Shadow Residual adapters and plain LoRA/aLoRA adapters are
+        # never composed together.
+        layer_cls = (
+            SRSwitchDecoderLayer
+            if config.dual_stream
+            else GraniteSwitchAttentionDecoderLayer
+        )
         layers = []
         for local_idx in range(num_decoder_layers):
             global_layer_idx = local_idx + layer_offset
-            layers.append(GraniteSwitchAttentionDecoderLayer(config, global_layer_idx))
+            layers.append(layer_cls(config, global_layer_idx))
         self.layers = nn.ModuleList(layers)
 
         # Final norm
@@ -238,6 +364,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         # Initialize weights
         self.post_init()
+
+        # Re-zero the cross_stream base weights: post_init() -> _init_weights()
+        # reinitializes every nn.Linear with a random normal, which would give
+        # cross_stream a non-LoRA contribution.
+        if config.dual_stream:
+            for layer in self.layers:
+                nn.init.zeros_(layer.cross_stream.base_layer.weight)
 
     def forward(
         self,
@@ -363,8 +496,15 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 inputs_embeds, position_ids=position_ids
             )
 
-        # Decoder layers
+        # Decoder layers.  In a Shadow Residual checkpoint every layer is an
+        # SRSwitchDecoderLayer and runs two streams that both start from the
+        # same embeddings; only the adapter stream reaches the LM head.
         hidden_states = inputs_embeds
+        h_base = None
+        if self.config.dual_stream:
+            h_base = inputs_embeds
+            hidden_states = inputs_embeds.clone()
+
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
@@ -373,7 +513,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 all_hidden_states += (hidden_states,)
 
             layer_outputs = decoder_layer(
-                hidden_states,
+                (h_base, hidden_states) if h_base is not None else hidden_states,
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
@@ -385,7 +525,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 **kwargs,
             )
 
-            hidden_states = layer_outputs[0]
+            if h_base is not None:
+                h_base, hidden_states = layer_outputs[0]
+            else:
+                hidden_states = layer_outputs[0]
 
             if output_attentions:
                 if layer_outputs[1] is not None:

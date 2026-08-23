@@ -26,7 +26,7 @@ class ModuleDescriptor:
             ``"input_linear"`` for group key ``"shared_input_linear"``).
             ``None`` means attribute name equals *name*.
         source_parent: Parent module in the **base** model, when different from
-            *parent*.  E.g., ``"mlp"`` when mapping a Granite 3.x dense MLP to
+            *parent*.  E.g., ``"mlp"`` when mapping a dense Granite MLP to
             the switch model's ``"shared_mlp"``.  ``None`` means same as *parent*.
         num_switch_slices: Override slice count for split modules (e.g., ``2``
             for MoE input_linear where 1 PEFT module produces 2 slices).
@@ -127,11 +127,16 @@ class ArchDescriptor:
 
         Keys match what :meth:`extract_module_key` returns, e.g.,
         ``{"self_attn.qkv_proj": ["q_proj", "k_proj", "v_proj"], ...}``.
+        For parent-less modules (e.g., cross_stream), the key is just the attr name.
         """
-        return {
-            f"{g.parent}.{g.effective_attr_name}": list(g.peft_modules)
-            for g in self.groups
-        }
+        result = {}
+        for g in self.groups:
+            if g.parent:
+                key = f"{g.parent}.{g.effective_attr_name}"
+            else:
+                key = g.effective_attr_name
+            result[key] = list(g.peft_modules)
+        return result
 
     @property
     def all_peft_modules(self) -> list[str]:
@@ -140,12 +145,17 @@ class ArchDescriptor:
 
     @property
     def parent_names(self) -> list[str]:
-        """Ordered list of unique parent module names."""
+        """Ordered list of unique non-empty parent module names."""
         seen = []
         for g in self.groups:
-            if g.parent not in seen:
+            if g.parent and g.parent not in seen:
                 seen.append(g.parent)
         return seen
+
+    @property
+    def parentless_attr_names(self) -> list[str]:
+        """Attr names of groups with no parent (layer-level modules like cross_stream)."""
+        return [g.effective_attr_name for g in self.groups if not g.parent]
 
     def extract_module_key(self, param_name: str) -> str | None:
         """Extract ``parent.attr`` module key from a parameter name.
@@ -153,9 +163,17 @@ class ArchDescriptor:
         E.g., ``"model.layers.0.self_attn.qkv_proj.lora_A"`` →
         ``"self_attn.qkv_proj"``.
 
+        For parent-less modules (e.g., cross_stream), returns just the attr name:
+        ``"model.layers.0.cross_stream.lora_A"`` → ``"cross_stream"``.
+
         Returns None if no known parent is found.
         """
         parts = param_name.split(".")
+        # Check parent-less modules first (layer-level)
+        for attr in self.parentless_attr_names:
+            if attr in parts:
+                return attr
+        # Check parented modules
         for parent in self.parent_names:
             if parent in parts:
                 idx = parts.index(parent)
@@ -199,7 +217,7 @@ def _common_attn_groups() -> list[ModuleDescriptor]:
 def _dense_mlp_to_shared_groups() -> list[ModuleDescriptor]:
     """Map dense MLP (gate/up/down) to switch model's shared_mlp naming.
 
-    Used for Granite 3.x whose base model uses ``mlp.gate_proj`` /
+    Used for dense Granite models whose base uses ``mlp.gate_proj`` /
     ``mlp.up_proj`` / ``mlp.down_proj`` but whose switch model uses
     ``shared_mlp.input_linear`` / ``shared_mlp.output_linear``
     (the ``GraniteMoeHybridMLP`` layout).
@@ -237,6 +255,21 @@ def _moe_shared_mlp_groups() -> list[ModuleDescriptor]:
             peft_modules=["output_linear"],
             parent="shared_mlp",
             attr_name="output_linear",
+        ),
+    ]
+
+
+def _cross_stream_groups() -> list[ModuleDescriptor]:
+    """Cross-stream injection module for Shadow Residual dual-stream architecture.
+
+    This is a layer-level module (no parent wrapper like self_attn or shared_mlp).
+    PEFT key format: base_model.model.model.layers.{idx}.cross_stream.lora_A.weight
+    """
+    return [
+        ModuleDescriptor(
+            name="cross_stream",
+            peft_modules=["cross_stream"],
+            parent="",  # layer-level, no parent
         ),
     ]
 
@@ -306,11 +339,11 @@ _HYBRID_OPTIONAL_FIELDS: dict[str, Any] = {
 
 
 def granite_moe_hybrid_arch(base_config=None) -> ArchDescriptor:
-    """Granite 4.x MoE-Hybrid architecture (GraniteMoeHybrid config).
+    """GraniteMoeHybrid architecture (model_type ``granitemoehybrid``).
 
-    All Granite 4 models are GraniteMoeHybrid configs and use ``shared_mlp``
-    module naming (``shared_input_linear``, ``shared_output_linear``), even
-    dense models with ``num_local_experts=0``.
+    GraniteMoeHybrid models use ``shared_mlp`` module naming
+    (``shared_input_linear``, ``shared_output_linear``), even dense layers
+    with ``num_local_experts=0``.
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
@@ -324,11 +357,12 @@ def granite_moe_hybrid_arch(base_config=None) -> ArchDescriptor:
 
 
 def granite_dense_arch(base_config=None) -> ArchDescriptor:
-    """Granite 3.x dense architecture (Granite multipliers, mapped to shared_mlp).
+    """Granite dense architecture (model_type ``granite``).
 
-    Granite 3.x uses the same ``mlp.gate_proj`` / ``mlp.up_proj`` /
-    ``mlp.down_proj`` naming, but has Granite-specific config fields
-    (``attention_multiplier``, ``residual_multiplier``, etc.) that are
+    Dense Granite models use ``mlp.gate_proj`` / ``mlp.up_proj`` /
+    ``mlp.down_proj`` naming. These are mapped to the switch model's
+    ``shared_mlp`` layout. Granite-specific config fields
+    (``attention_multiplier``, ``residual_multiplier``, etc.) are
     propagated from the base config.
     """
     return ArchDescriptor(
@@ -336,6 +370,34 @@ def granite_dense_arch(base_config=None) -> ArchDescriptor:
         required_config_fields=list(_COMMON_REQUIRED_FIELDS),
         optional_config_fields=dict(_GRANITE_OPTIONAL_FIELDS),
     )
+
+
+_SR_BUFFER_KEYWORDS: list[str] = [
+    "adapter_token_ids",
+    "adapter_scalings",
+    "control_to_substitute_lut",
+    "cross_stream",  # zero-initialized, no base source
+]
+
+
+def granite_moe_hybrid_sr_arch(base_config=None) -> ArchDescriptor:
+    """GraniteMoeHybrid Shadow Residual architecture.
+
+    Identical to :func:`granite_moe_hybrid_arch` (fused projections) plus the
+    layer-level ``cross_stream`` injection site.
+    """
+    arch = granite_moe_hybrid_arch(base_config=base_config)
+    arch.groups = arch.groups + _cross_stream_groups()
+    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    return arch
+
+
+def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
+    """Granite dense Shadow Residual architecture (fused + ``cross_stream``)."""
+    arch = granite_dense_arch(base_config=base_config)
+    arch.groups = arch.groups + _cross_stream_groups()
+    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    return arch
 
 
 # ---------------------------------------------------------------------------
@@ -347,13 +409,24 @@ _ARCH_REGISTRY = {
     "granitemoehybrid": granite_moe_hybrid_arch,
 }
 
+_SR_ARCH_REGISTRY = {
+    "granite": granite_dense_sr_arch,
+    "granitemoehybrid": granite_moe_hybrid_sr_arch,
+}
 
-def resolve_arch(model_name_or_path: str, base_config=None) -> ArchDescriptor:
+
+def resolve_arch(
+    model_name_or_path: str,
+    base_config=None,
+    dual_stream: bool = False,
+) -> ArchDescriptor:
     """Auto-detect architecture from HF config's ``model_type`` field.
 
     Args:
         model_name_or_path: HF model ID or local path.
         base_config: Optional pre-loaded config (avoids re-loading).
+        dual_stream: If True, select the Shadow Residual variant — the same
+            fused groups plus the layer-level ``cross_stream`` group.
 
     Returns:
         ArchDescriptor for the detected architecture.
@@ -371,7 +444,8 @@ def resolve_arch(model_name_or_path: str, base_config=None) -> ArchDescriptor:
     # Normalize: granite_switch -> granite (handle our own model type)
     normalized = model_type.replace("_switch", "")
 
-    factory = _ARCH_REGISTRY.get(normalized)
+    registry = _SR_ARCH_REGISTRY if dual_stream else _ARCH_REGISTRY
+    factory = registry.get(normalized)
     if factory is None:
         raise ValueError(
             f"Unsupported architecture '{model_type}' for {model_name_or_path}. "

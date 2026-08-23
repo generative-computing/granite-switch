@@ -26,6 +26,7 @@ build/
 # Virtual environments
 venv/
 .venv/
+.env
 
 # Scratch / debug scripts (not part of the test suite)
 scratch/
@@ -50,8 +51,3 @@ htmlcov/
 
 # pyenv version file (local dev preference)
 .python-version
-
-# Local design/planning doc (keep on disk, do not version)
-docs/KV_CACHE_OVERHEAD_REMOVAL.md
-docs/KV_CACHE_OVERHEAD_REMOVAL.html
-docs/KV_CACHE_OVERHEAD_REMOVAL*.html

@@ -155,6 +155,110 @@ def _extract_modules_from_weights(adapter_path: str) -> set:
     return modules
 
 
+def is_shadow_residual_adapter(adapter_path: str) -> bool:
+    """Is the checkpoint at *adapter_path* a Shadow Residual (dual-stream) adapter?
+
+    Decided from the weights — an SR adapter carries a layer-level
+    ``cross_stream`` LoRA, nothing else does. The alternative, parsing the
+    ``adapter_name/model/technology/`` directory layout, only recognizes
+    ``alora``/``lora`` and the Shadow Residual training runs do not lay their
+    output out that way, so a real SR checkpoint would come back mislabelled.
+    Placement of the control token depends on this answer, so it must come from
+    the artifact rather than from its path.
+
+    Returns ``False`` for a directory with no readable adapter weights.
+    """
+    return "cross_stream" in _extract_modules_from_weights(adapter_path)
+
+
+def _pattern_lookup(pattern: dict, module: str):
+    """Read *module*'s entry from a PEFT ``rank_pattern`` / ``alpha_pattern``.
+
+    PEFT decides the key spelling, and Shadow Residual no longer controls it:
+    since ``feature/stock-peft-sr`` the cross-stream layer is targeted by name
+    through stock ``peft`` rather than by SR's own code, so the key may arrive
+    bare (``"cross_stream"``) or fully qualified
+    (``"base_model.model.model.layers.0.cross_stream"``). Match on the last
+    dotted component so either spelling resolves. Returns ``None`` when absent.
+    """
+    if module in pattern:
+        return pattern[module]
+    for key, value in pattern.items():
+        if key.rsplit(".", 1)[-1] == module:
+            return value
+    return None
+
+
+def resolve_cross_stream_rank_alpha(adapter_path: str) -> tuple[int, float]:
+    """Return ``(rank, alpha)`` of a Shadow Residual adapter's cross-stream LoRA.
+
+    The rank comes from ``rank_pattern`` when the config records it, and
+    otherwise from the checkpoint itself — ``lora_A.weight`` has shape
+    ``(rank, hidden)``, which is authoritative and cannot drift from the
+    weights. ``alpha`` comes from ``alpha_pattern`` and otherwise from the
+    global ``lora_alpha``, which is the rule PEFT itself applies.
+
+    Failing to resolve the rank used to surface far from its cause, as
+    ``cross_stream_rank is required when dual_stream is True`` out of config
+    validation, so this raises here instead.
+
+    Raises:
+        ValueError: If *adapter_path* has no cross-stream LoRA weights, or if
+            they are present but no rank can be read from them.
+    """
+    config = load_adapter_config(adapter_path)
+    rank = _pattern_lookup(config.get("rank_pattern") or {}, "cross_stream")
+
+    if rank is None:
+        rank = _cross_stream_rank_from_weights(adapter_path)
+    if rank is None:
+        raise ValueError(
+            f"Cannot determine the cross_stream LoRA rank for the Shadow "
+            f"Residual adapter at {adapter_path}: 'cross_stream' is absent from "
+            f"rank_pattern in adapter_config.json "
+            f"({sorted((config.get('rank_pattern') or {}).keys())}) and no "
+            f"cross_stream lora_A weight was found to read it from."
+        )
+
+    alpha = _pattern_lookup(config.get("alpha_pattern") or {}, "cross_stream")
+    if alpha is None:
+        # PEFT's own rule, from LoraModel._create_and_replace:
+        #     alpha = alpha_pattern.get(alpha_key, lora_config.lora_alpha)
+        # so an absent entry means the *global* lora_alpha, never the rank.
+        # Stock-peft-sr checkpoints ship alpha_pattern={} with lora_alpha=64 and
+        # a cross-stream rank of 32, where falling back to the rank would scale
+        # the cross-stream delta by 1.0 instead of 2.0 — halving it, silently.
+        alpha = config.get("lora_alpha")
+    if alpha is None:
+        raise ValueError(
+            f"Cannot determine the cross_stream LoRA alpha for the Shadow "
+            f"Residual adapter at {adapter_path}: 'cross_stream' is absent from "
+            f"alpha_pattern and adapter_config.json has no 'lora_alpha'."
+        )
+    return int(rank), float(alpha)
+
+
+def _cross_stream_rank_from_weights(adapter_path: str) -> int | None:
+    """Read the cross-stream LoRA rank off ``lora_A.weight``'s shape."""
+    adapter_path_obj = Path(adapter_path)
+    safetensors_file = adapter_path_obj / "adapter_model.safetensors"
+    bin_file = adapter_path_obj / "adapter_model.bin"
+
+    if safetensors_file.exists():
+        from safetensors.torch import load_file
+
+        state_dict = load_file(str(safetensors_file))
+    elif bin_file.exists():
+        state_dict = torch.load(str(bin_file), map_location="cpu")
+    else:
+        return None
+
+    for key, tensor in state_dict.items():
+        if ".cross_stream.lora_A." in key:
+            return tensor.shape[0]
+    return None
+
+
 def detect_present_modules(
     adapter_paths: list[str],
     arch: ArchDescriptor,

@@ -5,10 +5,11 @@ Extracted from ``compose_granite_switch.py`` to provide testable units for
 token management and chat template modification.
 """
 
-import json
 import os
 import re
 from dataclasses import dataclass
+
+from .adapter_loader import load_adapter_config
 
 # ---------------------------------------------------------------------------
 # Chat-template format abstraction
@@ -130,6 +131,15 @@ def detect_template_format(chat_template: str | None) -> TemplateFormat | None:
     return None
 
 
+#: Placement mode where the control token is inserted immediately *before* an
+#: invocation sequence (legacy ALoRA, ``alora_invocation_tokens``).
+ANCHOR_MODE_ALORA = "alora"
+
+#: Placement mode where the control token *replaces* a single anchor token at
+#: the end of the generation prompt (Shadow Residual, ``last_context_token``).
+ANCHOR_MODE_SR = "sr"
+
+
 def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
     """Load alora_invocation_tokens from adapter_config.json.
 
@@ -138,8 +148,7 @@ def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
         ValueError: If alora_invocation_tokens is missing or empty.
     """
     config_path = os.path.join(adapter_path, "adapter_config.json")
-    with open(config_path) as f:
-        adapter_config = json.load(f)
+    adapter_config = load_adapter_config(adapter_path)
 
     token_ids = adapter_config.get("alora_invocation_tokens")
     if not token_ids:
@@ -147,6 +156,110 @@ def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
             f"alora_invocation_tokens is missing or empty in {config_path}"
         )
     return token_ids
+
+
+def resolve_activation_anchor(adapter_path: str, tokenizer) -> tuple[str, str]:
+    """Resolve where an adapter's control token goes, from its adapter_config.json.
+
+    Two checkpoint generations are supported, distinguished by which keys the
+    trainer wrote:
+
+    * ``alora_invocation_tokens`` (a token-id *sequence*) — the control token is
+      inserted immediately **before** that sequence.  Mode
+      :data:`ANCHOR_MODE_ALORA`.
+    * ``last_context_token`` + ``last_context_token_id`` (a **single** token) —
+      written by shadow-residual ``feature/stock-peft-sr`` onward, where the
+      adapter is always-active during training and this marker records the
+      prompt/completion boundary.  The control token **replaces** that token at
+      the end of the generation prompt.  Mode :data:`ANCHOR_MODE_SR`.
+
+    The legacy key is probed first, so an adapter carrying both keys keeps its
+    established placement.
+
+    Args:
+        adapter_path: Directory holding ``adapter_config.json``.
+        tokenizer: Tokenizer used to decode / re-encode the anchor.
+
+    Returns:
+        ``(anchor_text, mode)``, where ``anchor_text`` is the literal the chat
+        template renders at the activation point.
+
+    Raises:
+        FileNotFoundError: If ``adapter_config.json`` is not found.
+        ValueError: If neither key set is present, if ``last_context_token`` is
+            not a single token under *tokenizer*, or if it does not encode to
+            the recorded ``last_context_token_id``.
+    """
+    try:
+        invocation_text = _decode_alora_invocation_text(adapter_path, tokenizer)
+    except ValueError:
+        pass  # No alora_invocation_tokens — try the Shadow Residual keys below.
+    else:
+        return invocation_text, ANCHOR_MODE_ALORA
+
+    config_path = os.path.join(adapter_path, "adapter_config.json")
+    anchor_text = load_adapter_config(adapter_path).get("last_context_token")
+    if not anchor_text:
+        raise ValueError(
+            f"{config_path} carries no activation anchor: expected either "
+            f"'alora_invocation_tokens' (shadow-residual before "
+            f"feature/stock-peft-sr, and the standard aLoRA adapter library) or "
+            f"'last_context_token' + 'last_context_token_id' (shadow-residual "
+            f"feature/stock-peft-sr onward)."
+        )
+    _resolve_sr_anchor_token_id(adapter_path, tokenizer, anchor_text)
+    return anchor_text, ANCHOR_MODE_SR
+
+
+def _resolve_sr_anchor_token_id(adapter_path: str, tokenizer, anchor_text: str) -> int:
+    """Encode *anchor_text* and check it against the recorded id.
+
+    The trainer already asserts a single id (``_resolve_single_token`` in
+    ``shadow_residual/training/train.py``); it is re-checked here against *this*
+    tokenizer because the substitute-token mechanism swaps exactly one
+    embedding, and a train-vs-compose tokenizer mismatch would otherwise
+    activate the adapter at the wrong position and silently lose accuracy.
+    """
+    config_path = os.path.join(adapter_path, "adapter_config.json")
+    encoded = tokenizer.encode(anchor_text, add_special_tokens=False)
+    if len(encoded) != 1:
+        raise ValueError(
+            f"last_context_token {anchor_text!r} from {config_path} encodes to "
+            f"{len(encoded)} tokens ({encoded}) with this tokenizer, but the "
+            f"control-token swap replaces exactly one embedding. The adapter was "
+            f"trained against a different tokenizer than the base model being "
+            f"composed."
+        )
+    recorded_id = load_adapter_config(adapter_path).get("last_context_token_id")
+    if recorded_id is not None and recorded_id != encoded[0]:
+        raise ValueError(
+            f"last_context_token {anchor_text!r} encodes to id {encoded[0]} with "
+            f"this tokenizer, but {config_path} records "
+            f"last_context_token_id={recorded_id}. The adapter was trained "
+            f"against a different tokenizer than the base model being composed; "
+            f"composing anyway would activate the adapter at the wrong position "
+            f"and silently degrade accuracy."
+        )
+    return encoded[0]
+
+
+def load_activation_anchor(adapter_path: str, tokenizer) -> tuple[str, int, str]:
+    """Like :func:`resolve_activation_anchor`, but also return the anchor's id.
+
+    Returns:
+        ``(anchor_text, anchor_token_id, mode)``.  ``anchor_token_id`` is the id
+        whose embedding the runtime token-exchange must place at the control
+        token's position so the post-swap sequence is indistinguishable from a
+        no-adapter render.
+    """
+    anchor_text, mode = resolve_activation_anchor(adapter_path, tokenizer)
+    if mode == ANCHOR_MODE_SR:
+        return (
+            anchor_text,
+            _resolve_sr_anchor_token_id(adapter_path, tokenizer, anchor_text),
+            mode,
+        )
+    return anchor_text, get_alora_first_invocation_token_id(adapter_path), mode
 
 
 def _decode_alora_invocation_text(adapter_path: str, tokenizer) -> str:
@@ -167,6 +280,249 @@ def get_alora_first_invocation_token_id(adapter_path: str) -> int:
     control token before the decoder runs.
     """
     return _load_alora_invocation_token_ids(adapter_path)[0]
+
+
+#: A ``{{- ... }}`` emission in a Jinja template.
+_EMISSION_RE = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}", re.DOTALL)
+
+#: An emission expression that is a single quoted string literal and nothing
+#: else. Group 1 is the quote character, group 2 the literal body.
+_SINGLE_LITERAL_RE = re.compile(r"^(['\"])((?:(?!\1).)*)\1$", re.DOTALL)
+
+
+def _split_at_generation_prompt(template: str) -> tuple[str, str]:
+    """Split *template* into everything before, and everything from, the
+    ``{%- if add_generation_prompt %}`` block.
+
+    Raises:
+        ValueError: If the template has no such block.
+    """
+    match = re.search(r"\{%-\s*if add_generation_prompt\s*%\}", template)
+    if match is None:
+        raise ValueError(
+            "Chat template has no 'add_generation_prompt' block, so a Shadow "
+            "Residual control token cannot be placed at the end of the "
+            "generation prompt."
+        )
+    return template[: match.start()], template[match.start() :]
+
+
+#: Escape sequences recognized inside a Jinja string literal.
+_JINJA_ESCAPES = {
+    "\\": "\\",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "'": "'",
+    '"': '"',
+}
+
+
+def _unescape_literal(body: str) -> str:
+    """Resolve a Jinja string-literal *body* to the text it renders.
+
+    Token-level reasoning has to happen on the rendered value: in the template
+    source Granite 4.2's generation prompt is
+    ``<|im_start|>assistant\\n<think>`` with a two-character ``\\n``, and asking
+    a tokenizer about that is meaningless.
+    """
+    out, i = [], 0
+    while i < len(body):
+        if body[i] == "\\" and i + 1 < len(body) and body[i + 1] in _JINJA_ESCAPES:
+            out.append(_JINJA_ESCAPES[body[i + 1]])
+            i += 2
+        else:
+            out.append(body[i])
+            i += 1
+    return "".join(out)
+
+
+def _generation_prompt_literals(region: str) -> list[str]:
+    """Bodies of every lone-string-literal emission in the generation prompt.
+
+    One entry per emission, so a template that renders different generation
+    prompts under different flags (Granite 4.2's ``enable_thinking``) yields one
+    entry per branch.  This is what makes branch coverage checkable: a control
+    token placed in only one branch leaves the others inert.
+    """
+    bodies = []
+    for emission in _EMISSION_RE.finditer(region):
+        literal = _SINGLE_LITERAL_RE.match(emission.group(1))
+        if literal is not None:
+            bodies.append(literal.group(2))
+    return bodies
+
+
+def _resolve_sr_substitution_site(region: str, anchor: str, tokenizer) -> str:
+    """Pick the token the Shadow Residual control token will replace.
+
+    The adapter declares its ``last_context_token`` (*anchor*), and when every
+    generation-prompt branch emits it that is the site — Granite 4.1, where the
+    single branch ends ``'<|start_of_role|>assistant<|end_of_role|>'``.
+
+    Granite 4.2 has two branches that do **not** share the anchor::
+
+        enable_thinking      '<|im_start|>assistant\\n<think>\\n'
+        not enable_thinking  '<|im_start|>assistant\\n<think></think>'
+
+    The declared anchor ``</think>`` exists only in the second, so substituting
+    it leaves the *default* render with no control token at all and ships an
+    adapter that never activates.  A single control token cannot carry two
+    substitute embeddings either — the runtime swap keys on the control token's
+    id — so the site must be one token common to every branch.  Here that is
+    ``<think>``, the last token of the branches' common prefix.
+
+    Moving the site earlier is sound: SR trains always-active (its
+    ``last_context_token`` is a label-boundary marker, not a gate), and both
+    sites sit inside the generation prompt with nothing generated in between.
+
+    Returns:
+        The literal to substitute, guaranteed to occur in every branch and to
+        encode to exactly one token id.
+
+    Raises:
+        ValueError: If the generation prompt emits no string literal at all, if
+            its single branch does not emit *anchor*, or if its branches share
+            no single-token site.
+    """
+    literals = _generation_prompt_literals(region)
+    if not literals:
+        raise ValueError(
+            "The generation prompt emits no string literal, so the Shadow "
+            "Residual control token has nowhere to go."
+        )
+    if all(anchor in body for body in literals):
+        return anchor
+    if len(literals) == 1:
+        raise ValueError(
+            f"The generation prompt never emits {anchor!r}, so the Shadow "
+            f"Residual control token has nowhere to go. The adapter's "
+            f"last_context_token does not match this base model's chat template."
+        )
+
+    prefix = os.path.commonprefix([_unescape_literal(body) for body in literals])
+    prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
+    for cut in range(len(prefix)):
+        candidate = prefix[cut:]
+        # The site is located and re-emitted in the *escaped* Jinja source, so a
+        # candidate containing anything the source escapes would not survive the
+        # rewrite. This also keeps the site off the wrong side of a ``\n``.
+        if any(char in _JINJA_ESCAPES.values() for char in candidate):
+            continue
+        candidate_ids = tokenizer.encode(candidate, add_special_tokens=False)
+        if len(candidate_ids) != 1:
+            continue
+        lead = prefix[: len(prefix) - len(candidate)]
+        lead_ids = tokenizer.encode(lead, add_special_tokens=False) if lead else []
+        # The control token replaces one *token*, so the site has to start on a
+        # token boundary. Without this a bare '>' would qualify — it encodes to
+        # one id on its own while being the tail of a longer token in context.
+        if prefix_ids == lead_ids + candidate_ids:
+            return candidate
+
+    raise ValueError(
+        f"The generation prompt has {len(literals)} render paths that do not "
+        f"all emit the adapter's last_context_token {anchor!r} ({literals!r}), "
+        f"and their common prefix {prefix!r} ends in no single token that could "
+        f"stand in for it. A Shadow Residual control token must replace one "
+        f"token present in every path, otherwise the paths it misses render an "
+        f"adapter that never activates."
+    )
+
+
+def _replace_anchor_in_generation_prompt(
+    template: str, anchor: str, tokenizer
+) -> tuple[str, str, int]:
+    """Make every generation-prompt branch emit the control token in place of
+    one token.
+
+    The control token must take that token's *place*, not sit next to it: the
+    runtime embedding swap puts the replaced token's embedding back at the
+    control token's position, so the post-swap id sequence is identical to a
+    no-adapter render and only the switch sees a difference.
+
+    The rewrite is confined to the ``{%- if add_generation_prompt %}`` block so
+    that the same literal appearing in earlier turns (every role header on 4.1;
+    the history-truncation ``split('</think>')`` calls on 4.2) is untouched.
+
+    Args:
+        template: The chat template being patched.
+        anchor: The adapter's declared ``last_context_token``.
+        tokenizer: Used to check candidate sites are a single token.
+
+    Returns:
+        ``(patched_template, site, num_replacements)`` where *site* is the
+        literal actually replaced — the anchor itself unless the branches forced
+        an earlier common token (see :func:`_resolve_sr_substitution_site`).
+
+    Raises:
+        ValueError: If there is no ``add_generation_prompt`` block, if the site
+            appears in an emission that is not a lone string literal, if any
+            branch does not contain the site exactly once, or if the number of
+            substitutions does not equal the number of branches.
+    """
+    head, region = _split_at_generation_prompt(template)
+    site = _resolve_sr_substitution_site(region, anchor, tokenizer)
+
+    literals = _generation_prompt_literals(region)
+    for body in literals:
+        # One substitution per branch, no more: two control tokens in one render
+        # would activate twice and break the id-for-id equality with a
+        # no-adapter render.
+        if body.count(site) != 1:
+            raise ValueError(
+                f"The generation prompt branch {body!r} contains the Shadow "
+                f"Residual substitution site {site!r} {body.count(site)} times, "
+                f"but the control token must replace exactly one token."
+            )
+
+    count = 0
+
+    def _rewrite(emission: "re.Match") -> str:
+        nonlocal count
+        expr = emission.group(1)
+        if site not in expr:
+            return emission.group(0)
+        literal = _SINGLE_LITERAL_RE.match(expr)
+        if literal is None:
+            raise ValueError(
+                f"The generation prompt emits {site!r} from an expression that "
+                f"is not a lone string literal ({expr!r}). The Shadow Residual "
+                f"control token cannot be substituted for it safely."
+            )
+        quote, body = literal.group(1), literal.group(2)
+        # Emit the control token where the site was, falling back to the site
+        # itself for every other adapter type (and for no-adapter renders).
+        substitution = (
+            "{%- if ns.adapter_token and ns.adapter_type == '"
+            + ANCHOR_MODE_SR
+            + "' %}{{- ns.adapter_token }}"
+            "{%- else %}{{- " + quote + site + quote + " }}{%- endif %}"
+        )
+        parts = body.split(site)
+        out = []
+        for i, part in enumerate(parts):
+            if part:
+                out.append("{{- " + quote + part + quote + " }}")
+            if i < len(parts) - 1:
+                out.append(substitution)
+                count += 1
+        return "".join(out)
+
+    region = _EMISSION_RE.sub(_rewrite, region)
+    if count != len(literals):
+        # Reached when a branch emits the site from something other than a lone
+        # literal, or when the region holds a literal the site is absent from.
+        # Either way some render path would ship an inert adapter, so fail here
+        # rather than at eval time.
+        raise ValueError(
+            f"Substituted the Shadow Residual control token for {site!r} in "
+            f"{count} of the generation prompt's {len(literals)} literal "
+            f"emission(s) ({literals!r}). Every render path must place the "
+            f"control token, otherwise the ones that miss it render an adapter "
+            f"that never activates."
+        )
+    return head + region, site, count
 
 
 def add_control_tokens(
@@ -250,6 +606,13 @@ def configure_chat_template(
     Args:
         tokenizer: HuggingFace tokenizer with a chat_template to modify.
         discovered_adapters: List of ``(adapter_path, adapter_name, technology, source)`` tuples.
+
+    Returns:
+        ``(template_format_name, sr_substitute_token_ids)``.  The second element
+        maps each Shadow Residual adapter's name to the id of the token its
+        control token displaced, which the runtime token exchange must restore.
+        It is resolved here because the answer depends on the base model's
+        template shape, not only on the adapter's config.
     """
     print("\nConfiguring chat template with adapter support...")
 
@@ -258,13 +621,28 @@ def configure_chat_template(
             "Warning: Base model does not have a chat template, "
             "skipping adapter configuration"
         )
-        return
+        return None, {}
 
     base_chat_template = tokenizer.chat_template
 
-    # Build adapter mapping. For ALoRA adapters, decode alora_invocation_tokens
-    # so the template can locate the right insertion point at render time.
+    # Build adapter mapping. Adapters that declare an activation point (``alora``
+    # or ``sr``) carry an anchor in their adapter_config.json; resolving it also
+    # confirms which convention the checkpoint uses, and that decides placement:
+    #
+    #   ANCHOR_MODE_ALORA -> control token inserted *before* the invocation
+    #                        sequence (or before the generation prompt).
+    #   ANCHOR_MODE_SR    -> control token *replaces* the single anchor token at
+    #                        the end of the generation prompt.
+    #
+    # ``lora`` means sequence-start placement. Shadow Residual must never take
+    # that path: its adapter stream does not write the KV cache (it reuses the
+    # base stream's K/V), so the adapter hidden states at prompt positions are
+    # never read back, and activating before the anchor changes no output while
+    # still costing compute. Callers therefore classify SR from the checkpoint
+    # weights (``is_shadow_residual_adapter``) and pass ``sr`` here, rather than
+    # trusting a directory label that no SR training run produces.
     adapter_mapping: dict[str, dict[str, str]] = {}
+    sr_anchors: set[str] = set()
     for adapter_info in discovered_adapters:
         adapter_path = adapter_info[0]
         adapter_name = adapter_info[1]
@@ -273,11 +651,30 @@ def configure_chat_template(
             "token": f"<|{adapter_name}|>",
             "type": technology,
         }
-        if technology == "alora" and adapter_path is not None:
-            entry["invocation_text"] = _decode_alora_invocation_text(
-                adapter_path, tokenizer
-            )
+        if technology in (ANCHOR_MODE_ALORA, ANCHOR_MODE_SR) and adapter_path:
+            anchor_text, mode = resolve_activation_anchor(adapter_path, tokenizer)
+            if technology == ANCHOR_MODE_SR and mode != ANCHOR_MODE_SR:
+                raise ValueError(
+                    f"Adapter '{adapter_name}' at {adapter_path} was classified as "
+                    f"Shadow Residual from its weights, but its adapter_config.json "
+                    f"carries 'alora_invocation_tokens' instead of "
+                    f"'last_context_token'. SR activates by replacing a single "
+                    f"anchor token, so the checkpoint and its metadata disagree."
+                )
+            entry["type"] = mode
+            if mode == ANCHOR_MODE_SR:
+                sr_anchors.add(anchor_text)
+            else:
+                entry["invocation_text"] = anchor_text
         adapter_mapping[adapter_name] = entry
+
+    if len(sr_anchors) > 1:
+        raise ValueError(
+            f"Shadow Residual adapters in one checkpoint must share a "
+            f"last_context_token (it is baked into the chat template), but got "
+            f"{sorted(sr_anchors)}. These adapters were trained against "
+            f"different base models."
+        )
 
     mapping_entries = []
     for adapter_name, info in adapter_mapping.items():
@@ -587,6 +984,30 @@ def configure_chat_template(
     else:
         modified_chat_template += "\n" + alora_insertion
 
+    # Shadow Residual placement: rewrite the generation prompt so its final
+    # token (the adapter's ``last_context_token``) is emitted as the control
+    # token instead. Runs before the skip-once wrappers below so it sees the
+    # base template's original emission literals.
+    sr_replacements = 0
+    sr_site = ""
+    sr_substitute_token_ids: dict[str, int] = {}
+    if sr_anchors:
+        (
+            modified_chat_template,
+            sr_site,
+            sr_replacements,
+        ) = _replace_anchor_in_generation_prompt(
+            modified_chat_template, next(iter(sr_anchors)), tokenizer
+        )
+        # The runtime swap must restore the token the control token displaced,
+        # which is the resolved site — not necessarily the declared anchor.
+        site_id = tokenizer.encode(sr_site, add_special_tokens=False)[0]
+        sr_substitute_token_ids = {
+            name: site_id
+            for name, info in adapter_mapping.items()
+            if info["type"] == ANCHOR_MODE_SR
+        }
+
     # Skip-once wrapper for every role-open marker emission in the template.
     # ns.skip_next_role_marker is set to true immediately after a LoRA or
     # assistant-boundary ALoRA control token is emitted; the very next role
@@ -653,10 +1074,20 @@ def configure_chat_template(
     tokenizer.chat_template = modified_chat_template
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")
     for adapter_name, info in adapter_mapping.items():
-        if "invocation_text" in info:
+        if info["type"] == ANCHOR_MODE_SR:
+            placement = f"replacing '{sr_site}' in the generation prompt"
+            anchor = next(iter(sr_anchors))
+            if sr_site != anchor:
+                placement += (
+                    f" (its last_context_token '{anchor}' is absent from some "
+                    f"render paths; '{sr_site}' is common to all of them)"
+                )
+        elif "invocation_text" in info:
             placement = f"before '{info['invocation_text']}' in last user message"
-        else:
+        elif info["type"] == ANCHOR_MODE_ALORA:
             placement = "before generation prompt (fallback)"
+        else:
+            placement = "at the beginning of the sequence"
         print(f"  - {adapter_name}: {info['token']} ({info['type']}) → {placement}")
     print(f"  Template format: {fmt.name} (role marker {fmt.role_open_marker!r})")
     print("Adapter token insertion logic added:")
@@ -665,4 +1096,9 @@ def configure_chat_template(
         "  - ALoRA tokens (user-message invocation): before invocation text in last user message"
     )
     print("  - ALoRA tokens (role-token invocation): before generation prompt")
-    return fmt.name
+    if sr_replacements:
+        print(
+            f"  - SR tokens: substituted for {sr_site!r} in all "
+            f"{sr_replacements} generation-prompt render path(s)"
+        )
+    return fmt.name, sr_substitute_token_ids

@@ -269,6 +269,19 @@ The Granite Switch extends the base Granite model with:
 - Continuous batching, tensor/pipeline parallelism
 - OpenAI-compatible API server
 
+### Shadow Residual (SR) Dual-Stream
+
+SR runs a frozen base stream and a LoRA adapter stream through the same layer, connected by a
+`cross_stream` low-rank injection. The two streams share every parameter (the base stream is
+the same modules called with `adapter_indices=None`), and K/V always come from the base
+stream. SR uses the same fused projections as the rest of the HF backend.
+
+One `GraniteSwitchModel` / `GraniteSwitchForCausalLM` pair serves both modes and picks its
+decoder layer class in `__init__` from `config.dual_stream`: `SRSwitchDecoderLayer` (a
+subclass) when True, `GraniteSwitchAttentionDecoderLayer` otherwise. A checkpoint holds
+**either** SR adapters **or** standard LoRA/aLoRA adapters — the composer rejects a mixed
+set. See [docs/SR_ARCHITECTURE.md](docs/SR_ARCHITECTURE.md) for full details.
+
 ### Weight Compatibility
 
 Both backends share the same weight format:
@@ -382,6 +395,14 @@ authoritative check — both the upstream and skinned models use the same fused-
 architecture there. The HF skinning tests in `tests/composer/test_skinning_equivalence.py` are
 skipped for this reason.
 
+### 10. Pre-Fusion SR Checkpoints Must Be Re-Composed
+
+SR used to build unfused Q/K/V and gate/up/down projections (`unfused_qkv=True`); it now uses
+the same fused projections as everything else. Since `transformers` silently keeps unknown
+config keys, an old unfused checkpoint would otherwise load into a fused model and quietly
+mismatch keys, so `GraniteSwitchConfig` rejects `unfused_qkv=True` with a re-compose error.
+See [docs/SR_ARCHITECTURE.md](docs/SR_ARCHITECTURE.md) for details.
+
 ## Pre-commit
 
 **See [docs/CICD.md](docs/CICD.md) for the full CI/CD setup — pre-commit hook list, setup steps, and what runs on every commit vs. in CI.**
@@ -392,6 +413,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
+- `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
 
 ## Git Workflow
 

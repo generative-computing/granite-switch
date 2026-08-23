@@ -7,9 +7,15 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 
 import torch
 
-from .adapter_loader import detect_lora_config, detect_present_modules
+from .adapter_loader import (
+    _extract_modules_from_weights,
+    detect_lora_config,
+    detect_present_modules,
+    is_shadow_residual_adapter,
+    resolve_cross_stream_rank_alpha,
+)
 from .arch import resolve_arch
-from .validator import validate_all_parameters
+from .validator import validate_all_parameters, validate_cross_stream_population
 from .weight_transfer import transfer_adapter_weights, transfer_base_weights
 
 
@@ -74,13 +80,67 @@ class GraniteSwitchComposer:
         num_total = num_external + num_built_in
 
         # --- Step 1: Resolve architecture ---
+        # Pre-scan for cross_stream (SR dual-stream) to select the right arch.
         print(f"Loading config from {base_model_name_or_path}...")
         base_config = load_base_config(base_model_name_or_path)
-        arch = resolve_arch(base_model_name_or_path, base_config=base_config)
+
+        # Classify every adapter as single-stream (LoRA/aLoRA) or dual-stream
+        # (Shadow Residual).  A checkpoint holds one kind or the other: the whole
+        # decoder runs in one mode, chosen from ``dual_stream``.
+        sr_adapters = []
+        non_sr_adapters = []
+        for ap in adapter_paths:
+            if is_shadow_residual_adapter(ap):
+                sr_adapters.append(ap)
+            else:
+                non_sr_adapters.append(ap)
+
+        if sr_adapters and non_sr_adapters:
+            raise ValueError(
+                "Cannot mix Shadow Residual (dual-stream) and standard LoRA/aLoRA "
+                "adapters in the same checkpoint. All adapters must be the same "
+                "kind.\n"
+                f"  SR adapters: {sr_adapters}\n"
+                f"  Non-SR adapters: {non_sr_adapters}"
+            )
+        dual_stream = bool(sr_adapters)
+
+        cross_stream_rank = None
+
+        arch = resolve_arch(
+            base_model_name_or_path, base_config=base_config, dual_stream=dual_stream
+        )
 
         # --- Step 2–3: Detect LoRA config and present modules ---
+        if dual_stream:
+            # Each SR adapter may have a different cross_stream rank — the
+            # stacked tensor is sized to the max and the narrower ones are padded.
+            cross_stream_rank = max(
+                resolve_cross_stream_rank_alpha(ap)[0] for ap in sr_adapters
+            )
+
+            # Shadow Residual always reads K/V from the base stream, so an SR
+            # adapter's k_proj/v_proj LoRA could never be applied.  Reject it
+            # rather than silently dropping trained weights.
+            for ap in sr_adapters:
+                modules = _extract_modules_from_weights(ap)
+                offending = sorted({"k_proj", "v_proj"} & modules)
+                if offending:
+                    raise ValueError(
+                        f"Shadow Residual adapter at {ap} has LoRA weights for "
+                        f"{offending}, but SR takes K/V from the base stream, so "
+                        f"they can never be applied. Separate-KV SR is not "
+                        f"supported — retrain without k_proj/v_proj in "
+                        f"target_modules."
+                    )
+
+            print(
+                f"  Shadow Residual detected in all {len(sr_adapters)} adapters "
+                f"(cross_stream_rank={cross_stream_rank})"
+            )
+
         if adapter_paths:
-            lora_rank, lora_alpha, adapter_ranks, adapter_alphas = detect_lora_config(
+            lora_rank, _lora_alpha, adapter_ranks, adapter_alphas = detect_lora_config(
                 adapter_paths
             )
             lora_target_modules, source_analysis = detect_present_modules(
@@ -164,6 +224,13 @@ class GraniteSwitchComposer:
             }
         )
 
+        # Shadow Residual parameters.  Left unset when no SR adapter is present,
+        # so no cross_stream site is allocated and the parameter count is
+        # identical to a pre-SR build.
+        if dual_stream:
+            config_kwargs["dual_stream"] = True
+            config_kwargs["cross_stream_rank"] = cross_stream_rank
+
         # Merge caller-provided overrides (switch_head_dim, etc.)
         config_kwargs.update(kwargs)
 
@@ -209,6 +276,8 @@ class GraniteSwitchComposer:
                 adapter_names=adapter_names[:num_external],
                 target_module_sets=target_module_sets,
             )
+            if dual_stream:
+                validate_cross_stream_population(model)
         else:
             adapter_mapping = {}
 

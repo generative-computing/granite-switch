@@ -59,14 +59,18 @@ class AdapterRemapper:
             attr = g.effective_attr_name
             src_parent = g.effective_source_parent
 
+            # Build target prefix: "model.layers.{layer}.parent.attr." or "model.layers.{layer}.attr."
+            if g.parent:
+                target_prefix = f"model.layers.{{layer}}.{g.parent}.{attr}.{inner}"
+            else:
+                target_prefix = f"model.layers.{{layer}}.{attr}.{inner}"
+
             if g.is_split:
                 # Split module: 1 PEFT module → N slices with split metadata
                 peft_mod = g.peft_modules[0]
                 for ab in ("lora_A", "lora_B"):
                     pattern = self._make_pattern(prefix, src_parent, peft_mod, ab)
-                    target_template = (
-                        f"model.layers.{{layer}}.{g.parent}.{attr}.{inner}{ab}_slices"
-                    )
+                    target_template = f"{target_prefix}{ab}_slices"
                     if ab == "lora_A":
                         split_info = {"slices": n_slices, "type": "duplicate"}
                     else:
@@ -78,10 +82,7 @@ class AdapterRemapper:
                 for slice_idx, peft_mod in enumerate(g.peft_modules):
                     for ab in ("lora_A", "lora_B"):
                         pattern = self._make_pattern(prefix, src_parent, peft_mod, ab)
-                        target_template = (
-                            f"model.layers.{{layer}}.{g.parent}.{attr}."
-                            f"{inner}{ab}_slices.{slice_idx}"
-                        )
+                        target_template = f"{target_prefix}{ab}_slices.{slice_idx}"
                         self._rules.append((pattern, target_template, None))
 
             else:
@@ -89,9 +90,7 @@ class AdapterRemapper:
                 peft_mod = g.peft_modules[0]
                 for ab in ("lora_A", "lora_B"):
                     pattern = self._make_pattern(prefix, src_parent, peft_mod, ab)
-                    target_template = (
-                        f"model.layers.{{layer}}.{g.parent}.{attr}.{inner}{ab}"
-                    )
+                    target_template = f"{target_prefix}{ab}"
                     self._rules.append((pattern, target_template, None))
 
     @staticmethod
@@ -99,16 +98,22 @@ class AdapterRemapper:
         """Build compiled regex for a PEFT source parameter name.
 
         Pattern: ``{prefix}layers.{layer}.{parent}.{peft_mod}.{ab}.weight``
+        For parent-less modules: ``{prefix}layers.{layer}.{peft_mod}.{ab}.weight``
         """
-        # Escape dots in literal segments
         escaped_prefix = re.escape(prefix)
-        escaped_parent = re.escape(parent)
         escaped_mod = re.escape(peft_mod)
         escaped_ab = re.escape(ab)
-        regex = (
-            f"^{escaped_prefix}layers\\.(?P<layer>\\d+)\\."
-            f"{escaped_parent}\\.{escaped_mod}\\.{escaped_ab}\\.weight$"
-        )
+        if parent:
+            escaped_parent = re.escape(parent)
+            regex = (
+                f"^{escaped_prefix}layers\\.(?P<layer>\\d+)\\."
+                f"{escaped_parent}\\.{escaped_mod}\\.{escaped_ab}\\.weight$"
+            )
+        else:
+            regex = (
+                f"^{escaped_prefix}layers\\.(?P<layer>\\d+)\\."
+                f"{escaped_mod}\\.{escaped_ab}\\.weight$"
+            )
         return re.compile(regex)
 
     def remap_adapter_name(self, src_name: str) -> RemapResult | None:
