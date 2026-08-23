@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A LoRA adapter, end to end — compose, template, prefill, decode</title>
+<style>
+  :root{
+    --bg:#fbfbfd; --fg:#1d1d20; --muted:#6a6a75; --line:#e3e3e9;
+    --card:#ffffff; --code-bg:#f5f5f8;
+    --ok:#0f7a52; --ok-bg:#e7f5ef;
+    --bad:#b02a37; --bad-bg:#fdeced;
+    --warn:#8a5a00; --warn-bg:#fdf3e2;
+    --accent:#2b5fd9; --accent-bg:#ecf1fe;
+    --base:#8e8e98; --a1:#2b5fd9; --a2:#b8860b; --a3:#0f7a52;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#16161a; --fg:#e9e9ee; --muted:#a0a0ad; --line:#2c2c34;
+      --card:#1e1e24; --code-bg:#131317;
+      --ok:#5fd3a5; --ok-bg:#123026;
+      --bad:#ff8a95; --bad-bg:#33161a;
+      --warn:#e7b34a; --warn-bg:#332a14;
+      --accent:#8bacff; --accent-bg:#1a2340;
+      --base:#7c7c88; --a1:#8bacff; --a2:#e0b44a; --a3:#5fd3a5;
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+  .wrap{max-width:1060px;margin:0 auto;padding:40px 24px 96px}
+  h1{font-size:30px;line-height:1.25;margin:0 0 8px;letter-spacing:-.02em}
+  .sub{color:var(--muted);font-size:16px;margin:0 0 28px}
+  h2{font-size:23px;margin:52px 0 14px;padding-bottom:8px;border-bottom:2px solid var(--line);letter-spacing:-.01em}
+  h3{font-size:18px;margin:30px 0 10px}
+  h4{font-size:15px;margin:20px 0 8px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  p{margin:11px 0}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13.5px;
+       background:var(--code-bg);padding:2px 5px;border-radius:4px}
+  pre{background:var(--code-bg);border:1px solid var(--line);border-radius:8px;
+      padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.55;margin:12px 0}
+  pre code{background:none;padding:0;font-size:13px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:16px 0}
+  .box{border-left:4px solid var(--accent);background:var(--accent-bg);
+       border-radius:0 8px 8px 0;padding:13px 16px;margin:16px 0}
+  .box.ok{border-color:var(--ok);background:var(--ok-bg)}
+  .box.bad{border-color:var(--bad);background:var(--bad-bg)}
+  .box.warn{border-color:var(--warn);background:var(--warn-bg)}
+  .box p:first-child{margin-top:0} .box p:last-child{margin-bottom:0}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+  th{background:var(--code-bg);font-weight:600}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:13px}
+  .pass{color:var(--ok);font-weight:600}
+  .fail{color:var(--bad);font-weight:600}
+  .tag{display:inline-block;font-size:11.5px;padding:2px 8px;border-radius:20px;
+       font-weight:600;letter-spacing:.02em;vertical-align:middle}
+  .tag.ok{background:var(--ok-bg);color:var(--ok)}
+  .tag.bad{background:var(--bad-bg);color:var(--bad)}
+  .tag.warn{background:var(--warn-bg);color:var(--warn)}
+  .toc{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px 22px}
+  .toc ol{margin:6px 0;padding-left:22px} .toc li{margin:4px 0}
+  .toc a{color:var(--accent);text-decoration:none} .toc a:hover{text-decoration:underline}
+  small{color:var(--muted)}
+  .step{position:relative;padding-left:44px;margin:26px 0}
+  .step::before{content:attr(data-n);position:absolute;left:0;top:2px;width:30px;height:30px;
+    background:var(--accent);color:#fff;border-radius:50%;display:grid;place-items:center;
+    font-weight:700;font-size:14px}
+  .step h3{margin-top:0}
+  .src{color:var(--muted);font-size:12.5px;font-family:ui-monospace,monospace;margin:4px 0 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>A LoRA adapter, end to end</h1>
+<p class="sub">Compose &rarr; chat template &rarr; tokenizer &rarr; prefill &rarr; switch &rarr; control-token
+replacement &rarr; decoder &rarr; LoRA kernels &rarr; decode. Every number below was read off a real
+composed checkpoint or executed, not recalled.</p>
+
+<div class="card">
+<h4>The checkpoint used throughout</h4>
+<p class="mono">barha/granite-switch-4.0-350m-demo &mdash; base granite-4.0-350m, 3 adapters,
+composed from <code>main</code> (its template still uses the older
+<code>skip_next_start_of_role</code> name).</p>
+<p><small>Caveat stated once, up front: all three of its adapters are declared
+<code>technology: "alora"</code>. To show the <em>LoRA</em> branch with real output rather than a
+hand-written guess, the renders below flip one adapter's declared
+<code>type</code> from <code>'alora'</code> to <code>'lora'</code> in the shipped template's
+<code>adapter_map</code> and re-render. That exercises the real template code; nothing else is
+altered.</small></p>
+</div>
+
+<div class="toc">
+<strong>Contents</strong>
+<ol>
+  <li><a href="#big">The whole pipeline on one page</a></li>
+  <li><a href="#compose">Part A &mdash; compose time (6 steps)</a></li>
+  <li><a href="#request">Part B &mdash; request time (8 steps)</a></li>
+  <li><a href="#trace">The full trace, position by position</a></li>
+  <li><a href="#invariants">Invariants, and where they can break</a></li>
+  <li><a href="#vs">LoRA vs aLoRA, side by side</a></li>
+</ol>
+</div>
+
+<h2 id="big">1. The whole pipeline on one page</h2>
+
+<p>One sentence: <strong>a LoRA adapter is turned on by a token in the prompt, and that token is
+erased before the model sees it.</strong> Everything else is bookkeeping around those two facts.</p>
+
+<pre><code>COMPOSE TIME (once, offline)
+  base model + PEFT adapter dir
+        |
+   [1] add control token to tokenizer      &lt;|text-to-json|&gt; -&gt; id 100353
+   [2] probe the substitute token          no-adapter render starts with 100264
+   [3] rewrite the chat template           lora -&gt; emit token at position 0
+   [4] stack + pre-scale LoRA weights      lora_B *= alpha/rank
+   [5] resize embeddings, init ctrl rows
+   [6] write config + 1 extra KV slot      num_hidden_layers 28 -&gt; 29
+        |
+        v
+   checkpoint on disk (config.json, chat_template.jinja, model.safetensors)
+
+REQUEST TIME (per request)
+   apply_chat_template(msgs, adapter_name="text-to-json")
+        |
+   [7] render     ids[0] = 100353   (replaces the 100264 that would be there)
+   [8] tokenize + vLLM prefix-cache hash over those ids
+        |
+   [9] PREFILL: switch attention  -&gt;  adapter_indices = [2,2,2,...]
+  [10] token exchange            -&gt;  ids[0] rewritten 100353 -&gt; 100264
+  [11] embed modified ids        -&gt;  sequence now identical to no-adapter render
+  [12] adapter_indices - 1       -&gt;  Punica token_lora_mapping
+  [13] 28 decoder layers, LoRA added per token
+        |
+  [14] DECODE: the +gain key sits in the KV cache, so each new token
+       re-reads it and stays on adapter 2</code></pre>
+
+<h2 id="compose">2. Part A &mdash; compose time</h2>
+
+<div class="step" data-n="1">
+<h3>Add one control token per adapter to the tokenizer</h3>
+<p>The token string is mechanical: <code>&lt;|{adapter_name}|&gt;</code>. It is added as a
+<em>special</em> token, so the tokenizer never splits it.</p>
+<pre><code>special_tokens.append(f"&lt;|{adapter_name}|&gt;")
+num_added = tokenizer.add_special_tokens(
+    {"additional_special_tokens": special_tokens}
+)</code></pre>
+<p class="src">src/granite_switch/composer/tokenizer_setup.py:194-199</p>
+<p>In the real checkpoint the base vocab of 100352 grows by 3:</p>
+<table>
+<tr><th>token</th><th>id</th><th>adapter index</th></tr>
+<tr><td class="mono">&lt;|cti-technique-mapping|&gt;</td><td class="mono">100352</td><td class="mono">1</td></tr>
+<tr><td class="mono">&lt;|text-to-json|&gt;</td><td class="mono">100353</td><td class="mono">2</td></tr>
+<tr><td class="mono">&lt;|genai-attack-vector|&gt;</td><td class="mono">100354</td><td class="mono">3</td></tr>
+</table>
+<p class="src">config.json: adapter_token_ids [100352, 100353, 100354], vocab_size 100355</p>
+<p>Note the index convention that holds for the rest of the pipeline:
+<strong>0 means base / no adapter</strong>, and adapter <em>slot i</em> is <em>index i+1</em>. There is
+no token for "base" &mdash; base is the absence of any control token.</p>
+</div>
+
+<div class="step" data-n="2">
+<h3>Probe which token the control token will impersonate</h3>
+<p>The control token is going to sit at position 0, displacing whatever normally lives there. Compose
+asks the tokenizer what that is, by rendering a throwaway chat and taking the first id:</p>
+<pre><code>probe_text = tokenizer.apply_chat_template(
+    [{"role": "user", "content": "probe"}],
+    tokenize=False, add_generation_prompt=False,
+)
+ids = tokenizer(probe_text, add_special_tokens=False).input_ids
+sub_id = ids[0]</code></pre>
+<p class="src">src/granite_switch/composer/compose_granite_switch.py:121-137</p>
+<p>Verified by running it on this checkpoint's tokenizer: a no-adapter render starts</p>
+<pre><code>'&lt;|start_of_role|&gt;system&lt;|end_of_role|&gt;You are a helpful assistant. ...'
+ids[:6] = [100264, 9125, 100265, 2675, 527, 264]
+             ^^^^^^ &lt;|start_of_role|&gt;</code></pre>
+<p>so <code>sub_id = 100264</code>. That value is written into the config as
+<code>adapter_substitute_token_ids</code> &mdash; here <code>[100264, 100264, 100264]</code>. For a
+Granite 4.2 ChatML template the same probe yields <code>&lt;|im_start|&gt;</code> (100256) instead; nothing
+is hardcoded.</p>
+<div class="box warn">
+<p><strong>The assumption this rests on.</strong> The template must emit a <em>constant</em>
+<code>ids[0]</code> regardless of message content, system prompt, or generation-prompt flag. True for
+Granite 4.x, pinned by <code>tests/composer/test_lora_substitute_probe.py</code>. A future template
+that branched at position 0 (say, BOS only when no system message) would silently break this &mdash;
+the probe would still return a valid id, just the wrong one for some render modes.</p>
+</div>
+</div>
+
+<div class="step" data-n="3">
+<h3>Rewrite the chat template</h3>
+<p>Two things are injected: a lookup table of adapter name &rarr; (token, type), and a prefix rule.
+The prefix rule is the whole LoRA placement policy:</p>
+<pre><code>{#- For lora adapters: insert activation token at the very beginning -#}
+{%- if adapter_token and adapter_type == 'lora' %}
+{{- adapter_token }}
+{%- set ns.skip_next_role_marker = true %}
+{%- endif %}</code></pre>
+<p class="src">src/granite_switch/composer/tokenizer_setup.py:332-336
+(shipped checkpoint has the older name <code>skip_next_start_of_role</code>,
+chat_template.jinja:53-56)</p>
+<p>The second line matters as much as the first. Without it you would get the control token
+<em>plus</em> the role marker, i.e. two consecutive near-identical embeddings after the swap &mdash;
+a shape the base model never saw in training. So the template emits the control token and
+<strong>suppresses the very next role marker</strong>, making it a replacement rather than an
+insertion:</p>
+<pre><code>{%- if ns.skip_next_start_of_role %}{%- set ns.skip_next_start_of_role = false %}
+{%- else %}{{- '&lt;|start_of_role|&gt;' }}{%- endif %}</code></pre>
+<p class="src">chat_template.jinja:89 (shipped)</p>
+</div>
+
+<div class="step" data-n="4">
+<h3>Stack the LoRA weights, pre-scaled</h3>
+<p>PEFT ships one adapter as its own pair of matrices per target module. Compose stacks all adapters
+into a single tensor with the adapter as the leading dimension, so the runtime can gather per token:</p>
+<pre><code>if is_lora_a:
+    stacked[target_name][adapter_idx, 0, :adapter_rank, :] = tensor
+else:
+    scaling_factor = adapter_alpha / adapter_rank
+    stacked[target_name][adapter_idx, 0, :, :adapter_rank] = tensor * scaling_factor</code></pre>
+<p class="src">src/granite_switch/composer/weight_transfer.py:547-550</p>
+<p>Two design choices are visible there. <strong>Ranks are padded</strong> to
+<code>max_lora_rank</code>, so mixed-rank adapters coexist (the tail stays zero and contributes
+nothing). And <strong><code>alpha/rank</code> is folded into <code>lora_B</code> at compose time</strong>,
+so the inference path has no scalar multiply &mdash; consistent with the runtime comment
+"lora_B weights are PRE-SCALED by (alpha/rank) during model loading" at
+<code>src/granite_switch/hf/core/lora.py:53</code>.</p>
+<p>Real shapes from the checkpoint (<code>[num_adapters, 1, ...]</code>, 392 of 565 tensors are LoRA):</p>
+<table>
+<tr><th>tensor</th><th>shape</th><th>note</th></tr>
+<tr><td class="mono">layers.0.self_attn.o_proj.lora_A</td><td class="mono">[3, 1, 32, 1024]</td><td>rank 32, in 1024</td></tr>
+<tr><td class="mono">layers.0.self_attn.o_proj.lora_B</td><td class="mono">[3, 1, 1024, 32]</td><td>pre-scaled</td></tr>
+<tr><td class="mono">qkv_proj.lora_A_slices.0/1/2</td><td class="mono">[3, 1, 32, 1024] each</td><td>duplicated &mdash; Q/K/V share the input space</td></tr>
+<tr><td class="mono">qkv_proj.lora_B_slices.0</td><td class="mono">[3, 1, 1024, 32]</td><td>Q &mdash; chunked from the fused output dim</td></tr>
+<tr><td class="mono">qkv_proj.lora_B_slices.1</td><td class="mono">[3, 1, 256, 32]</td><td>K &mdash; 4 kv heads &times; 64</td></tr>
+<tr><td class="mono">qkv_proj.lora_B_slices.2</td><td class="mono">[3, 1, 256, 32]</td><td>V</td></tr>
+</table>
+<p>That split is the fused-projection adaptation: this backbone has one fused <code>qkv_proj</code>
+where PEFT trained three separate ones, so <code>lora_A</code> is duplicated across slices and
+<code>lora_B</code> is chunked along dim 0
+(<code>weight_transfer.py:575-596</code>, <code>split_type</code> <code>"duplicate"</code> /
+<code>"chunk_dim0"</code>).</p>
+</div>
+
+<div class="step" data-n="5">
+<h3>Resize embeddings, then fix the new rows</h3>
+<p><code>resize_token_embeddings</code> gives each newly-added control token a <em>random</em> row.
+Compose overwrites it with the substitute's row:</p>
+<pre><code>emb[ctrl_id].copy_(emb[sub_id])
+if lm_head is not None and lm_head.weight is not emb:
+    lm_head.weight[ctrl_id].copy_(lm_head.weight[sub_id])</code></pre>
+<p class="src">src/granite_switch/composer/compose_granite_switch.py:216-218</p>
+<div class="box">
+<p><strong>Why this exists, precisely.</strong> At inference the input row for a control token is
+<em>never read</em> &mdash; step 10 rewrites the id first. The row matters on the <em>output</em> side:
+Granite 4.x ties embeddings (<code>tie_word_embeddings: true</code> in this checkpoint, and there is no
+separate <code>lm_head.weight</code> tensor), so a random input row <em>is</em> a random logit for that
+token. Two compose runs then disagree about the top-1 at a low-confidence position, and HF vs vLLM
+disagree with them &mdash; a flaky argmax test with no real bug behind it. Copying the substitute row
+makes it config-derived and reproducible.</p>
+</div>
+<div class="box warn">
+<p><strong>Verified on the shipped checkpoint: this fix is newer than it.</strong>
+<code>emb[100352]</code> and <code>emb[100264]</code> are <em>not</em> equal there
+(<code>0.00775, 0.00124, ...</code> vs <code>-0.00043, -0.00128, ...</code>). It predates
+<code>_init_control_token_embeddings</code>, which is consistent with its template still using the
+older <code>skip_next_start_of_role</code> spelling. Harmless for routing &mdash; routing reads ids,
+not embeddings &mdash; but its control-token logits are whatever the RNG produced.</p>
+</div>
+</div>
+
+<div class="step" data-n="6">
+<h3>Write the config, including one extra KV-cache slot</h3>
+<p>The switch is a real attention layer and needs its own cache slot. Compose accounts for it by
+inflating <code>num_hidden_layers</code>, and the runtime subtracts it back out:</p>
+<pre><code>if config.num_adapters &gt; 0:
+    layer_offset = self.switch.num_cache_layers      # 1 for SingleSwitch
+    num_decoder_layers = config.num_hidden_layers - layer_offset</code></pre>
+<p class="src">src/granite_switch/vllm/granite_switch_model.py:178-180</p>
+<p>Verified on disk: <code>num_hidden_layers: 29</code>, while the actual decoder tensors are
+<code>model.layers.0</code> &hellip; <code>model.layers.27</code> &mdash; 28 layers. 28 + 1 = 29. The
+inflation count is pinned to the switch class by
+<code>tests/composer/test_switch_cache_layers.py:62-71</code>.</p>
+<p>The switch itself carries <strong>no learned parameters</strong>. The only switch tensor in the
+whole checkpoint is the lookup table:</p>
+<pre><code>model.switch.control_to_substitute_lut    [100355]  I64
+
+lut[100352] = 100264
+lut[100353] = 100264
+lut[100354] = 100264
+lut[100264] = -1        # not a control token
+non-negative entries: 3 out of 100355</code></pre>
+</div>
+
+<h2 id="request">3. Part B &mdash; request time</h2>
+
+<div class="step" data-n="7">
+<h3>Render the prompt</h3>
+<p>Executed on the shipped tokenizer. First with no adapter, then with the LoRA branch:</p>
+<pre><code>&gt;&gt;&gt; tok.apply_chat_template(msgs, add_generation_prompt=True)                      # no adapter
+'&lt;|start_of_role|&gt;system&lt;|end_of_role|&gt;You are a helpful assistant. ...'
+ids[:6] = [100264, 9125, 100265, 2675, 527, 264]
+
+&gt;&gt;&gt; tok.apply_chat_template(msgs, add_generation_prompt=True,
+...                          adapter_name="text-to-json")                          # lora branch
+'&lt;|text-to-json|&gt;system&lt;|end_of_role|&gt;You are a helpful assistant. ...'
+ids[:6] = [100353, 9125, 100265, 2675, 527, 264]</code></pre>
+<p>Both are 31 tokens. Diffing the id lists:</p>
+<pre><code>differ at positions: [0]</code></pre>
+<p>That is the entire footprint of activating a LoRA adapter: <strong>one token id, at position 0,
+replacing the role marker</strong>. The prompt does not get longer, and no other position moves.</p>
+</div>
+
+<div class="step" data-n="8">
+<h3>Tokenize, and let vLLM hash it</h3>
+<p>Nothing in this repo participates &mdash; <code>grep -rn "prefix_caching\|block_hash" src/</code>
+returns nothing. vLLM chops the request's ids into blocks and hashes each one chained to its parent:</p>
+<pre><code>block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
+block_hash = hash_block_tokens(
+    caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
+)
+prev_block_hash_value = block_hash</code></pre>
+<p class="src">vllm/v1/core/kv_cache_utils.py, <code>get_request_block_hasher</code> (fetched from
+vllm-project/vllm@main; this repo pins <code>vllm&gt;=0.19.1,&lt;0.20.0</code>, so line numbers drift)</p>
+<p>The adapter id never enters the hash and does not need to: the control <em>token</em> is at
+position 0, so it is inside block 0, and every later block hash chains off block 0's. Request A with
+<code>100352</code> and request B with <code>100353</code> diverge at the first hash and share no
+block anywhere. The <code>extra_keys</code> LoRA channel tracks vLLM's native
+<code>LoRARequest</code>, which granite-switch never sets &mdash; and that is fine.</p>
+<div class="box warn">
+<p>Unexercised in CI: every vLLM test here passes <code>enable_prefix_caching=False</code>
+(<code>tests/integration/test_multi_switch_vllm_generate.py:85</code>,
+<code>tests/vllm/_generation_equivalence_worker.py:156</code>), set for determinism with no comment claiming a
+hazard. The argument above is from data dependencies, not from a passing prefix-cache test.</p>
+</div>
+</div>
+
+<div class="step" data-n="9">
+<h3>Prefill: the switch turns the token into a per-token index</h3>
+<p>The switch runs before the decoder and answers one question per token: <em>which adapter applies
+here?</em> It answers with attention, because attention is the operation vLLM already batches, caches
+and shards correctly.</p>
+<pre><code>matches    = input_ids.unsqueeze(1) == adapter_token_ids.unsqueeze(0)
+is_control = matches.any(dim=1)
+adapter_ids = torch.where(is_control, matches.long().argmax(dim=1) + 1, 0)
+
+gain_sign = (2.0 * is_control.to(self.dtype) - 1.0) * self.effective_gain
+k[:, :, 0] = gain_sign.unsqueeze(1)          # +gain at control, -gain elsewhere
+v[:, :, 0] = adapter_ids.to(self.dtype)      # the payload
+q[:, :, 0] = 1.0                             # constant probe
+
+attn_output = self.attn(q, k, v)
+adapter_indices = torch.clamp(torch.round(attn_output[:, 0]), 0, self.num_adapters)</code></pre>
+<p class="src">src/granite_switch/vllm/switch/single.py:171-217 (condensed)</p>
+<pre><code>pos:       0            1        2        3      ...
+tok:   &lt;|text-to-json|&gt; "system" ...      ...
+k[0]:     +15          -15      -15      -15
+v[0]:       2            0        0        0
+q[0]:       1            1        1        1
+           |            |        |        |    causal softmax, gain 15
+           v            v        v        v
+idx:        2            2        2        2      -&gt; adapter 2 on every token</code></pre>
+<p>Why it works: with gain 15 the single <code>+15</code> key beats every <code>-15</code> key by
+<code>e^30 &asymp; 10^13</code>, so the attention output is the adapter id to ~13 digits and
+<code>round</code> makes it exact. The gain is pre-divided by <code>attention_multiplier</code>
+(<code>single.py:70</code>) because the <code>Attention</code> layer applies that scaling itself.</p>
+<p>This is a genuine paged-KV <code>vllm.Attention</code> with <code>prefix="switch.layers.0"</code>
+(<code>single.py:85-93</code>), using backbone head geometry
+(<code>projection_head_dim: 64</code>, <code>num_key_value_heads: 4</code> here). vLLM therefore
+confines each request's switch attention to its own tokens for free &mdash; which is why SingleSwitch
+can ignore the <code>positions</code> argument entirely (<code>single.py:143-149</code>).</p>
+</div>
+
+<div class="step" data-n="10">
+<h3>Control-token replacement (token exchange)</h3>
+<p>Same function, last four lines. The control token has done its job; now it is erased:</p>
+<pre><code>sub_id_per_pos = self.control_to_substitute_lut[input_ids]
+is_control = sub_id_per_pos &gt;= 0
+modified_input_ids = torch.where(is_control, sub_id_per_pos, input_ids)</code></pre>
+<p class="src">src/granite_switch/vllm/switch/single.py:226-228 (HF twin at
+<code>hf/switch/single.py:250-252</code>)</p>
+<p>One gather plus one select, unconditionally, every step &mdash; no <code>tensor.any()</code> gate,
+because the surrounding decoder is wrapped in <code>@support_torch_compile</code> and data-dependent
+branching is not allowed there.</p>
+<div class="box ok">
+<p><strong>The payoff, verified.</strong> Apply the checkpoint's own LUT to the LoRA-branch ids and
+compare against the no-adapter render:</p>
+<pre><code>swapped = [lut[i] if lut[i] &gt;= 0 else i for i in lora_ids]
+swapped == base_ids   ->   True</code></pre>
+<p>The post-swap sequence is <em>identical</em>, id for id, to what the model would have received with
+no adapter at all. The decoder is not "tolerating" a strange token &mdash; it is looking at an
+ordinary prompt, and the adapter selection has already been extracted into a separate tensor.</p>
+</div>
+</div>
+
+<div class="step" data-n="11">
+<h3>Embed the rewritten ids</h3>
+<pre><code>hidden_states = self.get_input_embeddings(modified_input_ids)
+hidden_states *= self.config.embedding_multiplier</code></pre>
+<p class="src">src/granite_switch/vllm/granite_switch_model.py:355-357
+(<code>embedding_multiplier: 12</code> in this checkpoint)</p>
+<p>A single ordinary lookup. There is no decoder-side LUT, no per-forward scatter, no clone guard,
+and no special case &mdash; the rewrite happened upstream, so the decoder cannot know a control token
+ever existed.</p>
+</div>
+
+<div class="step" data-n="12">
+<h3>Convert to Punica convention, once per forward</h3>
+<pre><code>punica_indices = adapter_indices - 1          # 0=base -&gt; -1=base
+self.lora_meta.prepare_and_store(punica_indices, self.lora_ctx)</code></pre>
+<p class="src">src/granite_switch/vllm/granite_switch_model.py:318-319</p>
+<table>
+<tr><th>convention</th><th>base</th><th>adapter slot <em>i</em></th></tr>
+<tr><td>switch output</td><td class="mono">0</td><td class="mono">i+1</td></tr>
+<tr><td>Punica <code>token_lora_mapping</code></td><td class="mono">-1</td><td class="mono">i</td></tr>
+</table>
+<p><code>prepare_tensors</code> passes the mapping straight through
+(<code>lora_kernel_meta.py:289</code>) and builds the sort / one-hot bucketing beside it; the
+<code>+1</code> at <code>:293</code> is only for that bucketing. Results land on a single shared
+<code>LoRAContext</code> that all 28 decoder layers read &mdash; computed once, not per layer.</p>
+</div>
+
+<div class="step" data-n="13">
+<h3>Decoder layers apply LoRA per token</h3>
+<p>Each adapted projection is a <code>SwitchedLoRALinear</code>: base result, plus a gated LoRA
+contribution driven by the mapping.</p>
+<pre><code>ctx = self._lora_ctx
+if ctx is not None and ctx.token_lora_mapping is not None:
+    ...
+    lora_shrink(...)     # x @ A^T   -&gt; [tokens, rank]
+    lora_expand(...)     # @ B^T     -&gt; [tokens, out_features]</code></pre>
+<p class="src">src/granite_switch/vllm/core/lora.py:321-386, kernels imported from
+<code>vllm.lora.ops.triton_ops</code> at <code>:49</code></p>
+<p>No <code>alpha/rank</code> multiply appears, because step 4 already folded it into
+<code>lora_B</code>. The HF backend does the same arithmetic in plain torch, gathering the slice for
+each active adapter (<code>hf/core/lora.py:140-160</code>) and short-circuiting entirely when no token
+uses an adapter (<code>:109</code>).</p>
+<p>Adapted modules in this checkpoint: <code>lora_target_modules: ['o_proj', 'qkv_proj',
+'shared_input_linear', 'shared_output_linear']</code> &mdash; attention output, fused QKV, and both
+halves of the shared MLP.</p>
+<div class="box">
+<p>For a LoRA-type adapter every token carries the same index, so
+<code>token_lora_mapping</code> is constant across the sequence. The kernels still run per token; they
+just all fall into one bucket. Identical code path to aLoRA &mdash; only the values differ.</p>
+</div>
+</div>
+
+<div class="step" data-n="14">
+<h3>Decode: the KV cache is what remembers</h3>
+<p>After prefill, generation feeds one token at a time and the control token is <em>gone</em> from
+<code>input_ids</code>. Nothing re-derives the adapter from the prompt. Instead the switch's
+<code>+gain</code> key is sitting in its paged cache slot, and the new token's constant query reads
+it again:</p>
+<pre><code>decode step, token 31
+  q[0]=1  --attends--&gt;  cached k: [+15, -15, -15, ... ]     (from prefill)
+                        cached v: [  2,   0,   0, ... ]
+                        own    k:  -15
+                     -&gt; 2.0 -&gt; round -&gt; idx = 2    (adapter still on)</code></pre>
+<p>This is why the query is a constant <code>1.0</code> rather than anything derived from the current
+token: the current token needs to carry no information at all. The adapter state lives entirely in the
+cache, which vLLM already pages, evicts and shards correctly.</p>
+<p><small>The output side closes the loop: control-token rows in the (tied) <code>lm_head</code> are
+copied from their substitutes at <code>compose_granite_switch.py:174</code>, so if the model ever
+emits a control token it scores like the token it impersonates rather than like a random row.</small></p>
+</div>
+
+<h2 id="trace">4. The full trace, position by position</h2>
+
+<p>Real ids, from the renders and the LUT above. Prompt is 31 tokens; the first four and the tail are
+shown.</p>
+
+<table>
+<tr><th>pos</th><th>0</th><th>1</th><th>2</th><th>3</th><th>&hellip;</th><th>30</th></tr>
+<tr><td>rendered id</td><td class="mono">100353</td><td class="mono">9125</td><td class="mono">100265</td><td class="mono">2675</td><td>&hellip;</td><td class="mono">100265</td></tr>
+<tr><td>what it is</td><td class="mono">&lt;|text-to-json|&gt;</td><td class="mono">system</td><td class="mono">&lt;|end_of_role|&gt;</td><td class="mono">You</td><td>&hellip;</td><td class="mono">&lt;|end_of_role|&gt;</td></tr>
+<tr><td>hashed by vLLM</td><td>yes (block 0)</td><td>yes</td><td>yes</td><td>yes</td><td>&hellip;</td><td>partial block: no</td></tr>
+<tr><td>switch <code>k[0]</code></td><td class="mono">+15</td><td class="mono">-15</td><td class="mono">-15</td><td class="mono">-15</td><td>&hellip;</td><td class="mono">-15</td></tr>
+<tr><td>switch <code>v[0]</code></td><td class="mono">2</td><td class="mono">0</td><td class="mono">0</td><td class="mono">0</td><td>&hellip;</td><td class="mono">0</td></tr>
+<tr><td><code>adapter_indices</code></td><td class="mono">2</td><td class="mono">2</td><td class="mono">2</td><td class="mono">2</td><td>&hellip;</td><td class="mono">2</td></tr>
+<tr><td><code>modified_input_ids</code></td><td class="mono">100264</td><td class="mono">9125</td><td class="mono">100265</td><td class="mono">2675</td><td>&hellip;</td><td class="mono">100265</td></tr>
+<tr><td>embedded row</td><td class="mono">emb[100264]</td><td class="mono">emb[9125]</td><td class="mono">emb[100265]</td><td class="mono">emb[2675]</td><td>&hellip;</td><td class="mono">emb[100265]</td></tr>
+<tr><td><code>token_lora_mapping</code></td><td class="mono">1</td><td class="mono">1</td><td class="mono">1</td><td class="mono">1</td><td>&hellip;</td><td class="mono">1</td></tr>
+<tr><td>LoRA slice used</td><td class="mono">[1]</td><td class="mono">[1]</td><td class="mono">[1]</td><td class="mono">[1]</td><td>&hellip;</td><td class="mono">[1]</td></tr>
+</table>
+
+<p>Read the last three rows together: adapter index <code>2</code> &rarr; Punica <code>1</code> &rarr;
+stacked-tensor slice <code>1</code>, i.e. <code>lora_A[1, 0]</code> and <code>lora_B[1, 0]</code> out
+of the <code>[3, 1, 32, 1024]</code> / <code>[3, 1, 1024, 32]</code> tensors. Three conventions, two
+subtractions, one adapter.</p>
+
+<h2 id="invariants">5. Invariants, and where they can break</h2>
+
+<table>
+<tr><th>invariant</th><th>enforced by</th><th>what breaks if it fails</th></tr>
+<tr><td>Control token is at position 0 for LoRA</td><td>template prefix, <code>tokenizer_setup.py:332</code></td><td>only the tail of the prompt gets the adapter (i.e. aLoRA semantics)</td></tr>
+<tr><td>Exactly one role marker survives</td><td><code>skip_next_role_marker</code></td><td>two near-identical embeddings back to back &mdash; out of distribution</td></tr>
+<tr><td>Substitute == the displaced token</td><td>compose-time probe + <code>test_lora_substitute_probe.py</code></td><td>swap injects the wrong embedding at position 0</td></tr>
+<tr><td>Switch K/V are a pure function of ids</td><td><code>single.py:174-198</code></td><td>prefix-cache reuse would become unsound</td></tr>
+<tr><td><code>num_hidden_layers</code> includes the switch slot</td><td><code>test_switch_cache_layers.py</code></td><td>off-by-one layer count; cache slot mis-assigned</td></tr>
+<tr><td><code>lora_B</code> carries <code>alpha/rank</code></td><td><code>weight_transfer.py:549</code></td><td>adapter strength off by that factor</td></tr>
+</table>
+
+<h4>Known limits, stated in the code</h4>
+<ul>
+<li><strong>One adapter per request.</strong> Softmax averages: two control tokens with values 1 and 2
+give <code>(1+2)/2 = 1.5 &rarr; 2</code>. Not a precedence rule &mdash; an arithmetic accident.
+<code>single.py:139-142</code>: <em>"SingleSwitch has no mechanism to transition back to base
+mid-sequence."</em> This is what MultiSwitch exists to fix.</li>
+<li><strong>Position 0 in a hiding group</strong> shifts <code>hidden_count</code> by 1, giving a
+one-position RoPE offset (CLAUDE.md gotcha 7). Accepted: detection is exact and RoPE tolerates it.</li>
+<li><strong>Prefix caching is untested here</strong> &mdash; see step 8.</li>
+</ul>
+
+<h2 id="vs">6. LoRA vs aLoRA, side by side</h2>
+
+<p>Same machinery, one difference: <em>where</em> the token goes. Both renders below are real output
+from the shipped template.</p>
+
+<pre><code>LoRA  (type == 'lora')
+  &lt;|text-to-json|&gt;system&lt;|end_of_role|&gt;...&lt;|start_of_role|&gt;assistant&lt;|end_of_role|&gt;
+  ^^^^^^^^^^^^^^^^ position 0, replaces the opening role marker
+  -&gt; adapter_indices = [2, 2, 2, ... 2]        every token
+
+aLoRA (type == 'alora', as shipped)
+  &lt;|start_of_role|&gt;system&lt;|end_of_role|&gt;...&lt;|text-to-json|&gt;assistant&lt;|end_of_role|&gt;
+                                            ^^^^^^^^^^^^^^^^ position 28 of 31
+  -&gt; adapter_indices = [0, 0, ... 0, 2, 2, 2]  tail only</code></pre>
+
+<table>
+<tr><th></th><th>LoRA</th><th>aLoRA</th></tr>
+<tr><td>token placement</td><td>sequence start</td><td>at the invocation text in the last user message, or just before the generation prompt</td></tr>
+<tr><td>substitute id</td><td>probed from a no-adapter render (<code>100264</code>)</td><td>first token of <code>alora_invocation_tokens</code></td></tr>
+<tr><td>positions adapted</td><td>all</td><td>from the token onward</td></tr>
+<tr><td>template branch</td><td><code>tokenizer_setup.py:332</code></td><td><code>:353</code> (pass 1) and <code>:431</code> (fallback)</td></tr>
+<tr><td>switch / kernels / cache</td><td colspan="2" style="text-align:center">identical &mdash; nothing downstream distinguishes them</td></tr>
+</table>
+
+<p><small>In the shipped checkpoint all three adapters are aLoRA whose invocation text is
+<code>&lt;|start_of_role|&gt;assistant&lt;|end_of_role|&gt;</code> &mdash; the assistant role sequence, which
+appears in no user message &mdash; so they all take the pre-generation-prompt fallback path, and their
+substitutes all resolve to <code>100264</code> as well.</small></p>
+
+<hr style="border:none;border-top:1px solid var(--line);margin:44px 0 18px">
+<p><small>Companion doc: <a href="MULTISWITCH_EXPLAINED.html">MULTISWITCH_EXPLAINED.html</a> &mdash;
+the engine, both backends, per-request anchoring under vLLM batching, and the limits. (It replaced
+<code>MULTISWITCH_BRANCH_EXPLAINED.html</code>, <code>MULTISWITCH_ENGINES_COMPARED.html</code> and
+<code>MULTISWITCH_VLLM_BATCHING.html</code>, now archived in granite-switch-internal.)</small></p>
+
+</div>
+</body>
+</html>

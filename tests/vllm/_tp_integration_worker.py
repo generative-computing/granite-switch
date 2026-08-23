@@ -71,6 +71,11 @@ def cmd_build_compose(args):
     ]
     for repo in args.adapter_repos:
         cmd.extend(["--adapters", repo])
+    # MultiSwitch owns 2 cache layers vs SingleSwitch's 1; the composer inflates
+    # num_hidden_layers from switch_type itself (compose_utils._switch_cache_layers),
+    # so passing the flag is all that is needed -- no geometry changes here.
+    if getattr(args, "switch_type", None):
+        cmd.extend(["--switch-type", args.switch_type])
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
     if result.stdout:
@@ -133,10 +138,33 @@ def cmd_run(args):
         )
 
     if args.intrinsic_name:
+        # The composed chat template gates control-token injection on
+        # ``adapter_name`` (composer/tokenizer_setup.py::configure_chat_template
+        # emits "{%- if adapter_name is defined and adapter_name in adapter_map %}").
+        # This call previously passed ``intrinsic_name``; Jinja silently treats an
+        # unknown kwarg as not-defined, so no control token was ever injected and
+        # the chat arm of the TP comparison agreed vacuously -- two servers both
+        # running plain base. Guard it rather than trust the key.
+        tok = AutoTokenizer.from_pretrained(model_path)
+        rendered = tok.apply_chat_template(
+            CHAT_MESSAGES,
+            tokenize=False,
+            add_generation_prompt=True,
+            adapter_name=args.intrinsic_name,
+        )
+        expected_token = f"<|{args.intrinsic_name}|>"
+        if expected_token not in rendered:
+            print(
+                f"RUN_FAIL: chat template did not inject {expected_token} for "
+                f"adapter_name={args.intrinsic_name!r}; the chat arm would compare "
+                f"two base-only runs and agree vacuously. Rendered: {rendered[:300]!r}",
+                file=sys.stderr,
+            )
+            return 1
         chat_outputs = llm.chat(
             CHAT_MESSAGES,
             sampling_params=sampling,
-            chat_template_kwargs={"intrinsic_name": args.intrinsic_name},
+            chat_template_kwargs={"adapter_name": args.intrinsic_name},
         )
         for o in chat_outputs:
             completion = o.outputs[0]
@@ -168,6 +196,11 @@ def main():
     p_compose.add_argument("--base-model", required=True)
     p_compose.add_argument("--output-dir", required=True)
     p_compose.add_argument("--adapter-repos", nargs="+", required=True)
+    p_compose.add_argument(
+        "--switch-type",
+        default=None,
+        help="'single' (default composer behaviour) or 'multi'",
+    )
 
     p_run = sub.add_parser("run")
     p_run.add_argument("--model-path", required=True)

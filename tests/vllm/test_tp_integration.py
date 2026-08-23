@@ -196,3 +196,35 @@ class TestTPRealAdapters:
             label="granite-4.0-micro-rag",
             intrinsic_name="answerability",
         )
+
+
+class TestTPMultiSwitch:
+    """TP=1 vs TP=2 for the coded MultiSwitch engine.
+
+    MultiSwitch owns TWO extra attention layers with their own KV cache slots
+    (counting + memory) where SingleSwitch owns one. Those slots are the obvious
+    thing tensor-parallel sharding can get wrong, and nothing covered it: the
+    worker hardcoded switch_type='single', so every TP assertion to date was about
+    SingleSwitch only. Real serving of a 3B+ checkpoint commonly uses TP>=2, so
+    this is a deployment shape with no coverage.
+
+    Same comparison as the SingleSwitch case above -- TP=1 and TP=2 logprobs must
+    agree -- and it also goes through a chat-template prompt via intrinsic_name, so
+    control-token placement is exercised under sharding too.
+    """
+
+    def test_tp_logprobs_agree_multi(self, tmp_path):
+        _build_and_compare(
+            str(tmp_path),
+            build_args=[
+                "build-compose",
+                "--base-model",
+                "ibm-granite/granite-4.0-micro",
+                "--adapter-repos",
+                "ibm-granite/granitelib-rag-r1.0",
+                "--switch-type",
+                "multi",
+            ],
+            label="granite-4.0-micro-rag-multi",
+            intrinsic_name="answerability",
+        )

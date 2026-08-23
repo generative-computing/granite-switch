@@ -122,6 +122,7 @@ class SingleSwitch(nn.Module):
         self,
         input_ids: torch.Tensor,
         adapter_token_ids: torch.Tensor,
+        positions: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Compute adapter indices and rewrite control tokens via the LUT.
@@ -137,6 +138,13 @@ class SingleSwitch(nn.Module):
                               - adapter_token_ids[i] = token to activate adapter i+1
                               Output 0 = base (implicit default). SingleSwitch has no mechanism
                               to transition back to base mid-sequence.
+            positions: Accepted and IGNORED, for a uniform switch interface --
+                the model glue passes it unconditionally so no engine can
+                silently miss it. SingleSwitch needs no per-request token
+                offsets: it has no counting stage, so it has no position-0
+                anchor to place. Its ±gain control-token attention runs through
+                a real paged-KV ``vllm.Attention``, which vLLM already masks
+                per request. The coded MultiSwitch DOES need this argument.
 
         Returns:
             (adapter_indices, modified_input_ids):

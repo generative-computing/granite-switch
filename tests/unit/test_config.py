@@ -93,3 +93,28 @@ class TestConfigDefaults:
     def test_projection_head_dim_inferred_from_hidden_size(self):
         cfg = GraniteSwitchConfig(**_valid_kwargs())
         assert cfg.projection_head_dim == 64 // 4
+
+
+# ════════════════════════════════════════════════════════════════════
+# 3. Switch-engine selection
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestSwitchTypeValidation:
+    """``"multi_coded"`` was removed; only the canonical names are accepted.
+
+    It was a real CLI choice until 11557a9 (when ``multi_scan`` and
+    ``multi_coded`` were separate engines) and then lived on as an alias for
+    ``"multi"``. Rejecting it is deliberate: a checkpoint composed in that
+    window must have its ``config.json`` updated to ``"multi"``, which selects
+    the same engine. Without this test the alias could quietly reappear.
+    """
+
+    @pytest.mark.parametrize("switch_type", ["single", "multi"])
+    def test_canonical_names_accepted(self, switch_type):
+        cfg = GraniteSwitchConfig(**_valid_kwargs(switch_type=switch_type))
+        assert cfg.switch_type == switch_type
+
+    def test_multi_coded_alias_rejected(self):
+        with pytest.raises(ValueError, match="switch_type must be one of"):
+            GraniteSwitchConfig(**_valid_kwargs(switch_type="multi_coded"))

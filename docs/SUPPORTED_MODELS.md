@@ -29,6 +29,29 @@ ALoRA assistant-boundary fallback) works identically for both formats. Granite
 distinct LM head and initializes new control-token output rows from their
 token-exchange substitute rows.
 
+#### Multi-turn KV policy on 4.2
+
+`KVHistoryPolicy.RE_PREFILL` works on both formats with no extra arguments.
+`KVHistoryPolicy.PRESERVE_MIXED_HISTORY` reuses the exact ids it already sent, so
+it needs a template whose render only ever grows. On `chatml` that means passing
+both flags to `build_prompt()` on **every** turn:
+
+```python
+conv.build_prompt(adapter="uncertainty",
+                  enable_thinking=False,
+                  truncate_history_thinking=False)
+```
+
+| flag | default | why `PRESERVE_MIXED_HISTORY` needs it off |
+|---|---|---|
+| `enable_thinking` | `True` | The generation prompt ends inside an open `<think>`, while a completed turn is past `</think>`, so the assistant turn terminator cannot be derived. Turning it off costs the model's reasoning. |
+| `truncate_history_thinking` | `True` | Strips reasoning from assistant turns older than the newest user message, rewriting bytes that have already been sent. |
+
+Both are refused rather than mis-served, but the errors are generic -- one reports
+that the turn terminator cannot be derived, the other that the template is not
+append-only, and both suggest `RE_PREFILL`. On `chatml` the remedy is the flags
+above. `granite_format` needs neither flag -- it has no `<think>` block.
+
 ### Example Models
 
 Any Granite model whose HuggingFace config has `model_type: granite` can be used

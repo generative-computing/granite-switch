@@ -275,9 +275,20 @@ class GraniteSwitchModel(nn.Module):
         # control tokens via token-exchange. Only runs on first rank.
         if get_pp_group().is_first_rank:
             if self.switch is not None:
+                # ``positions`` MUST be forwarded. vLLM flattens a batch into a
+                # single ``[total_tokens]`` tensor, so a switch cannot infer
+                # per-request token offsets on its own. The coded engine derives
+                # its ``1/(1+n)`` counting anchor from ``positions == 0``; with a
+                # locally-fabricated ``arange(total_tokens)`` only the FIRST
+                # request in the batch would contain an anchor, so every other
+                # request counts against a missing baseline, recovers a wrong
+                # write address ``n``, and retrieves whatever adapter happens to
+                # live at that address (arbitrary mis-routing, not a uniform
+                # off-by-one). SingleSwitch has no counting stage and ignores it.
                 adapter_indices, modified_input_ids = self.switch(
                     input_ids=input_ids,
                     adapter_token_ids=self.adapter_token_ids,
+                    positions=positions,
                 )
             else:
                 num_tokens = input_ids.shape[0]
