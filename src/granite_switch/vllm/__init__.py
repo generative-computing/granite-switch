@@ -7,11 +7,8 @@ __version__ = "0.1.0"
 from granite_switch.config import GraniteSwitchConfig
 
 # Export core components (for advanced use)
-from .core import (
-    GraniteLoRAEmbeddedAttention,
-    GraniteSwitchDecoderLayer,
-    SwitchedLoRALinear,
-)
+from .core import SwitchedLoRALinear
+from .decoder import GraniteLoRAEmbeddedAttention, GraniteSwitchDecoderLayer
 from .granite_switch_model import GraniteSwitchForCausalLM, GraniteSwitchModel
 from .switch import SingleSwitch
 
@@ -88,10 +85,22 @@ def register():
     except ImportError:
         pass
 
-    # Only register if not already registered
-    if "GraniteSwitchForCausalLM" not in ModelRegistry.get_supported_archs():
-        ModelRegistry.register_model(
-            "GraniteSwitchForCausalLM",
-            "granite_switch.vllm.granite_switch_model:GraniteSwitchForCausalLM",
-        )
-        print("✓ GraniteSwitchForCausalLM registered with vLLM")
+    # LoRA/aLoRA and Shadow-Residual are two adaptations of ONE host model, so
+    # all arch strings point at the SAME shared GraniteSwitchForCausalLM class.
+    # vLLM selects the class from config.architectures; the class then picks its
+    # adaptation from config.cross_stream_rank (None -> LoRA, int -> SR).
+    #   - GraniteSwitchForCausalLM  : LoRA/aLoRA composed checkpoints.
+    #   - SRSwitchForCausalLM       : what the composer writes into a composed SR
+    #     checkpoint's config.architectures (mirrors the HF SR arch name), so an
+    #     SR model auto-dispatches with no hf_overrides.
+    #   - ShadowResidualForCausalLM : explicit alias for callers that force the arch.
+    target = "granite_switch.vllm.granite_switch_model:GraniteSwitchForCausalLM"
+    supported = ModelRegistry.get_supported_archs()
+    for arch in (
+        "GraniteSwitchForCausalLM",
+        "SRSwitchForCausalLM",
+        "ShadowResidualForCausalLM",
+    ):
+        if arch not in supported:
+            ModelRegistry.register_model(arch, target)
+            print(f"✓ {arch} registered with vLLM")

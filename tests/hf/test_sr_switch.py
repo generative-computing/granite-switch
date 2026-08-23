@@ -163,17 +163,25 @@ class TestSRModelInstantiation:
     def test_no_unexpected_non_persistent_buffers(self, sr_config):
         """Non-persistent buffers do not survive save/load — allowlist them.
 
-        Only the rotary tables are permitted: transformers owns them and
-        recomputes them from config during init.  An SR-related non-persistent
-        buffer once kept its uninitialized meta-device placeholder after
-        ``from_pretrained``, silently corrupting stream routing.
+        Permitted:
+          * the rotary tables (``inv_freq`` / ``original_inv_freq``) —
+            transformers owns them and recomputes them from config during init;
+          * ``adapter_token_ids`` — registered ``persistent=False`` so
+            ``device_map="auto"`` does not reject an unmapped buffer, and the
+            switch sources the control ids from ``config.adapter_token_ids`` (not
+            this buffer) at forward time, so its zeros-after-``from_pretrained``
+            value never reaches stream routing.
+
+        Any OTHER non-persistent buffer is a bug: one such buffer once kept its
+        uninitialized meta-device placeholder after ``from_pretrained``, silently
+        corrupting stream routing.
         """
         model = GraniteSwitchForCausalLM(sr_config)
         offenders = [
             f"{mod_name}.{buf}" if mod_name else buf
             for mod_name, mod in model.named_modules()
             for buf in mod._non_persistent_buffers_set
-            if buf not in ("inv_freq", "original_inv_freq")
+            if buf not in ("inv_freq", "original_inv_freq", "adapter_token_ids")
         ]
         assert offenders == [], f"non-persistent buffers will not reload: {offenders}"
 

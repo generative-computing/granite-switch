@@ -9,8 +9,12 @@ The decoder layer uses upstream GraniteMoeSharedMLP for the MLP, with in-place
 LoRA replacement on input_linear/output_linear projections.
 
 These layers apply conditional LoRA adapters based on per-token adapter indices
-from the switch. They use vLLM's Punica kernels for efficient LoRA computation
-with torch.compile-friendly metadata preparation.
+from the switch. They use the fused SWITCH Triton kernel (see
+granite_switch.kernels.switch_lora_kernel) for LoRA computation, with
+torch.compile-friendly per-module bitmask kernel metadata. This is Granite
+Switch's own LoRA path — it does not use vLLM's LoRA subsystem (PunicaWrapper,
+LoRARequest, etc.); adapters are embedded in the checkpoint and fused into the
+base projection (w_ext) at load time.
 """
 
 from typing import TYPE_CHECKING
@@ -27,8 +31,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 
-# Use switched LoRA implementation from core
-from .lora import SwitchedLoRALinear
+# Use switched LoRA implementation from core. Absolute import: the decoder-tier
+# reorg moved this file to vllm/decoder/lora/decoder.py, where a relative
+# `.lora` resolves to the nonexistent decoder.lora.lora — SwitchedLoRALinear
+# still lives in vllm/core/lora.py.
+from granite_switch.vllm.core.lora import SwitchedLoRALinear
 
 if TYPE_CHECKING:
     pass
@@ -226,7 +233,13 @@ def replace_shared_mlp_projections_with_lora(mlp, config):
             max_lora_rank,
             num_slices=2,
             output_slices=tuple(base.output_sizes),
+            fuse_swiglu=True,
         )
+        # The gate/up projection now applies SwiGLU internally and returns the
+        # activated [M, H], so the MLP's own activation becomes a pass-through.
+        # This removes the separate SiluAndMul launch and its read of the strided
+        # gate|up output (the contiguity hazard) entirely.
+        mlp.act_fn = nn.Identity()
         has_input_lora = True
 
     if "shared_output_linear" in config.lora_target_modules:

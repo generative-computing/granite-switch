@@ -25,13 +25,13 @@ from torch import nn
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -39,7 +39,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
-    is_pp_missing_parameter,
     make_layers,
     maybe_prefix,
 )
@@ -47,14 +46,10 @@ from vllm.sequence import IntermediateTensors
 
 from granite_switch.config import GraniteSwitchConfig
 
-from .core import (
-    CompileFriendlyLoRAKernelMeta,
-    GraniteSwitchDecoderLayer,
-    LoRAContext,
-)
-from .core.decoder import GraniteLoRAEmbeddedAttention
-from .core.lora import SwitchedLoRALinear
+from .decoder.interface import select_decoder_interface
 from .switch import create_switch
+
+logger = init_logger(__name__)
 
 
 def _get_intermediate_tensor(
@@ -102,6 +97,12 @@ class GraniteSwitchModel(nn.Module):
 
         self.config = config
         self.padding_idx = config.pad_token_id
+
+        # Adaptation strategy: confines the LoRA-vs-Shadow-Residual split to the
+        # decoder tier. Keyed on config.cross_stream_rank (None -> LoRA, int -> SR).
+        # The shared __init__/forward call its hooks so one code path drives both.
+        self.decoder_interface = select_decoder_interface(config)
+
         lora_vocab = 0
         if hasattr(config, "lora_vocab_size"):
             lora_vocab = (
@@ -120,6 +121,7 @@ class GraniteSwitchModel(nn.Module):
 
         # 2. Switch and adapter configuration
         num_adapters = config.num_adapters
+        self.decoder_interface.validate_num_adapters(num_adapters)
         if num_adapters > 0:
             self.switch = create_switch(config, vllm_config=vllm_config)
 
@@ -147,24 +149,18 @@ class GraniteSwitchModel(nn.Module):
                     torch.zeros(num_adapters, dtype=torch.long),
                 )
 
-            # Token-exchange LUT lives on the switch module
-            # (see vllm/switch/single.py); the switch rewrites input_ids
-            # in-place during its forward pass, so this model class no
-            # longer needs a decoder-side substitute table.
-
-            # Initialize compile-friendly LoRA metadata handler
-            # This replaces vLLM's LoRAKernelMeta with a torch.compile-compatible version
-            # that avoids data-dependent branching
-            self.lora_meta = CompileFriendlyLoRAKernelMeta(
-                num_adapters=num_adapters,
-                device=torch.device("cuda"),
-                dtype=torch.bfloat16,
+            # Fused kernel metadata (bitmask-based). The strategy builds the
+            # adaptation's (kernel-meta, ctx) pair: LoRA -> (FusedLoRAKernelMeta,
+            # LoRAContext); SR -> (SRFusedLoRAKernelMeta, SRLoRAContext).
+            self.lora_meta, self.lora_ctx = self.decoder_interface.make_kernel_meta(
+                vllm_config.device_config.device,
             )
 
         else:
             self.switch = None
             self.adapter_token_ids = None
             self.lora_meta = None
+            self.lora_ctx = None
 
         # 3. Base transformer layers with custom LoRA
         #
@@ -183,11 +179,8 @@ class GraniteSwitchModel(nn.Module):
             num_decoder_layers = config.num_hidden_layers
 
         def _make_decoder_layer(prefix: str):
-            """Create attention decoder layer."""
-            return GraniteSwitchDecoderLayer(
-                vllm_config=vllm_config,
-                prefix=prefix,
-            )
+            """Create one decoder layer for this adaptation."""
+            return self.decoder_interface.make_decoder_layer(vllm_config, prefix)
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             num_decoder_layers,
@@ -198,19 +191,15 @@ class GraniteSwitchModel(nn.Module):
         # Wire shared LoRAContext to every module that reads per-forward metadata.
         # This follows vLLM's PunicaWrapper pattern: a single shared object
         # populated once per forward, read by all layers that need LoRA metadata
-        # or hiding group masks.
+        # or hiding group masks. object.__setattr__ bypasses nn.Module.__setattr__
+        # so the context is NOT registered as a submodule/buffer (it carries live
+        # per-forward tensors, not parameters) and the attribute stays stable for
+        # torch.compile.
         if num_adapters > 0:
-            self.lora_ctx = LoRAContext()
-            _ctx_types = (
-                SwitchedLoRALinear,
-                GraniteLoRAEmbeddedAttention,
-                GraniteSwitchDecoderLayer,
-            )
+            _ctx_types = self.decoder_interface.ctx_wire_types()
             for module in self.modules():
                 if isinstance(module, _ctx_types):
                     object.__setattr__(module, "_lora_ctx", self.lora_ctx)
-        else:
-            self.lora_ctx = None
 
         # 4. RMS Layer norm
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -291,7 +280,6 @@ class GraniteSwitchModel(nn.Module):
                     adapter_token_ids=self.adapter_token_ids,
                 )
             else:
-                # No switch — all tokens use base model (adapter_id = 0).
                 num_tokens = input_ids.shape[0]
                 adapter_indices = torch.zeros(
                     num_tokens,
@@ -300,12 +288,11 @@ class GraniteSwitchModel(nn.Module):
                 )
                 modified_input_ids = input_ids
 
-            # Step 2: Prepare LoRA metadata ONCE for all decoder layers.
-            # Stored on the shared LoRAContext — every SwitchedLoRALinear reads from it.
+            # Prepare kernel metadata ONCE for all decoder layers (adaptation-specific).
             if self.lora_meta is not None and self.lora_ctx is not None:
-                # Convert to Punica convention: 0=base -> -1=base
-                punica_indices = adapter_indices - 1
-                self.lora_meta.prepare_and_store(punica_indices, self.lora_ctx)
+                self.decoder_interface.prepare_kernel_meta(
+                    self.lora_meta, adapter_indices, self.lora_ctx
+                )
 
             # Store metadata in intermediate_tensors for pipeline parallelism.
             if intermediate_tensors is None:
@@ -317,17 +304,22 @@ class GraniteSwitchModel(nn.Module):
             if intermediate_tensors is not None:
                 adapter_indices = intermediate_tensors["adapter_indices"]
                 if self.lora_ctx is not None:
-                    punica_indices = adapter_indices - 1
-                    self.lora_meta.prepare_and_store(punica_indices, self.lora_ctx)
+                    self.decoder_interface.prepare_kernel_meta(
+                        self.lora_meta, adapter_indices, self.lora_ctx
+                    )
             else:
                 # Fallback: no metadata available (should not happen in normal operation)
                 num_tokens = input_ids.shape[0] if input_ids is not None else 0
+                if input_ids is not None:
+                    fallback_device = input_ids.device
+                elif self.lora_meta is not None:
+                    fallback_device = self.lora_meta.device
+                else:
+                    fallback_device = self.embed_tokens.weight.device
                 adapter_indices = torch.zeros(
                     num_tokens,
                     dtype=torch.long,
-                    device=input_ids.device
-                    if input_ids is not None
-                    else torch.device("cuda"),
+                    device=fallback_device,
                 )
 
         # ═══════════════════════════════════════════════════════════════
@@ -351,37 +343,31 @@ class GraniteSwitchModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = _get_intermediate_tensor(intermediate_tensors, "residual")
 
-        # Pass through base transformer layers.
-        # All per-forward metadata (LoRA + hiding masks) is on the shared LoRAContext.
-        # Each layer returns (hidden_states, residual); the residual-add happens
-        # inside rms_norm_select using the convention that matches the original
-        # model's vLLM class (fused or separate) for bit-exact compatibility.
+        # Pass through base transformer layers via adaptation hooks. The
+        # adaptation owns the stack shape: LoRA runs single-stream [M,H] and
+        # threads (hidden_states, residual); SR re-stacks to [2M,H] rank-locally
+        # in enter_decoder_stack and collapses it in exit_decoder_stack. All
+        # per-forward metadata (kernel meta + hiding masks) is on the shared ctx.
+        state = self.decoder_interface.enter_decoder_stack(hidden_states, residual)
         for i in range(self.start_layer, self.end_layer):
-            layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions=positions,
-                hidden_states=hidden_states,
-                residual=residual,
-            )
+            state = self.decoder_interface.run_layer(self.layers[i], positions, state)
 
-        # Final norm: fold in the last residual via rms_norm_select so
-        # the same fused/separate convention is used throughout.
         if get_pp_group().is_last_rank:
-            from granite_switch.vllm.core.decoder import rms_norm_select
-
-            hidden_states, _ = rms_norm_select(
-                self.norm,
-                hidden_states,
-                residual,
-                self.config.fused_add_norm,
+            # Adaptation-specific finalize: LoRA folds the last residual via
+            # rms_norm_select (fused/separate convention); SR does the per-token
+            # where-merge of its two streams then a plain norm.
+            return self.decoder_interface.exit_decoder_stack(
+                state, adapter_indices, self.norm, self.config
             )
-            return hidden_states
         else:
-            # Non-last rank: return IntermediateTensors with hidden states
+            # Non-last rank: ship two token-leading [M,H] tensors so vLLM's
+            # per-token IntermediateTensors slice stays correct. LoRA sends
+            # (hidden_states, residual); SR overloads residual as its adapter half.
             if intermediate_tensors is None:
                 intermediate_tensors = IntermediateTensors({})
-            intermediate_tensors["hidden_states"] = hidden_states
-            intermediate_tensors["residual"] = residual
+            h_out, r_out = self.decoder_interface.to_intermediate(state)
+            intermediate_tensors["hidden_states"] = h_out
+            intermediate_tensors["residual"] = r_out
             return intermediate_tensors
 
 
@@ -474,11 +460,7 @@ class GraniteSwitchForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        """Forward pass returning hidden states.
-
-        Switch logic now happens inside GraniteSwitchModel.forward(),
-        so this is just a simple passthrough.
-        """
+        """Forward pass returning hidden states."""
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -493,11 +475,14 @@ class GraniteSwitchForCausalLM(
     ) -> torch.Tensor | None:
         """Compute logits from hidden states.
 
-        Suppression of control tokens is NOT done here — see issue #14.
-        vLLM v1 calls compute_logits on sample-extracted hidden states, which
-        are not aligned with per-token adapter_indices from forward().
-        Suppression must be implemented at a point where adapter_indices and
-        hidden_states share the same token dimension.
+        No control-token logit suppression is applied here. The intended
+        design is that control tokens are freely generatable, so no runtime
+        suppression is the target end state. Even if an interim suppression
+        were wanted, it could not live here: vLLM v1 calls compute_logits on
+        sample-extracted hidden states, which are no longer aligned with the
+        per-token adapter_indices computed in forward(). Any suppression would
+        have to act where adapter_indices and hidden_states still share the
+        same token dimension.
         """
         return self.logits_processor(self.lm_head, hidden_states)
 
@@ -513,126 +498,10 @@ class GraniteSwitchForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         """Load model weights from checkpoint.
 
-        Handles two checkpoint formats:
-
-        1. **Composed checkpoints** (from compose_granite_switch.py): parameter names
-           match the vLLM model exactly — loaded directly.
-
-        2. **HuggingFace checkpoints** (from save_pretrained): MoE expert weights
-           use a stacked format that must be split into per-expert tensors for
-           vLLM's FusedMoE layer.
-
-           HF format → vLLM format:
-           - block_sparse_moe.input_linear.weight [E, 2*I, H]
-             → experts.w13_weight via weight_loader(shard_id="w1"/"w3", expert_id=e)
-           - block_sparse_moe.output_linear.weight [E, H, I]
-             → experts.w2_weight via weight_loader(shard_id="w2", expert_id=e)
-           - block_sparse_moe.router.layer.weight [E, H]
-             → block_sparse_moe.gate.weight (direct rename)
+        Delegated to the adaptation strategy: LoRA fans HF stacked-MoE tensors
+        into per-expert FusedMoE loads (and loads composed checkpoints directly);
+        SR does the unfused->fused fuse-at-load mapping and marks the absent
+        shared-KV LoRA slices loaded. Each ends by finalizing the fused kernel
+        state + registering per-module remap tables (was ``_finalize_fused_lora``).
         """
-        params_dict = dict(self.named_parameters())
-        loaded_params = set()
-
-        def _load_direct(name, loaded_weight):
-            """Load a weight directly by name."""
-            if name.endswith(".bias") and name not in params_dict:
-                return
-            if is_pp_missing_parameter(name, self):
-                return
-            if name in params_dict:
-                param = params_dict[name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(name)
-
-        def _load_expert(param_name, loaded_weight, weight_name, shard_id, expert_id):
-            """Load a per-expert weight into a FusedMoE packed parameter."""
-            if is_pp_missing_parameter(param_name, self):
-                return
-            if param_name not in params_dict:
-                return
-            param = params_dict[param_name]
-            weight_loader = param.weight_loader
-            weight_loader(
-                param,
-                loaded_weight,
-                weight_name,
-                shard_id=shard_id,
-                expert_id=expert_id,
-            )
-            loaded_params.add(param_name)
-
-        for name, loaded_weight in weights:
-            # ── HF stacked MoE: input_linear → per-expert w1/w3 ──
-            if name.endswith(".block_sparse_moe.input_linear.weight"):
-                for e in range(loaded_weight.size(0)):
-                    w1_name = name.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
-                    )
-                    w3_name = name.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
-                    )
-                    w1_param, w3_param = loaded_weight[e].chunk(2, dim=0)
-                    _load_expert(
-                        name.replace(".input_linear.", ".experts.w13_"),
-                        w1_param,
-                        w1_name,
-                        shard_id="w1",
-                        expert_id=e,
-                    )
-                    _load_expert(
-                        name.replace(".input_linear.", ".experts.w13_"),
-                        w3_param,
-                        w3_name,
-                        shard_id="w3",
-                        expert_id=e,
-                    )
-                continue
-
-            # ── HF stacked MoE: output_linear → per-expert w2 ──
-            if name.endswith(".block_sparse_moe.output_linear.weight"):
-                for e in range(loaded_weight.size(0)):
-                    w2_name = name.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
-                    )
-                    _load_expert(
-                        name.replace(".output_linear.", ".experts.w2_"),
-                        loaded_weight[e],
-                        w2_name,
-                        shard_id="w2",
-                        expert_id=e,
-                    )
-                continue
-
-            # ── HF MoE router → gate ──
-            if name.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = name.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                _load_direct(gate_name, loaded_weight)
-                continue
-
-            # ── Direct load (built checkpoints + all non-MoE weights) ──
-            _load_direct(name, loaded_weight)
-
-        # Report unloaded parameters
-        unloaded_params = [name for name in params_dict if name not in loaded_params]
-        if unloaded_params:
-            print(
-                f"Warning: {len(unloaded_params)} parameters were not loaded from checkpoint"
-            )
-            if len(unloaded_params) <= 10:
-                for name in unloaded_params:
-                    print(f"  - {name}")
-            else:
-                for name in unloaded_params[:10]:
-                    print(f"  - {name}")
-                print(f"  ... and {len(unloaded_params) - 10} more")
+        return self.model.decoder_interface.load_weights(self, weights)

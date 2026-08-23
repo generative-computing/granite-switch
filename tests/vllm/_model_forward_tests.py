@@ -72,8 +72,10 @@ def _tiny_vllm_config():
         adapter_token_ids=[250, 251],
         adapter_names=["adapter_1", "adapter_2"],
         adapter_substitute_token_ids=[1, 1],
-        max_lora_rank=4,
-        adapter_ranks=[4, 4],
+        # Rank must be in the fused kernel's SUPPORTED_RANKS (16, 32, ...);
+        # finalize_weights asserts this for applicable adapters.
+        max_lora_rank=16,
+        adapter_ranks=[16, 16],
         switch_head_dim=32,
         max_position_embeddings=512,
         attention_multiplier=1.0,
@@ -189,14 +191,33 @@ class _VLLMModelTestBase:
         try:
             self.vllm_config = _make_vllm_config(self.config)
             with set_current_vllm_config(self.vllm_config):
-                self.model = GraniteSwitchForCausalLM(
-                    vllm_config=self.vllm_config,
-                ).to(self.device)
+                # Construct on-device, mirroring vLLM's model loader (which
+                # builds inside `with target_device:`). Each SwitchedLoRALinear
+                # caches its device at construction, so building on CUDA lets
+                # finalize build the fused weights on CUDA. (Constructing on CPU
+                # then .to() leaves that cached device stale and the kernel sees
+                # CPU kernel-metadata tensors.)
+                with torch.device(self.device):
+                    self.model = GraniteSwitchForCausalLM(
+                        vllm_config=self.vllm_config,
+                    )
         finally:
             torch.set_default_dtype(old_dtype)
 
         torch.manual_seed(SEED)
-        _init_model_weights(self.model)
+        _init_model_weights(self.model)  # base weights
+        _set_nonzero_lora(self.model)  # adapter weights — set BEFORE finalize
+
+        # The fused design bakes LoRA weights into w_ext at finalize time, so
+        # finalize must run AFTER the weights are set — exactly as vLLM's
+        # load_weights() does as its post-load step.
+        #
+        # #83 moved this off the model: each DecoderInterface owns the post-load
+        # step and load_weights() ends by calling finalize_modules(). Go through
+        # the interface so this harness exercises the same path as a real load.
+        self.model.model.decoder_interface.finalize_modules(
+            self.model, self.model.config
+        )
 
         self.model_config = self.model.config
         self._setup_kv_caches()
@@ -409,8 +430,8 @@ class TestForwardOutputShape(_VLLMModelTestBase):
 
 class TestAdapterIndicesWiring(_VLLMModelTestBase):
     def test_control_token_activates_adapter(self):
-        torch.manual_seed(SEED)
-        _set_nonzero_lora(self.model)
+        # LoRA weights were set non-zero and baked into w_ext at finalize time
+        # in setup_model; setting them now (post-finalize) would have no effect.
         self.model.eval()
 
         with_ctrl = [10, 20, 250, 30, 40, 50, 60, 70]
@@ -427,8 +448,8 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
         )
 
     def test_different_adapters_produce_different_logits(self):
-        torch.manual_seed(SEED)
-        _set_nonzero_lora(self.model)
+        # LoRA weights baked into w_ext at finalize (setup_model); the two
+        # adapters get distinct random rows there, so they diverge downstream.
         self.model.eval()
 
         seq_a1 = [10, 20, 250, 30, 40, 50, 60, 70]
