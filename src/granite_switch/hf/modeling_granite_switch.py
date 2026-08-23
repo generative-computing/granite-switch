@@ -306,23 +306,33 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             #   which adapter to activate. Position in the tensor = adapter index.
             #   These tokens are KV-hidden (masked from attention) so downstream
             #   experts see only clean base-model representations.
+            # persistent=False keeps adapter_token_ids out of state_dict(): its
+            # values are always reconstructed from config.adapter_token_ids (the
+            # single source of truth), so it need not be a saved weight. This
+            # avoids accelerate>=1.14 check_device_map rejecting an unmapped
+            # buffer under device_map="auto" (the 16 quantization errors). The
+            # forward pass reads control ids from config, not this buffer — see
+            # the switch call below — because from_pretrained meta-inits the
+            # module and then restores from the checkpoint, so a non-persistent
+            # buffer materializes to ZEROS after load.
             token_ids = config.adapter_token_ids
             if token_ids is not None:
                 self.register_buffer(
                     "adapter_token_ids",
                     torch.tensor(token_ids, dtype=torch.long),
+                    persistent=False,
                 )
             else:
                 # Build script hasn't populated yet — zeros placeholder
                 self.register_buffer(
                     "adapter_token_ids",
                     torch.zeros(config.num_adapters, dtype=torch.long),
+                    persistent=False,
                 )
 
             # Token-exchange LUT lives on the switch module (see hf/switch/
             # single.py); the switch rewrites input_ids in-place during its
-            # forward pass, so this model class no longer needs a decoder-
-            # side substitute table.
+            # forward pass, so the decoder side needs no substitute table.
 
         else:
             self.switch = None
@@ -466,9 +476,27 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # so the decoder can embed once without any token-exchange awareness.
         modified_input_ids = input_ids
         if self.switch is not None:
+            # Source the control-token ids from config, NOT self.adapter_token_ids.
+            # That buffer is persistent=False (kept out of state_dict so
+            # accelerate's device_map="auto" check does not reject it). But
+            # from_pretrained builds the module on the meta device and then
+            # restores tensors from the checkpoint: a non-persistent buffer is
+            # absent from the checkpoint, so the value __init__ computes from
+            # config is discarded and the buffer materializes to ZEROS after
+            # load. The switch would then match `input_ids == 0` instead of the
+            # real control-token id, never route to any adapter, and collapse
+            # adapter-mode output to base-mode. config round-trips correctly, so
+            # read from it here (buffer stays a fallback for the build-script
+            # window before config is populated).
+            ctrl = getattr(self.config, "adapter_token_ids", None)
+            switch_token_ids = (
+                torch.as_tensor(ctrl, dtype=torch.long, device=device)
+                if ctrl is not None
+                else self.adapter_token_ids
+            )
             adapter_indices, modified_input_ids = self.switch(
                 input_ids=input_ids,
-                adapter_token_ids=self.adapter_token_ids,
+                adapter_token_ids=switch_token_ids,
                 attention_mask=causal_mask,
                 past_key_values=past_key_values,
                 cache_position=cache_position,

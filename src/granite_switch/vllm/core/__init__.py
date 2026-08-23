@@ -1,23 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Core LoRA and decoder layer implementations for Granite Switch.
+"""Shared switch-kernel substrate for Granite Switch (both adaptations).
 
-This package provides the foundational building blocks:
-- lora: Low-level LoRA primitives using vLLM's Punica kernels
-- lora_kernel_meta: Torch.compile-friendly LoRA kernel metadata
-- decoder: High-level decoder layers (attention, MLP, full decoder layer)
+Foundational building blocks used by BOTH the LoRA and Shadow-Residual decoder
+tiers — not LoRA-specific despite the historical ``lora`` naming:
+- lora: Fused switch-LoRA linear layer (SwitchedLoRALinear)
+- lora_ops: torch.compile-opaque custom ops wrapping the Triton kernel
+- lora_kernel_meta: Bitmask + remap metadata for the fused kernel
 """
 
-from .decoder import (
-    GraniteLoRAEmbeddedAttention,
-    GraniteSwitchDecoderLayer,
-)
 from .lora import SwitchedLoRALinear
-from .lora_kernel_meta import CompileFriendlyLoRAKernelMeta, LoRAContext
+from .lora_kernel_meta import FusedLoRAKernelMeta, LoRAContext
 
 __all__ = [
-    "CompileFriendlyLoRAKernelMeta",
-    "GraniteLoRAEmbeddedAttention",
-    "GraniteSwitchDecoderLayer",
+    "FusedLoRAKernelMeta",
     "LoRAContext",
     "SwitchedLoRALinear",
 ]

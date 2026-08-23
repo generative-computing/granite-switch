@@ -50,14 +50,27 @@ granite-switch/
 │       │       ├── __init__.py
 │       │       └── single.py            # SingleSwitch (HF attention backends)
 │       │
+│       ├── kernels/                     # Backend-agnostic Triton kernels
+│       │   ├── __init__.py
+│       │   └── switch_lora_kernel.py    # SWITCH fused-LoRA kernel: expand + swiglu + W_cross shrink
+│       │
 │       └── vllm/                        # vLLM backend (requires [vllm] extra)
 │           ├── __init__.py              # register() for vLLM plugin system
-│           ├── granite_switch_model.py
+│           ├── granite_switch_model.py  # GraniteSwitch{Model,ForCausalLM}: LoRA + SR, TP/PP
 │           ├── core/
 │           │   ├── __init__.py
-│           │   ├── lora.py              # SwitchedLoRALinear (Punica kernels)
-│           │   ├── lora_kernel_meta.py
-│           │   └── decoder.py           # Decoder layers
+│           │   ├── lora.py              # SwitchedLoRALinear (SWITCH kernel backend)
+│           │   ├── lora_kernel_meta.py  # FusedLoRAKernelMeta: per-module remap + tile bitmasks
+│           │   └── lora_ops.py          # torch custom-op wrappers for the SWITCH launchers
+│           ├── decoder/                 # per-adaptation decoder tier (DecoderInterface)
+│           │   ├── __init__.py
+│           │   ├── interface.py
+│           │   ├── lora/decoder.py      # GraniteLoRAEmbeddedAttention (LoRA / aLoRA)
+│           │   └── shadow_residual/     # SR dual-stream decoder
+│           │       ├── decoder.py       # ShadowResidualAttention (doubled-Q, TP-aware)
+│           │       ├── wcross_shunt.py  # WCrossShunt (base->adapter cross-stream)
+│           │       ├── kernel_meta.py   # SRFusedLoRAKernelMeta
+│           │       └── _sr_ops.py       # Q-head interleave / deinterleave
 │           └── switch/
 │               ├── __init__.py
 │               └── single.py            # SingleSwitch (vLLM Attention)
@@ -264,7 +277,7 @@ The Granite Switch extends the base Granite model with:
 
 **Purpose**: Fast production inference (10-20x speedup)
 
-- Punica kernels for optimized LoRA computation
+- SWITCH fused-LoRA Triton kernel for optimized adapter computation (replaces Punica)
 - PagedAttention for efficient KV cache
 - Continuous batching, tensor/pipeline parallelism
 - OpenAI-compatible API server
@@ -329,7 +342,7 @@ Always use config values - never hardcode these parameters.
 
 **Control tokens**: `0` = no adapter, `1+` = adapter indices
 
-**vLLM Punica kernels**: `-1` = no adapter (internal conversion: `adapter_indices - 1`)
+**SWITCH kernel (vLLM)**: per-module *kernel-local* indices — `0` = base (no adapter, or not applicable to this module), `1..` = that module's applicable adapters in ascending rank order. Global adapter ids are remapped per module centrally (see `vllm/core/lora_kernel_meta.py`).
 
 ### 2. Control Token Generatability
 

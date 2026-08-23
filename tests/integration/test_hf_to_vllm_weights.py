@@ -186,9 +186,17 @@ class _HFToVLLMWeightTestBase:
         try:
             self.vllm_config = _make_vllm_config(self.tmpdir, self.config)
             with set_current_vllm_config(self.vllm_config):
-                self.vllm_model = VLLMModel(
-                    vllm_config=self.vllm_config,
-                ).to(self.device)
+                # Build ON-device (mirrors vLLM's loader, which constructs inside
+                # `with target_device:`). Each SwitchedLoRALinear caches its device
+                # at construction; the fused SWITCH path then builds w_ext / kernel meta
+                # on that device at finalize (load_weights). Constructing on CPU then
+                # .to(cuda) leaves that cached device stale, so finalize builds the
+                # fused weights on CPU while the KV caches are on CUDA -> device
+                # mismatch at forward.
+                with torch.device(self.device):
+                    self.vllm_model = VLLMModel(
+                        vllm_config=self.vllm_config,
+                    )
         finally:
             torch.set_default_dtype(old_dtype)
 
@@ -398,8 +406,10 @@ class TestSingleSwitchForwardEquivalence(_HFToVLLMWeightTestBase):
             adapter_token_ids=[250, 251],
             adapter_names=["adapter_1", "adapter_2"],
             adapter_substitute_token_ids=[1, 1],
-            max_lora_rank=4,
-            adapter_ranks=[4, 4],
+            # Rank must be in the fused kernel's SUPPORTED_RANKS (16, 32, ...);
+            # finalize_weights asserts this for applicable adapters.
+            max_lora_rank=16,
+            adapter_ranks=[16, 16],
             switch_head_dim=32,
             max_position_embeddings=512,
             attention_multiplier=1.0,
