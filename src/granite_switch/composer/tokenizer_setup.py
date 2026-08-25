@@ -637,6 +637,34 @@ def build_substitute_token_ids(
     return substitute_ids
 
 
+# Reserved slots in the Granite vocabulary that never appear as a training
+# target. Measured on granite-4.1-3b and granite-4.2-3b: every <|unused_N|> row
+# has collapsed to a single point — in 4.2's lm_head the 72 rows sit within
+# 0.001 of each other, with a norm at the ~0.1st percentile of ordinary tokens.
+# That is the signature of an id which only ever received downward pressure from
+# the softmax denominator and never a target gradient, i.e. one the model was
+# effectively trained not to emit.
+_RESERVED_UNUSED_TOKEN_RE = re.compile(r"^<\|unused_\d+\|>$")
+
+
+def find_reserved_never_emitted_token_id(tokenizer) -> int | None:
+    """Id of a reserved ``<|unused_N|>`` token, or ``None`` if the vocab has none.
+
+    Used to give a newly added placeholder token an output row that the base
+    model was trained not to emit, instead of the arbitrary row
+    ``resize_token_embeddings`` would leave behind.
+
+    Any of the reserved slots serves equally well — they are numerically
+    interchangeable — so the highest id is returned for determinism.
+    """
+    ids = [
+        token_id
+        for token, token_id in tokenizer.get_vocab().items()
+        if _RESERVED_UNUSED_TOKEN_RE.match(token)
+    ]
+    return max(ids) if ids else None
+
+
 def configure_chat_template(
     tokenizer,
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
