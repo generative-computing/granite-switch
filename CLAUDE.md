@@ -398,15 +398,23 @@ acceptable because adapter detection is exact and RoPE is robust to small positi
 suppressing it for rank > 0. After all-reduce this doubles the bias. Not affected: all Granite
 architectures (4.0, 4.1) use `attention_bias=False` and `mlp_bias=False`.
 
-### 9. HF Backend Uses Fused Projections (Not Bit-Exact with Upstream HF)
+### 9. Backends Use Fused Projections (Not Bit-Exact with Upstream)
 
 The GraniteSwitch HF backend uses fused QKV and gate-up projections, symmetric with the vLLM
 backend architecture. Upstream HuggingFace `GraniteMoeHybridForCausalLM` uses separate projections.
 Fused projections change the floating-point reduction order, so bit-exact skinning equivalence
-with the upstream HF model is not achievable. The vLLM skinning equivalence tests are the
-authoritative check — both the upstream and skinned models use the same fused-projection
-architecture there. The HF skinning tests in `tests/composer/test_skinning_equivalence.py` are
-skipped for this reason.
+with the upstream HF model is not achievable. The HF skinning tests in
+`tests/composer/test_skinning_equivalence.py` are skipped for this reason.
+
+The vLLM check (`tests/vllm/test_generation_equivalence.py`) is the authoritative equivalence
+test, but it is **not** token-exact either. The skinned model runs its projections through the
+fused SWITCH Triton kernel (`kernels/switch_lora_kernel.py`), whose float-reduction order differs
+from vLLM's native linear even with a zero adapter, so the two paths are numerically close but not
+bit-identical. That sub-ULP difference can flip a near-tie greedy argmax — observed under vLLM 0.20
+but not 0.19, because each version's numerics land the tie on a different side. The test therefore
+gates **distribution equivalence** (per-position top-k JSD + Jaccard), not token-for-token match:
+robust to benign ties while still catching a real logit/weight regression. See
+`tests/vllm/_generation_equivalence_worker.py` for the metric and thresholds.
 
 ### 10. Known Limitation: bf16 Caps the vLLM MultiSwitch Counting Head at 188 Control Tokens
 
