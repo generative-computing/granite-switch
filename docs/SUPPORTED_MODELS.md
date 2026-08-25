@@ -26,8 +26,16 @@ auto-detected from the base tokenizer's template at compose time (see
 Adapter control-token injection (LoRA prefix, ALoRA user-message invocation,
 ALoRA assistant-boundary fallback) works identically for both formats. Granite
 4.2 additionally sets `tie_word_embeddings: false`; the composer preserves the
-distinct LM head and initializes new control-token output rows from their
-token-exchange substitute rows.
+distinct LM head.
+
+For both formats the composer initializes every new control-token output row
+from a reserved `<|unused_N|>` row, so a control token is as unlikely to be
+emitted as a token the base model was trained never to emit. This runs on the
+tied path (4.0/4.1) as well as the untied one: a control token's *input* row is
+never read, because the switch rewrites the control-token id to its
+token-exchange substitute before the embedding lookup, so writing the shared
+matrix affects only the output side. See `initialize_control_token_output_rows`
+in `composer/compose_granite_switch.py`.
 
 #### Multi-turn KV policy on 4.2
 

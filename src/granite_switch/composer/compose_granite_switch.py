@@ -73,6 +73,7 @@ from granite_switch.composer.tokenizer_setup import (
     add_control_tokens,
     build_substitute_token_ids,
     configure_chat_template,
+    find_reserved_never_emitted_token_id,
     load_activation_anchor,
 )
 from granite_switch.composer.validator import validate_base_reset_switch_type
@@ -186,38 +187,64 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
     return sub_id
 
 
-def initialize_untied_control_token_lm_head_rows(
-    model, adapter_token_ids, adapter_substitute_token_ids
-):
-    """Initialize new control-token rows in an untied ``lm_head``.
+def initialize_control_token_output_rows(model, adapter_token_ids, reserved_token_id):
+    """Point every control token's output row at a reserved never-emitted row.
 
-    Only relevant when ``config.tie_word_embeddings`` is False (e.g. Granite
-    4.2): ``resize_token_embeddings`` extends the *separate* ``lm_head`` matrix
-    with HF-default (small random) rows for the new control tokens and leaves
-    them uncorrected. Since control tokens are freely generatable (no logit
-    suppression), those random rows would give each control token an arbitrary,
-    checkpoint-nondeterministic output logit.
+    ``resize_token_embeddings`` appends a row per control token, and since
+    transformers 4.46 that row is *mean-initialized* — sampled from a Gaussian
+    fitted to the trained rows, so it lands squarely inside the distribution of
+    real tokens rather than looking like noise. Nothing suppresses control tokens
+    at generation time (no ``bad_words``, no logit bias, ``bias=False`` on the
+    head in both backends), so an uncorrected row gives each control token an
+    arbitrary — and compose-run-nondeterministic — probability of being emitted.
 
-    Policy: copy each control token's token-exchange *substitute* row from the
-    LM head into the control token's row, so the control token is as (un)likely
-    to be emitted as the substitute it is swapped to at the input side. This
-    keeps the input-side embedding swap and the output-side logits symmetric.
+    Policy: copy a reserved ``<|unused_N|>`` row (see
+    :func:`~granite_switch.composer.tokenizer_setup.find_reserved_never_emitted_token_id`)
+    into every control token's row, making each control token's logit identical
+    to a token the base model was trained not to emit, for every possible hidden
+    state. All control tokens share one reserved row: they are all equally
+    never-emitted, so there is nothing to distinguish, and sharing keeps this
+    consistent with how other added placeholder tokens are initialized.
+
+    This replaces an earlier policy that copied each control token's
+    token-exchange *substitute* row. That made a control token's output detector
+    identical to its substitute's, so at any position where the substitute was
+    the natural next token the two had equal logits and split the probability
+    mass — for LoRA the substitute is the sequence-start role marker, for ALoRA
+    the first invocation token, often something as common as ``<``.
+
+    Applies on the **tied** path (Granite 4.0/4.1) as well as the untied one
+    (4.2), even though the write then lands in the matrix shared with the input
+    embedding. That is safe because a control token's input row is never read:
+    the switch rewrites each control-token id to its substitute id *before* the
+    embedding lookup, in both backends (``hf/switch/single.py`` returns
+    ``modified_input_ids``, which ``modeling_granite_switch.py`` embeds;
+    ``vllm/switch/single.py::apply_token_exchange`` covers the vLLM text and
+    multimodal paths).
+    ``tests/vllm/_model_forward_tests.py::TestKVVisibility`` pins this on the
+    vLLM side by perturbing a control token's embedding row and asserting the
+    logits after it are unchanged, and
+    ``tests/composer/test_control_token_output_rows.py`` does the same on CPU
+    for the HF backend. Being tied is therefore not a constraint here — the shared row
+    is output-only in practice, which is what makes the 4.1 fix possible at all.
 
     Args:
         model: A ``GraniteSwitchForCausalLM`` after ``resize_token_embeddings``.
-        adapter_token_ids: Control-token ids, one per adapter.
-        adapter_substitute_token_ids: Substitute-token ids, one per adapter
-            (ALoRA: first invocation token; LoRA: probed sequence-start token).
+        adapter_token_ids: Control-token ids — one per adapter, plus the
+            ``<|base_reset|>`` slot at index 0 when MultiSwitch was composed with
+            ``--base-reset-token``. The base-reset token is newly added and never
+            trained just like the rest, so it needs the same fixup and gets it by
+            being in this list.
+        reserved_token_id: Token id of the reserved row to copy from.
     """
-    lm_head_weight = model.get_output_embeddings().weight
+    output_weight = model.get_output_embeddings().weight
     with torch.no_grad():
-        for control_id, substitute_id in zip(
-            adapter_token_ids, adapter_substitute_token_ids
-        ):
-            lm_head_weight[control_id].copy_(lm_head_weight[substitute_id])
+        for control_id in adapter_token_ids:
+            output_weight[control_id].copy_(output_weight[reserved_token_id])
     print(
-        f"  Untied LM head: initialized {len(adapter_token_ids)} control-token "
-        f"row(s) from their substitute rows"
+        f"  Initialized {len(adapter_token_ids)} control-token output row(s) "
+        f"from reserved token id {reserved_token_id} "
+        f"(row norm {output_weight[reserved_token_id].norm():.4f})"
     )
 
 
@@ -1085,17 +1112,26 @@ def build():
     new_embed_size = model.model.embed_tokens.weight.shape[0]
     print(f"Embeddings resized: {old_embed_size} -> {new_embed_size}")
 
-    # Untied LM head: resize_token_embeddings extends lm_head with HF-default
-    # (small random) rows for the new control tokens. Those rows are never
-    # corrected otherwise, giving control tokens arbitrary, nondeterministic
-    # output logits. Copy each control token's token-exchange substitute row
-    # so a control token is as (un)likely to be emitted as its substitute on
-    # the output side too — symmetric with the input-side embedding swap.
-    # No-op on the tied path (embed and head share one matrix).
-    if not getattr(model.config, "tie_word_embeddings", True):
-        initialize_untied_control_token_lm_head_rows(
-            model, adapter_token_ids, adapter_substitute_token_ids
-        )
+    # resize_token_embeddings appended a mean-initialized row per control token,
+    # which would leave each control token with an arbitrary, compose-run-
+    # nondeterministic emission probability (nothing suppresses control tokens at
+    # generation time). Repoint those rows at a reserved never-emitted row.
+    # Runs on the tied path (4.0/4.1) as well as the untied one (4.2) — a control
+    # token's input row is never read, so the shared-matrix write is inert on the
+    # input side. See initialize_control_token_output_rows.
+    if adapter_token_ids:
+        reserved_token_id = find_reserved_never_emitted_token_id(tokenizer)
+        if reserved_token_id is None:
+            print(
+                "  Warning: no reserved <|unused_N|> token in this vocabulary, so "
+                "the control tokens keep the rows resize_token_embeddings "
+                "generated. Each control token is then as emittable as an average "
+                "token, with a probability that varies between compose runs."
+            )
+        else:
+            initialize_control_token_output_rows(
+                model, adapter_token_ids, reserved_token_id
+            )
 
     print(f"\nStep 3 complete in {time.time() - step_start:.2f}s")
 

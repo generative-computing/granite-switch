@@ -13,17 +13,12 @@ pin the behavior that matters for the untied path:
   ``embed_tokens.weight``. (On transformers ≥5.9 the framework already gates
   tie-key expansion on the config, so the head is not dropped; this test guards
   against a regression if that gating changes.)
-* A11 — ``initialize_untied_control_token_lm_head_rows`` copies each control
-  token's substitute row into its LM-head row.
 * Config copy — ``tie_word_embeddings`` survives the base→GraniteSwitchConfig
   field copy (pins arch.py's required-field list).
 """
 
 import torch
 
-from granite_switch.composer.compose_granite_switch import (
-    initialize_untied_control_token_lm_head_rows,
-)
 from granite_switch.composer.weight_transfer import read_saved_lm_head_shape
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
@@ -130,26 +125,3 @@ class TestUntiedSaveLoadRoundTrip:
         assert torch.equal(
             reloaded.lm_head.weight, reloaded.get_input_embeddings().weight
         )
-
-
-class TestInitializeUntiedControlTokenLmHeadRows:
-    """A11: control-token LM-head rows are copied from their substitute rows."""
-
-    def test_rows_copied_from_substitutes(self):
-        cfg = _tiny_config(tie=False)
-        model = GraniteSwitchForCausalLM(cfg).eval()
-        head = model.get_output_embeddings().weight
-
-        control_ids = [250, 251]
-        substitute_ids = [1, 7]
-        # Give substitute rows recognizable values distinct from control rows.
-        with torch.no_grad():
-            head[1] = 3.0
-            head[7] = -5.0
-            head[250] = 0.0
-            head[251] = 0.0
-
-        initialize_untied_control_token_lm_head_rows(model, control_ids, substitute_ids)
-
-        assert torch.allclose(head[250], head[1])
-        assert torch.allclose(head[251], head[7])
