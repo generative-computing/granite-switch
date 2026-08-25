@@ -1,8 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Verify greedy generation equivalence: upstream model vs zero-adapter switch model.
+"""Verify generation equivalence: upstream model vs zero-adapter switch model.
 
-Tests that autoregressive generation produces identical token sequences when a
-GraniteSwitch model has a single built-in adapter with zero LoRA weights.
+Tests that the next-token *distributions* match (per-position JSD + top-k Jaccard
+over the prompt) when a GraniteSwitch model has a single built-in adapter with zero
+LoRA weights. Distribution equivalence (rather than exact greedy-token match) is used
+because the fused SWITCH projections are numerically close but not bit-exact to the
+native linear, so a near-tie can flip the greedy argmax (a false failure sensitive to
+the vLLM version); see _generation_equivalence_worker.py for the full rationale.
 
 No control tokens appear in the prompt, so:
 - Switch layer → adapter_indices=0 everywhere, no token rewrite
@@ -76,7 +80,7 @@ def _run_generation_test(model_name, timeout):
       1. build   — Build switch model + save inputs (CPU only)
       2. run ref — Upstream model generation (GPU)
       3. run sw  — Switch model generation (GPU)
-      4. compare — Check token-for-token match (CPU)
+      4. compare — Gate distribution equivalence: JSD + Jaccard (CPU)
     """
     with tempfile.TemporaryDirectory(prefix="gen_equiv_") as work_dir:
         switch_dir = os.path.join(work_dir, "switch")
@@ -118,7 +122,7 @@ def _run_generation_test(model_name, timeout):
             timeout=timeout,
         )
 
-        # 4. Compare token sequences (CPU)
+        # 4. Gate distribution equivalence (JSD + Jaccard) (CPU)
         _run_step(
             "compare",
             "compare",
@@ -133,5 +137,5 @@ def _run_generation_test(model_name, timeout):
 @pytest.mark.requires_model
 @pytest.mark.parametrize("model_name", MODELS, ids=_short_name)
 def test_generation_equivalence(model_name):
-    """Generate with upstream vs zero-adapter switch and assert token-exact match."""
+    """Upstream vs zero-adapter switch: assert next-token distribution equivalence."""
     _run_generation_test(model_name, TIMEOUT)

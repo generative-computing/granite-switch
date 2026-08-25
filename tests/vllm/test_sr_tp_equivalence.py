@@ -29,13 +29,16 @@ Env:
 
 import importlib.util
 import json
-import math
 import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from tests.shared.logit_metrics import jaccard as _jaccard
+from tests.shared.logit_metrics import jsd_bits as _jsd_bits
+from tests.shared.logit_metrics import topk_ids as _topk_ids
 
 try:
     import torch
@@ -82,32 +85,6 @@ def _run_worker(tp, out_path):
         f"SR TP worker (tp={tp}) failed (exit {result.returncode}).\n"
         f"STDERR (last 1500):\n{result.stderr[-1500:]}"
     )
-
-
-def _topk_ids(dist, k):
-    return [t for t, _ in sorted(dist.items(), key=lambda kv: kv[1], reverse=True)[:k]]
-
-
-def _jaccard(a, b):
-    sa, sb = set(a), set(b)
-    return len(sa & sb) / len(sa | sb) if (sa | sb) else 1.0
-
-
-def _jsd_bits(p_lp, q_lp, ids):
-    """JSD (bits) between two logprob dicts, restricted + renormalized over `ids`."""
-
-    def probs(lp):
-        v = {t: math.exp(lp[t]) for t in ids if t in lp}
-        s = sum(v.values()) or 1.0
-        return {t: v.get(t, 0.0) / s for t in ids}
-
-    p, q = probs(p_lp), probs(q_lp)
-    m = {t: 0.5 * (p[t] + q[t]) for t in ids}
-
-    def kl(a, b):
-        return sum(a[t] * math.log2(a[t] / b[t]) for t in ids if a[t] > 0 and b[t] > 0)
-
-    return 0.5 * kl(p, m) + 0.5 * kl(q, m)
 
 
 def test_sr_tp_equivalence(tmp_path):
