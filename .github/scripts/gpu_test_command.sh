@@ -29,6 +29,11 @@
 #
 # The suite NAME is dispatched, never a path list: gpu-tests.yaml owns the mapping.
 #
+# ONE flag is understood, `--no-cache`, which turns off the result cache for that run
+# (`/gpu-test-short --no-cache`). Unlike the suite, it IS named here: it is a property
+# of the request, not a test family, and it has no `options:` list to derive it from.
+# Anything else beginning with `-` is declined rather than ignored — see that loop.
+#
 # Deployed to granite-switch as .github/scripts/gpu_test_command.sh.
 # It runs on a GitHub-hosted runner (no /opt/gsw), which is why it is checked in
 # rather than being baked into the runner image. See
@@ -96,7 +101,9 @@ usage_list() {
   for f in $FAMILIES; do
     if [[ "$f" == "full" ]]; then out="${out}\`/gpu-test\` "; else out="${out}\`/gpu-test-${f}\` "; fi
   done
-  printf '%s' "$out"
+  # The flag is mentioned here because this message is the only documentation of the
+  # command surface that reaches someone in the moment they need it.
+  printf '%s' "${out}— any of them may be followed by \`--no-cache\` to re-run tests that have already been run for this commit."
 }
 
 # Exit 0 throughout: a mistyped command is user error, not a broken workflow, and a
@@ -115,10 +122,17 @@ decline() {
   exit 0
 }
 
-# Which scope? First whitespace-delimited token of the FIRST line, so
-# "/gpu-test-dev please" works and a command followed by prose or a second
-# paragraph still parses. \r is stripped because GitHub sends CRLF line endings.
-CMD="$(printf '%s' "$BODY" | head -n1 | tr -d '\r' | awk '{print $1}')"
+# Which scope, and with which flags? The FIRST line only, so a command followed by
+# prose or a second paragraph still parses. \r is stripped because GitHub sends CRLF
+# line endings.
+#
+# read -ra rather than word-splitting an unquoted expansion: this is an attacker's
+# text, and unquoted it would be glob-expanded against the runner's working directory
+# — `/gpu-test *` becoming a list of filenames.
+FIRST_LINE="$(printf '%s' "$BODY" | head -n1 | tr -d '\r')"
+read -ra TOKENS <<<"$FIRST_LINE"
+CMD="${TOKENS[0]:-}"
+
 
 # Derive rather than look up. Note `/gpu-testing` does NOT match /gpu-test-* (the
 # next character is `i`, not `-`), so the workflow's startsWith prefilter letting it
@@ -144,6 +158,30 @@ if [[ -n "$FAMILIES" ]]; then
   esac
 fi
 
+# Flags, after the command is known to be one — "that is not a command" is the more
+# useful complaint about `/gpu-testing --nope` than "that is not an option".
+#
+# Only tokens that LOOK like flags are interpreted, so "/gpu-test-dev please" keeps
+# working; anything else on the line is prose and is ignored, as it always was.
+#
+# An unrecognised flag is DECLINED rather than ignored, and that is deliberate: the
+# only flag here turns the RESULT CACHE off, so quietly ignoring `--nocache` would
+# answer "test this again" with a cached result — precisely what the person was asking
+# not to happen. A 😕 they can retype beats a stale pass they trust.
+#
+# Indexed loop rather than "${TOKENS[@]:1}": under set -u, expanding an empty array
+# that way is an "unbound variable" error on bash before 4.4, and an empty comment
+# body produces exactly that.
+NO_CACHE=false
+for ((i = 1; i < ${#TOKENS[@]}; i++)); do
+  case "${TOKENS[i]}" in
+    --no-cache) NO_CACHE=true ;;
+    -*)         decline "\`${TOKENS[i]}\` is not a GPU test option — the only one is \`--no-cache\`." \
+                        "unknown flag: '${TOKENS[i]}'" ;;
+    *)          : ;;
+  esac
+done
+
 SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')"
 
 # Layer 2: GitHub's own `type: choice` validation. Only reachable when FAMILIES
@@ -151,11 +189,15 @@ SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.sha')"
 #
 # The reaction is posted AFTER a successful dispatch, not before: a 🚀 followed by
 # "no such family" reads as though something launched and then broke.
+# no_cache is passed on EVERY dispatch, not only when it was asked for. The value
+# GitHub coerces for a `type: boolean` input is exercised on the common path that way,
+# rather than only the first time somebody types --no-cache and finds out it 422s.
 if ! gh workflow run gpu-tests.yaml \
        --ref "$DEFAULT_BRANCH" \
        -f sha="$SHA" \
        -f pr_number="$PR_NUMBER" \
-       -f suite="$SUITE" 2>/tmp/gh_dispatch_err; then
+       -f suite="$SUITE" \
+       -f no_cache="$NO_CACHE" 2>/tmp/gh_dispatch_err; then
   echo "dispatch failed:" >&2
   cat /tmp/gh_dispatch_err >&2
   decline "could not launch \`${SUITE}\` — it is probably not a valid test family." \
@@ -164,4 +206,4 @@ fi
 
 react 'rocket'
 
-echo "Dispatched gpu-tests.yaml (suite=${SUITE}) for PR #${PR_NUMBER} at ${SHA} (by ${ACTOR})"
+echo "Dispatched gpu-tests.yaml (suite=${SUITE}, no_cache=${NO_CACHE}) for PR #${PR_NUMBER} at ${SHA} (by ${ACTOR})"
