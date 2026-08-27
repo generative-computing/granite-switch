@@ -121,7 +121,6 @@ class GraniteSwitchModel(nn.Module):
 
         # 2. Switch and adapter configuration
         num_adapters = config.num_adapters
-        self.decoder_interface.validate_num_adapters(num_adapters)
         if num_adapters > 0:
             self.switch = create_switch(config, vllm_config=vllm_config)
 
