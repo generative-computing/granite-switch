@@ -358,7 +358,7 @@ class MultiSwitch(nn.Module):
         # modules, so their Q/K/V must match the cache. The HF twin forces fp32 for
         # the counting head and is exact past n=4095; a bf16 cache quantizes the
         # 1/(1+n) signal and inverts exactly only to n=188 (189 aliases). See
-        # docs/MULTISWITCH_EXPLAINED.html section 8; the bound itself is pinned by
+        # docs/MULTISWITCH_EXPLAINED.md section 8; the bound itself is pinned by
         # tests/unit/test_counting_ceiling.py and enforced (client-side only) by
         # conversation.MAX_RETAINED_CONTROL_TOKENS.
         dtype = self.dtype

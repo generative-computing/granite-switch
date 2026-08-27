@@ -427,7 +427,7 @@ exactly only up to `n = 188` (189 aliases). This is a different limit from the c
 re-prefills the turn, resetting the count to one and losing history's adapter attribution (logged;
 counted in `Conversation.reprefills`). A raw `/v1/completions` request still bypasses this entirely.
 `--kv-cache-dtype fp8` is also unguarded and would saturate `_NEG_INF` and `code(n) * 28`.
-See section 8 of [docs/MULTISWITCH_EXPLAINED.html](docs/MULTISWITCH_EXPLAINED.html).
+See section 8 of [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md).
 
 ### 11. `MultiSwitch`'s Debug Attributes Exist Only Under `enforce_eager`
 
