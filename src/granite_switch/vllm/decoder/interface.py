@@ -107,10 +107,6 @@ class DecoderInterface(abc.ABC):
 
     # ---- build-time ----
     @abc.abstractmethod
-    def validate_num_adapters(self, num_adapters: int) -> None:
-        """Raise if this adaptation cannot host ``num_adapters``."""
-
-    @abc.abstractmethod
     def make_kernel_meta(self, device) -> tuple[FusedLoRAKernelMeta, LoRAContext]:
         """Build the (kernel-meta, ctx) pair for this adaptation."""
 
@@ -173,9 +169,6 @@ class DecoderInterface(abc.ABC):
 # --------------------------------------------------------------------------- #
 class LoRADecoderInterface(DecoderInterface):
     """Single-stream LoRA/aLoRA. Base defaults == today's LoRA forward."""
-
-    def validate_num_adapters(self, num_adapters: int) -> None:
-        return  # no constraint
 
     def make_kernel_meta(self, device):
         return FusedLoRAKernelMeta(device=device), LoRAContext()
@@ -380,18 +373,15 @@ class LoRADecoderInterface(DecoderInterface):
 class SRDecoderInterface(DecoderInterface):
     """Dual-stream SR: base ++ adapter stacked ``[2M, H]``, merged per token.
 
+    The doubling is per *stream*, not per adapter: the adapter half carries each
+    token's own real adapter id, and K/V always comes from the base half, so
+    tokens on different adapters never reach each other through attention.
+
     The ``[2M, H]`` stack lives strictly intra-rank. At a PP boundary only two
     token-leading ``[M, H]`` halves cross (via :meth:`to_intermediate`); each
     rank re-stacks them at :meth:`enter_decoder_stack`. Nothing ``2M`` is ever
     sent, so vLLM's per-token IntermediateTensors slice stays correct.
     """
-
-    def validate_num_adapters(self, num_adapters: int) -> None:
-        if num_adapters not in (0, 1):
-            raise ValueError(
-                f"SR vLLM path supports a single adapter; got "
-                f"num_adapters={num_adapters}"
-            )
 
     def make_kernel_meta(self, device):
         return SRFusedLoRAKernelMeta(device=device), SRLoRAContext()
