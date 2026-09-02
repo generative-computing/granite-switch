@@ -31,8 +31,6 @@ never hardcodes a role marker and inherits any future template change for free.
 
 Requirements for PRESERVE_MIXED_HISTORY:
 
-* ``switch_type="multi"``. Preserving an earlier control token puts two in one
-  request; SingleSwitch averages competing control tokens and mis-routes.
 * the prompt must be sent as token ids (``/v1/completions`` with ``prompt=[ids]``,
   or ``model.generate(input_ids=...)``). ``/v1/chat/completions`` re-renders and
   re-tokenizes server-side, which silently turns this back into RE_PREFILL.
@@ -159,8 +157,15 @@ class PromptTokenIds(list):
 
     @property
     def requires_token_ids(self):
-        """True when this prompt is only correct if sent as ids."""
-        return self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY
+        """True: every prompt this class builds must be sent as ids.
+
+        Both policies reuse previously-sent ids as a stable prefix. Re-rendering
+        or re-tokenizing them server-side reproduces a different prefix and
+        silently degrades cache reuse, with no error and no symptom beyond a
+        fallen hit rate. The flag stays so a transport layer can check rather
+        than assume; it is now constant.
+        """
+        return True
 
 
 class Conversation:
@@ -172,8 +177,8 @@ class Conversation:
         policy: see :class:`KVHistoryPolicy`. Defaults to ``RE_PREFILL``, which
             reproduces the behaviour of rendering each turn from scratch.
         config: the checkpoint's ``GraniteSwitchConfig``, or anything exposing
-            ``adapter_token_ids`` and ``switch_type``. Optional, but without it
-            the ``switch_type`` and control-token-budget guards cannot run.
+            ``adapter_token_ids``. Optional, but without it the control-token-budget
+            guard cannot run.
     """
 
     def __init__(self, tokenizer, policy=KVHistoryPolicy.RE_PREFILL, config=None):
@@ -209,24 +214,12 @@ class Conversation:
             if config is None:
                 raise ValueError(
                     "PRESERVE_MIXED_HISTORY requires config=<the checkpoint's "
-                    "GraniteSwitchConfig>. Both of this policy's guards read it, so "
-                    "omitting it does not merely lose diagnostics -- it disables "
-                    "them: a single-switch checkpoint would average the two control "
-                    "tokens and mis-route with no error, and a long conversation "
-                    "would slide past the counting head's exact range and alias its "
-                    "write addresses. Both failures are silent, which is exactly why "
-                    "the guards exist. RE_PREFILL does not need config."
-                )
-            switch_type = getattr(config, "switch_type", None)
-            if switch_type != "multi":
-                raise ValueError(
-                    "PRESERVE_MIXED_HISTORY requires switch_type='multi'. Keeping "
-                    "an earlier turn's control token puts two control tokens in one "
-                    "request, and SingleSwitch's +/-gain attention AVERAGES competing "
-                    "control tokens instead of taking the most recent one, so routing "
-                    f"would be wrong rather than merely different. Got "
-                    f"switch_type={switch_type!r}; recompose with --switch-type multi "
-                    "or use KVHistoryPolicy.RE_PREFILL."
+                    "GraniteSwitchConfig>. This policy's control-token-budget guard "
+                    "reads it, so omitting it does not merely lose diagnostics -- it "
+                    "disables the guard: a long conversation would slide past the "
+                    "counting head's exact range and alias its write addresses, a "
+                    "silent failure, which is exactly why the guard exists. RE_PREFILL "
+                    "does not need config."
                 )
 
     # ── conversation state ────────────────────────────────────────────────────
@@ -242,10 +235,11 @@ class Conversation:
     def messages(self):
         """The conversation as role/content dicts (a copy; text only).
 
-        Under ``PRESERVE_MIXED_HISTORY`` this is a **display and RE_PREFILL** view,
-        not what gets sent. Text carries no control tokens, so posting it to a chat
-        endpoint would send a different conversation than the one this object has
-        been building -- see :meth:`chat_payload`, which refuses to do that.
+        Under ``PRESERVE_MIXED_HISTORY`` this is a **display** view, not what gets
+        sent. Text carries no control tokens, so posting it to a chat endpoint
+        would send a different conversation than the one this object has been
+        building -- which is why the prompt must travel as ids
+        (:meth:`completion_payload`).
         """
         return [dict(m) for m in self._messages]
 
@@ -339,38 +333,6 @@ class Conversation:
             **extra: merged into the body (``max_tokens``, ``temperature``, ...).
         """
         return {"prompt": list(self.build_prompt(adapter=adapter)), **extra}
-
-    def chat_payload(self, adapter=None, **extra):
-        """A ``/v1/chat/completions`` body -- ``RE_PREFILL`` only.
-
-        Raises under ``PRESERVE_MIXED_HISTORY`` rather than returning a body that
-        would quietly behave as ``RE_PREFILL``. The chat endpoint takes messages,
-        so the server re-renders and re-tokenizes: earlier turns' control tokens
-        would be dropped exactly as this policy exists to prevent, the prefix
-        would stop matching what was sent, and nothing would report it.
-        """
-        if self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY:
-            raise RuntimeError(
-                "PRESERVE_MIXED_HISTORY cannot be served by /v1/chat/completions: "
-                "that endpoint accepts messages and re-renders them server-side, "
-                "which drops earlier turns' control tokens and re-tokenizes the "
-                "prefix -- silently reverting to RE_PREFILL with no error and no "
-                "symptom other than a fallen prefix-cache hit rate. Use "
-                "completion_payload() (ids to /v1/completions), or construct the "
-                "Conversation with KVHistoryPolicy.RE_PREFILL if the chat endpoint "
-                "is required."
-            )
-        kwargs = dict(extra)
-        if adapter:
-            # dict(extra) is a shallow copy, so setdefault would hand back the
-            # CALLER's own nested dict and write the adapter into it. A caller who
-            # reuses one template-kwargs dict across turns would then carry this
-            # adapter into every later turn, including base ones, with nothing to
-            # reveal it. Copy the nested mapping before writing.
-            tpl = dict(kwargs.get("chat_template_kwargs") or {})
-            tpl["adapter_name"] = adapter
-            kwargs["chat_template_kwargs"] = tpl
-        return {"messages": self.messages, **kwargs}
 
     def record_answer(self, answer, adapter=None):
         """Record the assistant turn produced by the last :meth:`build_prompt`.
