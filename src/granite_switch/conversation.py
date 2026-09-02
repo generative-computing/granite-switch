@@ -29,33 +29,23 @@ placement stays owned by the chat template: the new turn's text is obtained by
 rendering the conversation with and without it and subtracting, so this module
 never hardcodes a role marker and inherits any future template change for free.
 
-Requirements for PRESERVE_MIXED_HISTORY:
+Requirements:
 
 * the prompt must be sent as token ids (``/v1/completions`` with ``prompt=[ids]``,
   or ``model.generate(input_ids=...)``). ``/v1/chat/completions`` re-renders and
-  re-tokenizes server-side, which silently turns this back into RE_PREFILL.
-* **aLoRA adapters only**, enforced. Use ``RE_PREFILL`` for any conversation whose
-  turns need LoRA adapters.
+  re-tokenizes server-side, which drops earlier control tokens and degrades cache
+  reuse. Both policies reuse the ids already sent as a stable prefix, so both
+  require ids; ``completion_payload`` builds the body.
 
-  The reason is placement. A LoRA adapter's control token is emitted at sequence
-  position 0 (the template's LoRA prefix insertion, which also suppresses the role
-  marker that would follow), and position 0 is inside the already-sent prefix, so
-  the delta cannot be derived. An aLoRA adapter activates inside a user message or
-  at the assistant boundary -- in the turn being generated -- which is what makes
-  it appear in the delta.
-
-  ``build_prompt`` refuses on TURN 1, where a LoRA adapter would otherwise render
-  fine: turn 1 takes the full-render path, so there is no prefix to preserve. It
-  is refused anyway because a conversation does not change adapter technology
-  mid-dialogue -- a LoRA turn 1 is a LoRA turn 2, and turn 2 cannot be served
-  under this policy. Succeeding once and then failing on every later turn would
-  leave the caller holding a transcript that cannot continue under the policy it
-  chose.
-
-  NOT covered by that check: an aLoRA adapter whose invocation text sits in an
-  EARLIER user message also rewrites history and fails, and has no index-0
-  signature to test for. ``build_prompt`` raises for it on the turn it happens,
-  naming the adapter and both character positions.
+No adapter-technology enforcement. Each turn appends when its control token lands
+in the new-turn region -- aLoRA inside the user message or at the assistant
+boundary, SR at the generation-prompt boundary -- and falls back to a full text
+render when it cannot. A LoRA adapter's control token is at sequence position 0
+(the template's LoRA prefix insertion, which also suppresses the role marker that
+would follow), inside the already-sent prefix on every turn after the first, so a
+LoRA turn always full-renders. This happens on its own; nothing detects "LoRA".
+Under ``PRESERVE_MIXED_HISTORY`` that full render is a re-prefill -- it drops the
+preserved control tokens for that turn.
 
 Not handled here: returning routing to *base* between two adapter regions. That
 needs a base-reset control token, which this module never emits, so under this
@@ -120,10 +110,10 @@ class KVHistoryPolicy(Enum):
     ``PRESERVE_MIXED_HISTORY``
         Send the ids already sent, plus the new turn. Earlier control tokens stay
         in the stream, so each region keeps routing to the adapter that produced
-        it and its cached KV stays eligible for reuse. aLoRA adapters only: a LoRA
-        adapter's control token is emitted at position 0, so it cannot be the
-        adapter of turn 2 or later and ``build_prompt`` refuses it on turn 1 --
-        see the module docstring.
+        it and its cached KV stays eligible for reuse. aLoRA and SR turns append;
+        a LoRA turn (control token at position 0) cannot be appended and falls
+        back to a full text render for that turn, dropping the preserved control
+        tokens -- see the module docstring.
 
         A conversation long enough to exceed ``MAX_RETAINED_CONTROL_TOKENS`` control
         tokens in one request is re-prefilled automatically for that turn: history's
@@ -306,13 +296,53 @@ class Conversation:
         if self.policy is KVHistoryPolicy.RE_PREFILL or not self._sent_ids:
             ids = self._render_full(adapter, **template_kwargs)
         else:
-            delta = self._delta(adapter, **template_kwargs)
-            ids = self._sent_ids + self._encode(delta)
-            # Same comparison _assert_control_budget makes, so anything that reaches
-            # it over budget is necessarily a full render -- which is what its error
-            # message claims.
-            if self._control_count(ids) > MAX_RETAINED_CONTROL_TOKENS:
-                ids = self._reprefill(adapter, ids, **template_kwargs)
+            prev = self._render(
+                self._messages[: self._sent_messages],
+                gen=False,
+                **self._sent_template_kwargs,
+            )
+            full = self._render(
+                self._messages, gen=True, adapter=adapter, **template_kwargs
+            )
+            if self._appendable(full, prev):
+                delta = self._delta(adapter, **template_kwargs)
+                ids = self._sent_ids + self._encode(delta)
+                # Same comparison _assert_control_budget makes, so anything that
+                # reaches it over budget is necessarily a full render -- which is
+                # what its error message claims.
+                if self._control_count(ids) > MAX_RETAINED_CONTROL_TOKENS:
+                    ids = self._reprefill(
+                        adapter,
+                        ids,
+                        reason=(
+                            f"the preserved prompt reached {self._control_count(ids)} "
+                            f"control tokens, past the {MAX_RETAINED_CONTROL_TOKENS} "
+                            "the coded switch can address exactly in bf16"
+                        ),
+                        **template_kwargs,
+                    )
+            elif self._render(
+                self._messages, gen=True, adapter=None, **template_kwargs
+            ).startswith(prev):
+                # A no-adapter render still extends prev, so the TEMPLATE is
+                # append-only -- the divergence is only where this turn's control
+                # token landed (a LoRA token at index 0, or an aLoRA invocation in
+                # an earlier message). No delta can carry it, so re-prefill instead
+                # of raising: a full render, history's control tokens dropped.
+                ids = self._reprefill(
+                    adapter,
+                    self._encode(full),
+                    reason="this turn's control token lands inside the "
+                    "already-sent prefix, so no delta can carry it",
+                    **template_kwargs,
+                )
+            else:
+                # Even a no-adapter render fails the prefix relation: the template
+                # rewrites history when a turn is added (e.g. Granite 4.2 thinking
+                # truncation), or the template kwargs drifted. Raise -- a
+                # re-prefill would silently hide a template that cannot be served.
+                self._reject_template_kwargs_drift(template_kwargs)
+                self._explain_no_prefix()
 
         self._assert_control_budget(ids)
         self._pending = ids
@@ -383,49 +413,48 @@ class Conversation:
 
     # ── internals ─────────────────────────────────────────────────────────────
     def _render_full(self, adapter, **template_kwargs):
-        """The whole transcript rendered from ``_messages`` -- the RE_PREFILL shape.
+        """The whole transcript rendered from ``_messages`` -- the full-render shape.
 
         Carries a control token for THIS turn only: ``_render`` passes
         ``adapter_name`` for the current adapter, and ``record_answer`` decodes
         answers with ``skip_special_tokens=True``, so no earlier turn's token
         survives in ``_messages`` to be re-rendered. That is what makes this a
-        reset rather than an attempt at one.
+        reset rather than an attempt at one. It is also the fallback for any turn
+        that cannot be appended -- a LoRA turn (control token at position 0), or a
+        template that is not append-only.
         """
         rendered = self._render(
             self._messages, gen=True, adapter=adapter, **template_kwargs
         )
-        if self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY:
-            self._reject_lora_placement(rendered, adapter)
         return self._encode(rendered)
 
-    def _reprefill(self, adapter, over_budget_ids, **template_kwargs):
-        """Rebuild this turn as a full render, because the preserved ids got too long.
+    def _reprefill(self, adapter, current_ids, reason, **template_kwargs):
+        """Rebuild this turn as a full render, dropping history's control tokens.
 
-        The cost is real and paid here rather than deferred: the rebuilt prefix
-        diverges from ``_sent_ids`` at or near position 0, so the whole conversation
-        recomputes once, and every earlier region is interpreted under base from this
-        turn on. PRESERVE then resumes appending deltas to the new baseline.
+        Two callers, one mechanism: the preserved ids exceeded the counting head's
+        exact range, or this turn's control token cannot be appended (it lands in
+        the already-sent prefix). Either way the rebuilt prefix diverges from
+        ``_sent_ids`` at or near position 0, so the whole conversation recomputes
+        once and every earlier region is interpreted under base from this turn on.
+        PRESERVE then resumes appending deltas to the new baseline. ``reason`` is
+        logged so the two causes are distinguishable; ``current_ids`` is the ids
+        being replaced, for the length in the log.
 
-        The alternative is worse. Past the counting head's exact range two distinct
-        counts recover as one address, so two control tokens key the same codeword and
-        the memory head returns the mean of the two expert ids they wrote -- an
-        arbitrary adapter after rounding, for every token in both their spans. Not a
-        lag: the write and the read use the same recovered address, so a lone aliased
-        count still routes correctly, and it is the collision that breaks it. Either
-        way there is no error and nothing in the output to reveal it.
+        For the counting-head case the alternative is worse: past the exact range
+        two distinct counts recover as one address, so two control tokens key the
+        same codeword and the memory head returns the mean of the two expert ids
+        -- an arbitrary adapter after rounding, with no error in the output.
         """
         ids = self._render_full(adapter, **template_kwargs)
         self._reprefills += 1
         logger.warning(
-            "re-prefilled: the preserved prompt reached %d control tokens, past the "
-            "%d the coded switch can address exactly in bf16, so history's control "
-            "tokens were dropped and the transcript re-rendered -- %d ids instead of "
-            "%d. Earlier turns are interpreted under base from now on, and the prefix "
-            "cache for this conversation is recomputed once. Re-prefills so far: %d.",
-            self._control_count(over_budget_ids),
-            MAX_RETAINED_CONTROL_TOKENS,
+            "re-prefilled (%s): history's control tokens were dropped and the "
+            "transcript re-rendered -- %d ids instead of %d. Earlier turns are "
+            "interpreted under base from now on, and the prefix cache for this "
+            "conversation is recomputed once. Re-prefills so far: %d.",
+            reason,
             len(ids),
-            len(over_budget_ids),
+            len(current_ids),
             self._reprefills,
         )
         return ids
@@ -507,7 +536,7 @@ class Conversation:
 
         if not full.startswith(prev):
             self._reject_template_kwargs_drift(template_kwargs)
-            self._explain_no_prefix(prev, full, adapter)
+            self._explain_no_prefix()
 
         delta = full[len(prev) :]
         self._assert_join_boundary(delta)
@@ -529,40 +558,29 @@ class Conversation:
             self._control_text_cache = [t for t in texts if t]
         return self._control_text_cache
 
-    def _reject_lora_placement(self, rendered, adapter):
-        """Refuse a LoRA-technology adapter under PRESERVE_MIXED_HISTORY.
+    def _control_char_index(self, rendered):
+        """Char offset of this turn's control token in ``rendered``, or -1.
 
-        A LoRA adapter's control token is emitted at sequence position 0 (the
-        template's LoRA prefix insertion, which also suppresses the role marker
-        that would follow). Index 0 is therefore its signature: an aLoRA adapter
-        activates either inside a user message or at the assistant boundary, both
-        of which sit after the opening marker.
-
-        Position 0 is inside the already-sent prefix for every turn after the
-        first, so the delta can never be derived and the policy cannot hold.
-        Turn 1 happens to work -- it takes the full-render path, where there is no
-        prefix to preserve -- and is refused anyway, because a conversation does
-        not change adapter technology mid-dialogue: a LoRA turn 1 is a LoRA turn 2,
-        and that turn fails. Succeeding once and then failing on every later turn
-        would leave the caller holding a transcript that cannot continue under the
-        policy it chose. LoRA adapters use RE_PREFILL.
+        A fresh render carries at most one control token, so the earliest
+        occurrence of any control string is this turn's.
         """
-        if not adapter:
-            return
-        for text in self._control_texts():
-            if text and rendered.startswith(text):
-                raise RuntimeError(
-                    f"adapter {adapter!r} is a LoRA-technology adapter: its control "
-                    f"token {text!r} is emitted at sequence position 0. That is "
-                    "inside the already-sent prefix on every turn after the first, "
-                    "so PRESERVE_MIXED_HISTORY cannot hold for it. Refused here on "
-                    "turn 1, which would otherwise render fine, because a "
-                    "conversation does not change adapter technology mid-dialogue: "
-                    "a LoRA turn 1 is a LoRA turn 2, and that turn fails. LoRA "
-                    "adapters use KVHistoryPolicy.RE_PREFILL; "
-                    "PRESERVE_MIXED_HISTORY is for aLoRA adapters, whose control "
-                    "token lands in the turn being generated."
-                )
+        idxs = [i for i in (rendered.find(t) for t in self._control_texts()) if i >= 0]
+        return min(idxs, default=-1)
+
+    def _appendable(self, full_text, prev_text):
+        """True when the new turn can be appended as a delta rather than re-rendered.
+
+        The delta is ``full_text[len(prev_text):]``. It carries this turn's
+        control token only when that token sits at or after ``len(prev_text)`` --
+        i.e. in the region the new turn added. A LoRA control token at index 0
+        never satisfies this, so a LoRA turn is not appendable and full-renders.
+        A turn with no adapter (no control token) is appendable whenever the
+        render is append-only.
+        """
+        if not full_text.startswith(prev_text):
+            return False
+        idx = self._control_char_index(full_text)
+        return idx == -1 or idx >= len(prev_text)
 
     def _reject_template_kwargs_drift(self, template_kwargs):
         """Raise when this turn's template kwargs differ from the sent ones.
@@ -595,56 +613,22 @@ class Conversation:
             f"KVHistoryPolicy.RE_PREFILL for this conversation."
         )
 
-    def _explain_no_prefix(self, prev, full, adapter):
-        """Raise for a missing prefix relation, naming the real cause.
+    def _explain_no_prefix(self):
+        """Raise for a template that is not append-only for a growing message list.
 
-        The usual cause is NOT a defective template -- it is *where this turn's
-        control token landed*. The delta is ``full[len(prev):]``, so the trick
-        holds exactly when that token sits at or after ``len(prev)``, i.e. inside
-        the region the new turn added. Placements that break it:
-
-          * a LoRA-technology adapter, whose token goes to index 0;
-          * an aLoRA adapter whose invocation text appears in an EARLIER user
-            message, so Pass 1 targets that message and rewrites the history.
-
-        Both leave the template itself append-only -- a no-adapter render still
-        yields a clean prefix -- which is why "the template is not append-only"
-        was the wrong diagnosis to report.
-
-        Granite 4.2 with ``truncate_history_thinking`` on is a template that
-        genuinely is not append-only, and it lands on the generic message below.
-        The remedy for it is that flag, not RE_PREFILL; see
+        Reached only when the prefix relation fails for a turn that WAS
+        appendable by control-token placement (``_appendable`` already routed a
+        LoRA turn, whose token sits at index 0, to a full render upstream). What
+        remains is a template whose earlier turns re-render when a new one is
+        added -- Granite 4.2 with ``truncate_history_thinking`` on is the real
+        case; the remedy is that flag, not a policy change. See
         ``docs/SUPPORTED_MODELS.md``.
         """
-        # A fresh render carries at most one control token, so the earliest
-        # occurrence of any of them is this turn's.
-        idx = min(
-            (i for i in (full.find(t) for t in self._control_texts()) if i >= 0),
-            default=-1,
-        )
-        if idx == 0:
-            # Same condition _reject_lora_placement names on turn 1; reached here
-            # only if a conversation was built before that check existed.
-            self._reject_lora_placement(full, adapter)
-        if 0 <= idx < len(prev):
-            raise RuntimeError(
-                f"cannot derive a delta for adapter {adapter!r}: its control token "
-                f"is placed at character {idx} of the rendered prompt, inside the "
-                f"{len(prev)} characters this conversation has already sent. "
-                "PRESERVE_MIXED_HISTORY appends the new turn to the ids already "
-                "sent, so this turn's control token has to land in the new turn's "
-                "region. It does when the adapter activates at the assistant "
-                "boundary, or when its invocation text appears in the NEWEST user "
-                "message. It does not for a LoRA-technology adapter (token at "
-                "index 0), nor for an aLoRA adapter whose invocation text appears "
-                "in an earlier user message. Use the aLoRA flavour of this "
-                "adapter, put its invocation text in the current turn, or use "
-                "KVHistoryPolicy.RE_PREFILL for this conversation."
-            )
         raise RuntimeError(
             "cannot derive a delta: this chat template is not append-only for a "
             "growing message list, so slicing the longer render would cut in the "
-            "wrong place. Use KVHistoryPolicy.RE_PREFILL with this checkpoint."
+            "wrong place. Use a template that is append-only, or enable "
+            "truncate_history_thinking. See docs/SUPPORTED_MODELS.md."
         )
 
     def _assert_join_boundary(self, delta):

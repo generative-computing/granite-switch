@@ -141,15 +141,23 @@ class TestDeltaConstruction:
 
 ASSISTANT_BOUNDARY = "<|start_of_role|>assistant<|end_of_role|>"
 
-# What PRESERVE requires is that THIS turn's control token land in the new turn's
-# region -- at or after len(prev). Four placements the composer can produce, and
-# only two satisfy it. A mixed LoRA+aLoRA checkpoint can hit all four, so all four
-# are covered.
+# What PRESERVE needs to APPEND is that THIS turn's control token land in the new
+# turn's region -- at or after len(prev). When it does not, PRESERVE does not
+# raise: it re-prefills (a full render, history's control tokens dropped for that
+# turn). ``should_work`` is now "appends and preserves" vs "falls back to a
+# re-prefill". A mixed LoRA+aLoRA checkpoint can hit all these placements.
 PLACEMENTS = [
-    # A LoRA-placed adapter (control token at index 0) is deliberately absent: it
-    # is now refused on turn 1, before any delta is attempted, so it cannot be
-    # expressed as a delta-placement outcome. Covered by
-    # tests/unit/test_conversation_lora_rule.py.
+    # A LoRA-placed adapter's control token is at index 0, inside the sent prefix,
+    # so turn 2 cannot append -- it re-prefills.
+    pytest.param(
+        [("ctx", "lora", None), ("req", "alora", ASSISTANT_BOUNDARY)],
+        "first turn",
+        "second turn",
+        "ctx",
+        "ctx",
+        False,
+        id="lora-token-at-index-0",
+    ),
     pytest.param(
         [("unc", "alora", "<certainty>"), ("req", "alora", ASSISTANT_BOUNDARY)],
         "first turn <certainty>",
@@ -181,12 +189,15 @@ PLACEMENTS = [
 
 
 class TestControlTokenPlacement:
-    """PRESERVE works iff this turn's control token lands in the new turn."""
+    """PRESERVE appends iff this turn's control token lands in the new turn.
+
+    When it does not, PRESERVE re-prefills for that turn instead of raising.
+    """
 
     @pytest.mark.parametrize(
         "adapters,turn1,turn2,adapter_a,adapter_b,should_work", PLACEMENTS
     )
-    def test_placement_decides_whether_preserve_is_possible(
+    def test_placement_decides_append_vs_reprefill(
         self, adapters, turn1, turn2, adapter_a, adapter_b, should_work
     ):
         tok = make_stub_tokenizer(adapters)
@@ -203,31 +214,25 @@ class TestControlTokenPlacement:
 
         if should_work:
             second = conv.build_prompt(adapter=adapter_b)
-            assert second[: len(first)] == first
+            assert second[: len(first)] == first, "an appendable turn preserves"
             assert sum(1 for t in second if t in set(control_ids)) == 2
+            assert conv.reprefills == 0
             return
 
-        # The failure must name the placement, not blame the template: the
-        # template IS append-only here, and a no-adapter render still yields a
-        # clean prefix. Reporting "not append-only" sent readers to the wrong file.
-        with pytest.raises(RuntimeError) as excinfo:
-            conv.build_prompt(adapter=adapter_b)
-        message = str(excinfo.value)
-        assert "control token" in message and "character" in message, (
-            f"expected the placement-specific diagnosis, got: {message}"
-        )
-        assert "not append-only" not in message, (
-            "the generic template diagnosis fired for a placement problem; that is "
-            "the misdiagnosis this test exists to prevent"
-        )
+        # The control token lands inside the already-sent prefix, so PRESERVE
+        # cannot append. It re-prefills instead of raising: a valid full render,
+        # counted, that no longer extends the preserved prefix.
+        second = conv.build_prompt(adapter=adapter_b)
+        assert second, "a re-prefill still produces a valid prompt"
+        assert conv.reprefills == 1, "the unappendable turn was re-prefilled"
 
-    def test_diagnostic_is_not_silently_inert(self):
-        """The placement message needs the tokenizer's control-token spellings.
+    def test_control_texts_recoverable_for_appendable_decision(self):
+        """`_appendable` needs the tokenizer's control-token spellings.
 
         ``_control_texts`` swallows exceptions, so a tokenizer without
-        ``convert_ids_to_tokens`` degrades to the generic message and every
-        assertion above would pass for the wrong reason -- which is exactly what
-        happened before the stub grew that method.
+        ``convert_ids_to_tokens`` would degrade `_control_char_index` to -1 and
+        call every turn appendable -- silently wrong. Assert the spellings are
+        recovered so the append decision is real.
         """
         tok = make_stub_tokenizer([("unc", "alora", "<certainty>")])
         conv = Conversation(
@@ -236,8 +241,8 @@ class TestControlTokenPlacement:
             config=StubConfig([tok.token_id("<|unc|>")]),
         )
         assert conv._control_texts() == ["<|unc|>"], (
-            "control-token spellings could not be recovered, so the placement "
-            "diagnostic is dead code"
+            "control-token spellings could not be recovered, so _appendable would "
+            "wrongly treat every turn as appendable"
         )
 
 
@@ -380,12 +385,6 @@ class TestTemplateKwargs:
 
 
 class TestGuards:
-    def test_preserve_rejects_a_single_switch_checkpoint(self, tok):
-        """SingleSwitch averages competing control tokens, so this must not run."""
-        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")], switch_type="single")
-        with pytest.raises(ValueError, match="switch_type='multi'"):
-            Conversation(tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=cfg)
-
     def test_preserve_requires_config(self, tok):
         """Omitting config disables both guards, so it must be refused.
 
@@ -401,9 +400,9 @@ class TestGuards:
         conv.user(Q1)
         assert conv.build_prompt(adapter=A_NAME)
 
-    def test_re_prefill_works_on_a_single_switch_checkpoint(self, tok):
-        """The twin: the guard must not over-reach and block the default policy."""
-        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")], switch_type="single")
+    def test_re_prefill_works_with_config(self, tok):
+        """The twin: the config guard must not over-reach and block the default policy."""
+        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")])
         Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=cfg)
 
 
