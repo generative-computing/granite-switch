@@ -197,6 +197,16 @@ class Conversation:
         # Per recorded answer: the control-token ids the model emitted in it.
         self._generated_control_tokens: list[list[int]] = []
 
+        # RE_PREFILL id reuse. _re_base_ids is the base-demoted history prefix
+        # already sent (control tokens dropped), carried verbatim from the ids we
+        # sent last turn; _re_base_text is the render it came from, for the delta
+        # subtraction. It lags one turn: a turn's base form is not sent until the
+        # next turn renders it clean. None means "no reusable baseline yet".
+        self._re_base_ids: list[int] | None = None
+        self._re_base_text: str | None = None
+        self._pending_re_base_ids: list[int] | None = None
+        self._pending_re_base_text: str | None = None
+
         self._control_ids = set(getattr(config, "adapter_token_ids", None) or [])
         self._control_text_cache: list[str] | None = None
 
@@ -293,7 +303,9 @@ class Conversation:
             **template_kwargs: forwarded to ``apply_chat_template`` (e.g.
                 ``documents=[...]`` for RAG adapters).
         """
-        if self.policy is KVHistoryPolicy.RE_PREFILL or not self._sent_ids:
+        if self.policy is KVHistoryPolicy.RE_PREFILL:
+            ids = self._build_reprefill(adapter, **template_kwargs)
+        elif not self._sent_ids:
             ids = self._render_full(adapter, **template_kwargs)
         else:
             prev = self._render(
@@ -349,6 +361,63 @@ class Conversation:
         self._pending_adapter = adapter
         self._pending_template_kwargs = dict(template_kwargs)
         return PromptTokenIds(ids, self.policy)
+
+    def _build_reprefill(self, adapter, **template_kwargs):
+        """RE_PREFILL: reuse base-demoted ids for history, text-render the tail.
+
+        ``base_hist`` is the completed history rendered with no adapter. Answers
+        are stored as text with control tokens stripped, so a no-adapter render is
+        base by construction -- no substitution needed. ``full`` is the same plus
+        the current turn, with this turn's adapter.
+
+        When this turn's control token lands in the delta, reuse the base prefix
+        already sent (``_re_base_ids``) and append; the deep prefix stays
+        byte-identical to the ids sent last turn, so the cache hits. When it does
+        not -- turn 1, a LoRA token at index 0, or a non-append-only template --
+        full-render and drop the reusable baseline. The just-demoted turn is
+        always freshly rendered here (its base ids never existed before): a
+        one-turn lag.
+        """
+        committed = self._messages[: self._sent_messages]
+        full = self._render(self._messages, gen=True, adapter=adapter, **template_kwargs)
+
+        if not committed:
+            # Turn 1: nothing sent yet, nothing to reuse. Full render; turn 2 will
+            # render this turn's base form itself.
+            self._pending_re_base_ids = None
+            self._pending_re_base_text = None
+            return self._encode(full)
+
+        base_hist = self._render(committed, gen=False, adapter=None, **template_kwargs)
+        if not self._appendable(full, base_hist):
+            # LoRA (control token at index 0) or a non-append-only template: full
+            # render. RE_PREFILL re-renders each turn anyway, so this is correct;
+            # only the id reuse is forgone.
+            self._pending_re_base_ids = None
+            self._pending_re_base_text = None
+            return self._encode(full)
+
+        current_text = full[len(base_hist) :]
+        self._assert_join_boundary(current_text)
+
+        if self._re_base_text is not None and base_hist.startswith(self._re_base_text):
+            base_delta = base_hist[len(self._re_base_text) :]
+            # The just-demoted turn joins the reused prefix here; the seam is a
+            # turn boundary (a role marker) and must be a special token, or a
+            # tokenizer merge across it would renumber the reused ids.
+            if base_delta:
+                self._assert_join_boundary(base_delta)
+            prefix_ids = self._re_base_ids + self._encode(base_delta)
+        else:
+            prefix_ids = self._encode(base_hist)
+
+        ids = prefix_ids + self._encode(current_text)
+        # Carry the prefix we actually sent (history minus the current turn's
+        # region) forward; the current region holds a control token, so it is not
+        # reusable until it is re-rendered to base next turn.
+        self._pending_re_base_ids = prefix_ids
+        self._pending_re_base_text = base_hist
+        return ids
 
     # ── transport helpers ─────────────────────────────────────────────────────
     def completion_payload(self, adapter=None, **extra):
@@ -407,6 +476,11 @@ class Conversation:
             tail = answer_ids if answer_ids is not None else self._encode(text)
             self._sent_ids = self._pending + list(tail) + self._encode(self._turn_end())
             self._sent_template_kwargs = dict(self._pending_template_kwargs)
+        elif self.policy is KVHistoryPolicy.RE_PREFILL:
+            # Commit the base baseline this turn established: the history prefix
+            # (minus the current turn's adaptered region) that the NEXT turn reuses.
+            self._re_base_ids = self._pending_re_base_ids
+            self._re_base_text = self._pending_re_base_text
 
         self._pending = None
         return text

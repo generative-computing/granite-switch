@@ -52,6 +52,82 @@ def _two_turns(tok, config, policy):
     return conv, p1, p2
 
 
+def _run_reprefill(tok, config, n_turns):
+    """RE_PREFILL over n_turns with adapter A each turn; the user message carries
+    the aLoRA invocation so this turn's control token lands in the new region.
+
+    Returns the conversation, the ids sent each turn, and the base-ids reused at
+    build time each turn (None where nothing was reusable yet).
+    """
+    conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+    sent, base_at_build = [], []
+    for i in range(n_turns):
+        conv.user(f"Turn {i}: is this answerable? <certainty>")
+        base = conv._re_base_ids
+        base_at_build.append(None if base is None else list(base))
+        ids = list(conv.build_prompt(adapter=A_NAME))
+        sent.append(ids)
+        conv.record_answer("Answer.", adapter=A_NAME)
+    return conv, sent, base_at_build
+
+
+class TestReprefillIdReuse:
+    """RE_PREFILL reuses base-demoted ids across turns (lag by one turn)."""
+
+    def test_output_equals_a_from_scratch_render(self, tok, config):
+        """Id reuse must send EXACTLY what rendering the transcript would.
+
+        This is the load-bearing invariant: reuse is a cache optimization, never
+        a change to what the model sees. A from-scratch RE_PREFILL render is the
+        reference.
+        """
+        conv, sent, _base = _run_reprefill(tok, config, 3)
+        scratch = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+        for i in range(3):
+            scratch.user(f"Turn {i}: is this answerable? <certainty>")
+            want = list(
+                scratch._encode(
+                    scratch._render(scratch._messages, gen=True, adapter=A_NAME)
+                )
+            )
+            assert sent[i] == want, f"turn {i} diverges from a from-scratch render"
+            scratch.build_prompt(adapter=A_NAME)
+            scratch.record_answer("Answer.", adapter=A_NAME)
+
+    def test_sent_ids_carry_no_history_control_tokens(self, tok, config):
+        """RE_PREFILL demotes history to base, so each send has at most this
+        turn's one control token -- never an earlier turn's."""
+        conv, sent, _base = _run_reprefill(tok, config, 4)
+        for i, ids in enumerate(sent):
+            n = sum(1 for t in ids if t in conv._control_ids)
+            assert n <= 1, f"turn {i} carries {n} control tokens; history leaked one"
+
+    def test_deep_prefix_is_byte_stable_turn_to_turn(self, tok, config):
+        """The reused base prefix equals ids actually sent the previous turn.
+
+        That equality is the whole point: the server's cached blocks for the
+        previous turn match this turn's prefix, so they are reused rather than
+        recomputed.
+        """
+        conv, sent, base_at_build = _run_reprefill(tok, config, 4)
+        for i in (2, 3):
+            base = base_at_build[i]
+            assert base, f"turn {i} should have had a reusable base prefix"
+            assert sent[i][: len(base)] == base, "reused base is this turn's prefix"
+            assert sent[i - 1][: len(base)] == base, (
+                "the reused base was byte-identically sent last turn, so the "
+                "cache hits"
+            )
+
+    def test_lag_is_one_turn(self, tok, config):
+        """Turn 1 has no reusable base (turn 0 was sent with its adapter); reuse
+        begins at turn 2."""
+        conv, sent, base_at_build = _run_reprefill(tok, config, 3)
+        assert base_at_build[0] is None
+        assert base_at_build[1] is None
+        assert base_at_build[2], "reuse begins once a turn's base form has been sent"
+
+
 class TestControlTokenSurvival:
     """Whether turn 1's control token is still in turn 2's prompt."""
 
