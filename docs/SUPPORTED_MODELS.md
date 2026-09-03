@@ -37,6 +37,11 @@ token-exchange substitute before the embedding lookup, so writing the shared
 matrix affects only the output side. See `initialize_control_token_output_rows`
 in `composer/compose_granite_switch.py`.
 
+Audio input (`--enable-audio`) is also supported on both formats — the `<|audio|>`
+marker injection is format-aware. The two templates need different treatment
+because ChatML has no content-part loop at all; see
+[AUDIO.md](AUDIO.md#openai-compatible-server--chat-api).
+
 #### Multi-turn KV policy on 4.2
 
 `KVHistoryPolicy.RE_PREFILL` works on both formats with no extra arguments.

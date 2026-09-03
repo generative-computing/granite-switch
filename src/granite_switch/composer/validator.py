@@ -15,6 +15,56 @@ from ..config import MULTI_SWITCH_TYPES
 from .arch import ArchDescriptor
 
 
+def validate_control_lut(model) -> None:
+    """Check the switch's control->substitute table matches the shipped config.
+
+    The table is a persistent buffer sized from ``config.vocab_size``, so a
+    checkpoint whose buffer length disagrees with its own ``config.json`` is
+    internally inconsistent. Loading one is not a graceful degradation:
+    ``from_pretrained`` discards the mismatched tensor and leaves the buffer as
+    uninitialised memory, which turns every token into a "control" token and
+    sends out-of-range ids into the embedding gather — surfacing as an opaque
+    CUDA ``srcIndex < srcSelectDimSize`` device-side assert far from the cause.
+
+    **Strict equality is right here and would be wrong earlier.**
+    :func:`~granite_switch.token_exchange.build_control_to_substitute_lut` sizes the
+    table ``max(vocab_size, max_ctrl_id + 1)``, and that ``max`` fires on every
+    compose: at switch construction the control ids have been appended past a
+    ``vocab_size`` still copied from the base checkpoint, so the table is
+    *legitimately* longer than the config for a while. ``resize_token_embeddings``
+    then grows ``vocab_size``, and
+    :func:`~granite_switch.token_exchange.rebuild_control_to_substitute_lut`
+    re-derives the table, which now lands at exactly ``vocab_size``. This check
+    runs after all of that, so by the time it sees the buffer the only remaining
+    explanation for a mismatch is a **stale** table — one built before the resize
+    and never rebuilt. Do not "reconcile" this with the builder's ``max`` by
+    loosening it; the two describe the same invariant at different times. See that
+    function's docstring for the full sequence.
+
+    Raises:
+        ValueError: if the table length differs from ``config.vocab_size``.
+    """
+    switch = getattr(getattr(model, "model", None), "switch", None)
+    lut = getattr(switch, "control_to_substitute_lut", None)
+    if lut is None:
+        return  # no token-exchange mapping on this model
+
+    expected = getattr(model.config, "vocab_size", None)
+    if expected is None or lut.numel() == expected:
+        return
+
+    raise ValueError(
+        f"control_to_substitute_lut has {lut.numel()} entries but "
+        f"config.vocab_size is {expected}. Saving this model would produce a "
+        f"checkpoint that cannot be loaded correctly. By this point the table is "
+        f"stale: it was sized before the vocabulary grew and never re-derived. "
+        f"Rebuild it with rebuild_control_to_substitute_lut(switch, model.config) "
+        f"after the last thing that changes the vocabulary — compose does this in "
+        f"refresh_switch_control_lut, so reaching this error means that step was "
+        f"skipped or ran too early."
+    )
+
+
 def validate_base_reset_switch_type(base_reset: bool, switch_type) -> None:
     """Reject ``--base-reset-token`` on a switch engine that cannot use it.
 

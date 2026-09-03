@@ -221,9 +221,7 @@ SLOTS_JACC = float(os.environ.get("MULTI_ADAPTER_SLOTS_JACC", "0.02"))
 SLOTS_COMPILED_MEAN_JSD = float(
     os.environ.get("MULTI_ADAPTER_SLOTS_COMPILED_MEAN_JSD", "0.01")
 )
-SLOTS_COMPILED_JACC = float(
-    os.environ.get("MULTI_ADAPTER_SLOTS_COMPILED_JACC", "0.15")
-)
+SLOTS_COMPILED_JACC = float(os.environ.get("MULTI_ADAPTER_SLOTS_COMPILED_JACC", "0.15"))
 #: ...and max JSD is dropped for the compiled arm rather than loosened, because it
 #: CANNOT discriminate here: the noise reaches 0.157874 at one position, which is
 #: larger than a whole adapter effect, so no ceiling separates the two. The

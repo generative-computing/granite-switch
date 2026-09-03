@@ -22,6 +22,11 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.attention.attention import Attention
 
+from granite_switch.token_exchange import (
+    apply_token_exchange,
+    build_control_to_substitute_lut,
+)
+
 
 class SingleSwitch(nn.Module):
     """Replicated one-hot attention-based switch for adapter selection.
@@ -97,18 +102,8 @@ class SingleSwitch(nn.Module):
         # decoder embeds them. The decoder is then oblivious — it just calls
         # get_input_embeddings(input_ids) and gets the right result by
         # construction.
-        if (
-            config is not None
-            and getattr(config, "adapter_token_ids", None) is not None
-            and getattr(config, "adapter_substitute_token_ids", None) is not None
-        ):
-            ctrl_ids = config.adapter_token_ids
-            sub_ids = config.adapter_substitute_token_ids
-            max_ctrl_id = max(ctrl_ids)
-            lut_size = max(getattr(config, "vocab_size", 0), max_ctrl_id + 1)
-            lut = torch.full((lut_size,), -1, dtype=torch.long)
-            for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
-                lut[ctrl_id] = sub_id
+        lut = build_control_to_substitute_lut(config)
+        if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut)
         else:
             self.control_to_substitute_lut = None
@@ -220,11 +215,8 @@ class SingleSwitch(nn.Module):
         # @support_torch_compile, which forbids `tensor.any()` branching.
         # `torch.where` runs every step; the cost is one indexed gather and
         # one elementwise select on the flat input.
-        if self.control_to_substitute_lut is not None:
-            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
-            is_control = sub_id_per_pos >= 0
-            modified_input_ids = torch.where(is_control, sub_id_per_pos, input_ids)
-        else:
-            modified_input_ids = input_ids
+        modified_input_ids = apply_token_exchange(
+            self.control_to_substitute_lut, input_ids
+        )
 
         return adapter_indices, modified_input_ids

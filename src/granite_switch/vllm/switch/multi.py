@@ -98,13 +98,13 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.attention import Attention
 
-from granite_switch.hf.switch._token_exchange import (
-    apply_token_exchange,
-    build_substitute_lut,
-)
 from granite_switch.hf.switch.codes import (
     KerdockDGCodeGenerator,
     recover_count_from_signal,
+)
+from granite_switch.token_exchange import (
+    apply_token_exchange,
+    build_control_to_substitute_lut,
 )
 
 # Large negative finite value for masking. NOT literal -inf because IEEE 754
@@ -312,7 +312,7 @@ class MultiSwitch(nn.Module):
         # non-persistent buffer is zeroed by checkpoint loading. This LUT uses -1
         # as the "not a control token" sentinel, so an all-zero LUT would rewrite
         # EVERY token id to 0 in apply_token_exchange.
-        lut = build_substitute_lut(hf_config) if hf_config is not None else None
+        lut = build_control_to_substitute_lut(hf_config)
         if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
         else:
