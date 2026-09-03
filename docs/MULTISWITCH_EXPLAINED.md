@@ -4,8 +4,8 @@ One reference for coarse-grained multi-adapter routing in Granite Switch, as the
 
 
 *Converted from HTML on branch `bugfix/multi-switch-default`. Engine and backend
-facts were read at `1c86ee9` on `feature/multiswitch-kv-policy`; the `switch_type`
-default and the `config.py` / `modeling_granite_switch.py` line references were
+facts were read at `1c86ee9` on `feature/multiswitch-kv-policy`; the SingleSwitch
+removal and the `config.py` / `modeling_granite_switch.py` references were
 re-verified against this branch. Other line references are carried over unchanged
 and have not been re-audited.*
 
@@ -22,45 +22,38 @@ and have not been re-audited.*
 9. [What is tested, and where](#9-what-is-tested-and-where)
 10. [Reproducing every number here](#10-reproducing-every-number-here)
 
-> **If you read only this box.** MultiSwitch replaces SingleSwitch's single-transition routing with a *coded memory*: two tiny attention heads turn "how many control tokens have I seen?" into an address, and read back the adapter written at that address. Routing is piecewise-constant, latest-wins, and a pure function of the token ids. The control token is then rewritten to a substitute id so the decoder never embeds it. One engine ships (`switch_type="multi"`, Kerdock/DG codes); two backends implement it; the only substantive behavioural difference between them is arithmetic precision, which caps a vLLM request at **188 retained control tokens**.
+> **If you read only this box.** MultiSwitch replaced the earlier SingleSwitch (now removed) and its single-transition routing with a *coded memory*: two tiny attention heads turn "how many control tokens have I seen?" into an address, and read back the adapter written at that address. Routing is piecewise-constant, latest-wins, and a pure function of the token ids. The control token is then rewritten to a substitute id so the decoder never embeds it. It is the only engine (Kerdock/DG codes); two backends implement it; the only substantive behavioural difference between them is arithmetic precision, which caps a vLLM request at **188 retained control tokens**.
 
 ## 1. What MultiSwitch is, and how it differs from SingleSwitch
 
-Both switches answer the same question -- *which adapter applies at each token position?* -- and both are selected by one config field:
+MultiSwitch is the only switch engine. It replaced **SingleSwitch** (now removed), whose single base->adapter transition could not represent a conversation that returns to base or switches adapters more than once. `create_switch` builds MultiSwitch directly -- there is no engine dispatch:
 
 ```python
 # src/granite_switch/hf/switch/__init__.py  (vllm/switch/__init__.py is the twin)
-switch_type = config.switch_type
-if switch_type == "multi":
-    return MultiSwitch(**common)
-return SingleSwitch(**common)
+def create_switch(config, layer_idx=0):
+    return MultiSwitch(num_adapters=config.num_adapters, config=config, ...)
 ```
 
-Note that `create_switch` has no default of its own to fall back on. Two different
-places decide `switch_type`, and they answer different questions:
+`switch_type` is no longer a config parameter. It survives only as a **rejection
+marker**: `GraniteSwitchConfig.from_dict` refuses a SingleSwitch checkpoint rather
+than mis-load it, and strips a stale `switch_type` key off a real MultiSwitch
+checkpoint. With adapters present, a checkpoint is SingleSwitch when it has an
+explicit `switch_type != "multi"`, or **no** `switch_type` and **no** `ms_code_m`
+key -- a legacy preview (`ibm-granite/granite-switch-4.1-3b-preview`,
+`barha/granite-switch-4.0-350m-demo`) composed before the coded engine existed.
+Such a checkpoint has one decoder layer too few (SingleSwitch's `num_cache_layers`
+was 1, MultiSwitch's is 2), so its weights cannot map -- it must be re-composed.
+Pinned by `tests/unit/test_single_switch_rejected.py` (`config.py:65-104`).
 
-| | decides | value |
-|---|---|---|
-| `config.py` parameter default (`DEFAULT_SWITCH_TYPE`) | what a **new** checkpoint becomes | `"multi"` |
-| `GraniteSwitchConfig.from_dict` | how a `config.json` with **no** `switch_type` key is read | `"single"` |
+For context, what SingleSwitch did and why it was replaced:
 
-Only a checkpoint composed before `c5e78c6` (2026-07-30, the commit that added the
-field) lacks the key -- which includes both published previews,
-`ibm-granite/granite-switch-4.1-3b-preview` and
-`barha/granite-switch-4.0-350m-demo`. Such a checkpoint has
-`num_hidden_layers = L + 1`, because `_switch_cache_layers("single") == 1`. Reading
-it as multi subtracts `MultiSwitch.num_cache_layers == 2` instead, so the model
-builds one decoder layer too few (41 -> 39 for the 3b preview) and routes through
-counting and memory heads that were never trained. Both failures are silent, which
-is why `tests/unit/test_switch_type_default.py` pins the seam.
-
-|  | SingleSwitch (`"single"`) | MultiSwitch (`"multi"`, **default**) |
+|  | SingleSwitch (removed) | MultiSwitch |
 |---|---|---|
 | Transitions per request | one: base -> adapter | arbitrarily many: base -> A -> B -> base -> ... |
 | Mechanism | +/-gain cumsum over one attention head | counting head + Kerdock/DG coded memory head |
-| Two control tokens in one sequence | averages them and mis-routes | the case it exists for; resolved latest-wins |
-| KV-cache slots consumed | `num_cache_layers == 1` | `num_cache_layers == 2` (counting + memory) |
-| Return to base mid-sequence | no mechanism (`vllm/switch/single.py:139-140`) | yes, with a base-reset control token (section 3) |
+| Two control tokens in one sequence | averaged them and mis-routed | the case it exists for; resolved latest-wins |
+| KV-cache slots consumed | 1 | 2 (counting + memory) |
+| Return to base mid-sequence | no mechanism | yes, with a base-reset control token (section 3) |
 
 ### The config surface
 
@@ -68,7 +61,6 @@ All of it is plain attributes on `GraniteSwitchConfig`, with defaults, read via 
 
 | field | default | what it sets | defined |
 |---|---|---|---|
-| `switch_type` | `"multi"` | selects this engine; validated against `("single","multi")` | `config.py:70,122-127` |
 | `ms_code_m` | `6` | Kerdock order. m=6 -> code dim N=64, capacity 2048 | `config.py:75,129` |
 | `ms_code_type` | `"kerdock"` | codebook family | `config.py:76,130` |
 | `ms_memory_gain` | `28.0` | scale on the memory head's keys; 16.0 is the smallest that still retrieves exactly at capacity, 8.0 does not | `config.py:77,131` |
@@ -76,7 +68,7 @@ All of it is plain attributes on `GraniteSwitchConfig`, with defaults, read via 
 | `adapter_token_ids` | -- | `num_adapters` ids, or `num_adapters + 1` with a leading base-reset slot | `config.py:134-158` |
 | `adapter_substitute_token_ids` | -- | what each control token is rewritten to; required once `num_adapters > 0` | `config.py:159-192` |
 
-### What the checkpoint carries that SingleSwitch's does not
+### What a MultiSwitch checkpoint carries
 
 Two registered buffers, both `persistent=True` deliberately:
 
@@ -89,7 +81,7 @@ The switch also owns two logical cache slots rather than one, and the decoder la
 
 ```python
 # src/granite_switch/hf/modeling_granite_switch.py:343-344
-layer_offset = self.switch.num_cache_layers      # 2 for MultiSwitch, 1 for SingleSwitch
+layer_offset = self.switch.num_cache_layers      # num_cache_layers == 2 (counting + memory)
 num_decoder_layers = config.num_hidden_layers - layer_offset
 ```
 
@@ -248,7 +240,7 @@ adapter_indices  [ 0,   1,  1,  0,  0,   2,  2]
 
 | layer | who does what |
 |---|---|
-| compose | `--base-reset-token` (multi only) prepends `<\|base_reset\|>`, giving `num_adapters + 1` control ids with the base slot first. Off by default. `compose_granite_switch.py:655-660`, `tokenizer_setup.py:178-209`, gated by `validate_base_reset_switch_type`. |
+| compose | `--base-reset-token` prepends `<\|base_reset\|>`, giving `num_adapters + 1` control ids with the base slot first. Off by default. `compose_granite_switch.py:655-660`, `tokenizer_setup.py:178-209`. |
 | chat template | never emits it. `configure_chat_template` only knows about adapters, and base-reset is not an adapter. |
 | `Conversation` | never emits it either (`conversation.py:62-67`). Under `PRESERVE_MIXED_HISTORY` an earlier adapter therefore carries forward into the new user turn rather than reverting to base. |
 | caller | places it, or the gap does not happen. |
@@ -379,9 +371,11 @@ full = render(messages WITH the new turn, adapter=...)
 
 if _appendable(full, prev):                            # control token lands in the delta
     delta = full[len(prev):]                           # append it to the reused ids
+elif template_is_append_only(prev):                    # only the placement is wrong
+    full_render()                                      #   (LoRA at index 0, or an earlier
+                                                       #   trigger) -> re-prefill, no error
 else:
-    full_render()                                      # LoRA (token at index 0), or
-                                                       # a non-append-only template -> raise
+    raise ...                                          # template rewrites history -> not servable
 ```
 
 Under RE_PREFILL the reused prefix is the history *demoted to base* (control tokens dropped); under PRESERVE it is the history *with control tokens kept*. Both reuse the exact ids already sent, so the prefix cache hits. RE_PREFILL's base form of a turn is only sent the turn after it, so its id reuse lags one turn.
