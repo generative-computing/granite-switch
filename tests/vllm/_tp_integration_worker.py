@@ -63,7 +63,6 @@ def cmd_build(args):
         adapter_token_ids=[adapter_token_id],
         adapter_substitute_token_ids=[1],
         muted_adapter_token_ids=[muted_token_id],
-        switch_type="single",
     )
 
     model.save_pretrained(output_dir)
@@ -87,11 +86,6 @@ def cmd_build_compose(args):
     ]
     for repo in args.adapter_repos:
         cmd.extend(["--adapters", repo])
-    # MultiSwitch owns 2 cache layers vs SingleSwitch's 1; the composer inflates
-    # num_hidden_layers from switch_type itself (compose_utils._switch_cache_layers),
-    # so passing the flag is all that is needed -- no geometry changes here.
-    if getattr(args, "switch_type", None):
-        cmd.extend(["--switch-type", args.switch_type])
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=1500)
     if result.stdout:
@@ -292,11 +286,6 @@ def main():
     p_compose.add_argument("--base-model", required=True)
     p_compose.add_argument("--output-dir", required=True)
     p_compose.add_argument("--adapter-repos", nargs="+", required=True)
-    p_compose.add_argument(
-        "--switch-type",
-        default=None,
-        help="'single' (default composer behaviour) or 'multi'",
-    )
 
     p_moe = sub.add_parser("build-granitemoe")
     p_moe.add_argument("--output-dir", required=True)

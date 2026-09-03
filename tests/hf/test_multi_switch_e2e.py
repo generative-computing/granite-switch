@@ -1,20 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """End-to-end MultiSwitch tests through a REAL composed GraniteSwitch model.
 
-Counterpart of ``tests/hf/test_single_switch_e2e.py`` for the native
-multi-transition engines. Where the single-switch E2E builds a synthetic-geometry
-model in-memory, this one composes an *actual* granite-4.1-3b checkpoint with the
-requested ``--switch-type`` and runs the full ``GraniteSwitchForCausalLM.forward``
-on multi-transition token sequences, asserting ``model.model._last_adapter_indices``
-matches the expected latest-wins routing.
+Composes an *actual* granite-4.1-3b checkpoint (MultiSwitch is the only engine)
+and runs the full ``GraniteSwitchForCausalLM.forward`` on multi-transition token
+sequences, asserting ``model.model._last_adapter_indices`` matches the expected
+latest-wins routing.
 
 This proves the full chain persists and rebuilds correctly:
 
-  compose (--switch-type T -> config.json)
-      -> from_pretrained -> create_switch(config.switch_type)
+  compose (-> config.json)
+      -> from_pretrained -> create_switch -> MultiSwitch
       -> model.forward -> _last_adapter_indices
-
-Parametrized over ``switch_type in {multi}`` (the coded-memory engine).
 
 Heavy: composes a ~3B checkpoint and loads it. Marked slow / requires_model /
 gpu, and skipped unless ``GRANITE_SWITCH_E2E_MODELS=1`` is set (composing
@@ -29,13 +25,7 @@ Compose command (mirrors the task runbook)::
       --adapters ibm-granite/granitelib-guardian-r1.0 \\
                  ibm-granite/granitelib-core-r1.0 \\
       --technology-filter lora \\
-      --switch-type <T> \\
       --output <dir>
-
-``--switch-type`` is wired into the composer CLI (see
-``compose_granite_switch.py``): it flows through
-``from_base_and_adapters(**kwargs) -> GraniteSwitchConfig`` and persists to
-``config.json``, so ``from_pretrained`` rebuilds the matching engine.
 """
 
 import os
@@ -88,15 +78,13 @@ def _compose(switch_type):
         *ADAPTER_REPOS,
         "--technology-filter",
         "lora",
-        "--switch-type",
-        switch_type,
         "--output",
         str(out_dir),
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(
-            f"compose failed for switch_type={switch_type}:\n"
+            f"compose failed for {switch_type}:\n"
             f"--- stdout ---\n{result.stdout[-3000:]}\n"
             f"--- stderr ---\n{result.stderr[-3000:]}"
         )
@@ -106,11 +94,10 @@ def _compose(switch_type):
 
 @pytest.fixture(scope="module", params=SWITCH_TYPES, ids=lambda t: t)
 def composed_model(request):
-    """Module-scoped composed GraniteSwitch model per switch_type.
+    """Module-scoped composed GraniteSwitch model.
 
-    Verifies the persisted config.switch_type matches, so the assertion below
-    is genuinely exercising the requested engine (not silently falling back to
-    'single').
+    Confirms ``from_pretrained`` rebuilds a real MultiSwitch engine (the only
+    engine) from the composed checkpoint.
     """
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM
@@ -119,13 +106,9 @@ def composed_model(request):
     out_dir = _compose(switch_type)
 
     config = GraniteSwitchConfig.from_pretrained(out_dir)
-    assert config.switch_type == switch_type, (
-        f"composed config.switch_type={config.switch_type!r} != {switch_type!r}; "
-        "the --switch-type composer arg did not persist"
-    )
 
     model = GraniteSwitchForCausalLM.from_pretrained(out_dir).eval()
-    # Confirm from_pretrained rebuilt the matching engine.
+    # Confirm from_pretrained rebuilt the coded-memory engine.
     from granite_switch.hf.switch import MultiSwitch
 
     assert isinstance(model.model.switch, MultiSwitch), (

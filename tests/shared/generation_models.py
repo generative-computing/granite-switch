@@ -48,8 +48,12 @@ ADAPTER_RANK = 8
 # num_hidden_layers that prepend the switch layer(s) to the base.
 
 
-def single_overrides(base_cfg):
-    """SingleSwitch overrides for the given base config (token exchange)."""
+def switch_overrides(base_cfg):
+    """MultiSwitch overrides for the given base config (token exchange).
+
+    The coded switch owns 2 cache slots (counting + memory), so 2 attention
+    layers are prepended and ``num_hidden_layers`` grows by 2.
+    """
     base_layers = base_cfg["layer_types"]
     return {
         "num_adapters": NUM_ADAPTERS,
@@ -57,13 +61,13 @@ def single_overrides(base_cfg):
         "adapter_token_ids": [250, 251],
         "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
-        "num_hidden_layers": len(base_layers) + 1,
-        "layer_types": ["attention", *base_layers],
+        "num_hidden_layers": len(base_layers) + 2,
+        "layer_types": ["attention", "attention", *base_layers],
     }
 
 
 # Backward compatibility alias
-basic_overrides = single_overrides
+basic_overrides = switch_overrides
 
 
 # ── Model builder ─────────────────────────────────────────────────

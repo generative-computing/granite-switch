@@ -131,7 +131,7 @@ class TestZeroAdapterNoHiding:
             **_eager_kwargs_if_needed(model_name),
         )
 
-        # SingleSwitch is bit-exact (no counting head, no position perturbation)
+        # Skinned: bit-exact -- the switch is inert with no control token
         torch.testing.assert_close(
             switch,
             upstream,

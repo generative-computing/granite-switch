@@ -4,13 +4,13 @@
 __version__ = "0.1.0"
 
 # Export main classes
-from granite_switch.config import GraniteSwitchConfig
+from granite_switch.config import SWITCH_CACHE_LAYERS, GraniteSwitchConfig
 
 # Export core components (for advanced use)
 from .core import SwitchedLoRALinear
 from .decoder import GraniteLoRAEmbeddedAttention, GraniteSwitchDecoderLayer
 from .granite_switch_model import GraniteSwitchForCausalLM, GraniteSwitchModel
-from .switch import SingleSwitch
+from .switch import MultiSwitch
 
 __all__ = [
     "GraniteLoRAEmbeddedAttention",
@@ -19,7 +19,7 @@ __all__ = [
     "GraniteSwitchDecoderLayer",
     "GraniteSwitchForCausalLM",
     "GraniteSwitchModel",
-    "SingleSwitch",
+    "MultiSwitch",
     # Core components (advanced)
     "SwitchedLoRALinear",
     "register",
@@ -68,11 +68,12 @@ def register():
                 cfg = self.hf_text_config
                 num_layers = super().get_num_hidden_layers()
                 if getattr(cfg, "num_adapters", 0) > 0:
-                    # GraniteSwitch configs include one SingleSwitch KV-cache
-                    # placeholder before the decoder layers.  vLLM discovers the
-                    # switch Attention module separately for KV allocation, but
-                    # PP layer slicing must only count physical decoder layers.
-                    return max(0, num_layers - 1)
+                    # GraniteSwitch configs include SWITCH_CACHE_LAYERS KV-cache
+                    # placeholders (MultiSwitch's counting + memory slots) before
+                    # the decoder layers. vLLM discovers those Attention modules
+                    # separately for KV allocation, but PP layer slicing must only
+                    # count physical decoder layers.
+                    return max(0, num_layers - SWITCH_CACHE_LAYERS)
                 return num_layers
 
             def get_head_size(self) -> int:

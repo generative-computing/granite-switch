@@ -41,7 +41,7 @@ sequence and never knows a control token existed. The LUT is built in
 
 ``num_cache_layers == 2``: the switch owns two logical cache slots (counting +
 memory) at ``layer_idx`` and ``layer_idx + 1``. The property returns 2 so the
-model glue can account for both (SingleSwitch owns 1).
+model glue can account for both.
 
 The cache params below are the LIVE ``generate()`` path, not legacy scaffolding.
 ``GraniteSwitchModel.forward`` creates a ``DynamicCache`` whenever ``use_cache``
@@ -129,9 +129,9 @@ class MultiSwitch(nn.Module):
             ``0..num_adapters``. Matches ``GraniteSwitchConfig.num_adapters``.
         config: Model configuration. Provides backbone head geometry, the
             token-exchange substitute ids, and the ``ms_*`` coded-engine params.
-        control_token_gain: Accepted for signature parity with SingleSwitch /
-            the modeling glue. The coded engine's key scaling is
-            ``ms_memory_gain``, so this argument is not used by the memory head.
+        control_token_gain: Accepted for signature parity with the modeling
+            glue. The coded engine's key scaling is ``ms_memory_gain``, so this
+            argument is not used by the memory head.
         switch_head_dim: Fallback head_dim (>= 32) for standalone/test mode
             when no backbone geometry is available on ``config``.
         layer_idx: Base cache slot index. Counting uses ``layer_idx``, memory
@@ -155,7 +155,7 @@ class MultiSwitch(nn.Module):
         self.memory_layer_idx = layer_idx + 1
 
         # ── Expert-id offset (two accepted adapter_token_ids layouts).
-        #   * num_adapters entries (SingleSwitch-style, no base-reset slot):
+        #   * num_adapters entries (no base-reset slot):
         #     adapter_token_ids[i] fires adapter i+1 -> expert_id = argmax + 1.
         #   * num_adapters + 1 entries (base-reset layout): adapter_token_ids[0]
         #     is the base-reset token (fires 0) and [1..] fire 1.. -> expert_id

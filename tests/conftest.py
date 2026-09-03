@@ -43,14 +43,14 @@ def pytest_configure(config):
 def tiny_config():
     """Minimal GraniteSwitchConfig for fast CPU tests.
 
-    2 layers (+1 for switch = 3 total), 2 adapters, rank 4.
-    hidden_size=64, 4 heads -> head_dim=16.
+    2 decoder layers (+2 for the MultiSwitch cache slots = 4 total), 2 adapters,
+    rank 4. hidden_size=64, 4 heads -> head_dim=16.
     """
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=3,  # 1 switch + 2 decoder
+        num_hidden_layers=4,  # 2 switch slots + 2 decoder
         num_attention_heads=4,
         num_key_value_heads=4,
         num_adapters=2,

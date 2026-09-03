@@ -178,7 +178,7 @@ class TestNoSwitch:
         )
 
 
-class TestSingleSwitch:
+class TestMultiSwitch:
     def test_generates_tokens(self, tmp_path):
         model_dir = save_switch_model(
             HYBRID_CFG,

@@ -74,8 +74,6 @@ def _compose_mixed():
         BASE_MODEL,
         *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
         # deliberately NO --technology-filter
-        "--switch-type",
-        "multi",
         "--output",
         str(out_dir),
     ]

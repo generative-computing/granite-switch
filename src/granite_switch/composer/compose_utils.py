@@ -7,6 +7,7 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 
 import torch
 
+from ..config import SWITCH_CACHE_LAYERS
 from .adapter_loader import (
     _extract_modules_from_weights,
     detect_lora_config,
@@ -17,30 +18,6 @@ from .adapter_loader import (
 from .arch import resolve_arch
 from .validator import validate_all_parameters, validate_cross_stream_population
 from .weight_transfer import transfer_adapter_weights, transfer_base_weights
-
-# Number of decoder-layer cache slots each switch engine reserves at the front
-# of the model. Must stay in sync with each switch's ``num_cache_layers``
-# @property (instance-only, so it cannot be read statically at config-build
-# time here, before the switch object exists):
-#   - "single" -> SingleSwitch.num_cache_layers      == 1  (hf/switch/single.py)
-#   - "multi"  -> MultiSwitch.num_cache_layers  == 2  (hf/switch/multi.py)
-_SWITCH_CACHE_LAYERS = {
-    "single": 1,
-    "multi": 2,
-}
-
-
-def _switch_cache_layers(switch_type: str) -> int:
-    """Map a ``switch_type`` to the number of decoder-layer cache slots it owns.
-
-    Mirrors each switch class's ``num_cache_layers`` property. The composer
-    inflates ``num_hidden_layers`` by this count so that, after the model
-    subtracts ``switch.num_cache_layers`` in ``modeling_granite_switch.py``
-    (``num_decoder_layers = num_hidden_layers - num_cache_layers``), all base
-    decoder layers are retained.
-    """
-    return _SWITCH_CACHE_LAYERS[switch_type]
-
 
 class GraniteSwitchComposer:
     """Composer for creating Granite Switch models from base + adapters."""
@@ -225,19 +202,17 @@ class GraniteSwitchComposer:
         if lt is not None:
             config_kwargs["layer_types"] = ["attention" for _ in lt]
 
-        # When adapters are present, reserve switch cache slot(s) at the front.
-        # The number depends on the switch engine: single owns 1 slot, multi
-        # (coded) owns 2 (counting + memory heads). Read switch_type from the
-        # incoming **kwargs (its source of truth) because config_kwargs.update(
-        # kwargs) happens later, so switch_type is not yet in config_kwargs here.
+        # When adapters are present, reserve the switch's cache slots at the
+        # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
+        # memory heads). The model subtracts the same count in
+        # modeling_granite_switch.py to recover the physical decoder layers.
         if num_total > 0:
-            n_switch_layers = _switch_cache_layers(kwargs.get("switch_type", "single"))
             config_kwargs["num_hidden_layers"] = (
-                config_kwargs["num_hidden_layers"] + n_switch_layers
+                config_kwargs["num_hidden_layers"] + SWITCH_CACHE_LAYERS
             )
             if config_kwargs.get("layer_types") is not None:
                 config_kwargs["layer_types"] = [
-                    *(["attention"] * n_switch_layers),
+                    *(["attention"] * SWITCH_CACHE_LAYERS),
                     *list(config_kwargs["layer_types"]),
                 ]
 
@@ -317,7 +292,7 @@ class GraniteSwitchComposer:
             f"  Total adapters: {num_total} ({num_external} external, {num_built_in} built-in)"
         )
         print(f"  Adapter token IDs: {adapter_token_ids}")
-        print("\nSingleSwitch uses attention for adapter selection.")
+        print("\nMultiSwitch uses coded memory for adapter selection.")
         print("All parameters are frozen. Use the special tokens to trigger adapters.")
 
         # Store mappings for report generation

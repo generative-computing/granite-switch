@@ -68,8 +68,6 @@ def _compose(out_dir):
         *ADAPTER_REPOS,
         "--technology-filter",
         "lora",
-        "--switch-type",
-        "multi",
         "--output",
         out_dir,
     ]

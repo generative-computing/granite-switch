@@ -2,7 +2,7 @@
 """Granite model with adapter switching for Hugging Face.
 
 This implementation extends the base Granite model with:
-1. SingleSwitch for computing per-token adapter indices
+1. MultiSwitch for computing per-token adapter indices
 2. LoRA-enhanced attention and MLP layers that apply different adapters per token
 3. Control token masking to prevent KV cache corruption
 """

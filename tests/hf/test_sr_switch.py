@@ -56,6 +56,8 @@ _BASE_KWARGS = dict(
     hidden_size=64,
     intermediate_size=128,
     num_hidden_layers=3,  # 1 switch + 2 decoder
+    # Pinned: sized for a 1-slot switch; the default switch_type is now "multi".
+    switch_type="single",
     num_attention_heads=4,
     num_key_value_heads=4,
     max_lora_rank=4,

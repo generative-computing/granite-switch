@@ -4,9 +4,9 @@
 Shared test cases live in ``tests/shared/multi_switch_cases.py``; the coded
 engine runs them here. This file provides:
 
-- A mock ``GraniteSwitchConfig``-shaped object with realistic backbone geometry
-  and ``switch_type`` set, so ``create_switch`` dispatches the coded engine.
-- An HF-specific attention-backend probe (mirrors ``test_single_switch.py``):
+- A mock ``GraniteSwitchConfig``-shaped object with realistic backbone geometry,
+  which ``create_switch`` builds into the coded engine.
+- An HF-specific attention-backend probe:
   the coded engine's *memory* head honors ``config._attn_implementation``, so we
   probe each non-eager backend once and parametrize over the working ones.
 - ``_run(seq, adapter_token_ids)`` that bridges the shared mixins to
@@ -54,9 +54,9 @@ EXPECTED_CACHE_LAYERS = {"multi": 2}
 
 
 class _MockSwitchConfig:
-    """Minimal GraniteSwitchConfig-shaped object for create_switch dispatch.
+    """Minimal GraniteSwitchConfig-shaped object for create_switch.
 
-    Carries the switch_type, realistic backbone geometry (GQA 4Q/2KV,
+    Carries realistic backbone geometry (GQA 4Q/2KV,
     projection_head_dim=64), the token-exchange substitute ids, and the ms_*
     coded-engine params. ``adapter_token_ids`` / ``adapter_substitute_token_ids``
     are set per-run because the layout (no-base-slot vs base-reset) changes the
@@ -229,8 +229,8 @@ class TestNumCacheLayers:
         switch = create_switch(cfg, layer_idx=0)
         assert switch.num_cache_layers == EXPECTED_CACHE_LAYERS[switch_type]
 
-    def test_dispatch_type(self):
-        """create_switch returns MultiSwitch for switch_type='multi'."""
+    def test_builds_multiswitch(self):
+        """create_switch builds a MultiSwitch (the only engine)."""
         coded = create_switch(_MockSwitchConfig("multi", ATOK_NO_BASE, [1, 2]))
         assert isinstance(coded, MultiSwitch)
 

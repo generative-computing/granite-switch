@@ -47,7 +47,7 @@ if _VLLM_AVAILABLE:
 
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
-    from granite_switch.vllm.switch.single import SingleSwitch
+    from granite_switch.vllm.switch.multi import MultiSwitch
 
 # ── Constants ────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ def _tiny_vllm_config():
         vocab_size=300,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=3,
+        num_hidden_layers=4,  # 2 MultiSwitch cache slots + 2 decoder
         num_attention_heads=2,
         num_key_value_heads=2,
         num_adapters=2,
@@ -379,9 +379,9 @@ class _VLLMModelTestBase:
 
 
 class TestModelInstantiation(_VLLMModelTestBase):
-    def test_single_switch_model_creates(self):
-        assert isinstance(self.model.model.switch, SingleSwitch)
-        num_decoder_layers = self.config.num_hidden_layers - 1
+    def test_switch_model_creates(self):
+        assert isinstance(self.model.model.switch, MultiSwitch)
+        num_decoder_layers = self.config.num_hidden_layers - 2
         assert len(self.model.model.layers) == num_decoder_layers
 
     def test_no_adapter_model_creates(self):

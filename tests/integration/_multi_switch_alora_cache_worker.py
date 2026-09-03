@@ -73,8 +73,6 @@ def _compose(out_dir):
         BASE_MODEL,
         "--adapters",
         *ADAPTER_REPOS,
-        "--switch-type",
-        "multi",
         "--output",
         out_dir,
     ]

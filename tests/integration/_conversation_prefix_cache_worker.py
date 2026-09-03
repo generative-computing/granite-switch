@@ -78,8 +78,6 @@ def cmd_build(args):
             *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
             "--technology-filter",
             "alora",
-            "--switch-type",
-            "multi",
             "--output",
             args.output_dir,
         ]

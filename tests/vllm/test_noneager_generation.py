@@ -48,9 +48,9 @@ class TestNoSwitch:
         _run_inner_class("TestNoSwitch")
 
 
-class TestSingleSwitch:
+class TestMultiSwitch:
     def test_suite(self):
-        _run_inner_class("TestSingleSwitch")
+        _run_inner_class("TestMultiSwitch")
 
 
 # The two MoE classes run as separate subprocesses on purpose -- each builds its

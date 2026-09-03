@@ -4,12 +4,12 @@
 from granite_switch.config import GraniteSwitchConfig
 
 from .modeling_granite_switch import GraniteSwitchForCausalLM
-from .switch.single import SingleSwitch
+from .switch.multi import MultiSwitch
 
 __all__ = [
     "GraniteSwitchConfig",
     "GraniteSwitchForCausalLM",
-    "SingleSwitch",
+    "MultiSwitch",
 ]
 
 # Register with transformers AutoConfig and AutoModel

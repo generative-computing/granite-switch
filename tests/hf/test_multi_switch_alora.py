@@ -69,8 +69,6 @@ def _compose_alora():
         *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
         "--technology-filter",
         "alora",
-        "--switch-type",
-        "multi",
         "--output",
         str(out_dir),
     ]
