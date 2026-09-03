@@ -29,27 +29,30 @@ and have not been re-audited.*
 Both switches answer the same question -- *which adapter applies at each token position?* -- and both are selected by one config field:
 
 ```python
-# src/granite_switch/hf/switch/__init__.py:30-41  (vllm/switch/__init__.py:30-41 is the twin)
-switch_type = getattr(config, "switch_type", "single")
+# src/granite_switch/hf/switch/__init__.py  (vllm/switch/__init__.py is the twin)
+switch_type = config.switch_type
 if switch_type == "multi":
     return MultiSwitch(**common)
 return SingleSwitch(**common)
 ```
 
-Note that the `getattr` fallback above is `"single"` while the config default is
-`"multi"`. They answer different questions and are deliberately not the same value:
+Note that `create_switch` has no default of its own to fall back on. Two different
+places decide `switch_type`, and they answer different questions:
 
 | | decides | value |
 |---|---|---|
-| `config.py:70`, `compose_utils.py:234` | what a **new** checkpoint becomes | `"multi"` |
-| `hf/switch/__init__.py:30`, `vllm/switch/__init__.py:30` | how a checkpoint whose `config.json` has **no** `switch_type` key is read | `"single"` |
+| `config.py` parameter default (`DEFAULT_SWITCH_TYPE`) | what a **new** checkpoint becomes | `"multi"` |
+| `GraniteSwitchConfig.from_dict` | how a `config.json` with **no** `switch_type` key is read | `"single"` |
 
 Only a checkpoint composed before `c5e78c6` (2026-07-30, the commit that added the
-field) lacks the key. Such a checkpoint has `num_hidden_layers = L + 1`, because
-`_switch_cache_layers("single") == 1`. Reading it as multi would subtract
-`MultiSwitch.num_cache_layers == 2` instead, silently dropping a decoder layer and
-loading weights into counting and memory heads that were never trained -- so the
-read-side fallback stays `"single"` on purpose.
+field) lacks the key -- which includes both published previews,
+`ibm-granite/granite-switch-4.1-3b-preview` and
+`barha/granite-switch-4.0-350m-demo`. Such a checkpoint has
+`num_hidden_layers = L + 1`, because `_switch_cache_layers("single") == 1`. Reading
+it as multi subtracts `MultiSwitch.num_cache_layers == 2` instead, so the model
+builds one decoder layer too few (41 -> 39 for the 3b preview) and routes through
+counting and memory heads that were never trained. Both failures are silent, which
+is why `tests/unit/test_switch_type_default.py` pins the seam.
 
 |  | SingleSwitch (`"single"`) | MultiSwitch (`"multi"`, **default**) |
 |---|---|---|
@@ -360,24 +363,28 @@ measured on the real Granite template: 59 shared chars of turn 1's 140
 
 |  | `RE_PREFILL` (default) | `PRESERVE_MIXED_HISTORY` |
 |---|---|---|
-| How turn 2 is built | re-render the whole conversation from `messages` | the ids already sent, plus this turn's delta |
-| Earlier control tokens | dropped | kept |
+| How turn 2 is built | reuse the base-demoted ids already sent, plus this turn's delta | the ids already sent, plus this turn's delta |
+| Earlier control tokens | dropped (history reads as base) | kept |
 | History reads as | base, and is recomputed from the first adapter turn on | the adapter that produced it |
-| Transport | anything, including `/v1/chat/completions` | token ids only -- `/v1/completions` with `prompt=[ids]`, or `model.generate(input_ids=...)` |
-| Requires | -- | `switch_type="multi"` and **aLoRA adapters only**, enforced |
-| Measured turn-2 reuse | 64 of 98 prompt positions from cache | **80 of 99** |
+| Transport | token ids only -- `/v1/completions` with `prompt=[ids]`, or `model.generate(input_ids=...)` | same |
+| Requires | -- | -- (no technology enforcement; see below) |
+| Prefix-cache reuse | deep history reused as ids (lags one turn); a LoRA/earlier-trigger turn re-prefills | more -- every turn's control token is kept, so no turn re-prefills |
 
-The delta is derived, never hardcoded -- the module renders the conversation with and without the new turn and subtracts, so it inherits any future template change for free:
+The delta is derived, never hardcoded -- the module renders the conversation with and without the new turn and subtracts, so it inherits any future template change for free. Whether the new turn can be appended is decided by *where its control token lands*; when it cannot, the turn falls back to a full render instead of raising:
 
 ```python
-# src/granite_switch/conversation.py:409-443
+# src/granite_switch/conversation.py
 prev = render(messages WITHOUT the new turn)          # what has already been sent
 full = render(messages WITH the new turn, adapter=...)
 
-if not full.startswith(prev):                          # <-- the ONE precondition
-    raise ...
-delta = full[len(prev):]
+if _appendable(full, prev):                            # control token lands in the delta
+    delta = full[len(prev):]                           # append it to the reused ids
+else:
+    full_render()                                      # LoRA (token at index 0), or
+                                                       # a non-append-only template -> raise
 ```
+
+Under RE_PREFILL the reused prefix is the history *demoted to base* (control tokens dropped); under PRESERVE it is the history *with control tokens kept*. Both reuse the exact ids already sent, so the prefix cache hits. RE_PREFILL's base form of a turn is only sent the turn after it, so its id reuse lags one turn.
 
 ### The API surface
 
@@ -398,17 +405,20 @@ conv.record_answer(model_ids, adapter="unc") # 3. commit what the model produced
 | `user(text)` / `system(text)` | appends a message | `messages` only |
 | `build_prompt(adapter=...)` | returns the ids to send | no -- a discarded prompt (a judge or guardian call) leaves the conversation untouched |
 | `record_answer(ids_or_text, adapter=...)` | commits the answer and turn-end tokens | yes -- pass the model's *ids*; re-encoding detokenized text does not always reproduce them |
-| `completion_payload(...)` | a ready `/v1/completions` body with `prompt=[ids]` | same as `build_prompt` |
-| `chat_payload(...)` | a `/v1/chat/completions` body -- `RE_PREFILL` only; **raises** under PRESERVE rather than silently degrading it | same as `build_prompt` |
+| `completion_payload(...)` | a ready `/v1/completions` body with `prompt=[ids]` -- the only transport | same as `build_prompt` |
 | `generated_control_tokens` | `[]` = checked, none. `[ids]` = the model emitted these. `None` = not checkable, the answer was recorded as text | read-only |
 
-`build_prompt` returns a `PromptTokenIds` -- a `list[int]` subclass carrying one fact a bare list cannot: `requires_token_ids`, true under PRESERVE. Re-rendering those ids server-side reproduces a different prefix and silently degrades the request to `RE_PREFILL`, with no error and no symptom beyond a fallen cache-hit rate (`conversation.py:109-130`).
+There is no `chat_payload`: the `/v1/chat/completions` endpoint re-renders and re-tokenizes server-side, which cannot carry the ids both policies now reuse as a prefix. (The endpoint itself is unaffected; a caller who wants it just does not route through `Conversation`.)
 
-### Two refusals, and why they are refusals
+`build_prompt` returns a `PromptTokenIds` -- a `list[int]` subclass carrying one fact a bare list cannot: `requires_token_ids`, now **always true**. Both policies reuse the ids already sent as a prefix, so re-rendering them server-side reproduces a different prefix and silently degrades cache reuse, with no error and no symptom beyond a fallen cache-hit rate.
 
-**LoRA under PRESERVE, on turn 1.** A LoRA adapter's control token is emitted at sequence position 0, which is inside the already-sent prefix on every turn after the first -- so the policy can never hold for it. It is refused on turn *1*, where it would render fine, because a conversation does not change adapter technology mid-dialogue: a LoRA turn 1 is a LoRA turn 2, and turn 2 fails. Succeeding once and then failing forever would leave the caller holding a transcript that cannot continue under the policy it chose (`conversation.py:39-55`, `:463`).
+### When a turn cannot be appended, it falls back to a full render
 
-**The aLoRA trap: the trigger must be in *this* turn.** Not covered by the position-0 signature, and it has no signature to test for, so it is diagnosed on the turn it happens -- naming the adapter and both character positions (`:529`):
+Two placements put this turn's control token *inside* the already-sent prefix, so no delta can carry it. Neither raises: the turn falls back to a full render -- a re-prefill under PRESERVE, which drops the preserved control tokens for that turn and recomputes history as base. Nothing detects the adapter technology; the append test (`_appendable`) simply fails on control-token position.
+
+**LoRA, any turn.** A LoRA adapter's control token is emitted at sequence position 0, inside the already-sent prefix on every turn after the first. It can never be a delta, so a LoRA turn always full-renders (`conversation.py`, `_appendable`).
+
+**The aLoRA trap: the trigger is in an EARLIER turn.** When the invocation text sits in a past user message, the control token is inserted into the history region, not the new turn:
 
 ```
 char                                45  46
@@ -420,10 +430,10 @@ new render   : ...<|end_of_role|>Rate it. <|u n c|> c e r t a i n t y > <|end_of
 both renders start with "<" (the token the control token replaces), so they agree to
 char 45 and disagree from char 46 -- of 134. The new render is not the old render with
 something appended; it is the old render with a token stuffed into the middle. There
-is no tail to slice off.
+is no tail to slice off, so the turn re-prefills.
 ```
 
-Forcing it through would be wrong anyway: turn 1's text changed, so turn 1's ids changed, so turn 1's cached KV no longer matches. Preserving those blocks is the only thing the policy buys.
+**The one case that still raises: a template that is not append-only even with NO adapter.** Granite 4.2 with thinking-truncation on rewrites history when a turn is added, so even a no-adapter render fails the prefix relation. That is the discriminator between a placement fallback (re-prefill) and a template that cannot be served: the latter raises, naming the flag to set, because a silent re-prefill would hide it (`conversation.py`, `_explain_no_prefix`).
 
 ### The measured matrix
 
@@ -431,22 +441,22 @@ Turn 1 is always aLoRA `unc` with `"Rate it. <certainty>"`, answered. Only turn 
 
 | turn-2 adapter | turn-2 text | result under PRESERVE |
 |---|---|---|
-| `unc` -- aLoRA, user-message trigger | `"As JSON, how sure? <certainty>"` | OK -- 41 ids, control tokens at 8 and 33 |
-| `unc` -- aLoRA, user-message trigger | `"As JSON."` | RAISES -- token placed at char 45, inside the sent prefix |
-| `req` -- aLoRA, assistant boundary | `"As JSON."` | OK -- 32 ids, control tokens at 8 and 29 |
-| `ctx` -- LoRA | `"As JSON."` | RAISES -- LoRA rule; token would be at position 0 |
-| `None` -- base turn | `"As JSON."` | OK -- 32 ids, control token at 8 only (turn 1's, preserved) |
+| `unc` -- aLoRA, trigger in *this* turn | `"As JSON, how sure? <certainty>"` | appends -- 41 ids, control tokens at 8 and 33 |
+| `unc` -- aLoRA, trigger in an *earlier* turn | `"As JSON."` | re-prefills -- token lands at 8 (history region); 32 ids, `reprefills`=1 |
+| `req` -- aLoRA, assistant boundary | `"As JSON."` | appends -- 32 ids, control tokens at 8 and 29 |
+| `ctx` -- LoRA | `"As JSON."` | re-prefills -- token at position 0; 32 ids, `reprefills`=1 |
+| `None` -- base turn | `"As JSON."` | appends -- 32 ids, control token at 8 only (turn 1's, preserved) |
 
 ### Cheat sheet
 
 | I have... | policy | what to do |
 |---|---|---|
-| a LoRA adapter, any turn | `RE_PREFILL` | nothing special; PRESERVE refuses it on turn 1 |
+| a LoRA adapter, any turn | either | nothing special; under PRESERVE that turn re-prefills instead of preserving (token at position 0) |
 | an aLoRA whose trigger is the assistant role marker | either | nothing special -- placement is always in the new turn |
 | an aLoRA with a user-message trigger, turn 1 | either | nothing special -- turn 1 has no prefix to protect |
-| an aLoRA with a user-message trigger, turn >=2 | `PRESERVE` | put the trigger text in *this* turn's user message |
+| an aLoRA with a user-message trigger, turn >=2 | `PRESERVE` | put the trigger text in *this* turn's user message, or the turn re-prefills |
 | ...and I cannot edit the user's message | `RE_PREFILL` | accept recomputing history; that policy re-renders anyway |
-| mixed adapters across turns | `PRESERVE` | fine, as long as every adapter is aLoRA -- that is what the policy is for |
+| mixed adapters across turns | `PRESERVE` | fine -- an unappendable turn (LoRA, or an earlier trigger) re-prefills on its own |
 
 ### The HF equivalent
 
@@ -600,12 +610,12 @@ Test counts are `grep -c '^\s*def test_'` over the tree. Two files shrank in the
 | file | tests | what it pins |
 |---|---|---|
 | **unit -- CPU, fast** |  |  |
-| `tests/unit/test_counting_ceiling.py` | 5 | the 188 bound as arithmetic, per dtype |
-| `tests/unit/test_conversation_policy.py` | 26 | the placement matrix and both policies |
-| `tests/unit/test_conversation_span_attribution.py` | 16 | which adapter owns which span |
-| `tests/unit/test_conversation_transport.py` | 7 | `chat_payload` refusing under PRESERVE |
-| `tests/unit/test_conversation_generated_control_tokens.py` | 6 | model-emitted control tokens; the three-state report |
-| `tests/unit/test_conversation_lora_rule.py` | 5 | the turn-1 LoRA refusal |
+| `tests/unit/test_counting_ceiling.py` | 8 | the 188 bound as arithmetic, per dtype; RE_PREFILL never accumulates |
+| `tests/unit/test_conversation_policy.py` | 37 | the placement matrix (append vs re-prefill) and RE_PREFILL id reuse |
+| `tests/unit/test_conversation_span_attribution.py` | 19 | which adapter owns which span |
+| `tests/unit/test_conversation_transport.py` | 9 | ids-only transport; `chat_payload` removed |
+| `tests/unit/test_conversation_generated_control_tokens.py` | 9 | model-emitted control tokens; the three-state report |
+| `tests/unit/test_conversation_lora_rule.py` | 8 | a LoRA turn falls back to a full render |
 | **HF backend -- CPU** |  |  |
 | `tests/hf/test_multi_switch.py` | 12 | the engine across attention backends; `TestReturnToBaseCoded` |
 | `tests/hf/test_multi_switch_alora.py` | 9 | two aLoRA adapters in *one* sequence |
