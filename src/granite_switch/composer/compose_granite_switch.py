@@ -70,14 +70,21 @@ from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
     ANCHOR_MODE_SR,
+    add_audio_token,
     add_control_tokens,
     build_substitute_token_ids,
+    configure_audio_chat_template,
     configure_chat_template,
     find_reserved_never_emitted_token_id,
     load_activation_anchor,
 )
-from granite_switch.composer.validator import validate_base_reset_switch_type
+from granite_switch.composer.validator import (
+    validate_base_reset_switch_type,
+    validate_control_lut,
+)
 from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
+from granite_switch.config import ASR_DTYPES
+from granite_switch.token_exchange import rebuild_control_to_substitute_lut
 
 # ---------------------------------------------------------------------------
 # Utility helpers (kept local — not worth a separate module)
@@ -187,7 +194,7 @@ def _probe_lora_substitute_token_id(tokenizer) -> int:
     return sub_id
 
 
-def initialize_control_token_output_rows(model, adapter_token_ids, reserved_token_id):
+def initialize_control_token_output_rows(model, token_ids, reserved_token_id):
     """Point every control token's output row at a reserved never-emitted row.
 
     ``resize_token_embeddings`` appends a row per control token, and since
@@ -217,10 +224,12 @@ def initialize_control_token_output_rows(model, adapter_token_ids, reserved_toke
     (4.2), even though the write then lands in the matrix shared with the input
     embedding. That is safe because a control token's input row is never read:
     the switch rewrites each control-token id to its substitute id *before* the
-    embedding lookup, in both backends (``hf/switch/single.py`` returns
-    ``modified_input_ids``, which ``modeling_granite_switch.py`` embeds;
-    ``vllm/switch/single.py::apply_token_exchange`` covers the vLLM text and
-    multimodal paths).
+    embedding lookup, in both backends. Every path goes through the shared
+    :func:`granite_switch.token_exchange.apply_token_exchange`: the HF and vLLM
+    switches call it in ``forward`` and return ``modified_input_ids`` for the text
+    path, and the vLLM model's ``embed_input_ids`` calls it against the switch's
+    buffer for the multimodal path (where vLLM precomputes ``inputs_embeds``
+    before ``forward`` runs).
     ``tests/vllm/_model_forward_tests.py::TestKVVisibility`` pins this on the
     vLLM side by perturbing a control token's embedding row and asserting the
     logits after it are unchanged, and
@@ -228,24 +237,85 @@ def initialize_control_token_output_rows(model, adapter_token_ids, reserved_toke
     for the HF backend. Being tied is therefore not a constraint here — the shared row
     is output-only in practice, which is what makes the 4.1 fix possible at all.
 
+    The ``<|audio|>`` marker goes through here too, for the same reason and with
+    one extra consequence. The marker has no token-exchange substitute to copy
+    from — it stands for a variable-length transcript, not for one token — so a
+    reserved row is the only sensible source. And an emitted marker is worse than
+    an emitted control token: if the reply is fed back on a later turn, the
+    processor's ``_validate_marker_count`` rejects the whole request, because
+    markers no longer match audio items. The tied-path argument above holds for it
+    as well: the marker is replaced by the transcript's token ids before the
+    decoder runs, and a marker with no matching audio item is rejected up front,
+    so its input row is never read either.
+
     Args:
         model: A ``GraniteSwitchForCausalLM`` after ``resize_token_embeddings``.
-        adapter_token_ids: Control-token ids — one per adapter, plus the
+        token_ids: Every newly added, never-trained id whose output row needs
+            repointing. Control tokens — one per adapter, plus the
             ``<|base_reset|>`` slot at index 0 when MultiSwitch was composed with
-            ``--base-reset-token``. The base-reset token is newly added and never
-            trained just like the rest, so it needs the same fixup and gets it by
-            being in this list.
+            ``--base-reset-token`` — and the ``<|audio|>`` marker when audio is
+            enabled. The base-reset token is newly added and never trained just
+            like the rest, so it needs the same fixup and gets it by being in this
+            list.
         reserved_token_id: Token id of the reserved row to copy from.
     """
     output_weight = model.get_output_embeddings().weight
     with torch.no_grad():
-        for control_id in adapter_token_ids:
-            output_weight[control_id].copy_(output_weight[reserved_token_id])
+        for token_id in token_ids:
+            output_weight[token_id].copy_(output_weight[reserved_token_id])
+    # Read the norm back off a row that was WRITTEN, not the source row: the two
+    # are equal by construction, so reporting the source verifies nothing.
+    written_norm = output_weight[token_ids[0]].norm() if token_ids else float("nan")
     print(
-        f"  Initialized {len(adapter_token_ids)} control-token output row(s) "
+        f"  Initialized {len(token_ids)} never-trained output row(s) "
         f"from reserved token id {reserved_token_id} "
-        f"(row norm {output_weight[reserved_token_id].norm():.4f})"
+        f"(row norm {written_norm:.4f})"
     )
+
+
+def refresh_switch_control_lut(model) -> bool:
+    """Re-derive the switch's control->substitute table to match the shipped config.
+
+    The switch sized its table from the pre-resize ``config.vocab_size`` (copied
+    from the base model), so anything that grows the vocabulary past the last
+    control id leaves it short of the config this checkpoint will ship with.
+
+    In practice that means the audio marker. The table is sized
+    ``max(base_vocab_size, max_ctrl_id + 1)`` and control ids are appended, so
+    after N control tokens it is exactly ``len(tokenizer)`` and agrees already.
+    ``<|audio|>`` adds one more token that is NOT a control token, pushing
+    ``len(tokenizer)`` one past the last control id — so a stale table is
+    specific to ``--enable-audio`` rather than universal.
+
+    Extracted from ``build()`` so the rebuild can be tested over every switch
+    engine without composing a real checkpoint. It used to be an inline
+    ``switch.rebuild_control_to_substitute_lut(...)`` method call, which existed
+    only on ``SingleSwitch``, so ``--switch-type multi --enable-audio`` raised
+    ``AttributeError`` here. Every real multi-compose test is gated behind
+    ``GRANITE_SWITCH_E2E_MODELS=1`` (unset in CI) and none of them enables audio,
+    so nothing caught it.
+
+    Args:
+        model: Composed model, after ``resize_token_embeddings``.
+
+    Returns:
+        True if the table was rebuilt, False if it already agreed or there is
+        no switch / no token-exchange mapping.
+    """
+    switch = getattr(getattr(model, "model", None), "switch", None)
+    if switch is None:
+        return False
+    lut = getattr(switch, "control_to_substitute_lut", None)
+    if lut is None or lut.numel() == model.config.vocab_size:
+        return False
+
+    old_lut_size = lut.numel()
+    rebuild_control_to_substitute_lut(switch, model.config)
+    print(
+        "Switch control LUT rebuilt: "
+        f"{old_lut_size} -> {switch.control_to_substitute_lut.numel()}"
+    )
+    return True
 
 
 def _get_directory_size(directory):
@@ -756,6 +826,92 @@ Examples:
             "adapter's io.yaml is missing."
         ),
     )
+    parser.add_argument(
+        "--enable-audio",
+        action="store_true",
+        default=False,
+        help="Enable the audio cascade: add the <|audio|> marker token and set "
+        "asr_enabled in the config so the vLLM backend transcribes audio. This is "
+        "the only flag that switches audio on — the --asr-* options configure the "
+        "cascade and are ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-model",
+        type=str,
+        default=None,
+        help="HF id of the speech-to-text model the audio preprocessor loads. "
+        "Requires --enable-audio; ignored without it. Defaults to a small built-in model when unset.",
+    )
+    parser.add_argument(
+        "--asr-device",
+        type=str,
+        default="cpu",
+        help="Device the ASR model runs on (default: cpu). Use e.g. cuda:0 to "
+        "run transcription on GPU (watch vLLM's KV-cache memory budget).",
+    )
+    parser.add_argument(
+        "--asr-dtype",
+        type=str,
+        default=None,
+        choices=ASR_DTYPES,
+        help="Precision the ASR weights load in. Default derives it from "
+        "--asr-device (float16 on CUDA, float32 on CPU); set float32 for an "
+        "encoder that cannot run in half precision (e.g. one with BatchNorm). "
+        "Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-pipeline-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of extra kwargs merged into the transformers ASR "
+        "pipeline() construction, e.g. '{\"chunk_length_s\": 15}'. Baked "
+        "into the checkpoint config. Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-generate-kwargs",
+        type=json.loads,
+        default=None,
+        help="JSON object of default decode kwargs applied on every "
+        'transcription, e.g. \'{"language": "de", "task": '
+        '"transcribe"}\' for multilingual Whisper. Per-request '
+        "mm_processor_kwargs override these. Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-max-audio-clips",
+        type=int,
+        default=None,
+        help="Max audio clips accepted per request (default 32). Implies "
+        "--enable-audio.",
+    )
+    parser.add_argument(
+        "--asr-self-chunks",
+        dest="asr_self_chunks",
+        action="store_true",
+        default=None,
+        help="Backend chunks long audio itself (Whisper default). Mutually "
+        "exclusive with --asr-no-self-chunks.",
+    )
+    parser.add_argument(
+        "--asr-no-self-chunks",
+        dest="asr_self_chunks",
+        action="store_false",
+        help="Route long audio through the encoder-agnostic split/merge chunker "
+        "(for backends with a fixed input window). Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-chunk-length-s",
+        type=float,
+        default=None,
+        help="Chunker window length in seconds (default 30.0). Only used when "
+        "the backend does not self-chunk. Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-chunk-overlap-s",
+        type=float,
+        default=None,
+        help="Chunker window overlap in seconds (default 5.0). Only used when "
+        "the backend does not self-chunk. Requires --enable-audio; ignored without it.",
+    )
     return parser
 
 
@@ -985,10 +1141,35 @@ def build():
     # so probing here rather than after configure_chat_template is equivalent.
     (
         adapter_token_ids,
-        _special_tokens,
+        # Not unused on this branch: add_audio_token re-passes these so the
+        # marker call does not evict them from additional_special_tokens.
+        special_tokens,
         adapter_substitute_token_ids,
     ) = build_control_token_lists(
         tokenizer, all_discovered, args.switch_type, args.base_reset_token
+    )
+
+    # Audio cascade: add the <|audio|> marker token before the embedding resize.
+    #
+    # --enable-audio is the ONLY thing that turns audio on. The other --asr-*
+    # flags configure the cascade; they never enable it. Setting one without
+    # --enable-audio composes a text-only checkpoint and the value is simply not
+    # written — deliberate, so that one explicit flag decides, rather than the
+    # decision being inferred from a set of options.
+    #
+    # This replaced a disjunction over every --asr-* flag. Inference read well
+    # until a flag was left out of it: --asr-device was, and had a non-None
+    # default besides, so `--asr-device cuda:0` alone yielded a text-only
+    # checkpoint with no diagnostic. A single explicit flag has no such gap, and
+    # nothing to keep in step when an --asr-* option is added.
+    audio_enabled = args.enable_audio
+    # The control tokens are re-passed so this call doesn't drop them from the
+    # tokenizer's additional-special-tokens list (add_special_tokens replaces
+    # that list rather than extending it).
+    audio_token_id = (
+        add_audio_token(tokenizer, keep_special_tokens=special_tokens)
+        if audio_enabled
+        else None
     )
 
     # Configure chat template with adapter mappings (Granite models only).
@@ -1000,6 +1181,13 @@ def build():
         _fmt_name, sr_substitute_token_ids = configure_chat_template(
             tokenizer, all_discovered
         )
+        if audio_enabled:
+            # Make the chat template emit <|audio|> for audio content parts so
+            # the OpenAI server / chat() path works (the ASR processor replaces
+            # it). Must run after configure_chat_template: on ChatML the audio
+            # flattening has to land ahead of the ALoRA Pass 2 block, which
+            # rsplits `content` and so needs a string.
+            configure_audio_chat_template(tokenizer)
     else:
         print("  Skipping chat template configuration (non-Granite model)")
 
@@ -1076,6 +1264,41 @@ def build():
         **optional_kwargs,
     )
 
+    # Record audio-cascade settings in the config so the checkpoint is
+    # self-describing and the vLLM backend gates audio on asr_enabled.
+    if audio_enabled:
+        model.config.asr_enabled = True
+        model.config.asr_model_id = args.asr_model
+        model.config.asr_device = args.asr_device
+        model.config.asr_dtype = args.asr_dtype
+        # Optional pipeline-construction extras and default decode kwargs. Only
+        # set when provided so the config stays minimal for the common case.
+        if args.asr_pipeline_kwargs is not None:
+            model.config.asr_pipeline_kwargs = args.asr_pipeline_kwargs
+        if args.asr_generate_kwargs is not None:
+            model.config.asr_generate_kwargs = args.asr_generate_kwargs
+        # Long-audio / multi-clip knobs. Only set when explicitly given so the
+        # config keeps the constructor defaults otherwise.
+        if args.asr_max_audio_clips is not None:
+            model.config.asr_max_audio_clips = args.asr_max_audio_clips
+        if args.asr_self_chunks is not None:
+            model.config.asr_self_chunks = args.asr_self_chunks
+        if args.asr_chunk_length_s is not None:
+            model.config.asr_chunk_length_s = args.asr_chunk_length_s
+        if args.asr_chunk_overlap_s is not None:
+            model.config.asr_chunk_overlap_s = args.asr_chunk_overlap_s
+        print(
+            f"  Audio cascade enabled "
+            f"(asr_model_id={args.asr_model or 'default'}, "
+            f"asr_device={args.asr_device}, "
+            f"asr_dtype={args.asr_dtype or 'auto'}, "
+            f"audio_token_id={audio_token_id}, "
+            f"pipeline_kwargs={args.asr_pipeline_kwargs or {}}, "
+            f"generate_kwargs={args.asr_generate_kwargs or {}}, "
+            f"max_audio_clips={args.asr_max_audio_clips or 'default'}, "
+            f"self_chunks={args.asr_self_chunks})"
+        )
+
     # Base model size (best effort)
     base_model_size_gb, _ = _get_directory_size(base_model_local_path)
     if base_model_size_gb is not None:
@@ -1112,26 +1335,49 @@ def build():
     new_embed_size = model.model.embed_tokens.weight.shape[0]
     print(f"Embeddings resized: {old_embed_size} -> {new_embed_size}")
 
-    # resize_token_embeddings appended a mean-initialized row per control token,
-    # which would leave each control token with an arbitrary, compose-run-
-    # nondeterministic emission probability (nothing suppresses control tokens at
-    # generation time). Repoint those rows at a reserved never-emitted row.
-    # Runs on the tied path (4.0/4.1) as well as the untied one (4.2) — a control
-    # token's input row is never read, so the shared-matrix write is inert on the
-    # input side. See initialize_control_token_output_rows.
-    if adapter_token_ids:
+    # resize_token_embeddings appended a mean-initialized row per token added
+    # above — every control token, plus the <|audio|> marker when audio is
+    # enabled. None of them was ever a training target, so each is left with an
+    # arbitrary, compose-run-nondeterministic emission probability (nothing
+    # suppresses them at generation time). Repoint every such row at one reserved
+    # never-emitted row. Runs on the tied path (4.0/4.1) as well as the untied one
+    # (4.2): none of these ids has its *input* row read, so the shared-matrix
+    # write is inert on the input side — see
+    # initialize_control_token_output_rows for both halves of that argument.
+    #
+    # One list and one lookup rather than a block per token kind: the policy is
+    # identical, and find_reserved_never_emitted_token_id materializes the whole
+    # vocabulary, so calling it twice bought nothing.
+    never_trained_token_ids = list(adapter_token_ids or [])
+    if audio_token_id is not None:
+        never_trained_token_ids.append(audio_token_id)
+
+    if never_trained_token_ids:
         reserved_token_id = find_reserved_never_emitted_token_id(tokenizer)
         if reserved_token_id is None:
+            # Warn rather than fail: the compose is still usable, just with these
+            # rows as emittable as an average token's. Name the audio consequence
+            # separately — an emitted marker does not merely look odd, it makes
+            # _validate_marker_count reject a later turn outright.
             print(
                 "  Warning: no reserved <|unused_N|> token in this vocabulary, so "
-                "the control tokens keep the rows resize_token_embeddings "
-                "generated. Each control token is then as emittable as an average "
-                "token, with a probability that varies between compose runs."
+                f"{len(never_trained_token_ids)} newly added token(s) keep the "
+                "rows resize_token_embeddings generated. Each is then as emittable "
+                "as an average token, with a probability that varies between "
+                "compose runs."
             )
+            if audio_token_id is not None:
+                print(
+                    "  Warning: that includes the <|audio|> marker — a generated "
+                    "marker breaks a later turn's marker/audio-item count."
+                )
         else:
             initialize_control_token_output_rows(
-                model, adapter_token_ids, reserved_token_id
+                model, never_trained_token_ids, reserved_token_id
             )
+
+    refresh_switch_control_lut(model)
+    validate_control_lut(model)
 
     print(f"\nStep 3 complete in {time.time() - step_start:.2f}s")
 

@@ -601,6 +601,212 @@ def add_control_tokens(
     return adapter_token_ids, special_tokens
 
 
+# Reserved slots in the Granite vocabulary that never appear as a training
+# target. CONFIRMED with the Granite model authors: these ids are reserved and
+# the model is trained not to emit them, so borrowing one of their output rows to
+# suppress a newly added token is the intended use, not a trick.
+#
+# Independently measured on granite-4.1-3b and granite-4.2-3b before that
+# confirmation, and the numbers are kept because they are a cheap way to re-check
+# the property on a new base model: every <|unused_N|> row has collapsed to a
+# single point — in 4.2's lm_head the 72 rows sit within 0.001 of each other, with
+# a norm at the ~0.1st percentile of ordinary tokens. That is the signature of an
+# id which only ever received downward pressure from the softmax denominator and
+# never a target gradient. A future base whose unused rows look like ordinary
+# tokens would not have this property, and this policy would need revisiting.
+#
+# The inventory is NOT stable across releases (4.1 has 69 of these, 4.2 has 72),
+# so nothing may depend on a particular count or id range — hence the lookup in
+# find_reserved_never_emitted_token_id rather than a hardcoded id.
+_RESERVED_UNUSED_TOKEN_RE = re.compile(r"^<\|unused_\d+\|>$")
+
+
+def find_reserved_never_emitted_token_id(tokenizer) -> int | None:
+    """Id of a reserved ``<|unused_N|>`` token, or ``None`` if the vocab has none.
+
+    Used to give a newly added placeholder token an output row that the base
+    model was trained not to emit, instead of the arbitrary row
+    ``resize_token_embeddings`` would leave behind.
+
+    Any of the reserved slots serves equally well — they are numerically
+    interchangeable — so the highest id is returned for determinism.
+    """
+    ids = [
+        token_id
+        for token, token_id in tokenizer.get_vocab().items()
+        if _RESERVED_UNUSED_TOKEN_RE.match(token)
+    ]
+    return max(ids) if ids else None
+
+
+def add_audio_token(
+    tokenizer,
+    marker: str = "<|audio|>",
+    keep_special_tokens: list[str] | None = None,
+) -> int:
+    """Add the audio placeholder marker token to the tokenizer.
+
+    Used for the audio cascade: this single special token is placed in the
+    prompt and the vLLM ASR processor replaces it with the transcript tokens at
+    request time (see granite_switch.vllm.audio). Registering it as one special
+    token keeps the processor's prompt-replacement match clean.
+
+    ``keep_special_tokens`` must list every token an earlier
+    ``add_special_tokens({"additional_special_tokens": ...})`` call registered —
+    in practice the adapter control tokens from :func:`add_control_tokens`.
+    That call *replaces* the additional-special-tokens list instead of appending
+    to it, and transformers exposes no way to read the current list back, so any
+    token not re-passed here silently drops out of ``all_special_tokens`` and
+    out of the saved ``tokenizer_config.json``. Re-passing an already-added
+    token is free: it keeps its id and does not grow the vocabulary.
+
+    Must be called before the model's embedding resize so the new row is sized
+    in. Returns the marker's token id.
+    """
+    print(f"\nAdding audio marker token: {marker}")
+    # Marker last so it takes the next free id and the kept tokens keep theirs.
+    kept = [t for t in (keep_special_tokens or []) if t != marker]
+    tokenizer.add_special_tokens({"additional_special_tokens": [*kept, marker]})
+    token_id = tokenizer.convert_tokens_to_ids(marker)
+    print(f"  {marker}: {token_id}")
+    if kept:
+        print(f"  (preserved {len(kept)} existing special token(s))")
+    return token_id
+
+
+# The text-only branch of the granite_format content-part loop, and the ChatML
+# per-message content assignment. Each is the anchor its family's audio
+# injection attaches to.
+_GRANITE_TEXT_PART_BRANCH = (
+    "                    {%- set content.val = content.val + entry.text %}\n"
+    "                {%- endif %}"
+)
+_CHATML_CONTENT_SET = "{%- set content = message.content | string %}"
+
+
+def _inject_audio_granite_format(template: str, marker: str) -> str:
+    """Add an audio ``elif`` to the granite_format content-part loop.
+
+    The loop already walks the parts for ``entry.type == 'text'`` and silently
+    drops everything else, so audio only needs one more branch.
+    """
+    if _GRANITE_TEXT_PART_BRANCH not in template:
+        raise ValueError(
+            "Could not find the Granite content-part loop to inject audio "
+            "handling; the base chat template may have changed."
+        )
+    new = (
+        "                    {%- set content.val = content.val + entry.text %}\n"
+        "                {%- elif 'audio' in entry.type %}\n"
+        "                    {%- set content.val = content.val + '" + marker + "' %}\n"
+        "                {%- endif %}"
+    )
+    return template.replace(_GRANITE_TEXT_PART_BRANCH, new, 1)
+
+
+def _inject_audio_chatml(template: str, marker: str) -> str:
+    """Rebuild ChatML's stringified content from its parts, emitting the marker.
+
+    ChatML has no content-part loop at all: its user/system branch does
+    ``{%- set content = message.content | string %}``, so a multimodal parts
+    *list* renders as that list's Python repr — base64 audio payload included —
+    and the marker never appears.
+
+    The flattening block is appended immediately *after* that assignment rather
+    than replacing it, which keeps the statement intact as
+    :func:`configure_chat_template`'s ALoRA Pass 2 anchor. Since Pass 2 is
+    inserted directly after the same anchor, calling this after
+    ``configure_chat_template`` lands the flattening ahead of Pass 2 — required,
+    because Pass 2 calls ``rsplit`` on ``content`` and so needs a string.
+
+    Part joining mirrors the granite_format loop: a text part is newline-
+    separated from whatever precedes it, and the marker is appended directly.
+    Part *order* is preserved, so the transcript the ASR processor splices in
+    lands where the clip sat relative to the text.
+    """
+    if _CHATML_CONTENT_SET not in template:
+        raise ValueError(
+            "Could not find the ChatML per-message content assignment "
+            f"({_CHATML_CONTENT_SET!r}) to inject audio handling; the base chat "
+            "template may have changed."
+        )
+    block = (
+        "\n"
+        "        {#- Audio: ChatML stringifies message.content, so rebuild it from\n"
+        "         the parts when it is a list — otherwise a multimodal turn renders\n"
+        "         as a Python repr and the audio marker never appears. -#}\n"
+        "        {%- if message.content is not string and message.content is iterable %}\n"
+        "            {%- set _audio = namespace(val='') %}\n"
+        "            {%- for entry in message.content %}\n"
+        "                {%- if entry.type is defined and 'audio' in entry.type %}\n"
+        "                    {%- set _audio.val = _audio.val + '" + marker + "' %}\n"
+        "                {%- elif entry.type is defined and entry.type == 'text' %}\n"
+        "                    {%- if _audio.val != '' %}\n"
+        "                        {%- set _audio.val = _audio.val + '\\n' %}\n"
+        "                    {%- endif %}\n"
+        "                    {%- set _audio.val = _audio.val + entry.text %}\n"
+        "                {%- endif %}\n"
+        "            {%- endfor %}\n"
+        "            {%- set content = _audio.val %}\n"
+        "        {%- endif %}"
+    )
+    return template.replace(_CHATML_CONTENT_SET, _CHATML_CONTENT_SET + block, 1)
+
+
+def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
+    """Make the chat template emit the audio marker for audio content parts.
+
+    vLLM passes multimodal chat content to the template as a *list of parts*.
+    Neither Granite template family emits anything for an audio part on its own,
+    so without this the ``<|audio|>`` marker never reaches the rendered prompt
+    and the ASR processor's prompt replacement fails
+    (``Failed to apply prompt replacement for mm_items['audio'][0]``).
+
+    Both families are handled, dispatched on :func:`detect_template_format`:
+
+    * **granite_format** (3.x / 4.0 / 4.1) — one ``elif`` added to the existing
+      content-part loop. See :func:`_inject_audio_granite_format`.
+    * **chatml** (Granite 4.2) — no content-part loop exists, so a flattening
+      block rebuilds ``content`` from the parts. See :func:`_inject_audio_chatml`.
+
+    Matching on ``'audio' in entry.type`` covers ``audio`` / ``input_audio`` /
+    ``audio_url`` in both.
+
+    Call *after* :func:`configure_chat_template`, gated on audio being enabled;
+    the ChatML path depends on that order.
+
+    Scope is the per-message loop. An audio part in the leading system message is
+    dropped by both families — matching the pre-existing granite_format
+    behaviour, and not a shape any caller sends.
+
+    Raises:
+        ValueError: if the template family is unrecognized or its injection
+            anchor is missing. Audio is explicitly requested by the time this
+            runs, so failing to wire it is loud rather than silent.
+    """
+    template = tokenizer.chat_template
+    if template is None:
+        print("Warning: no chat template; skipping audio chat-template handling")
+        return
+
+    fmt = detect_template_format(template)
+    if fmt is None:
+        raise ValueError(
+            "Could not detect the chat-template family (found neither "
+            "<|im_start|> nor <|start_of_role|>), so audio handling cannot be "
+            "injected even though audio was requested."
+        )
+
+    if fmt.name == "chatml":
+        tokenizer.chat_template = _inject_audio_chatml(template, marker)
+    else:
+        tokenizer.chat_template = _inject_audio_granite_format(template, marker)
+    print(
+        f"  Audio chat-template handling added for {fmt.name} "
+        f"(emits {marker} for audio parts)"
+    )
+
+
 def build_substitute_token_ids(
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
     lora_substitute_id: int,
@@ -635,34 +841,6 @@ def build_substitute_token_ids(
         else:
             substitute_ids.append(lora_substitute_id)
     return substitute_ids
-
-
-# Reserved slots in the Granite vocabulary that never appear as a training
-# target. Measured on granite-4.1-3b and granite-4.2-3b: every <|unused_N|> row
-# has collapsed to a single point — in 4.2's lm_head the 72 rows sit within
-# 0.001 of each other, with a norm at the ~0.1st percentile of ordinary tokens.
-# That is the signature of an id which only ever received downward pressure from
-# the softmax denominator and never a target gradient, i.e. one the model was
-# effectively trained not to emit.
-_RESERVED_UNUSED_TOKEN_RE = re.compile(r"^<\|unused_\d+\|>$")
-
-
-def find_reserved_never_emitted_token_id(tokenizer) -> int | None:
-    """Id of a reserved ``<|unused_N|>`` token, or ``None`` if the vocab has none.
-
-    Used to give a newly added placeholder token an output row that the base
-    model was trained not to emit, instead of the arbitrary row
-    ``resize_token_embeddings`` would leave behind.
-
-    Any of the reserved slots serves equally well — they are numerically
-    interchangeable — so the highest id is returned for determinism.
-    """
-    ids = [
-        token_id
-        for token, token_id in tokenizer.get_vocab().items()
-        if _RESERVED_UNUSED_TOKEN_RE.match(token)
-    ]
-    return max(ids) if ids else None
 
 
 def configure_chat_template(

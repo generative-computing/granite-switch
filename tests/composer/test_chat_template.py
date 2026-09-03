@@ -27,9 +27,11 @@ import os
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from jinja2 import Environment
 
 from granite_switch.composer.tokenizer_setup import (
+    configure_audio_chat_template,
     configure_chat_template,
     detect_template_format,
 )
@@ -784,6 +786,319 @@ class TestConfigureChatTemplateChatML:
         pos = result.rindex("<|gsm8k|>")
         after = result[pos + len("<|gsm8k|>") :]
         assert after.startswith("assistant\n<think>")
+
+
+# ════════════════════════════════════════════════════════════════════
+# Audio: <|audio|> marker preservation, and coexistence with adapters
+# ════════════════════════════════════════════════════════════════════
+
+
+def _audio_messages(text="transcribe this", audio_type="audio"):
+    """A user turn whose content is a parts list carrying an audio clip."""
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": audio_type, audio_type: "clip-placeholder"},
+            ],
+        }
+    ]
+
+
+@pytest.mark.audio
+class TestAudioChatTemplate:
+    """configure_audio_chat_template emits the <|audio|> marker for audio parts."""
+
+    def test_audio_part_emits_marker(self):
+        tokenizer = _make_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" in result
+        assert "transcribe this" in result
+
+    def test_marker_dropped_without_injection(self):
+        # Regression canary: the un-injected base template drops the audio part.
+        tokenizer = _make_tokenizer()
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" not in result
+        assert "transcribe this" in result
+
+    def test_input_audio_and_audio_url_types_emit_marker(self):
+        for audio_type in ("input_audio", "audio_url"):
+            tokenizer = _make_tokenizer()
+            configure_audio_chat_template(tokenizer)
+            result = _render(
+                tokenizer,
+                messages=_audio_messages(audio_type=audio_type),
+                add_generation_prompt=True,
+            )
+            assert "<|audio|>" in result, f"marker missing for type={audio_type!r}"
+
+    def test_custom_marker_string(self):
+        tokenizer = _make_tokenizer()
+        configure_audio_chat_template(tokenizer, marker="<|snd|>")
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|snd|>" in result
+
+    def test_missing_anchor_raises(self):
+        # A granite_format template (has the role marker) whose content-part
+        # loop is gone: the family is known but the anchor is not.
+        tokenizer = SimpleNamespace(
+            chat_template="{{- '<|start_of_role|>user<|end_of_role|>' }}{{ messages }}"
+        )
+        with pytest.raises(ValueError, match="content-part loop"):
+            configure_audio_chat_template(tokenizer)
+
+    def test_unrecognized_format_raises(self):
+        # Neither role marker present, so the family cannot be detected. Audio
+        # was explicitly requested by this point, so this is loud, not silent.
+        tokenizer = SimpleNamespace(chat_template="{{ messages }}")
+        with pytest.raises(ValueError, match="detect the chat-template family"):
+            configure_audio_chat_template(tokenizer)
+
+    def test_none_template_is_noop(self):
+        tokenizer = SimpleNamespace(chat_template=None)
+        configure_audio_chat_template(tokenizer)
+        assert tokenizer.chat_template is None
+
+    def test_string_content_render_is_byte_identical(self):
+        """Injection must not perturb a plain string-content render.
+
+        ``_probe_lora_substitute_token_id`` runs *after* the audio injection and
+        reads token 0 of a rendered string-content chat, so any drift here would
+        silently change the LoRA substitute token.
+        """
+        messages = [{"role": "user", "content": "plain text"}]
+        before = _render(
+            _make_tokenizer(), messages=messages, add_generation_prompt=True
+        )
+        tokenizer = _make_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        after = _render(tokenizer, messages=messages, add_generation_prompt=True)
+        assert before == after
+
+
+@pytest.mark.audio
+class TestAudioAndAdapterInjectionsCompose:
+    """Adapter and audio injections applied in sequence leave both intact."""
+
+    def test_lora_prefix_and_audio_marker_coexist(self):
+        tokenizer = _make_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
+        configure_audio_chat_template(tokenizer)
+
+        result = _render(
+            tokenizer,
+            messages=_audio_messages(),
+            add_generation_prompt=True,
+            adapter_name="ctx_rel",
+        )
+        assert result.startswith("<|ctx_rel|>"), result[:80]
+        assert "<|audio|>" in result
+        assert "transcribe this" in result
+
+    def test_no_adapter_still_emits_audio_marker(self):
+        tokenizer = _make_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
+        configure_audio_chat_template(tokenizer)
+
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" in result
+        assert "<|ctx_rel|>" not in result
+
+
+# ════════════════════════════════════════════════════════════════════
+# Audio on the ChatML (Granite 4.2) template family
+# ════════════════════════════════════════════════════════════════════
+#
+# ChatML has no content-part loop at all — its user/system branch does
+# ``{%- set content = message.content | string %}`` — so a parts list would
+# render as that list's Python repr rather than dropping the audio part the way
+# granite_format does. The failure mode is therefore *louder* and worse: the
+# base64 audio payload would land in the prompt. These tests pin both the fix
+# and that specific regression.
+
+
+def _make_chatml_audio_tokenizer():
+    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+
+
+def _chatml_user_turn(rendered):
+    """The text between the user role header and its closing marker."""
+    return rendered.split("<|im_start|>user\n", 1)[1].split("<|im_end|>", 1)[0]
+
+
+@pytest.mark.audio
+class TestAudioChatTemplateChatML:
+    """configure_audio_chat_template wires audio into the ChatML family too."""
+
+    def test_audio_part_emits_marker(self):
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|audio|>" in result
+        assert "transcribe this" in result
+
+    def test_parts_repr_does_not_leak_into_prompt(self):
+        """The clip payload must never reach the prompt.
+
+        Without the flattening block ChatML stringifies the parts list, so the
+        rendered prompt contains ``[{'type': 'audio', ...}]`` — payload included.
+        """
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "clip-placeholder" not in result
+        assert "'type'" not in result
+        assert _chatml_user_turn(result) == "transcribe this<|audio|>"
+
+    def test_uninjected_chatml_leaks_the_repr(self):
+        """Regression canary for the pre-fix behaviour."""
+        result = _render(
+            _make_chatml_audio_tokenizer(),
+            messages=_audio_messages(),
+            add_generation_prompt=True,
+        )
+        assert "<|audio|>" not in result
+        assert "clip-placeholder" in result
+
+    def test_input_audio_and_audio_url_types_emit_marker(self):
+        for audio_type in ("input_audio", "audio_url"):
+            tokenizer = _make_chatml_audio_tokenizer()
+            configure_audio_chat_template(tokenizer)
+            result = _render(
+                tokenizer,
+                messages=_audio_messages(audio_type=audio_type),
+                add_generation_prompt=True,
+            )
+            assert "<|audio|>" in result, f"marker missing for type={audio_type!r}"
+
+    def test_custom_marker_string(self):
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer, marker="<|snd|>")
+        result = _render(
+            tokenizer, messages=_audio_messages(), add_generation_prompt=True
+        )
+        assert "<|snd|>" in result
+
+    def test_string_content_render_is_byte_identical(self):
+        messages = [{"role": "user", "content": "plain text"}]
+        before = _render(
+            _make_chatml_audio_tokenizer(),
+            messages=messages,
+            add_generation_prompt=True,
+        )
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        after = _render(tokenizer, messages=messages, add_generation_prompt=True)
+        assert before == after
+
+    def test_part_order_and_multiple_clips_preserved(self):
+        """Marker position tracks the clip's position among the parts.
+
+        The ASR processor replaces each marker with that clip's transcript, so a
+        reordered or collapsed marker sequence would splice transcripts into the
+        wrong place.
+        """
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": "a"},
+                    {"type": "text", "text": "and"},
+                    {"type": "audio", "audio": "b"},
+                ],
+            }
+        ]
+        result = _render(tokenizer, messages=messages, add_generation_prompt=True)
+        assert _chatml_user_turn(result) == "<|audio|>\nand<|audio|>"
+
+    def test_pass2_anchor_survives_injection(self):
+        """The ALoRA Pass 2 anchor must remain findable after audio injection.
+
+        The flattening block is appended after the content assignment rather
+        than replacing it precisely so configure_chat_template can still anchor
+        on it, in either call order.
+        """
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_audio_chat_template(tokenizer)
+        assert (
+            "{%- set content = message.content | string %}" in tokenizer.chat_template
+        )
+
+    def test_missing_chatml_anchor_raises(self):
+        tokenizer = SimpleNamespace(
+            chat_template="{{- '<|im_start|>user\\n' }}{{ messages }}"
+        )
+        with pytest.raises(ValueError, match="ChatML per-message content assignment"):
+            configure_audio_chat_template(tokenizer)
+
+
+@pytest.mark.audio
+class TestAudioAndAdapterInjectionsComposeChatML:
+    """Adapter + audio injection on ChatML, in the order compose applies them."""
+
+    def test_lora_prefix_and_audio_marker_coexist(self):
+        tokenizer = _make_chatml_audio_tokenizer()
+        configure_chat_template(tokenizer, [("/path/a", "ctx_rel", "lora")])
+        configure_audio_chat_template(tokenizer)
+
+        result = _render(
+            tokenizer,
+            messages=_audio_messages(),
+            add_generation_prompt=True,
+            adapter_name="ctx_rel",
+        )
+        assert "<|ctx_rel|>" in result
+        assert "<|audio|>" in result
+        assert "clip-placeholder" not in result
+
+    def test_alora_pass2_runs_on_flattened_content(self):
+        """Pass 2 calls ``rsplit`` on ``content``, so it needs the flattened string.
+
+        Compose applies configure_chat_template first, which anchors Pass 2 right
+        after the content assignment; the audio block then lands between them.
+        If that order inverted, Pass 2 would rsplit the list repr and the control
+        token would never be placed.
+        """
+        with patch(_PATCH_TARGET, return_value="<requirements>"):
+            tokenizer = _make_chatml_audio_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
+            configure_audio_chat_template(tokenizer)
+
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "audio", "audio": "clip"},
+                    {"type": "text", "text": "<requirements>r1"},
+                ],
+            }
+        ]
+        result = _render(
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="req_check",
+        )
+        # Control token placed before the invocation text, first char dropped,
+        # with the audio marker still ahead of it in part order.
+        assert _chatml_user_turn(result) == "<|audio|>\n<|req_check|>requirements>r1"
 
 
 # ---------------------------------------------------------------------------

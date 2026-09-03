@@ -18,6 +18,11 @@ from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.granite.modeling_granite import eager_attention_forward
 
+from ...token_exchange import (
+    apply_token_exchange,
+    build_control_to_substitute_lut,
+)
+
 
 class SingleSwitch(nn.Module):
     """Single-head attention-based switch for adapter selection.
@@ -89,18 +94,8 @@ class SingleSwitch(nn.Module):
         # control-token positions carry the substitute id by the time the
         # decoder embeds them. The decoder is then oblivious — it just calls
         # embed_tokens(input_ids) and gets the right result by construction.
-        if (
-            config is not None
-            and getattr(config, "adapter_token_ids", None) is not None
-            and getattr(config, "adapter_substitute_token_ids", None) is not None
-        ):
-            ctrl_ids = config.adapter_token_ids
-            sub_ids = config.adapter_substitute_token_ids
-            max_ctrl_id = max(ctrl_ids)
-            lut_size = max(getattr(config, "vocab_size", 0), max_ctrl_id + 1)
-            lut = torch.full((lut_size,), -1, dtype=torch.long)
-            for ctrl_id, sub_id in zip(ctrl_ids, sub_ids):
-                lut[ctrl_id] = sub_id
+        lut = build_control_to_substitute_lut(config)
+        if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut)
         else:
             self.control_to_substitute_lut = None
@@ -242,15 +237,10 @@ class SingleSwitch(nn.Module):
         # Token-exchange rewrite: replace each control token's id with its
         # substitute id via the LUT. Done here (rather than in the decoder)
         # so the decoder sees a clean, unified input_ids and never has to
-        # know about substitutes. Skipped only when the LUT was not built
-        # (no substitute ids configured — e.g. a non-token-exchange test
-        # fixture). Kept symmetric with the vLLM switch, which forbids the
-        # `tensor.any()` short-circuit under @support_torch_compile.
-        if self.control_to_substitute_lut is not None:
-            sub_id_per_pos = self.control_to_substitute_lut[input_ids]
-            is_control = sub_id_per_pos >= 0
-            modified_input_ids = torch.where(is_control, sub_id_per_pos, input_ids)
-        else:
-            modified_input_ids = input_ids
+        # know about substitutes. A None LUT (no substitute ids configured —
+        # e.g. a non-token-exchange test fixture) returns input_ids unchanged.
+        modified_input_ids = apply_token_exchange(
+            self.control_to_substitute_lut, input_ids
+        )
 
         return adapter_indices, modified_input_ids

@@ -37,7 +37,7 @@ end of ``forward`` the control-token ids are rewritten to their substitute ids
 via a precomputed LUT (``apply_token_exchange``) so the decoder embeds a clean
 sequence and never knows a control token existed. The LUT is built in
 ``__init__`` from the config's ``adapter_token_ids`` /
-``adapter_substitute_token_ids`` (``build_substitute_lut``).
+``adapter_substitute_token_ids`` (``build_control_to_substitute_lut``).
 
 ``num_cache_layers == 2``: the switch owns two logical cache slots (counting +
 memory) at ``layer_idx`` and ``layer_idx + 1``. The property returns 2 so the
@@ -66,7 +66,7 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from ._token_exchange import apply_token_exchange, build_substitute_lut
+from ...token_exchange import apply_token_exchange, build_control_to_substitute_lut
 from .codes import KerdockDGCodeGenerator, recover_count_from_signal
 
 # Large negative finite value for masking. NOT literal -inf because IEEE 754
@@ -275,7 +275,7 @@ class MultiSwitch(nn.Module):
         # non-persistent buffer is zeroed by ``from_pretrained``. This LUT uses
         # -1 as the "not a control token" sentinel, so an all-zero LUT would
         # rewrite EVERY token id to 0 in apply_token_exchange.
-        lut = build_substitute_lut(config) if config is not None else None
+        lut = build_control_to_substitute_lut(config)
         if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
         else:
