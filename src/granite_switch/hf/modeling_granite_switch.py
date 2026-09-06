@@ -48,7 +48,9 @@ _TRANSFORMERS_GE_5_9 = _parse_version(transformers.__version__) >= _parse_versio
 class GraniteSwitchAttentionDecoderLayer(nn.Module):
     """Single-stream attention decoder layer with LoRA and adapter routing.
 
-    Supports optional MoE (frozen) alongside shared_mlp when num_local_experts > 0.
+    The MLP section is whichever of the two paths the base has: a frozen expert
+    bank when ``num_local_experts > 0``, a dense ``shared_mlp`` when
+    ``shared_intermediate_size > 0``, or both (Granite 4 hybrid).
 
     This is the layer for plain LoRA / aLoRA checkpoints.  Shadow Residual
     checkpoints use :class:`SRSwitchDecoderLayer`, which subclasses this one and
@@ -70,11 +72,26 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
             # MoE: frozen router + frozen expert weights (no LoRA)
             self.block_sparse_moe = GraniteMoeHybridMoE(config)
 
-        # Shared MLP: upstream module with LoRA projections replaced in-place
-        self.shared_mlp = GraniteMoeHybridMLP(config)
-        self._has_shared_input_lora, self._has_shared_output_lora = (
-            replace_shared_mlp_projections_with_lora(self.shared_mlp, config)
-        )
+        # Shared MLP: upstream module with LoRA projections replaced in-place.
+        # Absent entirely on pure sparse MoE bases (granitemoe), which upstream
+        # encodes as shared_intermediate_size == 0.  Construction must be skipped,
+        # not merely zero-width: nn.Linear(H, 0) still registers a [0, H] weight,
+        # which would then be demanded of the base checkpoint.
+        self.has_shared_mlp = config.shared_intermediate_size > 0
+        if self.has_shared_mlp:
+            self.shared_mlp = GraniteMoeHybridMLP(config)
+            self._has_shared_input_lora, self._has_shared_output_lora = (
+                replace_shared_mlp_projections_with_lora(self.shared_mlp, config)
+            )
+        else:
+            if not self.has_experts:
+                raise ValueError(
+                    "A decoder layer needs at least one MLP path: got "
+                    "num_local_experts=0 and shared_intermediate_size=0."
+                )
+            self.shared_mlp = None
+            self._has_shared_input_lora = False
+            self._has_shared_output_lora = False
 
         # Layer norms
         self.input_layernorm = GraniteMoeHybridRMSNorm(
@@ -85,26 +102,90 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         )
 
     def _set_shared_mlp_context(self, adapter_indices):
+        # Keep the no-shared-MLP invariant local: the two flags below are also
+        # False when there is no shared MLP, but that is set in __init__.
+        if self.shared_mlp is None:
+            return
         if self._has_shared_input_lora:
             self.shared_mlp.input_linear._adapter_indices = adapter_indices
         if self._has_shared_output_lora:
             self.shared_mlp.output_linear._adapter_indices = adapter_indices
 
-    def _mlp_block(
-        self, hidden_states: torch.Tensor, adapter_indices: torch.Tensor | None
+    def _route(self, hidden_states: torch.Tensor) -> tuple:
+        """Run the frozen router alone, without touching the expert bank.
+
+        Split out of ``block_sparse_moe`` so that Shadow Residual can route once
+        and apply the result to both streams.
+
+        Returns:
+            ``(batch_index, batch_gates, expert_size)`` — the token-to-expert
+            partition *and* the gate scalars.
+        """
+        flat = hidden_states.reshape(-1, hidden_states.shape[-1])
+        _, batch_index, batch_gates, expert_size, _ = self.block_sparse_moe.router(flat)
+        return batch_index, batch_gates, expert_size
+
+    def _apply_experts(
+        self, hidden_states: torch.Tensor, routing: tuple
     ) -> torch.Tensor:
-        """MoE (when present) + shared MLP for one stream."""
+        """Expert bank under a routing decision made elsewhere.
+
+        This is the second half of ``GraniteMoeHybridMoE.forward``, duplicated
+        because upstream exposes no seam between routing and expert application.
+        ``test_route_apply_matches_upstream_moe`` pins it bit-exactly against
+        ``block_sparse_moe(x)`` so a change anywhere in the supported
+        ``transformers`` range fails there rather than as a drifted eval score.
+        """
+        batch_index, batch_gates, expert_size = routing
+        moe = self.block_sparse_moe
+        bsz, length, _ = hidden_states.shape
+        emb_size = moe.input_size
+
+        expert_inputs = hidden_states.reshape(-1, emb_size)[batch_index]
+        h = moe.input_linear(expert_inputs, expert_size)
+        chunked = h.chunk(2, dim=-1)
+        h = moe.activation(chunked[0]) * chunked[1]
+        expert_outputs = moe.output_linear(h, expert_size)
+        expert_outputs = expert_outputs * batch_gates[:, None]
+
+        zeros = torch.zeros(
+            (bsz * length, emb_size),
+            dtype=expert_outputs.dtype,
+            device=expert_outputs.device,
+        )
+        return zeros.index_add(0, batch_index, expert_outputs).view(
+            bsz, length, emb_size
+        )
+
+    def _mlp_block(
+        self,
+        hidden_states: torch.Tensor,
+        adapter_indices: torch.Tensor | None,
+        routing: tuple | None = None,
+    ) -> torch.Tensor:
+        """MoE (when present) + shared MLP (when present) for one stream.
+
+        ``routing`` reuses a partition produced by :meth:`_route` on *another*
+        stream instead of routing this one.  Only the routing is shared: the
+        dense shared MLP, where one exists, still runs with this stream's own
+        ``adapter_indices``.
+        """
+        moe_output = None
         if self.has_experts:
-            moe_output, _router_logits = self.block_sparse_moe(hidden_states)
-            self._set_shared_mlp_context(adapter_indices)
-            shared_output = self.shared_mlp(hidden_states)
-            self._set_shared_mlp_context(None)
-            return moe_output + shared_output
+            # GraniteMoeHybridMoE returns the summed expert output alone; the
+            # router logits stay inside it (no aux-loss path at inference).
+            moe_output = (
+                self._apply_experts(hidden_states, routing)
+                if routing is not None
+                else self.block_sparse_moe(hidden_states)
+            )
+        if not self.has_shared_mlp:
+            return moe_output
 
         self._set_shared_mlp_context(adapter_indices)
-        output = self.shared_mlp(hidden_states)
+        shared_output = self.shared_mlp(hidden_states)
         self._set_shared_mlp_context(None)
-        return output
+        return shared_output if moe_output is None else moe_output + shared_output
 
     def forward(
         self,
@@ -242,8 +323,13 @@ class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
         normed_base = self.post_attention_layernorm(h_base)
         normed_adapt = self.post_attention_layernorm(h_adapt)
 
-        mlp_base = self._mlp_block(normed_base, None)
-        mlp_adapt = self._mlp_block(normed_adapt, adapter_indices)
+        # The adapter stream always inherits the base stream's expert assignment
+        # *and* gate scalars.  Routing on normed_base keeps the frozen stream
+        # bit-identical to stock.  routing=None means each _mlp_block calls the
+        # router itself, which is only reachable when there is no expert bank.
+        routing = self._route(normed_base) if self.has_experts else None
+        mlp_base = self._mlp_block(normed_base, None, routing)
+        mlp_adapt = self._mlp_block(normed_adapt, adapter_indices, routing)
 
         h_base = residual_base + mlp_base * self.residual_multiplier
         h_adapt = residual_adapt + mlp_adapt * self.residual_multiplier

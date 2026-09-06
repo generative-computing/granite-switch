@@ -226,3 +226,50 @@ class TestSwitchTypeValidation:
     def test_multi_coded_alias_rejected(self):
         with pytest.raises(ValueError, match="switch_type must be one of"):
             GraniteSwitchConfig(**_valid_kwargs(switch_type="multi_coded"))
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4. No shared MLP (pure sparse MoE bases, model_type granitemoe)
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestNoSharedMLP:
+    """``shared_intermediate_size == 0`` is upstream's "no shared MLP" encoding.
+
+    The distinction from ``None`` is load-bearing: ``None`` means "unspecified,
+    default it from ``intermediate_size``", while ``0`` is an explicit statement
+    that the module does not exist.
+    """
+
+    def test_zero_survives_construction(self):
+        """The default-from-intermediate_size test must stay ``is None``.
+
+        A falsy test (``if not self.shared_intermediate_size``) would silently
+        resurrect a phantom shared MLP at ``intermediate_size`` width.
+        """
+        cfg = GraniteSwitchConfig(**_valid_kwargs(shared_intermediate_size=0))
+        assert cfg.shared_intermediate_size == 0
+
+    def test_unspecified_keeps_a_shared_mlp(self):
+        """Omitting the key must never land on 0 — that would drop the module.
+
+        On transformers 5.x the parent's own default is a positive width (1024),
+        so the ``is None`` fallback in ``__init__`` never fires; it is kept as a
+        guard, and passing ``None`` explicitly is rejected by the parent's strict
+        ``int`` field. Either way, unspecified means "a shared MLP exists".
+        """
+        cfg = GraniteSwitchConfig(**_valid_kwargs())
+        assert cfg.shared_intermediate_size > 0
+
+    def test_lora_targets_omit_shared_mlp_groups(self):
+        cfg = GraniteSwitchConfig(**_valid_kwargs(shared_intermediate_size=0))
+        assert set(cfg.lora_target_modules) == {"qkv_proj", "o_proj"}
+
+    def test_lora_targets_include_shared_mlp_groups_when_present(self):
+        cfg = GraniteSwitchConfig(**_valid_kwargs())
+        assert set(cfg.lora_target_modules) == {
+            "qkv_proj",
+            "o_proj",
+            "shared_input_linear",
+            "shared_output_linear",
+        }

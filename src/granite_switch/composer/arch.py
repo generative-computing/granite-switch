@@ -356,6 +356,35 @@ def granite_moe_hybrid_arch(base_config=None) -> ArchDescriptor:
     )
 
 
+def granite_moe_arch(base_config=None) -> ArchDescriptor:
+    """GraniteMoe architecture (model_type ``granitemoe``).
+
+    Pure sparse MoE: every layer has an expert bank and **no** dense
+    ``shared_mlp``.  The descriptor is therefore ``_common_attn_groups()`` and
+    nothing else — a strict subset of :func:`granite_moe_hybrid_arch`.
+
+    The frozen expert tensors (``block_sparse_moe.input_linear`` /
+    ``output_linear`` / ``router.layer``) are named identically in the switch
+    model, so with no shared-MLP group to shadow them they transfer by identity.
+
+    ``shared_intermediate_size`` is pinned to ``0``, which is upstream's own
+    encoding for "no shared MLP"
+    (``granitemoeshared``: ``shared_mlp = None if shared_intermediate_size == 0``).
+    ``position_embedding_type`` is deliberately not propagated:
+    ``GraniteSwitchConfig`` already defaults it to ``"rope"``, which is what
+    granitemoe uses.
+    """
+    optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
+    optional_fields.update(_MOE_OPTIONAL_FIELDS)
+    optional_fields["shared_intermediate_size"] = 0
+
+    return ArchDescriptor(
+        groups=list(_common_attn_groups()),
+        required_config_fields=list(_COMMON_REQUIRED_FIELDS),
+        optional_config_fields=optional_fields,
+    )
+
+
 def granite_dense_arch(base_config=None) -> ArchDescriptor:
     """Granite dense architecture (model_type ``granite``).
 
@@ -392,6 +421,14 @@ def granite_moe_hybrid_sr_arch(base_config=None) -> ArchDescriptor:
     return arch
 
 
+def granite_moe_sr_arch(base_config=None) -> ArchDescriptor:
+    """GraniteMoe Shadow Residual architecture (attention + ``cross_stream``)."""
+    arch = granite_moe_arch(base_config=base_config)
+    arch.groups = arch.groups + _cross_stream_groups()
+    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    return arch
+
+
 def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
     """Granite dense Shadow Residual architecture (fused + ``cross_stream``)."""
     arch = granite_dense_arch(base_config=base_config)
@@ -406,11 +443,16 @@ def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
 
 _ARCH_REGISTRY = {
     "granite": granite_dense_arch,
+    "granitemoe": granite_moe_arch,
     "granitemoehybrid": granite_moe_hybrid_arch,
 }
 
+# Must stay key-for-key in step with _ARCH_REGISTRY: a model_type registered in
+# only one of the two fails later in adapter loading with a misleading
+# "not recognized by the current architecture".
 _SR_ARCH_REGISTRY = {
     "granite": granite_dense_sr_arch,
+    "granitemoe": granite_moe_sr_arch,
     "granitemoehybrid": granite_moe_hybrid_sr_arch,
 }
 
@@ -450,7 +492,7 @@ def resolve_arch(
         raise ValueError(
             f"Unsupported architecture '{model_type}' for {model_name_or_path}. "
             f"Only Granite models are supported "
-            f"(granite, granitemoehybrid)."
+            f"({', '.join(sorted(registry))})."
         )
 
     return factory(base_config=base_config)

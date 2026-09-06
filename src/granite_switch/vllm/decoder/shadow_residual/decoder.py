@@ -184,6 +184,13 @@ class ShadowResidualDecoderLayer(nn.Module):
     Granite non-fused residual convention (materialized): each block runs on
     ``norm(hs)`` and adds ``block * residual_multiplier`` back to ``hs``. The base
     half never receives a delta or shunt, so it stays base-equivalent.
+
+    Covers all three MLP shapes Granite ships: a dense shared MLP alone (4.0/4.1),
+    a frozen expert bank alongside it (4.x MoE hybrid), and the expert bank alone
+    (granitemoe, ``shared_intermediate_size == 0``). With experts, the adapter
+    stream always inherits the base stream's expert assignment. Only *routing* is
+    ever shared — the shared MLP, where one exists, always runs per-stream with
+    its own adapter context.
     """
 
     _lora_ctx = None  # wired post-init by the model
@@ -204,43 +211,63 @@ class ShadowResidualDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        # SR serves dense bases only: this dual-stream decoder builds just the
-        # shared MLP and has no routed-expert path, so a MoE base would silently
-        # drop every expert. Fail loudly instead of computing wrong output.
-        if getattr(config, "num_local_experts", 0) > 0:
-            raise NotImplementedError(
-                "Shadow-Residual vLLM decoding supports dense bases only; "
-                f"num_local_experts={config.num_local_experts} (MoE) is not "
-                "supported."
+        # Routed expert bank (4.x MoE hybrid, and the ONLY MLP path on a pure
+        # sparse base like granitemoe). Frozen: the experts are never LoRA
+        # targets, so no SwitchedLoRALinear wrapping here.
+        self.has_experts = getattr(config, "num_local_experts", 0) > 0
+        if self.has_experts:
+            from vllm.model_executor.models.granitemoehybrid import GraniteMoeMoE
+
+            self.block_sparse_moe = GraniteMoeMoE(
+                num_experts=config.num_local_experts,
+                top_k=config.num_experts_per_tok,
+                hidden_size=hidden,
+                intermediate_size=config.intermediate_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.block_sparse_moe",
             )
 
-        # Fused shared MLP (gate|up with in-kernel SwiGLU, + down), each wrapped in
-        # SwitchedLoRALinear. Runs over the [2M, H] stack; base half gets no delta.
-        # Wrapped UNCONDITIONALLY (not gated on config.lora_target_modules, unlike
-        # the base helper): an SR checkpoint with MLP LoRA always has a home, and
-        # one without just leaves the zero tiers (no delta) — either way correct.
-        self.shared_mlp = GraniteMoeSharedMLP(
-            config=config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.shared_mlp",
-        )
-        max_lora_rank = _max_lora_rank(config)
-        base_in = self.shared_mlp.input_linear
-        self.shared_mlp.input_linear = SwitchedLoRALinear(
-            base_in,
-            num_adapters,
-            max_lora_rank,
-            num_slices=2,
-            output_slices=tuple(base_in.output_sizes),
-            fuse_swiglu=True,
-        )
-        # gate/up now applies SwiGLU in-kernel and returns the activated [2M, H];
-        # the MLP's own activation becomes a pass-through.
-        self.shared_mlp.act_fn = nn.Identity()
-        base_out = self.shared_mlp.output_linear
-        self.shared_mlp.output_linear = SwitchedLoRALinear(
-            base_out, num_adapters, max_lora_rank
-        )
+        # The dense shared MLP is ABSENT on a pure sparse MoE base (granitemoe),
+        # which upstream encodes as shared_intermediate_size == 0.
+        # Building it anyway would register zero-width [0, H] / [H, 0] weights
+        # that no checkpoint ships. Same gate as the plain-LoRA decoder.
+        self.has_shared_mlp = getattr(config, "shared_intermediate_size", 0) > 0
+        if self.has_shared_mlp:
+            # Fused shared MLP (gate|up with in-kernel SwiGLU, + down), each wrapped
+            # in SwitchedLoRALinear. Runs over the [2M, H] stack; base half gets no
+            # delta. Wrapped UNCONDITIONALLY (not gated on
+            # config.lora_target_modules, unlike the base helper): an SR checkpoint
+            # with MLP LoRA always has a home, and one without just leaves the zero
+            # tiers (no delta) — either way correct.
+            self.shared_mlp = GraniteMoeSharedMLP(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.shared_mlp",
+            )
+            max_lora_rank = _max_lora_rank(config)
+            base_in = self.shared_mlp.input_linear
+            self.shared_mlp.input_linear = SwitchedLoRALinear(
+                base_in,
+                num_adapters,
+                max_lora_rank,
+                num_slices=2,
+                output_slices=tuple(base_in.output_sizes),
+                fuse_swiglu=True,
+            )
+            # gate/up now applies SwiGLU in-kernel and returns the activated [2M, H];
+            # the MLP's own activation becomes a pass-through.
+            self.shared_mlp.act_fn = nn.Identity()
+            base_out = self.shared_mlp.output_linear
+            self.shared_mlp.output_linear = SwitchedLoRALinear(
+                base_out, num_adapters, max_lora_rank
+            )
+        elif not self.has_experts:
+            raise ValueError(
+                "A decoder layer needs at least one MLP path: got "
+                "num_local_experts=0 and shared_intermediate_size=0."
+            )
+        else:
+            self.shared_mlp = None
 
         self.input_layernorm = RMSNorm(hidden, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(hidden, eps=config.rms_norm_eps)
@@ -263,9 +290,28 @@ class ShadowResidualDecoderLayer(nn.Module):
         hs = hs + o * self.residual_multiplier
 
         normed = self.post_attention_layernorm(hs)
-        mlp_out = self.shared_mlp(
-            normed
-        )  # SwitchedLoRALinear inside; base half no delta
+        mlp_out = None
+
+        if self.has_experts:
+            # vLLM's FusedMoE takes router_logits as an ARGUMENT and derives
+            # top-k selection AND the renormalized gate scalars from them itself
+            # (renormalize=True == HF's softmax-over-top-k). So sharing the RAW
+            # logits is exactly equivalent to HF sharing its post-softmax
+            # (batch_index, batch_gates, expert_size) partition — one duplicate
+            # of the base half's logits routes the whole [2M, H] stack in a
+            # single expert call. Bypass GraniteMoeMoE.forward to inject them.
+            logits, _ = self.block_sparse_moe.gate(normed[:m])  # [M, E]
+            logits = torch.cat([logits, logits], dim=0)  # [2M, E]
+            # FusedMoE modifies its input in place.
+            mlp_out = self.block_sparse_moe.experts(normed.clone(), logits)
+
+        if self.has_shared_mlp:
+            # Only ROUTING is shared. The dense shared MLP still runs per-stream
+            # with this stream's own adapter context (SwitchedLoRALinear inside;
+            # base half gets no delta).
+            shared = self.shared_mlp(normed)
+            mlp_out = shared if mlp_out is None else mlp_out + shared
+
         hs = hs + mlp_out * self.residual_multiplier
 
         # base -> adapter injection over the M base-half rows (adapter-active only).

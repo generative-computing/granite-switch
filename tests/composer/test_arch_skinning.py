@@ -4,9 +4,14 @@
 from types import SimpleNamespace
 
 from granite_switch.composer.arch import (
+    _ARCH_REGISTRY,
     _COMMON_OPTIONAL_FIELDS,
+    _SR_ARCH_REGISTRY,
     ModuleDescriptor,
     granite_dense_arch,
+    granite_moe_arch,
+    granite_moe_hybrid_arch,
+    granite_moe_sr_arch,
 )
 from granite_switch.composer.weight_transfer import _classify_base_weights
 
@@ -179,6 +184,113 @@ class TestGraniteDenseArchDescriptor:
         """Granite uses separate add-then-norm."""
         arch = granite_dense_arch()
         assert arch.optional_config_fields["fused_add_norm"] is False
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: granitemoe — pure sparse MoE, no shared MLP
+# ---------------------------------------------------------------------------
+
+
+def _make_granitemoe_base_state_dict(num_layers=1, num_experts=4):
+    """Mock base state dict for a pure sparse MoE base (no ``mlp.*`` at all)."""
+    import torch
+
+    d = {
+        "model.embed_tokens.weight": torch.zeros(100, 128),
+        "model.norm.weight": torch.zeros(128),
+        "lm_head.weight": torch.zeros(100, 128),
+    }
+    for i in range(num_layers):
+        prefix = f"model.layers.{i}"
+        d[f"{prefix}.self_attn.q_proj.weight"] = torch.zeros(128, 128)
+        d[f"{prefix}.self_attn.k_proj.weight"] = torch.zeros(32, 128)
+        d[f"{prefix}.self_attn.v_proj.weight"] = torch.zeros(32, 128)
+        d[f"{prefix}.self_attn.o_proj.weight"] = torch.zeros(128, 128)
+        moe = f"{prefix}.block_sparse_moe"
+        d[f"{moe}.input_linear.weight"] = torch.zeros(num_experts, 512, 128)
+        d[f"{moe}.output_linear.weight"] = torch.zeros(num_experts, 128, 256)
+        d[f"{moe}.router.layer.weight"] = torch.zeros(num_experts, 128)
+        d[f"{prefix}.input_layernorm.weight"] = torch.zeros(128)
+        d[f"{prefix}.post_attention_layernorm.weight"] = torch.zeros(128)
+
+    return d
+
+
+class TestBaseWeightClassificationGraniteMoe:
+    """The frozen expert bank must transfer by identity, untouched by any group."""
+
+    LORA_TARGETS = ["qkv_proj", "o_proj"]
+
+    def test_expert_tensors_map_by_identity(self):
+        base_sd = _make_granitemoe_base_state_dict()
+        _fused, direct = _classify_base_weights(
+            base_sd, granite_moe_arch(), self.LORA_TARGETS
+        )
+
+        for suffix in ("input_linear", "output_linear", "router.layer"):
+            name = f"model.layers.0.block_sparse_moe.{suffix}.weight"
+            assert name in direct, f"{name} not in direct mappings"
+            assert direct[name] == name, f"{name} was remapped to {direct[name]}"
+
+    def test_nothing_maps_into_shared_mlp(self):
+        base_sd = _make_granitemoe_base_state_dict()
+        fused, direct = _classify_base_weights(
+            base_sd, granite_moe_arch(), self.LORA_TARGETS
+        )
+
+        assert not any("shared_mlp" in target for target in direct.values())
+        assert not any("shared" in group for _layer, group in fused)
+
+    def test_qkv_still_fuses(self):
+        base_sd = _make_granitemoe_base_state_dict()
+        fused, _direct = _classify_base_weights(
+            base_sd, granite_moe_arch(), self.LORA_TARGETS
+        )
+
+        entry = fused[("0", "qkv_proj")]
+        for mod in ("q_proj", "k_proj", "v_proj"):
+            assert mod in entry
+
+
+class TestGraniteMoeArchDescriptor:
+    """granite_moe_arch is granite_dense_arch minus the shared-MLP groups."""
+
+    def test_groups_are_attention_only(self):
+        assert [g.name for g in granite_moe_arch().groups] == ["qkv_proj", "o_proj"]
+
+    def test_shared_intermediate_size_pinned_to_zero(self):
+        """0 is upstream's encoding for "no shared MLP" — not a missing value."""
+        assert (
+            granite_moe_arch().optional_config_fields["shared_intermediate_size"] == 0
+        )
+
+    def test_expert_fields_propagated(self):
+        opt = granite_moe_arch().optional_config_fields
+        assert opt["num_local_experts"] == 0
+        assert opt["num_experts_per_tok"] == 1
+
+    def test_sr_variant_adds_cross_stream(self):
+        names = [g.name for g in granite_moe_sr_arch().groups]
+        assert names == ["qkv_proj", "o_proj", "cross_stream"]
+        assert granite_moe_sr_arch().buffer_keywords
+
+
+class TestArchRegistries:
+    """Both registries must stay key-for-key in step."""
+
+    def test_same_model_types_registered(self):
+        assert set(_ARCH_REGISTRY) == set(_SR_ARCH_REGISTRY)
+
+    def test_granitemoe_registered(self):
+        assert "granitemoe" in _ARCH_REGISTRY
+        assert "granitemoe" in _SR_ARCH_REGISTRY
+
+    def test_hybrid_optional_fields_unchanged_by_field_split(self):
+        """Splitting the MoE field bundle must not perturb the hybrid arch."""
+        opt = granite_moe_hybrid_arch().optional_config_fields
+        assert opt["shared_intermediate_size"] is None
+        assert opt["num_local_experts"] == 0
+        assert opt["num_experts_per_tok"] == 1
 
 
 # ---------------------------------------------------------------------------

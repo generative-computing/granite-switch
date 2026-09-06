@@ -8,6 +8,11 @@ while the decoder ModuleList contains only the 40 real decoder layers.
 The test intentionally asserts that PP=2 generation succeeds. On the current
 buggy implementation it is expected to fail on a 2-GPU machine; after fixing
 the vLLM layer-count reporting or PP structure, it should pass.
+
+It runs on two bases.  The dense one is the original regression case.  The pure
+sparse MoE one (``granitemoe``, ``shared_intermediate_size == 0``) is here
+because the expert bank is the one set of weights this backend does not place
+itself, and a PP split is what makes half of it legitimately absent on each rank.
 """
 
 import importlib.util
@@ -62,7 +67,18 @@ pytestmark = [
 ]
 
 
-def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path):
+@pytest.mark.parametrize("arch", ["dense", "moe"])
+def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path, arch):
+    """PP=2 generation, on a dense base and on a pure sparse MoE base.
+
+    The MoE case is not a variation for its own sake.  Expert weights are the only
+    tensors this backend does not place itself -- ``_load_expert`` hands each shard
+    to ``FusedMoE``'s own weight loader -- and under PP every rank sees the
+    checkpoint's full expert bank while owning only half the layers.  The
+    ``is_pp_missing_parameter`` skip on that path has never been executed by a
+    test, and a missing expert tensor is reported by ``load_weights`` rather than
+    guessed at.
+    """
     env = os.environ.copy()
     pythonpath = env.get("PYTHONPATH")
     env["PYTHONPATH"] = (
@@ -75,9 +91,11 @@ def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path):
         str(_WORKER),
         "--tmpdir",
         str(tmp_path),
+        "--arch",
+        arch,
     ]
-    stdout_log = tmp_path / "pp_generation_stdout.log"
-    stderr_log = tmp_path / "pp_generation_stderr.log"
+    stdout_log = tmp_path / f"pp_generation_{arch}_stdout.log"
+    stderr_log = tmp_path / f"pp_generation_{arch}_stderr.log"
 
     try:
         with stdout_log.open("w", encoding="utf-8") as stdout:
@@ -98,7 +116,7 @@ def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path):
         if stderr:
             print("STDERR:", stderr[-_LOG_TAIL:])
         raise AssertionError(
-            "Granite Switch PP=2 generation timed out.\n"
+            f"Granite Switch PP=2 generation timed out (arch={arch}).\n"
             f"Full stdout: {stdout_log}\n"
             f"Full stderr: {stderr_log}\n"
             f"STDOUT (last {_LOG_TAIL} chars):\n{stdout[-_LOG_TAIL:]}\n"
@@ -114,7 +132,7 @@ def test_single_switch_generation_with_pipeline_parallel_size_2(tmp_path):
         print("STDERR:", stderr[-_LOG_TAIL:])
 
     assert result.returncode == 0, (
-        "Granite Switch PP=2 generation failed.\n"
+        f"Granite Switch PP=2 generation failed (arch={arch}).\n"
         f"Full stdout: {stdout_log}\n"
         f"Full stderr: {stderr_log}\n"
         f"STDOUT (last {_LOG_TAIL} chars):\n{stdout[-_LOG_TAIL:]}\n"
