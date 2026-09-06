@@ -1,4 +1,4 @@
-# Bring Your Own Adapter with Mellea
+# Build Your Own Adapter with Mellea
 
 This guide explains how to configure your own adapter with Mellea to be used by Granite Switch model.
 
@@ -6,7 +6,7 @@ This guide explains how to configure your own adapter with Mellea to be used by 
 
 Together, Mellea + Granite Switch + vLLM provide a production-ready inference stack for adapter-based AI applications that can utilize custom adapters.
 - See [Mellea With Granite Switch](mellea_with_granite_switch.md) for a detailed explanation of how granite-switch and Mellea work together.
-- See [Bring Your Own Adapter](build_your_own_adapter.md) for info on how to train your own adapter.
+- See [Build Your Own Adapter](build_your_own_adapter.md) for info on how to train your own adapter.
 - See Mellea's [Lora and aLoRA adapters](https://docs.mellea.ai/advanced/lora-and-alora-adapters) for info on how to train your own custom adapters using Mellea.
 
 ## Prerequisites
@@ -61,7 +61,7 @@ out, _ = mfuncs.act(
 )
 
 # Adapter / Intrinsic processing in Mellea utilizes the io.yaml format forcing the output
-# to be a json. See the "Bring Your Own Adapter" linked example above.
+# to be a json. See the "Build Your Own Adapter" linked example above.
 result = json.loads(str(out))
 print(result)
 ```
