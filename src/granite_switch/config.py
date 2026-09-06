@@ -154,9 +154,11 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             **kwargs,
         )
 
-        # Default shared_intermediate_size from intermediate_size.
-        # All Granite 4 models use shared_mlp naming; for dense models
-        # shared_intermediate_size == intermediate_size.
+        # Default shared_intermediate_size from intermediate_size.  Granite 4
+        # models all have a shared_mlp; for dense ones its width equals
+        # intermediate_size.  The test MUST stay ``is None``: 0 is the explicit
+        # "no shared MLP" encoding used by pure sparse MoE bases (granitemoe),
+        # and a falsy test would silently resurrect the module.
         if self.shared_intermediate_size is None:
             self.shared_intermediate_size = self.intermediate_size
 
@@ -346,12 +348,15 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                         ]
                     )
 
-                # MLP modules: all Granite 4 models use shared_mlp naming
-                lora_target_modules.extend(
-                    [
-                        "shared_input_linear",  # shared_mlp input_linear (fused gate+up)
-                        "shared_output_linear",  # shared_mlp output_linear
-                    ]
-                )
+                # MLP modules: only where a shared_mlp exists to hold them.
+                # Pure sparse MoE bases have none, and asking for the groups
+                # anyway would build zero-width LoRA projections.
+                if self.shared_intermediate_size > 0:
+                    lora_target_modules.extend(
+                        [
+                            "shared_input_linear",  # shared_mlp input_linear (fused gate+up)
+                            "shared_output_linear",  # shared_mlp output_linear
+                        ]
+                    )
 
         self.lora_target_modules = lora_target_modules

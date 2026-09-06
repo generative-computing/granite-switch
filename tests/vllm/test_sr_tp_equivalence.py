@@ -18,8 +18,14 @@ Jaccard only catches gross top-k scrambling; cf. test_tp_integration.py, which t
 5/20 top-k overlap loss plus a top-1 logprob tolerance.
 
 gpu-marked; skipped without vLLM, >=2 GPUs, or a readable SR_COMPOSED_DIR. Model-agnostic: point
-SR_COMPOSED_DIR at a granite-4.1 or granite-4.2 SR checkpoint — the worker auto-detects the 4.2
-chat template. See tests/unit/test_sr_doubled_q_tp_mapping.py for the CPU head-mapping invariant.
+SR_COMPOSED_DIR at a granite-4.1, granite-4.2 or granitemoe SR checkpoint — the worker auto-detects
+the 4.2 chat template. See tests/unit/test_sr_doubled_q_tp_mapping.py for the CPU head-mapping
+invariant.
+
+Being env-var gated, this never runs in CI: it is the gate on a *real* composed checkpoint, and the
+evidence it produces lives in a run log rather than in the suite. TestTPGraniteMoe in
+test_tp_integration.py is the reproducible counterpart — a synthetic pure-sparse MoE base, LoRA and
+SR, no download and no env var — so the expert-bank sharding path has a gate that runs unprompted.
 
 Env:
   SR_COMPOSED_DIR (required)  composed SR checkpoint dir

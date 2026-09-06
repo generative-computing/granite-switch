@@ -667,6 +667,9 @@ def replace_shared_mlp_projections_with_lora(
 
     Returns (has_input_lora, has_output_lora) flags for context-passing.
     """
+    if mlp is None:
+        return False, False
+
     num_adapters = config.num_adapters
     max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
     has_input_lora = False

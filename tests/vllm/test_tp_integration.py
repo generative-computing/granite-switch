@@ -12,6 +12,9 @@ CUDA fork issues — follows the same pattern as test_generation_equivalence.py.
 
 Test cases:
   1. granite-4.0-micro with real adapters from ibm-granite/granitelib-rag-r1.0
+  2. the same, with the coded MultiSwitch engine
+  3. a synthetic pure sparse MoE (``granitemoe``) base, plain LoRA and Shadow
+     Residual — the only committed coverage of expert sharding
 
 Skip automatically if fewer than 2 GPUs or vLLM is not installed.
 """
@@ -120,11 +123,22 @@ def _compare_topk(label, prompt_idx, rec1, rec2):
         f"  Top-1 logprob diff: {top1_diff:.4f} "
         f"(require <= {TOP1_LOGPROB_ATOL})"
     )
+    # Printed on a pass too, not only into the failure message: how far a run sits
+    # from the gate is the only thing that says whether these tolerances are
+    # measured or merely unbroken, and it is what a reviewer without a GPU has to
+    # go on. Requires ``-s``.
+    print(
+        f"  [{label}] prompt {prompt_idx}: overlap {overlap}/{TOPK} "
+        f"(min {TOPK_OVERLAP_MIN})   top-1 logprob diff {top1_diff:.4f} "
+        f"(max {TOP1_LOGPROB_ATOL})"
+    )
     assert overlap >= TOPK_OVERLAP_MIN, msg
     assert top1_diff <= TOP1_LOGPROB_ATOL, msg
 
 
-def _build_and_compare(work_dir, build_args, label, intrinsic_name=None):
+def _build_and_compare(
+    work_dir, build_args, label, intrinsic_name=None, token_prompts=False
+):
     """Build a model, generate with TP=1 and TP=2, assert distributions match.
 
     Not an exact-text check — see comment above TOPK_OVERLAP_MIN for why.
@@ -138,6 +152,8 @@ def _build_and_compare(work_dir, build_args, label, intrinsic_name=None):
     run_extra = []
     if intrinsic_name:
         run_extra = ["--intrinsic-name", intrinsic_name]
+    if token_prompts:
+        run_extra = [*run_extra, "--token-prompts"]
 
     _run_step(
         f"generate TP=1 ({label})",
@@ -227,4 +243,46 @@ class TestTPMultiSwitch:
             ],
             label="granite-4.0-micro-rag-multi",
             intrinsic_name="answerability",
+        )
+
+
+class TestTPGraniteMoe:
+    """TP=1 vs TP=2 on a pure sparse MoE base (``granitemoe``), both adaptations.
+
+    Every other arm in this file is a *dense* base, so the expert bank has never
+    been sharded by any committed test.  Two things are at stake and neither is
+    reachable from the dense arms:
+
+    * the HF-stacked -> ``FusedMoE`` remap in ``vllm/decoder/interface.py``
+      (``input_linear`` ``[E, 2I, H]`` -> ``w13_weight``, ``output_linear``
+      ``[E, H, I]`` -> ``w2_weight``) must land the right bytes when ``FusedMoE``
+      splits the expert bank across ranks;
+    * Shadow Residual hands the MoE a ``[2M, H]`` doubled token dim, so the
+      ``sr`` arm is the only committed coverage of an expert path under both the
+      doubling and sharding at once.
+
+    The sharding arithmetic itself is upstream's — ``_load_expert`` only calls
+    ``param.weight_loader(...)`` and never writes a tensor — so what this pins is
+    our remap and our plumbing, not ``FusedMoE``'s math.
+
+    Scope note: this is a TP-agreement test, not an adapter-activation test.  That
+    the control token fires at all is gated on CPU by
+    ``tests/composer/test_granitemoe_compose_e2e.py`` and structurally by
+    ``tests/vllm/test_moe_support.py``.  What is guarded here is that the two runs
+    are not agreeing *vacuously*: ``build-granitemoe`` fails the build if any
+    ``lora_B`` (or, for ``sr``, ``cross_stream.lora_B``) is all zero, which is
+    exactly what ``save_switch_model`` would have produced.
+
+    ``tests/vllm/test_sr_tp_equivalence.py`` remains the gate on a *real* composed
+    checkpoint; it is env-var gated and never runs in CI, which is why this one
+    exists.
+    """
+
+    @pytest.mark.parametrize("variant", ["lora", "sr"])
+    def test_tp_logprobs_agree_granitemoe(self, tmp_path, variant):
+        _build_and_compare(
+            str(tmp_path),
+            build_args=["build-granitemoe", "--variant", variant],
+            label=f"granitemoe-{variant}",
+            token_prompts=True,
         )

@@ -24,20 +24,31 @@ from tests.shared.generation_models import (
     save_switch_model,
     single_overrides,
 )
+from tests.shared.granite4_equivalence import GRANITEMOE_MINI
 
 DECODER_LAYERS = 40
 CONTROL_TOKEN_ID = 250
 GENERATE_TIMEOUT_SECONDS = 180
+
+# Base configs by ``--arch``.  ``moe`` is a pure sparse MoE
+# (``shared_intermediate_size == 0``), which reaches code the dense config
+# cannot: the expert bank is loaded through ``FusedMoE``'s own weight loader, and
+# under PP each rank owns only half the layers, so ``is_pp_missing_parameter``
+# must skip the other half's experts rather than warn about them.
+_ARCH_CFGS = {
+    "dense": DENSE_CFG,
+    "moe": GRANITEMOE_MINI["moe-20b"],
+}
 
 
 def _log(message: str) -> None:
     print(f"PP_GENERATION_PHASE {message}", flush=True)
 
 
-def _build_model(tmpdir):
+def _build_model(tmpdir, arch):
     """Build a tiny model whose config has 41 layers and decoder has 40."""
     base_cfg = {
-        **DENSE_CFG,
+        **_ARCH_CFGS[arch],
         "num_hidden_layers": DECODER_LAYERS,
         "layer_types": ["attention"] * DECODER_LAYERS,
     }
@@ -48,11 +59,11 @@ def _build_model(tmpdir):
     )
 
 
-def run_pp_generation(tmpdir):
+def run_pp_generation(tmpdir, arch):
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
-    _log("build_model_start")
-    model_dir = _build_model(tmpdir)
+    _log(f"build_model_start arch={arch}")
+    model_dir = _build_model(tmpdir, arch)
     _log("build_model_done")
 
     from vllm import LLM, SamplingParams
@@ -109,9 +120,10 @@ def run_pp_generation(tmpdir):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--tmpdir", required=True)
+    parser.add_argument("--arch", choices=sorted(_ARCH_CFGS), default="dense")
     args = parser.parse_args()
 
-    run_pp_generation(args.tmpdir)
+    run_pp_generation(args.tmpdir, args.arch)
     print("PP_GENERATION_OK")
     return 0
 

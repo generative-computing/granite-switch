@@ -76,6 +76,143 @@ _SR_SKIP_SUBSTRINGS = (
 
 
 # --------------------------------------------------------------------------- #
+# Post-load audit
+#
+# LoRA delta parameters are constructed ZEROED (core/lora.py, wcross_shunt.py),
+# so a checkpoint that omits one is *correct*: an adapter that does not target
+# that fused slice simply contributes no delta there. Those may go unloaded.
+#
+# Nothing else may. A base weight, a FusedMoE expert bank, a norm or a switch
+# parameter that is never loaded is uninitialized memory, and serving it yields
+# plausible-looking garbage rather than an error. That is not hypothetical here:
+# _try_load_stacked_moe below is all that stands between a composed MoE
+# checkpoint and 56 banks of uninitialized experts, and a name mismatch in it
+# fails silently.
+# --------------------------------------------------------------------------- #
+_ZERO_INIT_PARAM_MARKERS = (".lora_A", ".lora_B")
+
+
+def _audit_loaded(params_dict, loaded_params, model, *, label: str) -> None:
+    """Raise if a non-zero-init parameter went unloaded; warn about the rest."""
+    unloaded = [
+        n
+        for n in params_dict
+        if n not in loaded_params and not is_pp_missing_parameter(n, model)
+    ]
+    if not unloaded:
+        return
+
+    uninitialized = [
+        n for n in unloaded if not any(m in n for m in _ZERO_INIT_PARAM_MARKERS)
+    ]
+    if uninitialized:
+        shown = "\n".join(f"  - {n}" for n in uninitialized[:20])
+        more = (
+            f"\n  ... and {len(uninitialized) - 20} more"
+            if len(uninitialized) > 20
+            else ""
+        )
+        raise ValueError(
+            f"{label}: {len(uninitialized)} parameter(s) absent from the "
+            f"checkpoint would be served UNINITIALIZED:\n{shown}{more}"
+        )
+
+    logger.warning(
+        "%s: %d LoRA delta parameter(s) absent from the checkpoint; they stay "
+        "zero (no delta), as expected when an adapter does not target that "
+        "slice:\n%s",
+        label,
+        len(unloaded),
+        "\n".join(f"  - {n}" for n in unloaded[:10]),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# HF stacked MoE -> vLLM FusedMoE
+#
+# HF keeps the expert bank in three stacked tensors; vLLM's FusedMoE wants
+# packed per-expert shards addressed by (shard_id, expert_id):
+#
+#   block_sparse_moe.input_linear.weight  [E, 2I, H] -> experts.w13_weight (w1|w3)
+#   block_sparse_moe.output_linear.weight [E, H, I]  -> experts.w2_weight  (w2)
+#   block_sparse_moe.router.layer.weight  [E, H]     -> block_sparse_moe.gate.weight
+#
+# Shared by BOTH adaptations: a composed SR checkpoint is written by the HF SR
+# model, whose layer holds the same GraniteMoeHybridMoE, so the tensor names and
+# stacked shapes are identical to the LoRA case.
+# --------------------------------------------------------------------------- #
+_MOE_INPUT_SUFFIX = ".block_sparse_moe.input_linear.weight"
+_MOE_OUTPUT_SUFFIX = ".block_sparse_moe.output_linear.weight"
+_MOE_ROUTER_SUFFIX = ".block_sparse_moe.router.layer.weight"
+
+
+def _try_load_stacked_moe(name, loaded_weight, params_dict, loaded_params, model):
+    """Remap one HF stacked-MoE tensor onto vLLM's FusedMoE.
+
+    Returns True if ``name`` was an MoE tensor and the caller should move on;
+    False if the caller should fall through to its own direct-by-name load.
+    """
+
+    def _load_expert(param_name, shard, weight_name, shard_id, expert_id):
+        if is_pp_missing_parameter(param_name, model):
+            return
+        if param_name not in params_dict:
+            return
+        param = params_dict[param_name]
+        param.weight_loader(
+            param,
+            shard,
+            weight_name,
+            shard_id=shard_id,
+            expert_id=expert_id,
+        )
+        loaded_params.add(param_name)
+
+    if name.endswith(_MOE_INPUT_SUFFIX):
+        # gate|up are concatenated on dim 0 of each expert: w1 = gate, w3 = up.
+        w13_param = name.replace(".input_linear.", ".experts.w13_")
+        for e in range(loaded_weight.size(0)):
+            w1, w3 = loaded_weight[e].chunk(2, dim=0)
+            for shard, shard_id in ((w1, "w1"), (w3, "w3")):
+                _load_expert(
+                    w13_param,
+                    shard,
+                    name.replace(
+                        _MOE_INPUT_SUFFIX,
+                        f".block_sparse_moe.experts.{e}.{shard_id}.weight",
+                    ),
+                    shard_id=shard_id,
+                    expert_id=e,
+                )
+        return True
+
+    if name.endswith(_MOE_OUTPUT_SUFFIX):
+        w2_param = name.replace(".output_linear.", ".experts.w2_")
+        for e in range(loaded_weight.size(0)):
+            _load_expert(
+                w2_param,
+                loaded_weight[e],
+                name.replace(
+                    _MOE_OUTPUT_SUFFIX,
+                    f".block_sparse_moe.experts.{e}.w2.weight",
+                ),
+                shard_id="w2",
+                expert_id=e,
+            )
+        return True
+
+    if name.endswith(_MOE_ROUTER_SUFFIX):
+        gate_name = name.replace(_MOE_ROUTER_SUFFIX, ".block_sparse_moe.gate.weight")
+        if not is_pp_missing_parameter(gate_name, model) and gate_name in params_dict:
+            param = params_dict[gate_name]
+            getattr(param, "weight_loader", default_weight_loader)(param, loaded_weight)
+            loaded_params.add(gate_name)
+        return True
+
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # Per-adaptation stack state carried through the decoder loop
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -224,95 +361,17 @@ class LoRADecoderInterface(DecoderInterface):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(name)
 
-        def _load_expert(param_name, loaded_weight, weight_name, shard_id, expert_id):
-            """Load a per-expert weight into a FusedMoE packed parameter."""
-            if is_pp_missing_parameter(param_name, model):
-                return
-            if param_name not in params_dict:
-                return
-            param = params_dict[param_name]
-            weight_loader = param.weight_loader
-            weight_loader(
-                param,
-                loaded_weight,
-                weight_name,
-                shard_id=shard_id,
-                expert_id=expert_id,
-            )
-            loaded_params.add(param_name)
-
         for name, loaded_weight in weights:
-            # ── HF stacked MoE: input_linear → per-expert w1/w3 ──
-            if name.endswith(".block_sparse_moe.input_linear.weight"):
-                for e in range(loaded_weight.size(0)):
-                    w1_name = name.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w1.weight",
-                    )
-                    w3_name = name.replace(
-                        ".block_sparse_moe.input_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w3.weight",
-                    )
-                    w1_param, w3_param = loaded_weight[e].chunk(2, dim=0)
-                    _load_expert(
-                        name.replace(".input_linear.", ".experts.w13_"),
-                        w1_param,
-                        w1_name,
-                        shard_id="w1",
-                        expert_id=e,
-                    )
-                    _load_expert(
-                        name.replace(".input_linear.", ".experts.w13_"),
-                        w3_param,
-                        w3_name,
-                        shard_id="w3",
-                        expert_id=e,
-                    )
-                continue
-
-            # ── HF stacked MoE: output_linear → per-expert w2 ──
-            if name.endswith(".block_sparse_moe.output_linear.weight"):
-                for e in range(loaded_weight.size(0)):
-                    w2_name = name.replace(
-                        ".block_sparse_moe.output_linear.weight",
-                        f".block_sparse_moe.experts.{e}.w2.weight",
-                    )
-                    _load_expert(
-                        name.replace(".output_linear.", ".experts.w2_"),
-                        loaded_weight[e],
-                        w2_name,
-                        shard_id="w2",
-                        expert_id=e,
-                    )
-                continue
-
-            # ── HF MoE router → gate ──
-            if name.endswith(".block_sparse_moe.router.layer.weight"):
-                gate_name = name.replace(
-                    ".block_sparse_moe.router.layer.weight",
-                    ".block_sparse_moe.gate.weight",
-                )
-                _load_direct(gate_name, loaded_weight)
+            # ── HF stacked MoE → vLLM FusedMoE (shared with the SR loader) ──
+            if _try_load_stacked_moe(
+                name, loaded_weight, params_dict, loaded_params, model
+            ):
                 continue
 
             # ── Direct load (built checkpoints + all non-MoE weights) ──
             _load_direct(name, loaded_weight)
 
-        # Report unloaded parameters
-        unloaded_params = [n for n in params_dict if n not in loaded_params]
-        if unloaded_params:
-            shown = unloaded_params[:10]
-            suffix = (
-                f"\n  ... and {len(unloaded_params) - 10} more"
-                if len(unloaded_params) > 10
-                else ""
-            )
-            logger.warning(
-                "%d parameters were not loaded from checkpoint:\n%s%s",
-                len(unloaded_params),
-                "\n".join(f"  - {n}" for n in shown),
-                suffix,
-            )
+        _audit_loaded(params_dict, loaded_params, model, label="LoRA weight load")
 
         # Finalize fused LoRA weights (build w_ext from loaded lora_A + base weights)
         self.finalize_modules(model, model.config)
@@ -417,7 +476,12 @@ class SRDecoderInterface(DecoderInterface):
             config-regenerated buffers);
           * mark the fused-qkv K/V LoRA slices loaded — they carry no delta
             (``lora_B`` is zero), so vLLM's strict init check must accept them
-            whether or not the checkpoint ships them.
+            whether or not the checkpoint ships them;
+          * remap the HF stacked expert bank onto vLLM's ``FusedMoE`` via
+            :func:`_try_load_stacked_moe`. The experts are frozen and never LoRA
+            targets, so a composed SR checkpoint carries them in exactly the
+            stacked layout the LoRA loader sees — the remap is shared, not
+            duplicated.
         """
         params = dict(model.named_parameters())
         loaded: set = set()
@@ -439,6 +503,8 @@ class SRDecoderInterface(DecoderInterface):
                 continue
             if name.endswith(".bias") and name not in params:
                 continue
+            if _try_load_stacked_moe(name, w, params, loaded, model):
+                continue
             _load(name, w)
 
         # Shared-KV: the K/V slices of the fused qkv LoRA carry no delta
@@ -453,13 +519,7 @@ class SRDecoderInterface(DecoderInterface):
             ):
                 loaded.add(pname)
 
-        unloaded = [n for n in params if n not in loaded]
-        if unloaded:
-            logger.warning(
-                "%d SR params not loaded from checkpoint:\n%s",
-                len(unloaded),
-                "\n".join(f"  - {n}" for n in unloaded[:15]),
-            )
+        _audit_loaded(params, loaded, model, label="SR weight load")
 
         self.finalize_modules(model, model.config)
         return loaded

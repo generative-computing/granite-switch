@@ -349,6 +349,44 @@ GRANITE4_MINI = {
 }
 
 
+# ── Miniaturized pure-sparse MoE configs ─────────────────────────
+#
+# ``model_type: granitemoe`` is a *pure sparse* MoE: every layer has an expert
+# bank and there is no dense ``shared_mlp``, which upstream encodes as
+# ``shared_intermediate_size == 0``.  Kept in its own registry because these
+# configs are built against ``GraniteMoeConfig`` / ``GraniteMoeForCausalLM``,
+# not the ``granitemoehybrid`` pair that GRANITE4_MINI drives.
+#
+# The switch-only keys below (``shared_intermediate_size``, ``layer_types``,
+# ``position_embedding_type``, ``mlp_bias``) are inert on ``GraniteMoeConfig``:
+# ``PretrainedConfig`` keeps unknown kwargs as plain attributes and
+# ``GraniteMoeModel`` builds the same decoder layer for every index regardless.
+# One dict can therefore feed both constructors, and
+# ``augment_cfg_with_adapters`` (which needs ``layer_types``) works unchanged.
+
+GRANITEMOE_MINI = {
+    "moe-20b": {
+        # Real: hidden=2048, heads=32, kv=8, GQA 4:1, head_dim=64, rope,
+        #       56 experts, top_k=4, per-expert intermediate=1536, no shared MLP.
+        **_FIXED,
+        "hidden_size": 256,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 1,  # GQA 4:1, head_dim=64
+        "intermediate_size": 192,
+        "shared_intermediate_size": 0,  # pure sparse: no dense shared MLP
+        "num_local_experts": 8,
+        "num_experts_per_tok": 2,
+        "layer_types": ["attention"] * 4,
+        "position_embedding_type": "rope",
+        "embedding_multiplier": 12.0,
+        "residual_multiplier": 0.22,
+        "attention_multiplier": 0.015625,
+        "logits_scaling": 8.0,
+    },
+}
+
+
 # ── Full-size configs (real HF dimensions) ───────────────────────
 
 _FULLSIZE_FIXED = dict(

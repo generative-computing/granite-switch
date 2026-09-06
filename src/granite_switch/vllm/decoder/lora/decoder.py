@@ -257,7 +257,10 @@ def replace_shared_mlp_projections_with_lora(mlp, config):
 class GraniteSwitchDecoderLayer(nn.Module):
     """Attention decoder layer with switch-determined adapter selection.
 
-    Supports optional MoE (frozen) alongside shared_mlp when num_local_experts > 0.
+    Covers all three MLP shapes Granite ships: a dense shared MLP alone (4.0/4.1),
+    a frozen expert bank alongside it (4.x MoE hybrid), and the expert bank alone
+    (granitemoe, ``shared_intermediate_size == 0``). The experts are never LoRA
+    targets in any of them.
     """
 
     _lora_ctx = None  # Wired post-init by GraniteSwitchModel
@@ -294,16 +297,35 @@ class GraniteSwitchDecoderLayer(nn.Module):
                 prefix=f"{prefix}.block_sparse_moe",
             )
 
-        from vllm.model_executor.models.granitemoehybrid import GraniteMoeSharedMLP
+        # The dense shared MLP is ABSENT on a pure sparse MoE base (granitemoe),
+        # which upstream encodes as shared_intermediate_size == 0.
+        # It must be skipped, not merely zero-width: GraniteMoeSharedMLP sets
+        # self.hidden_size = config.shared_intermediate_size, so building it here
+        # would register [0, H] / [H, 0] weights that no checkpoint ships and
+        # then add their output to the MoE result. Same gate as upstream vLLM's
+        # own granitemoehybrid.py and as the HF backend
+        # (hf/modeling_granite_switch.py).
+        self.has_shared_mlp = getattr(config, "shared_intermediate_size", 0) > 0
+        if self.has_shared_mlp:
+            from vllm.model_executor.models.granitemoehybrid import GraniteMoeSharedMLP
 
-        self.shared_mlp = GraniteMoeSharedMLP(
-            config=config,
-            quant_config=vllm_config.quant_config,
-            prefix=f"{prefix}.shared_mlp",
-        )
-        self._has_shared_input_lora, self._has_shared_output_lora = (
-            replace_shared_mlp_projections_with_lora(self.shared_mlp, config)
-        )
+            self.shared_mlp = GraniteMoeSharedMLP(
+                config=config,
+                quant_config=vllm_config.quant_config,
+                prefix=f"{prefix}.shared_mlp",
+            )
+            self._has_shared_input_lora, self._has_shared_output_lora = (
+                replace_shared_mlp_projections_with_lora(self.shared_mlp, config)
+            )
+        else:
+            if not self.has_experts:
+                raise ValueError(
+                    "A decoder layer needs at least one MLP path: got "
+                    "num_local_experts=0 and shared_intermediate_size=0."
+                )
+            self.shared_mlp = None
+            self._has_shared_input_lora = False
+            self._has_shared_output_lora = False
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
@@ -337,13 +359,16 @@ class GraniteSwitchDecoderLayer(nn.Module):
             self.fused_add_norm,
         )
 
-        if self.has_experts:
-            moe_hidden_states = hidden_states.clone()
-            moe_hidden_states = self.block_sparse_moe(moe_hidden_states)
-            shared_output = self.shared_mlp(hidden_states)
-            hidden_states = moe_hidden_states + shared_output
-        else:
+        if not self.has_experts:
             hidden_states = self.shared_mlp(hidden_states)
+        elif not self.has_shared_mlp:
+            # Experts-only (granitemoe). Still clone: FusedMoE modifies its input
+            # in place, and hidden_states aliases the tensor the caller's
+            # residual pair was normed from.
+            hidden_states = self.block_sparse_moe(hidden_states.clone())
+        else:
+            moe_output = self.block_sparse_moe(hidden_states.clone())
+            hidden_states = moe_output + self.shared_mlp(hidden_states)
 
         hidden_states = hidden_states * self.residual_multiplier
         return hidden_states, residual

@@ -14,6 +14,7 @@ from granite_switch.composer.arch import (
     _cross_stream_groups,
     _moe_shared_mlp_groups,
     granite_dense_sr_arch,
+    granite_moe_sr_arch,
 )
 from granite_switch.composer.weight_remapper import AdapterRemapper
 
@@ -30,6 +31,12 @@ def dense_sr_groups():
 def moe_mlp_groups():
     """MoE shared-MLP groups (pre-fused ``shared_mlp.*`` spelling)."""
     return _moe_shared_mlp_groups()
+
+
+@pytest.fixture
+def granitemoe_sr_groups():
+    """Pure sparse MoE (``granitemoe``) SR arch: attention + cross_stream only."""
+    return granite_moe_sr_arch().groups
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -115,6 +122,48 @@ class TestMoEMLPRemapping:
             )
             is None
         )
+
+
+# ════════════════════════════════════════════════════════════════════
+# 2b. granitemoe: no shared MLP, so no MLP spelling resolves at all
+# ════════════════════════════════════════════════════════════════════
+
+
+class TestGraniteMoeSRRemapping:
+    """SR over a pure sparse MoE base: cross_stream and attention, nothing else."""
+
+    def test_cross_stream_and_q_proj_remap(self, granitemoe_sr_groups):
+        remapper = AdapterRemapper(granitemoe_sr_groups)
+
+        cs = remapper.remap_adapter_name(
+            "base_model.model.model.layers.0.cross_stream.lora_A.weight"
+        )
+        assert cs is not None
+        assert cs.target_name == "model.layers.0.cross_stream.lora_A"
+
+        q = remapper.remap_adapter_name(
+            "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+        )
+        assert q is not None
+        assert q.target_name == "model.layers.0.self_attn.qkv_proj.lora_A_slices.0"
+
+    def test_no_mlp_spelling_resolves(self, granitemoe_sr_groups):
+        """Both the dense and the pre-fused shared-MLP spellings must miss.
+
+        An adapter that trained MLP LoRA against a granitemoe base trained
+        something that does not exist here, and must not be silently absorbed.
+        """
+        remapper = AdapterRemapper(granitemoe_sr_groups)
+
+        for key in (
+            "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight",
+            "base_model.model.model.layers.0.mlp.down_proj.lora_B.weight",
+            "base_model.model.model.layers.0.shared_mlp.input_linear.lora_A.weight",
+            "base_model.model.model.layers.0.shared_mlp.output_linear.lora_A.weight",
+        ):
+            assert remapper.remap_adapter_name(key) is None, (
+                f"{key} unexpectedly mapped"
+            )
 
 
 # ════════════════════════════════════════════════════════════════════
