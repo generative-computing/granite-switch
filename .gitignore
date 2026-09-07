@@ -44,6 +44,9 @@ my-modular-model/
 *.log
 TEST_STATUS_REPORT.md
 
+# Generated test/config YAML files
+generated*.yaml
+
 # Coverage reports
 .coverage
 .coverage.*
