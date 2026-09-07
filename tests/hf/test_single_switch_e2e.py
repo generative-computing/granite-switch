@@ -15,8 +15,7 @@ Parametrized over PRODUCTION_ATTENTION_MULTIPLIERS to catch config-flow
 regressions across the realistic multiplier values.
 
 CPU-only. Does not exercise vLLM gain compensation — HF SingleSwitch hardcodes
-scaling=1.0 regardless of config. Compensation is tested in the Tier 2 composer
-test (see scratch/ISSUE_107_HANDOFF.md for the deferred follow-up design).
+scaling=1.0 regardless of config.
 
 Runtime reference (measured on CPU, 2026-04-30):
   seq_len=10_000   → 0.22s / case
@@ -42,10 +41,6 @@ TEXT_TOKEN = 50
 # Derived ceilings for the test fixture overrides. Both `DENSE_CFG` and the
 # granite4 constants are authoritative sources — pick the higher of each so
 # the test fixture auto-adjusts if either source is raised later.
-#
-# TODO: after the granite4_constants.py → granite4_family_constants.py rename
-# (see scratch/ISSUE_107_HANDOFF.md §10.2), update the import above; these
-# constants continue to work unchanged.
 _E2E_MAX_POSITION_EMBEDDINGS = max(
     DENSE_CFG["max_position_embeddings"],
     MAX_POSITION_EMBEDDINGS,
