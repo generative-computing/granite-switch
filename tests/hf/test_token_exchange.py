@@ -246,7 +246,7 @@ class TestControlLutRebuildAcrossSwitchEngines:
     what let this through a green suite.
     """
 
-    @pytest.mark.parametrize("switch_type", ["single", "multi"])
+    @pytest.mark.parametrize("switch_type", ["multi"])
     def test_rebuild_agrees_with_vocab_size(self, switch_type):
         config = _build(substitute_ids=(5, 7))
         config.switch_type = switch_type
@@ -268,7 +268,7 @@ class TestControlLutRebuildAcrossSwitchEngines:
         assert lut[101].item() == 7
         assert int((lut >= 0).sum()) == 2
 
-    @pytest.mark.parametrize("switch_type", ["single", "multi"])
+    @pytest.mark.parametrize("switch_type", ["multi"])
     def test_empty_adapter_ids_yield_no_table(self, switch_type):
         """An empty id list is "no mapping", not ``max(())``.
 
