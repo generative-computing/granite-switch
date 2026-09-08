@@ -115,8 +115,7 @@ class TestReprefillIdReuse:
             assert base, f"turn {i} should have had a reusable base prefix"
             assert sent[i][: len(base)] == base, "reused base is this turn's prefix"
             assert sent[i - 1][: len(base)] == base, (
-                "the reused base was byte-identically sent last turn, so the "
-                "cache hits"
+                "the reused base was byte-identically sent last turn, so the cache hits"
             )
 
     def test_lag_is_one_turn(self, tok, config):

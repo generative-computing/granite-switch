@@ -51,9 +51,7 @@ class TestBuildControlTokenLists:
     def _run(self, base_reset):
         tokenizer = MockTokenizer(initial_vocab_size=500)
         with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
-            return build_control_token_lists(
-                tokenizer, self._ADAPTERS, base_reset
-            )
+            return build_control_token_lists(tokenizer, self._ADAPTERS, base_reset)
 
     def test_base_reset_grows_both_lists_and_leads_with_base(self):
         token_ids, special_tokens, substitute_ids = self._run(base_reset=True)

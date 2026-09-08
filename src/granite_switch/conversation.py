@@ -379,7 +379,9 @@ class Conversation:
         one-turn lag.
         """
         committed = self._messages[: self._sent_messages]
-        full = self._render(self._messages, gen=True, adapter=adapter, **template_kwargs)
+        full = self._render(
+            self._messages, gen=True, adapter=adapter, **template_kwargs
+        )
 
         if not committed:
             # Turn 1: nothing sent yet, nothing to reuse. Full render; turn 2 will

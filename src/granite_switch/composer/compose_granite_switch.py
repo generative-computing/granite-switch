@@ -1123,9 +1123,7 @@ def build():
         # marker call does not evict them from additional_special_tokens.
         special_tokens,
         adapter_substitute_token_ids,
-    ) = build_control_token_lists(
-        tokenizer, all_discovered, args.base_reset_token
-    )
+    ) = build_control_token_lists(tokenizer, all_discovered, args.base_reset_token)
 
     # Audio cascade: add the <|audio|> marker token before the embedding resize.
     #

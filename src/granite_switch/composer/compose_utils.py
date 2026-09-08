@@ -19,6 +19,7 @@ from .arch import resolve_arch
 from .validator import validate_all_parameters, validate_cross_stream_population
 from .weight_transfer import transfer_adapter_weights, transfer_base_weights
 
+
 class GraniteSwitchComposer:
     """Composer for creating Granite Switch models from base + adapters."""
 
