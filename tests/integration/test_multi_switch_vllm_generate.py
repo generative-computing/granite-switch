@@ -8,14 +8,12 @@ single HF ``forward`` and inspects ``_last_adapter_indices``:
     with a mock config -- no engine, no generation.
   * ``tests/hf/test_multi_switch_e2e.py`` uses a real composed checkpoint but the
     HF backend.
-  * ``tests/integration/test_switch_e2e_compose.py`` boots a real vLLM engine but
-    only for SingleSwitch.
 
 Nothing put a composed MultiSwitch checkpoint through ``llm.generate``. That
-matters because two of this branch's three bugs were only reachable through a real
-serving path: the codebook loading as all zeros (needs a checkpoint round trip) and
-per-request counting anchors (needs a real flattened batch). A mock-config harness
-cannot see either.
+matters because two failure modes are only reachable through a real serving path:
+the codebook loading as all zeros (needs a checkpoint round trip) and per-request
+counting anchors (needs a real flattened batch). A mock-config harness cannot see
+either.
 
 What these tests assert:
   1. the engine serves a MultiSwitch checkpoint at all (registration + load);
@@ -28,10 +26,9 @@ What these tests assert:
 (4) is the guard against a vacuous pass: if the switch were dead (all-base) every
 adapter would emit identical text and (1)-(3) would still pass.
 
-Boots vLLM IN-PROCESS, matching this module's sibling
-``test_switch_e2e_compose.py`` (``tests/vllm/`` keeps CUDA out of the parent
-process, this package does not). Reuses the checkpoint composed by the HF e2e
-module via ``GRANITE_SWITCH_E2E_DIR``, so it costs an engine boot, not a compose.
+Boots vLLM IN-PROCESS (this package, unlike ``tests/vllm/``, does not keep CUDA
+out of the parent process). Reuses the checkpoint composed by the HF e2e module
+via ``GRANITE_SWITCH_E2E_DIR``, so it costs an engine boot, not a compose.
 
 Markers: slow + requires_model + gpu, and skipped unless
 ``GRANITE_SWITCH_E2E_MODELS=1``.
@@ -75,8 +72,8 @@ def engine(multi_checkpoint):
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     from vllm import LLM
 
-    # gpu_memory_utilization mirrors test_switch_e2e_compose.py: the default 0.9
-    # collides with allocator/pytest overhead on an 80 GB card.
+    # gpu_memory_utilization is below the default 0.9, which collides with
+    # allocator/pytest overhead on an 80 GB card.
     llm = LLM(
         model=str(multi_checkpoint),
         skip_tokenizer_init=True,

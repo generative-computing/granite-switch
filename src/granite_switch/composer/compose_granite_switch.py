@@ -281,13 +281,9 @@ def refresh_switch_control_lut(model) -> bool:
     ``len(tokenizer)`` one past the last control id — so a stale table is
     specific to ``--enable-audio`` rather than universal.
 
-    Extracted from ``build()`` so the rebuild can be tested over every switch
-    engine without composing a real checkpoint. It used to be an inline
-    ``switch.rebuild_control_to_substitute_lut(...)`` method call, which existed
-    only on ``SingleSwitch``, so ``--switch-type multi --enable-audio`` raised
-    ``AttributeError`` here. Every real multi-compose test is gated behind
-    ``GRANITE_SWITCH_E2E_MODELS=1`` (unset in CI) and none of them enables audio,
-    so nothing caught it.
+    Extracted from ``build()`` so the rebuild can be tested without composing a
+    real checkpoint (the real audio-compose tests are gated behind
+    ``GRANITE_SWITCH_E2E_MODELS=1``, unset in CI).
 
     Args:
         model: Composed model, after ``resize_token_embeddings``.
@@ -1119,8 +1115,8 @@ def build():
     # so probing here rather than after configure_chat_template is equivalent.
     (
         adapter_token_ids,
-        # Not unused on this branch: add_audio_token re-passes these so the
-        # marker call does not evict them from additional_special_tokens.
+        # Not unused: add_audio_token re-passes these so the marker call does
+        # not evict them from additional_special_tokens.
         special_tokens,
         adapter_substitute_token_ids,
     ) = build_control_token_lists(tokenizer, all_discovered, args.base_reset_token)

@@ -20,9 +20,9 @@ filter at all. Nothing composed an aLoRA-only checkpoint and checked that an
 aLoRA-placed control token yields base-before / adapter-after routing on a real
 model. The template's placement logic is unit-tested in
 tests/composer/test_chat_template.py with no model attached, so the two halves --
-placement and routing -- were never joined. That is the same shape as all three
-bugs fixed on this branch: a layer correct in isolation, never crossed end to end.
-aLoRA is the technology whose entire semantics depend on that placement.
+placement and routing -- were never joined: a layer correct in isolation, never
+crossed end to end. aLoRA is the technology whose entire semantics depend on that
+placement.
 
 Heavy: composes a real granite-4.1-3b with --technology-filter alora. Gated on
 GRANITE_SWITCH_E2E_MODELS=1 like the other real-checkpoint suites.

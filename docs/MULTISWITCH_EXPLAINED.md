@@ -2,13 +2,6 @@
 
 One reference for coarse-grained multi-adapter routing in Granite Switch, as the code stands today: how the two attention heads compute an adapter index per token, what the HF and vLLM backends do differently, how multi-turn conversations reuse KV, and which limits are real. Every number below was read from the source or produced by running it.
 
-
-*Converted from HTML on branch `bugfix/multi-switch-default`. Engine and backend
-facts were read at `1c86ee9` on `feature/multiswitch-kv-policy`; the SingleSwitch
-removal and the `config.py` / `modeling_granite_switch.py` references were
-re-verified against this branch. Other line references are carried over unchanged
-and have not been re-audited.*
-
 **Contents**
 
 1. [What MultiSwitch is, and how it differs from SingleSwitch](#1-what-multiswitch-is-and-how-it-differs-from-singleswitch)
@@ -487,7 +480,7 @@ rendered:     <|req_check|>requirements>req1
               ^^^^^^^^^^^^^ becomes '<' at runtime, reconstructing the invocation
 ```
 
-On this branch the omitted unit is the first **character**, sliced in the emitted Jinja itself:
+The omitted unit is the first **character**, sliced in the emitted Jinja itself:
 
 ```
 # src/granite_switch/composer/tokenizer_setup.py:478  (Pass 2, inside the emitted template)
@@ -498,7 +491,7 @@ On this branch the omitted unit is the first **character**, sliced in the emitte
 >
 > They coincide only when the first character tokenizes alone. Measured across six cached Granite tokenizers (4.1-3b, 4.1-8b, 4.0-micro, 4.0-h-tiny, switch-4.1-3b-preview, 3.3-2b-instruct), the first token of every library invocation -- `<requirements>`, `<certainty>`, `<guardian>`, `<context>` -- is `'<'`, so the two rules agree on everything currently shipped. The exposure is **latent, not active**.
 >
-> Two corrections to earlier write-ups of this, both worth knowing: `<context>` is *not* a counterexample -- `'<context'` is a real vocab entry (id 35628 on granite-4.1-3b) but BPE never produces it for `'<context>'`, which encodes as `['<', 'context', '>']`. The real counterexamples are Granite's structural markers, which are single vocab entries:
+> Two subtleties, both worth knowing: `<context>` is *not* a counterexample -- `'<context'` is a real vocab entry (id 35628 on granite-4.1-3b) but BPE never produces it for `'<context>'`, which encodes as `['<', 'context', '>']`. The real counterexamples are Granite's structural markers, which are single vocab entries:
 >
 > ```
 > </documents>   ['</documents>']    token tail=''   char tail='/documents>'
@@ -508,7 +501,7 @@ On this branch the omitted unit is the first **character**, sliced in the emitte
 > where the adapter was trained on ONE.
 > ```
 
-The token-based rule exists but is **not on this branch**: `c775046` landed it here, `7a7cea3` reverted it, and it now lives as `41a6883` on `bugfix/alora-invocation-tail`, branched off `origin/main`. So do not look for an `alora_invocation_tail()` helper in this tree -- there is none.
+The code applies the character rule, not the token rule: there is no `alora_invocation_tail()` helper in this tree.
 
 > **A checkpoint's template and its buffers are a matched pair**
 >

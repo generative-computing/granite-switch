@@ -18,9 +18,9 @@ Every other multiswitch test hand-builds token-id lists like
     lives at position 0, so a later chunk can contain no anchor at all -- the same
     structural hazard as the batching bug.
 
-These are the three untested seams closest to real deployment. All three bugs
-fixed on this branch lived on exactly this kind of boundary: code that was correct
-in isolation and wrong the first time something real drove it.
+These are the three untested seams closest to real deployment -- exactly the kind
+of boundary where code correct in isolation goes wrong the first time something
+real drives it.
 
 Uses the module-scoped real composed checkpoint from ``test_multi_switch_e2e``, so
 it costs no extra compose. Gated on ``GRANITE_SWITCH_E2E_MODELS=1``.
