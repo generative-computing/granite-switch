@@ -31,11 +31,22 @@ def assert_close(actual, expected, *, atol, rtol, msg=""):
 
     This avoids the joint formula (atol + rtol * |b|) where the two
     tolerances inflate each other's budget.
+
+    ``atol=rtol=0.0`` is a valid bit-exact gate. Passing it here rather than
+    to ``torch.testing.assert_close`` is deliberate: that function's ``msg=``
+    string *replaces* its whole diagnostic, so a failure reports only the
+    message and none of the numbers needed to tell a last-bit drift from a
+    real regression.
+
+    Matching non-finite entries count as equal. Logprob tensors are padded
+    with ``-inf`` for positions vLLM did not return, and ``-inf - -inf`` is
+    ``nan``, which fails every comparison — including ``diff <= 0.0`` — and
+    would surface as a bogus ``worst=nan``.
     """
     diff = (actual - expected).abs()
     abs_ok = diff <= atol
     rel_ok = diff <= rtol * expected.abs()
-    ok = abs_ok | rel_ok
+    ok = abs_ok | rel_ok | (actual == expected)
 
     if not ok.all():
         num_bad = (~ok).sum().item()
@@ -255,6 +266,21 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
        token in the input, the switch embeds the substitute id at that
        position while upstream embeds the original control id. Visible
        positions attending to the control position pick up that delta.
+
+    Case 1's bit-exactness holds for the *eager* graph only. Under
+    torch.compile the switch graph and the upstream graph are different
+    graphs, so inductor is free to fuse and tile them differently; at
+    production dimensions that is enough to round one bf16 logit's last bit
+    apart. It surfaced as ``test_logits_match[4.0-micro]`` failing on vLLM
+    0.20 while passing on 0.19 — with 4.0-1b and 4.0-350m (same 40 layers,
+    same dense stack) passing on both, and the same test bit-exact on the HF
+    backend, which is why the divergence is attributed to compilation rather
+    than to the weight transfer. vLLM's per-engine kernel choice is visible
+    in its own logs: the failing engine reported
+    ``IrOpPriorityConfig(rms_norm=['native'])`` where its sibling reported
+    ``['vllm_c', 'native']``. The vLLM callers that want a bit-exact gate
+    therefore pass ``enforce_eager=True``; see
+    ``tests/vllm/_granite4_fullsize_tests.py``.
 
     Args:
         layer_types: list of "attention" strings
