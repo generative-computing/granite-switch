@@ -401,14 +401,74 @@ class TestResolveGenerateKwargs:
 
 @contextlib.contextmanager
 def _patched_pipeline(factory):
-    """Patch both lookup paths: `from transformers import pipeline` re-resolves to
-    transformers.pipelines.pipeline, but transformers caches it on the top-level
-    module after the first access, so a later test would get the real one."""
+    """Patch both lookup paths ``ASRTranscriber.load`` may resolve through.
+
+    ``load()`` does ``from transformers import pipeline`` at call time, which
+    reads the top-level attribute; transformers is a lazy module, so that
+    attribute may not exist yet and gets resolved from ``transformers.pipelines``
+    on first access. Both therefore need patching.
+
+    **The order matters and is load-bearing.** ``transformers.pipeline`` must be
+    patched FIRST. ``mock.patch.__enter__`` records the current value so it can
+    restore it, and if ``transformers.pipelines.pipeline`` were replaced first,
+    resolving ``transformers.pipeline`` would return *that mock* and record it as
+    the original -- which the patch then faithfully restores on exit, leaving the
+    mock installed for the rest of the process. See
+    ``TestPatchedPipelineRestores``.
+    """
     with (
-        mock.patch("transformers.pipelines.pipeline", factory),
         mock.patch("transformers.pipeline", factory),
+        mock.patch("transformers.pipelines.pipeline", factory),
     ):
         yield
+
+
+class TestPatchedPipelineRestores:
+    """``_patched_pipeline`` must leave ``transformers.pipeline`` as it found it.
+
+    Regression guard for a leak that was expensive to diagnose. With the two
+    patches in the wrong order the helper restored its own mock instead of the
+    real function, so every later real ``pipeline()`` call in the session got it.
+    Because one of the mocks in this file raises the "does not recognize this
+    architecture" ValueError, ``_unsupported_architecture_error`` then reported a
+    bogus "requires transformers>=5.16" ImportError from an unrelated GPU test --
+    naming the installed version as too old for itself.
+
+    The leak only surfaces when ``transformers.pipeline`` is not already cached on
+    the top-level module, which is why a full-suite run reproduced it and this
+    file alone did not. The test forces that precondition instead of depending on
+    collection order.
+    """
+
+    def test_pipeline_attribute_is_restored(self):
+        import transformers
+
+        real = transformers.pipeline  # resolve once, to compare against
+        # Force the lazy-resolve path, which is what makes the ordering matter.
+        transformers.__dict__.pop("pipeline", None)
+
+        sentinel = mock.Mock(side_effect=ValueError("this mock must not escape"))
+        with _patched_pipeline(sentinel):
+            from transformers import pipeline as inside
+
+            assert inside is sentinel, "patch did not take effect"
+
+        from transformers import pipeline as after
+
+        assert after is not sentinel, (
+            "_patched_pipeline leaked its mock onto transformers.pipeline; "
+            "check the patch order in the helper"
+        )
+        assert after is real
+
+    def test_pipelines_submodule_attribute_is_restored(self):
+        import transformers.pipelines
+
+        real = transformers.pipelines.pipeline
+        sentinel = mock.Mock(side_effect=ValueError("this mock must not escape"))
+        with _patched_pipeline(sentinel):
+            assert transformers.pipelines.pipeline is sentinel
+        assert transformers.pipelines.pipeline is real
 
 
 class TestResolveTorchDtype:
