@@ -99,7 +99,6 @@ def mixed_model():
 
     out_dir = _compose_mixed()
     config = GraniteSwitchConfig.from_pretrained(out_dir)
-    assert config.switch_type == "multi"
     tok = AutoTokenizer.from_pretrained(out_dir)
     model = GraniteSwitchForCausalLM.from_pretrained(out_dir).eval()
     assert isinstance(model.model.switch, MultiSwitch)

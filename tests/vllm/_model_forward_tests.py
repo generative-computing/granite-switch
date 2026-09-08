@@ -232,11 +232,16 @@ class _VLLMModelTestBase:
         self._kv_caches = []
         self._attention_map = {}
 
-        num_decoder_layers = self.config.num_hidden_layers - 1
+        num_decoder_layers = self.config.num_hidden_layers - 2
         num_blocks = (MAX_TOKENS + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
 
-        switch_attn = self.model.model.switch.attn
-        self._setup_single_attn(switch_attn, "switch.layers.0", num_blocks)
+        # MultiSwitch owns TWO attention modules (counting + memory), each with
+        # its own KV-cache slot; register both under their real vLLM layer names.
+        for switch_attn in (
+            self.model.model.switch.counting_attn,
+            self.model.model.switch.memory_attn,
+        ):
+            self._setup_single_attn(switch_attn, switch_attn.layer_name, num_blocks)
 
         for i in range(num_decoder_layers):
             layer_attn = self.model.model.layers[i].self_attn.attn

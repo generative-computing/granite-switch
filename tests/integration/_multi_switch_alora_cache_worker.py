@@ -124,7 +124,9 @@ def cmd_build(args):
     print(f"technologies={techs}", file=sys.stderr)
     print(f"ctrl={cfg.get('adapter_token_ids')}", file=sys.stderr)
     print(f"subs={cfg.get('adapter_substitute_token_ids')}", file=sys.stderr)
-    assert cfg.get("switch_type") == "multi", "expected switch_type=multi"
+    assert "ms_code_m" in cfg, (
+        "expected a MultiSwitch (coded) checkpoint (ms_code_m marker)"
+    )
     print("BUILD_OK")
     return 0
 

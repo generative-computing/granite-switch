@@ -90,7 +90,9 @@ def cmd_build(args):
 
     with open(os.path.join(args.output_dir, "config.json")) as f:
         cfg = json.load(f)
-    assert cfg.get("switch_type") == "multi", f"switch_type={cfg.get('switch_type')!r}"
+    assert "ms_code_m" in cfg, (
+        "expected a MultiSwitch (coded) checkpoint (ms_code_m marker)"
+    )
     print(
         f"num_adapters={cfg.get('num_adapters')} names={cfg.get('adapter_names')}",
         file=sys.stderr,
@@ -336,7 +338,6 @@ def cmd_serve(args):
 
     result = {
         "num_adapters": config.num_adapters,
-        "switch_type": config.switch_type,
         "adapter_map": {
             n: {"type": t, "invocation": i} for n, (_tok, t, i) in adapter_map.items()
         },

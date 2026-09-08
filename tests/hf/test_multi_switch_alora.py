@@ -94,9 +94,6 @@ def alora_model():
 
     out_dir = _compose_alora()
     config = GraniteSwitchConfig.from_pretrained(out_dir)
-    assert config.switch_type == "multi", (
-        f"composed switch_type={config.switch_type!r}, expected 'multi'"
-    )
     tok = AutoTokenizer.from_pretrained(out_dir)
     model = GraniteSwitchForCausalLM.from_pretrained(out_dir).eval()
     assert isinstance(model.model.switch, MultiSwitch)

@@ -88,8 +88,8 @@ def cmd_build(args):
         _compose(args.output_dir)
     with open(os.path.join(args.output_dir, "config.json")) as f:
         cfg = json.load(f)
-    assert cfg.get("switch_type") == "multi", (
-        f"switch_type={cfg.get('switch_type')!r}, expected 'multi'"
+    assert "ms_code_m" in cfg, (
+        "expected a MultiSwitch (coded) checkpoint (ms_code_m marker)"
     )
     print(
         f"num_adapters={cfg.get('num_adapters')} ctrl={cfg.get('adapter_token_ids')}",
