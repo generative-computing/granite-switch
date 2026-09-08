@@ -13,9 +13,9 @@ Quantization methods tested:
 No hardware gating — all methods dequantize to BF16 at compute time on HF backend.
 Requires: CUDA GPU, bitsandbytes, optimum-quanto.
 
-Model: a real MultiSwitch checkpoint composed on demand from rag + guardian (so it
-carries both an aLoRA intrinsic, ``answerability``, and a LoRA one,
-``hallucination_detection``) and warm-reused under ``GRANITE_SWITCH_E2E_DIR``. The
+Model: a real MultiSwitch checkpoint composed on demand from granitelib-rag, which
+carries both an aLoRA intrinsic (``answerability``) and a LoRA one
+(``hallucination_detection``), warm-reused under ``GRANITE_SWITCH_E2E_DIR``. The
 published previews are legacy SingleSwitch checkpoints and no longer load, so the
 suite composes its own — same pattern as ``test_multi_switch_mixed_tech.py``.
 """
@@ -39,20 +39,20 @@ pytestmark = [
 ]
 
 BASE_MODEL = "ibm-granite/granite-4.1-3b"
-# rag carries aLoRA intrinsics (answerability); guardian carries LoRA ones
-# (hallucination_detection). No --technology-filter -> BOTH technologies in one
-# checkpoint, matching ADAPTER_TESTS below.
-ADAPTER_REPOS = [
-    "ibm-granite/granitelib-rag-r1.0",
-    "ibm-granite/granitelib-guardian-r1.0",
-]
+# granitelib-rag carries BOTH adapters ADAPTER_TESTS exercises: answerability as
+# an aLoRA and hallucination_detection as a LoRA. Composing rag alone (no filter,
+# so the alora>lora preference is kept) yields a naturally mixed checkpoint with
+# exactly those names. A dedicated output dir (not the shared "multi-mixed") is
+# deliberate: that shared checkpoint may already exist composed from other
+# libraries, whose adapter names would not match ADAPTER_TESTS.
+ADAPTER_REPOS = ["ibm-granite/granitelib-rag-r1.0"]
 _E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e2e"))
 
 
 @pytest.fixture(scope="module")
 def model_path():
-    """Compose (or warm-reuse) a mixed MultiSwitch checkpoint; return its dir."""
-    out_dir = _E2E_ROOT / "multi-mixed"
+    """Compose (or warm-reuse) a rag MultiSwitch checkpoint; return its dir."""
+    out_dir = _E2E_ROOT / "quant-rag"
     if (out_dir / "config.json").exists():
         print(f"warm-reuse {out_dir}", file=sys.stderr)
         return str(out_dir)
