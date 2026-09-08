@@ -12,15 +12,71 @@ Quantization methods tested:
 
 No hardware gating — all methods dequantize to BF16 at compute time on HF backend.
 Requires: CUDA GPU, bitsandbytes, optimum-quanto.
-Model: ibm-granite/granite-switch-4.1-3b-preview (pre-composed, loaded from HF).
+
+Model: a real MultiSwitch checkpoint composed on demand from rag + guardian (so it
+carries both an aLoRA intrinsic, ``answerability``, and a LoRA one,
+``hallucination_detection``) and warm-reused under ``GRANITE_SWITCH_E2E_DIR``. The
+published previews are legacy SingleSwitch checkpoints and no longer load, so the
+suite composes its own — same pattern as ``test_multi_switch_mixed_tech.py``.
 """
+
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import torch
 
-pytestmark = [pytest.mark.slow, pytest.mark.requires_model, pytest.mark.gpu]
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.requires_model,
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
+        reason="composes a real ~3B mixed checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",
+    ),
+]
 
-MODEL_ID = "ibm-granite/granite-switch-4.1-3b-preview"
+BASE_MODEL = "ibm-granite/granite-4.1-3b"
+# rag carries aLoRA intrinsics (answerability); guardian carries LoRA ones
+# (hallucination_detection). No --technology-filter -> BOTH technologies in one
+# checkpoint, matching ADAPTER_TESTS below.
+ADAPTER_REPOS = [
+    "ibm-granite/granitelib-rag-r1.0",
+    "ibm-granite/granitelib-guardian-r1.0",
+]
+_E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e2e"))
+
+
+@pytest.fixture(scope="module")
+def model_path():
+    """Compose (or warm-reuse) a mixed MultiSwitch checkpoint; return its dir."""
+    out_dir = _E2E_ROOT / "multi-mixed"
+    if (out_dir / "config.json").exists():
+        print(f"warm-reuse {out_dir}", file=sys.stderr)
+        return str(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        BASE_MODEL,
+        *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
+        "--output",
+        str(out_dir),
+    ]
+    print("composing (mixed):", " ".join(cmd), file=sys.stderr)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if r.returncode != 0:
+        pytest.fail(
+            f"mixed compose failed (exit {r.returncode})\n"
+            f"--- stdout ---\n{r.stdout[-3000:]}\n--- stderr ---\n{r.stderr[-3000:]}",
+            pytrace=False,
+        )
+    return str(out_dir)
+
 
 # ---------------------------------------------------------------------------
 # Test data
@@ -93,7 +149,7 @@ def _generate(
 
 
 @pytest.fixture(scope="module")
-def bnb_model():
+def bnb_model(model_path):
     """Load granite-switch from HF with BitsAndBytes NF4 quantization."""
     bitsandbytes = pytest.importorskip("bitsandbytes")  # noqa: F841
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -106,9 +162,9 @@ def bnb_model():
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="nf4",
     )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_path,
         quantization_config=bnb_config,
         device_map="auto",
     )
@@ -117,7 +173,7 @@ def bnb_model():
 
 
 @pytest.fixture(scope="module")
-def quanto_model():
+def quanto_model(model_path):
     """Load granite-switch from HF with Quanto INT4 quantization."""
     pytest.importorskip("optimum.quanto")
     from transformers import AutoModelForCausalLM, AutoTokenizer, QuantoConfig
@@ -125,9 +181,9 @@ def quanto_model():
     import granite_switch.hf  # noqa: F401
 
     quanto_config = QuantoConfig(weights="int4")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_path,
         quantization_config=quanto_config,
         device_map="auto",
     )
@@ -271,7 +327,7 @@ class TestQuantoBaseQuantized:
 
 
 @pytest.fixture(scope="module")
-def fp8_model():
+def fp8_model(model_path):
     """Load granite-switch from HF with Quanto FP8 quantization."""
     pytest.importorskip("optimum.quanto")
     from transformers import AutoModelForCausalLM, AutoTokenizer, QuantoConfig
@@ -279,9 +335,9 @@ def fp8_model():
     import granite_switch.hf  # noqa: F401
 
     quanto_config = QuantoConfig(weights="float8")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_path,
         quantization_config=quanto_config,
         device_map="auto",
     )
@@ -354,7 +410,7 @@ class TestFP8BaseQuantized:
 
 
 @pytest.fixture(scope="module")
-def fp4_model():
+def fp4_model(model_path):
     """Load granite-switch from HF with BitsAndBytes FP4 quantization."""
     bitsandbytes = pytest.importorskip("bitsandbytes")  # noqa: F841
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
@@ -367,9 +423,9 @@ def fp4_model():
         bnb_4bit_use_double_quant=True,
         bnb_4bit_quant_type="fp4",
     )
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    tokenizer = AutoTokenizer.from_pretrained(model_path)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_path,
         quantization_config=bnb_config,
         device_map="auto",
     )
