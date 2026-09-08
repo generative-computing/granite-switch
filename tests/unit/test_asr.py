@@ -171,6 +171,120 @@ class TestChunkedTranscribe:
         assert out == "seg80000"
 
 
+class TestUnsupportedArchitectureError:
+    """A transformers too old for the default model must say so actionably."""
+
+    def test_unrecognized_architecture_becomes_actionable_importerror(self):
+        boom = mock.Mock(
+            side_effect=ValueError(
+                "The checkpoint you are trying to load has model type "
+                "`granite_speech5_ctc` but Transformers does not recognize this "
+                "architecture."
+            )
+        )
+        with _patched_pipeline(boom):
+            t = asr.ASRTranscriber(model_id=asr.DEFAULT_ASR_MODEL_ID, device="cpu")
+            with pytest.raises(ImportError) as excinfo:
+                t.load()
+        message = str(excinfo.value)
+        assert "transformers>=5.16" in message
+        assert "audio" in message  # names the extra that pins it
+
+    def test_other_value_errors_are_left_alone(self):
+        boom = mock.Mock(side_effect=ValueError("some unrelated pipeline problem"))
+        with _patched_pipeline(boom):
+            with pytest.raises(ValueError, match="some unrelated pipeline problem"):
+                asr.ASRTranscriber(model_id="m", device="cpu").load()
+
+
+class TestBackendKindDrivesCallKwargs:
+    """A CTC backend gets neither a chunk window nor decode kwargs; a generative
+    one gets both. Guards the two ways handing chunk_length_s to a CTC pipeline
+    goes wrong: chunked CTC rescales stride by inputs_to_logits_ratio (absent on
+    the default checkpoint, so it silently falls back to 1 and mis-trims every
+    seam), and a CTC pipeline has no generate() to take decode kwargs at all."""
+
+    def _transcriber(self, pipeline_type, pipeline_kwargs=None):
+        factory = mock.Mock(return_value=mock.Mock(type=pipeline_type))
+        with _patched_pipeline(factory):
+            t = asr.ASRTranscriber(
+                model_id="m", device="cpu", pipeline_kwargs=pipeline_kwargs
+            )
+            t.load()
+        # Re-point at a recorder now that load() has classified the backend.
+        t._pipeline = mock.Mock(return_value={"text": "hi"})
+        return t
+
+    @pytest.mark.parametrize("pipeline_type", ["ctc", "ctc_with_lm"])
+    def test_ctc_gets_no_chunk_window_and_no_decode_kwargs(self, pipeline_type):
+        t = self._transcriber(pipeline_type)
+        assert t._is_ctc is True
+        t.transcribe(
+            np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            generate_kwargs={"language": "fr"},
+            self_chunks=True,
+        )
+        kwargs = t._pipeline.call_args.kwargs
+        assert "chunk_length_s" not in kwargs
+        assert "generate_kwargs" not in kwargs
+
+    def test_seq2seq_gets_chunk_window_and_decode_kwargs(self):
+        t = self._transcriber("seq2seq_whisper")
+        assert t._is_ctc is False
+        t.transcribe(
+            np.zeros(1600, dtype=np.float32),
+            sampling_rate=16000,
+            generate_kwargs={"language": "fr"},
+            self_chunks=True,
+        )
+        kwargs = t._pipeline.call_args.kwargs
+        assert kwargs["chunk_length_s"] == asr.SEQ2SEQ_CHUNK_LENGTH_S
+        assert kwargs["generate_kwargs"] == {"language": "fr"}
+
+    def test_explicit_pipeline_window_is_not_repeated_at_call_time(self):
+        # Already bound into the pipeline at construction; passing it again would
+        # override the checkpoint's own choice.
+        t = self._transcriber("seq2seq_whisper", pipeline_kwargs={"chunk_length_s": 15})
+        t.transcribe(np.zeros(1600, dtype=np.float32), sampling_rate=16000)
+        assert "chunk_length_s" not in t._pipeline.call_args.kwargs
+
+    def test_construction_passes_no_chunk_window(self):
+        # The window is a call-time decision now, since it depends on the backend
+        # kind, which is only known once the pipeline exists.
+        factory = mock.Mock(return_value=mock.Mock(type="ctc"))
+        with _patched_pipeline(factory):
+            asr.ASRTranscriber(model_id="m", device="cpu").load()
+        assert "chunk_length_s" not in factory.call_args.kwargs
+
+
+class TestSinglePassCeiling:
+    """The default 120s window is the boundary between 'backend handles it whole'
+    and 'our chunker splits it'."""
+
+    def _recording_transcriber(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        t._is_ctc = True
+        t.calls = []
+        t._pipeline = lambda inp, **k: (
+            t.calls.append(len(inp["raw"])) or {"text": f"seg{len(inp['raw'])}"}
+        )
+        return t
+
+    def test_clip_at_the_ceiling_reaches_the_backend_whole(self):
+        t = self._recording_transcriber()
+        n = int(asr.DEFAULT_CHUNK_LENGTH_S) * 16000
+        t.transcribe(np.zeros(n, dtype=np.float32), sampling_rate=16000)
+        assert t.calls == [n]
+
+    def test_clip_past_the_ceiling_is_split(self):
+        t = self._recording_transcriber()
+        n = int(asr.DEFAULT_CHUNK_LENGTH_S * 2) * 16000
+        t.transcribe(np.zeros(n, dtype=np.float32), sampling_rate=16000)
+        assert len(t.calls) > 1
+        assert max(t.calls) <= int(asr.DEFAULT_CHUNK_LENGTH_S) * 16000
+
+
 class TestTranscriberCache:
     def test_same_key_returns_same_instance(self):
         a = asr.get_transcriber("m", "cpu")
@@ -298,12 +412,14 @@ def _patched_pipeline(factory):
 
 
 class TestResolveTorchDtype:
-    """asr_dtype resolution. float16-on-CUDA is the default, but overridable."""
+    """asr_dtype resolution. bfloat16-on-CUDA is the default, but overridable."""
 
-    def test_auto_on_cuda_is_float16(self):
+    def test_auto_on_cuda_is_bfloat16(self):
+        # bfloat16, not float16: it is the default checkpoint's own dtype and
+        # keeps float32's exponent range next to the encoder's BatchNorm layers.
         torch = pytest.importorskip("torch")
-        assert asr._resolve_torch_dtype(None, "cuda:0") is torch.float16
-        assert asr._resolve_torch_dtype("auto", "cuda") is torch.float16
+        assert asr._resolve_torch_dtype(None, "cuda:0") is torch.bfloat16
+        assert asr._resolve_torch_dtype("auto", "cuda") is torch.bfloat16
 
     def test_auto_on_cpu_is_float32(self):
         torch = pytest.importorskip("torch")

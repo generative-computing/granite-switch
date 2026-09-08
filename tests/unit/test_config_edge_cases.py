@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Additional config edge case tests for GraniteSwitchConfig."""
 
-from granite_switch.config import GraniteSwitchConfig
+from granite_switch.config import ATTENTION_LAYER_TYPES, GraniteSwitchConfig
 
 
 def _valid_kwargs(num_adapters=2, **overrides):
@@ -44,11 +44,20 @@ class TestSharedIntermediateSize:
 
 
 class TestLayerTypesDefault:
-    """layer_types defaults to all-attention with length == num_hidden_layers."""
+    """layer_types defaults to all-attention with length == num_hidden_layers.
+
+    The spelling is transformers', not ours: it renamed "attention" to
+    "full_attention" in 5.16 and rewrites whatever we pass inside
+    PreTrainedConfig.__init__. So these assert the *meaning* — every layer is a
+    full attention layer, and the list is as long as num_hidden_layers — against
+    ATTENTION_LAYER_TYPES, which is the same set the config consults when it
+    derives the default LoRA target groups.
+    """
 
     def test_default_layer_types_when_omitted(self):
         cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=4)
-        assert cfg.layer_types == ["attention"] * 4
+        assert len(cfg.layer_types) == 4
+        assert set(cfg.layer_types) <= ATTENTION_LAYER_TYPES
 
     def test_explicit_layer_types_preserved(self):
         cfg = GraniteSwitchConfig(
@@ -56,7 +65,8 @@ class TestLayerTypesDefault:
             num_hidden_layers=3,
             layer_types=["attention", "attention", "attention"],
         )
-        assert cfg.layer_types == ["attention", "attention", "attention"]
+        assert len(cfg.layer_types) == 3
+        assert set(cfg.layer_types) <= ATTENTION_LAYER_TYPES
 
 
 class TestLoraTargetModulesDefault:

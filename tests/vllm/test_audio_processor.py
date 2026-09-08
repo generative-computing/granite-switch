@@ -81,8 +81,8 @@ class TestProcessingInfoAsrAccessors:
         info = _make_info(asr_enabled=True, asr_model_id="openai/whisper-small")
         assert info._asr_model_id() == "openai/whisper-small"
 
-    def test_device_default_cpu(self):
-        assert _make_info(asr_enabled=True)._asr_device() == "cpu"
+    def test_device_default_cuda(self):
+        assert _make_info(asr_enabled=True)._asr_device() == "cuda"
 
     def test_pipeline_and_generate_kwargs_default_empty(self):
         info = _make_info(asr_enabled=True)
@@ -101,8 +101,10 @@ class TestProcessingInfoAsrAccessors:
     def test_longaudio_accessor_defaults(self):
         info = _make_info(asr_enabled=True)
         assert info._asr_max_audio_clips() == 32
-        assert info._asr_self_chunks() is True
-        assert info._asr_chunk_length_s() == 30.0
+        # The default backend is CTC: it does not self-chunk, so a clip longer
+        # than the 120s window goes through our chunker.
+        assert info._asr_self_chunks() is False
+        assert info._asr_chunk_length_s() == 120.0
         assert info._asr_chunk_overlap_s() == 5.0
 
     def test_longaudio_accessors_from_config(self):
@@ -146,8 +148,8 @@ def _make_processor(info, monkeypatch, capture):
             audio,
             sampling_rate=None,
             generate_kwargs=None,
-            self_chunks=True,
-            chunk_length_s=30.0,
+            self_chunks=False,
+            chunk_length_s=120.0,
             chunk_overlap_s=5.0,
         ):
             capture["sampling_rate"] = sampling_rate

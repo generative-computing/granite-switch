@@ -11,7 +11,10 @@ license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "torch>=2.10.0",
-    "transformers>=5.5.1,<5.10.0",
+    # Ceiling raised from <5.10 so the audio extra can reach 5.16, which is where
+    # the default ASR model's architecture (granite_speech5_ctc) landed. The core
+    # package keeps the lower bound: only the audio path needs 5.16.
+    "transformers>=5.5.1,<5.17.0",
 ]
 
 [project.urls]
@@ -25,8 +28,10 @@ vllm20 = ["vllm>=0.20.0,<0.21.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
-# tracks the active vLLM).
-audio = ["vllm[audio]"]
+# tracks the active vLLM). transformers 5.16 is where granite_speech5_ctc — the
+# default ASR model's architecture — landed, so the audio path requires it while
+# the rest of the package still works on an older release.
+audio = ["vllm[audio]", "transformers>=5.16.0"]
 tutorials = [
     "granite-switch[hf,vllm,compose]",
     "chromadb>=0.4.0",

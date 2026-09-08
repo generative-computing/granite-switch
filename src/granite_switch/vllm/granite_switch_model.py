@@ -34,7 +34,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
-    IsHybrid,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -414,7 +413,21 @@ class GraniteSwitchForCausalLM(
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    IsHybrid,
+    # IsHybrid deliberately NOT declared. It is a Protocol requiring
+    # get_mamba_state_shape_from_config and get_mamba_state_copy_func, neither of
+    # which this model implements or needs: the composer normalizes every layer
+    # to attention, so a composed checkpoint has zero mamba layers. The marker
+    # arrived by inheritance from GraniteMoeHybridConfig, not by design.
+    #
+    # Declaring it set ModelConfig._model_info.is_hybrid, and vLLM's escape hatch
+    # for exactly this case compares the literal string "attention":
+    #     return layer_types is None or not all(
+    #         layer == "attention" for layer in layer_types)   # config/model.py
+    # transformers 5.16 remaps "attention" -> "full_attention" on load, so the
+    # hatch stopped matching and vLLM took the hybrid path, asking for the mamba
+    # dtype hook and failing engine init with AttributeError. Nine other vLLM
+    # sites gate on is_hybrid (mamba state allocation, block-size alignment,
+    # speculative decoding, KV sizing); none should apply here.
 ):
     """
     Granite model with switch for causal language modeling.

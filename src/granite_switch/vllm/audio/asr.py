@@ -5,8 +5,9 @@ Wraps a HuggingFace ASR pipeline. Free of any vLLM import so it unit-tests on
 CPU. The model loads lazily and is cached per (model_id, device, dtype,
 pipeline_kwargs), so a process loads each ASR model at most once.
 
-Device defaults to CPU to keep vLLM's GPU KV-cache budget clean; dtype follows
-the device unless a checkpoint sets ``asr_dtype``. See docs/AUDIO.md.
+Device defaults to CUDA (the default CTC encoder is small and GPU-bound work is
+what makes it fast); dtype follows the device unless a checkpoint sets
+``asr_dtype``. See docs/AUDIO.md.
 """
 
 from __future__ import annotations
@@ -17,9 +18,32 @@ from typing import Any, Union
 
 import numpy as np
 
-# Small, CPU-friendly, English ASR model that emits text directly. Used when the
-# checkpoint does not name its own (config.asr_model_id is None).
-DEFAULT_ASR_MODEL_ID = "distil-whisper/distil-small.en"
+# Default speech-to-text model: Granite Speech 5.0 TurboCTC, a 470M conformer
+# CTC encoder. Used when the checkpoint does not name its own
+# (config.asr_model_id is None). Non-autoregressive (one forward pass + greedy
+# CTC collapse), so it cannot loop or hallucinate, but it also has no decoder to
+# steer: output is lowercase and unpunctuated and language/task decode kwargs do
+# not apply. English only.
+DEFAULT_ASR_MODEL_ID = "ibm-granite/granite-speech-5.0-470m-turboctc"
+
+# Call-time chunk window handed to a *generative* (seq2seq) pipeline, which has a
+# fixed input window and stitches its own chunks from timestamps. Never handed to
+# a CTC pipeline: chunked CTC rescales stride by config.inputs_to_logits_ratio,
+# which the CTC default does not publish, so the pipeline would fall back to 1
+# and trim every seam at the wrong offset. Long audio on a CTC backend goes
+# through our own chunker instead (asr_self_chunks=False).
+SEQ2SEQ_CHUNK_LENGTH_S = 30.0
+
+# Longest clip the default CTC backend takes in one pass. Its block attention
+# makes cost grow linearly with duration rather than quadratically, so a clip up
+# to this length needs no splitting at all; past it, activation memory is the
+# binding constraint and the caller's chunker takes over. Measured on CPU:
+# ~1.4GB peak at 60s, ~2.3GB at 300s, ~3.5GB at 600s.
+DEFAULT_CHUNK_LENGTH_S = 120.0
+
+# Pipeline types that decode autoregressively, i.e. the ones the window above
+# applies to. transformers sets pipeline.type at construction.
+_CTC_PIPELINE_TYPES = frozenset({"ctc", "ctc_with_lm"})
 
 ASR_DTYPE_AUTO = "auto"
 
@@ -37,10 +61,13 @@ _ASR_DTYPE_ALIASES = {
 def _resolve_torch_dtype(dtype: str | None, device: str) -> Any:
     """Resolve an ``asr_dtype`` name to a ``torch.dtype``.
 
-    None/"auto" derives it from the device: float16 on CUDA, float32 elsewhere
-    (CPU float16 is slow and partly unimplemented). Name a dtype explicitly for
-    an encoder that cannot run in half precision — BatchNorm raises on a float16
-    weight against float32 features rather than promoting.
+    None/"auto" derives it from the device: bfloat16 on CUDA, float32 elsewhere
+    (CPU half precision is slow and partly unimplemented). bfloat16 because it is
+    the default checkpoint's own dtype, so no conversion is implied, and because
+    it keeps float32's exponent range — the safer default for an encoder carrying
+    BatchNorm in every conv block. float16 is not rejected here: measured on an
+    A100 (torch 2.10 / transformers 5.16) it loads and transcribes correctly, so
+    it remains available as an explicit override. Name a dtype to override.
     """
     import torch
 
@@ -48,7 +75,7 @@ def _resolve_torch_dtype(dtype: str | None, device: str) -> Any:
     name = _ASR_DTYPE_ALIASES.get(name, name)
     if name == ASR_DTYPE_AUTO:
         on_cuda = isinstance(device, str) and device.startswith("cuda")
-        return torch.float16 if on_cuda else torch.float32
+        return torch.bfloat16 if on_cuda else torch.float32
     if name not in _ASR_DTYPE_NAMES:
         raise ValueError(
             f"Unsupported asr_dtype {dtype!r}. Expected {ASR_DTYPE_AUTO!r} (or "
@@ -56,6 +83,28 @@ def _resolve_torch_dtype(dtype: str | None, device: str) -> Any:
             f"{', '.join(sorted(_ASR_DTYPE_NAMES))}."
         )
     return getattr(torch, name)
+
+
+def _unsupported_architecture_error(model_id: str, exc: Exception) -> Exception:
+    """Turn transformers' generic "unrecognized architecture" into a fix.
+
+    The default CTC model's architecture landed in transformers 5.16 (which the
+    ``audio`` extra requires), so an install below that reports only that it does
+    not know ``granite_speech5_ctc`` — with a suggestion (trust_remote_code) that
+    does not apply, since the checkpoint carries no auto_map. Anything else is
+    re-raised untouched.
+    """
+    if "does not recognize this architecture" not in str(exc):
+        return exc
+    import transformers
+
+    return ImportError(
+        f"transformers {transformers.__version__} cannot load the ASR model "
+        f"{model_id!r}: its architecture requires transformers>=5.16, which the "
+        f"'audio' extra pins. Install it (uv sync --extra vllm --extra audio, or "
+        f"pip install 'transformers>=5.16'), or point the checkpoint at a model "
+        f"your version supports via asr_model_id (see docs/AUDIO.md)."
+    )
 
 
 _CHUNKING = None
@@ -86,7 +135,7 @@ def _load_chunking():
     return _CHUNKING
 
 
-# Sample rate expected by Whisper-family feature extractors.
+# Sample rate every supported ASR front-end expects.
 _TARGET_SAMPLE_RATE = 16_000
 
 # Audio item shapes vLLM may pass to a multimodal processor.
@@ -104,7 +153,7 @@ class ASRTranscriber:
     def __init__(
         self,
         model_id: str = DEFAULT_ASR_MODEL_ID,
-        device: str = "cpu",
+        device: str = "cuda",
         pipeline_kwargs: Mapping[str, Any] | None = None,
         dtype: str | None = None,
     ) -> None:
@@ -113,6 +162,9 @@ class ASRTranscriber:
         self.dtype = dtype
         self.pipeline_kwargs: dict[str, Any] = dict(pipeline_kwargs or {})
         self._pipeline = None
+        # Set by load(): whether the resolved backend decodes with CTC (no
+        # generation, so no decode kwargs and no pipeline-level chunking).
+        self._is_ctc = False
         self._load_lock = threading.Lock()
 
     def load(self) -> None:
@@ -130,27 +182,40 @@ class ASRTranscriber:
                 "model": self.model_id,
                 "device": self.device,
                 "torch_dtype": _resolve_torch_dtype(self.dtype, self.device),
-                "chunk_length_s": 30,
             }
             # pipeline_kwargs last: a checkpoint may override any default above.
             kwargs.update(self.pipeline_kwargs)
-            self._pipeline = pipeline(**kwargs)
+            try:
+                built = pipeline(**kwargs)
+            except ValueError as exc:
+                raise _unsupported_architecture_error(self.model_id, exc) from exc
+            # transformers resolves .type from the model class; a CTC backend gets
+            # no chunk window (see SEQ2SEQ_CHUNK_LENGTH_S) and no decode kwargs.
+            self._is_ctc = getattr(built, "type", None) in _CTC_PIPELINE_TYPES
+            self._pipeline = built
 
     def transcribe(
         self,
         audio: AudioInput,
         sampling_rate: int | None = None,
         generate_kwargs: Mapping[str, Any] | None = None,
-        self_chunks: bool = True,
-        chunk_length_s: float = 30.0,
+        self_chunks: bool = False,
+        chunk_length_s: float = DEFAULT_CHUNK_LENGTH_S,
         chunk_overlap_s: float = 5.0,
     ) -> str:
         """Transcribe one audio clip, stripped. Resampled to 16 kHz as needed.
 
         ``sampling_rate`` is required unless ``audio`` is an ``(array, rate)``
-        tuple. ``generate_kwargs`` is passed only when non-empty, so CTC backends
-        are unaffected. ``self_chunks=False`` routes long audio through
-        :mod:`.chunking` using ``chunk_length_s``/``chunk_overlap_s``.
+        tuple. ``generate_kwargs`` is passed only when non-empty and the backend
+        generates, so CTC backends are unaffected.
+
+        ``self_chunks=False`` (the default, matching the CTC default model) routes
+        the waveform through :mod:`.chunking`: a clip at or under
+        ``chunk_length_s`` is one segment and reaches the backend whole, and only
+        a longer clip is split into overlapping windows and merged. Set
+        ``self_chunks=True`` for a backend that stitches its own windows from
+        timestamps (Whisper) or to feed an arbitrarily long clip to a CTC backend
+        in a single pass.
         """
         samples, sr = _coerce_audio(audio, sampling_rate)
         samples = _to_mono_float32(samples)
@@ -173,10 +238,21 @@ class ASRTranscriber:
         samples: np.ndarray,
         generate_kwargs: Mapping[str, Any] | None = None,
     ) -> str:
-        """Run the loaded pipeline over an already-resampled mono waveform."""
+        """Run the loaded pipeline over an already-resampled mono waveform.
+
+        A generative backend gets ``chunk_length_s`` so it stitches its own
+        windows from timestamps (a seq2seq encoder has a fixed input window and
+        would otherwise silently truncate). A CTC backend gets neither that nor
+        ``generate_kwargs``: it consumes the whole waveform in one pass, and the
+        caller bounds the waveform's length instead (``asr_self_chunks=False``).
+        A window supplied in ``pipeline_kwargs`` is already bound into the
+        pipeline, so it is not repeated here.
+        """
         call_kwargs: dict[str, Any] = {}
-        if generate_kwargs:
+        if generate_kwargs and not self._is_ctc:
             call_kwargs["generate_kwargs"] = dict(generate_kwargs)
+        if not self._is_ctc and "chunk_length_s" not in self.pipeline_kwargs:
+            call_kwargs["chunk_length_s"] = SEQ2SEQ_CHUNK_LENGTH_S
         result = self._pipeline(
             {"raw": samples, "sampling_rate": _TARGET_SAMPLE_RATE},
             **call_kwargs,
@@ -231,7 +307,7 @@ def _freeze(value: Any) -> Any:
 
 def get_transcriber(
     model_id: str | None = None,
-    device: str = "cpu",
+    device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
 ) -> ASRTranscriber:
@@ -262,12 +338,12 @@ def transcribe(
     sampling_rate: int | None = None,
     *,
     model_id: str | None = None,
-    device: str = "cpu",
+    device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
     generate_kwargs: Mapping[str, Any] | None = None,
-    self_chunks: bool = True,
-    chunk_length_s: float = 30.0,
+    self_chunks: bool = False,
+    chunk_length_s: float = DEFAULT_CHUNK_LENGTH_S,
     chunk_overlap_s: float = 5.0,
 ) -> str:
     """Convenience wrapper: transcribe with the cached transcriber for the args."""
