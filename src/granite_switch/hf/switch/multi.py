@@ -281,6 +281,33 @@ class MultiSwitch(nn.Module):
         else:
             self.control_to_substitute_lut = None
 
+    def _apply(self, *args, **kwargs):
+        """Keep ``codebook`` in fp32 across ``.to()`` / ``.half()`` / ``.bfloat16()``.
+
+        ``nn.Module._apply`` casts every float buffer, so ``model.to(bfloat16)`` --
+        which the composer does at ``compose_utils.py:281`` -- would take the
+        codebook with it. That makes save/load non-idempotent: ``__init__`` rebuilds
+        this buffer as fp32 on every load, so a cast model writes bf16 while the
+        reload of it writes fp32, and the same model serializes to two different
+        byte counts -- a 262,144-byte gap that is exactly the 2048x64 codebook.
+        Caught by ``test_save_load_compose.py::TestPhase2_DoubleSerialization``,
+        which compares aggregate safetensors payload size.
+
+        Serialization is the whole reason; the forward path is NOT at risk and must
+        not be cited as one. The codebook's entries are +/-1/sqrt(N) = +/-0.125,
+        exact in bf16, and the memory key it feeds is assigned into an fp32
+        destination below, which upcasts whatever arrives.
+
+        ``persistent=False`` is not an alternative -- see the ``register_buffer``
+        note above for why the buffer must be in the state_dict.
+        """
+        out = super()._apply(*args, **kwargs)
+        if getattr(self, "codebook", None) is not None and (
+            self.codebook.dtype != torch.float32
+        ):
+            self.codebook = self.codebook.to(torch.float32)
+        return out
+
     @property
     def num_cache_layers(self) -> int:
         """Cache slots used by this switch: counting slot + memory slot."""
