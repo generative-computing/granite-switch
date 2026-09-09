@@ -43,6 +43,31 @@ def register():
     """
     from vllm import ModelRegistry
 
+    # vLLM <=0.25 keys its Granite-hybrid layer table on the pre-5.16 spelling of
+    # a layer type, so a config written by transformers >=5.16 -- which renamed
+    # "attention" to "full_attention" and rewrites it inside
+    # PreTrainedConfig.__init__ -- raises KeyError at engine init:
+    #
+    #     ALL_DECODER_LAYER_TYPES[config.layer_types[layer_idx]]
+    #     KeyError: 'full_attention'
+    #
+    # Both names denote the same layer class, so aliasing is not a behaviour
+    # change: it teaches vLLM to accept the only spelling transformers can now
+    # produce. This must happen here rather than in a test fixture because the
+    # lookup runs in vLLM's spawned engine-core process, and this plugin hook is
+    # the one thing we own that executes there (v1/engine/core.py calls
+    # load_general_plugins() during init). setdefault makes it a no-op on 0.26+,
+    # where upstream added the key themselves, so the block can be deleted
+    # whenever we move off the 0.19/0.20 line. See issue #122.
+    try:
+        from vllm.model_executor.models import granitemoehybrid as _gmh
+
+        _gmh.ALL_DECODER_LAYER_TYPES.setdefault(
+            "full_attention", _gmh.ALL_DECODER_LAYER_TYPES["attention"]
+        )
+    except Exception:  # pragma: no cover - must never block registration
+        pass
+
     # Register config with transformers AutoConfig
     try:
         from transformers import AutoConfig
