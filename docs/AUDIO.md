@@ -225,10 +225,25 @@ in automatically — callers send standard chat messages, no manual marker neede
 
 Both Granite chat-template families are supported, detected at compose time:
 
-| Family | Models | How the marker is emitted |
+| Family | Role markers | How the marker is emitted |
 |---|---|---|
-| `granite_format` | 4.0 / 4.1 | An `elif` added to the existing content-part loop |
-| `chatml` | 4.2 | A flattening block, since ChatML has no content-part loop |
+| `granite_format` | `<\|start_of_role\|>` | An `elif` added to the existing content-part loop |
+| `chatml` | `<\|im_start\|>` | A flattening block, since ChatML has no content-part loop |
+
+**Nothing on the audio path is architecture-specific.** The compose-time gate is
+`model_type.startswith("granite")` and the injection above keys off the *detected
+template family*, never the architecture — so a dense base and a pure sparse MoE
+base (`granitemoe`, no `shared_mlp`) go down identical code, and the marker's
+output-row fixup only ever touches embedding rows. What does differ is the
+adapter surface, not the audio: see *Audio + adapters* below.
+
+A base whose tokenizer carries **no chat template at all** is *not* refused:
+`configure_audio_chat_template` warns and returns, and compose completes. The
+checkpoint then carries `asr_enabled: true` while its template emits no
+`<|audio|>` marker, so an audio content part on the chat path is dropped rather
+than transcribed — offline `llm.generate` with a hand-written marker still works.
+Compose from the instruct-tuned sibling, or supply a template first. (A template
+that *is* present but whose family cannot be identified does raise.)
 
 The ChatML template consumes `message.content` as a string
 (`{%- set content = message.content | string %}`), so a multimodal parts *list*
@@ -274,7 +289,7 @@ is rejected.
 
 Compose therefore copies a reserved `<|unused_N|>` row into the marker's row, so
 its logit is identical to a token the base model was trained not to emit, for
-every hidden state. On the tied path (4.0/4.1) that row is shared with the input
+every hidden state. On a tied-embedding base that row is shared with the input
 embedding, which is inert here: the marker is replaced by transcript ids before
 the decoder runs, and a marker without a matching audio item is rejected
 up-front, so the marker's input row is never read.
@@ -289,7 +304,9 @@ rather than the basis.
 If a vocabulary has no reserved slots, compose warns and leaves the row as
 generated. Note the inventory is not stable across releases (4.1 has 69 unused
 ids, 4.2 has 72), so nothing should depend on a specific count or id range —
-`find_reserved_never_emitted_token_id` looks them up each time.
+`find_reserved_never_emitted_token_id` looks them up each time. The rows are
+present on `granitemoe` bases too, so this policy needs no architecture-specific
+fallback.
 
 ## Limitations (alpha)
 
@@ -324,6 +341,13 @@ forward pass on the multimodal path; the switch then detects adapter control
 tokens as usual, and `embed_input_ids` applies the same token-exchange rewrite
 (control → substitute id) used for text — so an audio request that activates an
 adapter behaves identically to the text equivalent.
+
+On a **pure sparse MoE** base the adapter surface is attention-only (`qkv_proj`,
+`o_proj`), because there is no `shared_mlp` for the MLP-side groups to attach to —
+see [SUPPORTED_MODELS.md](SUPPORTED_MODELS.md#pure-sparse-moe-granitemoe). Where
+no adapter library targets such a base yet, compose an adapter-free audio skin
+with `--built-in-adapters base --enable-audio`: the marker, its output row and the
+control-LUT sizing are all independent of how many adapters are present.
 
 ## Tests
 
