@@ -1,35 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 """Composer layer-inflation guard for the switch-cache-slot count.
 
-The composer inflates ``num_hidden_layers`` by ``_switch_cache_layers(switch_type)``
-so that, after ``modeling_granite_switch.py`` subtracts ``switch.num_cache_layers``,
-all base decoder layers are retained. This must stay in sync with each switch
-class's ``num_cache_layers`` property:
+The composer inflates ``num_hidden_layers`` by ``SWITCH_CACHE_LAYERS`` so that,
+after ``modeling_granite_switch.py`` subtracts ``switch.num_cache_layers``, all
+base decoder layers are retained. MultiSwitch is the only engine, so this is a
+fixed constant now (the coded engine owns 2 slots: counting + memory). This test
+pins that the composer's constant still equals the switch's actual
+``num_cache_layers`` — if the two drift, the composed model keeps the wrong
+number of decoder layers.
 
-  - "single" -> SingleSwitch.num_cache_layers     == 1
-  - "multi"  -> MultiSwitch.num_cache_layers == 2
-
-The regression risk is subtle: the coded engine's move to 2 slots changed the
-inflation from a hardcoded ``+1`` to a slot-count lookup. These tests pin the
-mapping AND assert it matches the switch classes' actual ``num_cache_layers`` so
-the single-switch path (``+1``, unchanged behavior) cannot silently drift.
-
-CPU-only: reads a pure mapping function and constructs the switches over a tiny
-mock config; no model download.
+CPU-only: constructs the switch over a tiny mock config; no model download.
 """
 
-import pytest
 import torch
 
-from granite_switch.composer.compose_utils import _switch_cache_layers
+from granite_switch.composer.compose_utils import SWITCH_CACHE_LAYERS
 from granite_switch.hf.switch import create_switch
 
 
 class _MockSwitchConfig:
-    """Minimal GraniteSwitchConfig-shaped object for create_switch dispatch."""
+    """Minimal GraniteSwitchConfig-shaped object for create_switch."""
 
-    def __init__(self, switch_type):
-        self.switch_type = switch_type
+    def __init__(self):
         self.num_adapters = 2
         self.num_attention_heads = 4
         self.num_key_value_heads = 2
@@ -41,7 +33,7 @@ class _MockSwitchConfig:
         self.adapter_substitute_token_ids = [1, 2]
         self.switch_head_dim = 32
         self.control_token_gain = 15.0
-        # coded-engine params (ignored by the single switch)
+        # coded-engine params
         self.ms_code_m = 6
         self.ms_code_type = "kerdock"
         self.ms_memory_gain = 28.0
@@ -50,22 +42,13 @@ class _MockSwitchConfig:
 
 
 class TestSwitchCacheLayers:
-    """The inflation lookup and its agreement with the switch classes."""
+    """The inflation constant and its agreement with the switch class."""
 
-    @pytest.mark.parametrize(
-        "switch_type,expected",
-        [("single", 1), ("multi", 2)],
-    )
-    def test_mapping(self, switch_type, expected):
-        assert _switch_cache_layers(switch_type) == expected
+    def test_constant_is_two(self):
+        assert SWITCH_CACHE_LAYERS == 2
 
-    @pytest.mark.parametrize("switch_type", ["single", "multi"])
-    def test_lookup_matches_switch_class(self, switch_type):
+    def test_constant_matches_switch_class(self):
         """The inflation count MUST equal the built switch's num_cache_layers —
         otherwise the composed model keeps the wrong number of decoder layers."""
-        switch = create_switch(_MockSwitchConfig(switch_type), layer_idx=0)
-        assert _switch_cache_layers(switch_type) == switch.num_cache_layers
-
-    def test_unknown_switch_type_raises(self):
-        with pytest.raises(KeyError):
-            _switch_cache_layers("bogus")
+        switch = create_switch(_MockSwitchConfig(), layer_idx=0)
+        assert SWITCH_CACHE_LAYERS == switch.num_cache_layers

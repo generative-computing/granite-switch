@@ -31,7 +31,7 @@ from granite_switch.composer.compose_granite_switch import refresh_switch_contro
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
 
-SWITCH_TYPES = ["single", "multi"]
+SWITCH_TYPES = ["multi"]
 
 # Two adapters -> control ids 200, 201 appended past a 200-token base vocab.
 _BASE_VOCAB = 200

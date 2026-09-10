@@ -322,7 +322,7 @@ def cmd_concurrent(args):
     from granite_switch import Conversation, KVHistoryPolicy
 
     tok, config, amap, aloras, expected = _setup(args.model_path)
-    result = {"switch_type": config.switch_type, "alora_names": aloras, "arms": {}}
+    result = {"alora_names": aloras, "arms": {}}
     if len(aloras) < 2:
         result["error"] = f"need >=2 alora adapters, got {aloras}"
         Path(args.output_path).write_text(json.dumps(result))
@@ -446,7 +446,7 @@ def cmd_evict(args):
     from granite_switch import Conversation, KVHistoryPolicy
 
     tok, config, amap, aloras, expected = _setup(args.model_path)
-    result = {"switch_type": config.switch_type, "blocks": args.blocks, "turns": []}
+    result = {"blocks": args.blocks, "turns": []}
     if len(aloras) < 2:
         result["error"] = f"need >=2 alora adapters, got {aloras}"
         Path(args.output_path).write_text(json.dumps(result))

@@ -113,7 +113,6 @@ def test_preserve_reuses_the_adapter_history():
     print("\n" + "=" * 66)
     print("CHECKPOINT")
     print("=" * 66)
-    print(f"  switch_type   : {data['switch_type']}")
     print(f"  num_adapters  : {data['num_adapters']}")
     print(f"  aLoRA adapters: {data['alora_names']}")
     print(f"  chosen        : {data.get('chosen')}")
@@ -152,7 +151,6 @@ def test_preserve_reuses_the_adapter_history():
             )
 
     # ── Anti-vacuity ────────────────────────────────────────────────────────
-    assert data["switch_type"] == "multi", data["switch_type"]
     assert len(data["alora_names"]) >= 2, (
         f"need >=2 aLoRA adapters for a two-adapter conversation; got "
         f"{data['alora_names']}. Without them PRESERVE and RE_PREFILL send the "

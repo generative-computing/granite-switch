@@ -6,23 +6,25 @@ from transformers import GraniteMoeHybridConfig
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 
-# Switch engines that support multi-transition routing, and therefore the
-# optional ``num_adapters + 1`` control-token layout whose leading slot is a
-# base-reset token (writes expert id 0 -> return to base mid-request).
-# SingleSwitch is excluded: its +/-gain attention averages competing control
-# tokens and it has no mechanism to re-select base.
-MULTI_SWITCH_TYPES = ("multi",)
+# Decoder-layer cache slots the switch reserves at the front of the model when
+# adapters are present. MultiSwitch (the only engine) owns two: a counting slot
+# and a memory slot. Single source of truth, mirrored by
+# ``MultiSwitch.num_cache_layers`` in both backends; the composer inflates
+# ``num_hidden_layers`` by this count and the models subtract it to recover the
+# physical decoder-layer count.
+SWITCH_CACHE_LAYERS = 2
 
 
 class GraniteSwitchConfig(GraniteMoeHybridConfig):
     """Configuration class for GraniteSwitch model.
 
-    Extends the Granite base config with parameters for adapter switching
-    using the SingleSwitch mechanism. Control tokens are handled exclusively
-    via token exchange: the switch reads ``input_ids``, decides the active
-    adapter, and rewrites each control token to its substitute id (from
-    ``adapter_substitute_token_ids``) before the decoder embeds the
-    sequence. The decoder is unaware of the substitution.
+    Extends the Granite base config with parameters for adapter switching.
+    The switch engine is the Kerdock/DG coded-memory MultiSwitch (the only
+    engine). Control tokens are handled exclusively via token exchange: the
+    switch reads ``input_ids``, decides the active adapter, and rewrites each
+    control token to its substitute id (from ``adapter_substitute_token_ids``)
+    before the decoder embeds the sequence. The decoder is unaware of the
+    substitution.
 
     Args:
         num_adapters (int): Number of LoRA adapters available. Default: 0 (no adapters).
@@ -31,12 +33,12 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             Length: num_adapters (one token per real adapter). Must be unique.
             adapter_token_ids[i] activates adapter i+1 (1-indexed output).
             Output 0 = base (implicit default, no token needed to return to base).
-            NOTE: SingleSwitch cannot transition back to base mid-sequence.
         adapter_substitute_token_ids (List[int]): Token IDs whose embeddings
             replace the control-token embeddings before the decoder runs.
-            Length: num_adapters. Required when num_adapters > 0.
+            Length: num_adapters (or num_adapters + 1 with a leading base-reset
+            token). Required when num_adapters > 0.
 
-        SingleSwitch parameters:
+        Switch attention parameters:
             control_token_gain (float): Attention gain for control/non-control separation. Default: 15.0.
             switch_head_dim (int): Dimension of Q/K/V vectors in switch attention. Default: 32.
 
@@ -96,15 +98,53 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
     model_type = "granite_switch"
 
+    @classmethod
+    def from_dict(cls, config_dict, **kwargs):
+        """Reject SingleSwitch checkpoints; MultiSwitch is the only engine.
+
+        SingleSwitch has been removed. A checkpoint built for it cannot run as
+        MultiSwitch: MultiSwitch owns ``num_cache_layers == 2`` where SingleSwitch
+        owned 1, so a single-sized checkpoint has one decoder layer too few and its
+        weights cannot map. There is no auto-migration -- it must be re-composed.
+
+        This is the one seam that still sees the raw on-disk config, so the reject
+        lives here. Two shapes identify a SingleSwitch checkpoint (adapters > 0):
+
+        * an explicit ``switch_type`` that is not ``"multi"`` -- a single checkpoint
+          composed while the field still existed; or
+        * no ``switch_type`` key AND no ``ms_code_m`` key -- a legacy preview
+          (ibm-granite/granite-switch-4.1-3b-preview, barha/granite-switch-4.0-350m-demo)
+          composed before the coded engine existed. ``ms_code_m`` is serialized by
+          every MultiSwitch checkpoint (it is always set as an instance attribute),
+          so its absence is the reliable marker that this predates MultiSwitch.
+
+        A stale ``switch_type`` key on a real MultiSwitch checkpoint is stripped
+        before ``super().from_dict`` so the removed ``__init__`` parameter never
+        sees it. Pinned by ``tests/unit/test_single_switch_rejected.py``.
+        """
+        if config_dict.get("num_adapters", 0) > 0:
+            st = config_dict.get("switch_type")
+            legacy_single = st is None and "ms_code_m" not in config_dict
+            if (st is not None and st != "multi") or legacy_single:
+                raise ValueError(
+                    "This checkpoint was built for SingleSwitch, which has been "
+                    "removed. MultiSwitch is now the only engine and a SingleSwitch "
+                    "checkpoint cannot be loaded as MultiSwitch (it was sized for a "
+                    "different decoder-layer count). Re-compose it from its PEFT "
+                    "adapters with the current composer:\n"
+                    "  python -m granite_switch.composer.compose_granite_switch "
+                    "--adapters <adapter> [<adapter> ...]"
+                )
+        if "switch_type" in config_dict:
+            config_dict = {k: v for k, v in config_dict.items() if k != "switch_type"}
+        return super().from_dict(config_dict, **kwargs)
+
     def __init__(
         self,
         num_adapters: int = 0,
         adapter_token_ids: list[int] | None = None,
         adapter_substitute_token_ids: list[int] | None = None,
-        # Switch engine selection: "single" (sticky, one transition) or
-        # "multi" (Kerdock/DG coded memory; arbitrary transitions per request).
-        switch_type: str = "single",
-        # SingleSwitch parameters
+        # Switch attention parameters
         control_token_gain: float = 15.0,
         switch_head_dim: int = 32,
         # MultiSwitch (coded engine) parameters
@@ -167,35 +207,23 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             raise ValueError(f"num_adapters must be >= 0, got {num_adapters}")
         self.num_adapters = num_adapters
 
-        # Switch engine selection. "multi" is the Kerdock/DG coded-memory engine.
-        valid_switch_types = ("single", "multi")
-        if switch_type not in valid_switch_types:
-            raise ValueError(
-                f"switch_type must be one of {valid_switch_types}, got {switch_type!r}"
-            )
-        self.switch_type = switch_type
-        # MultiSwitch coded-memory params (unused when switch_type == 'single').
+        # MultiSwitch (Kerdock/DG coded-memory) params.
         self.ms_code_m = ms_code_m
         self.ms_code_type = ms_code_type
         self.ms_memory_gain = ms_memory_gain
         self.ms_counting_head_dim = ms_counting_head_dim
 
-        # Allowed control-token-list lengths. SingleSwitch: exactly num_adapters
-        # (adapter_token_ids[i] fires adapter i+1; base is implicit). MultiSwitch:
-        # num_adapters (no base slot) OR num_adapters+1 (leading base-reset token
-        # that writes expert_id 0, enabling return-to-base mid-request).
-        _is_multi = switch_type in MULTI_SWITCH_TYPES
-        _allowed_lens = (
-            (num_adapters, num_adapters + 1) if _is_multi else (num_adapters,)
-        )
+        # Allowed control-token-list lengths. MultiSwitch accepts num_adapters
+        # (no base slot) OR num_adapters+1 (leading base-reset token that writes
+        # expert_id 0, enabling return-to-base mid-request).
+        _allowed_lens = (num_adapters, num_adapters + 1)
 
         # Validate adapter_token_ids if provided
         if num_adapters > 0 and adapter_token_ids is not None:
             if len(adapter_token_ids) not in _allowed_lens:
                 raise ValueError(
                     f"adapter_token_ids length ({len(adapter_token_ids)}) must be "
-                    f"one of {_allowed_lens} for switch_type={switch_type!r} "
-                    f"(num_adapters={num_adapters})."
+                    f"one of {_allowed_lens} (num_adapters={num_adapters})."
                 )
             # Token-exchange builds the control→substitute LUT keyed by adapter token id;
             # duplicates would silently collapse to a single slot.
@@ -217,8 +245,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 raise ValueError(
                     f"adapter_substitute_token_ids length "
                     f"({len(adapter_substitute_token_ids)}) must be one of "
-                    f"{_allowed_lens} for switch_type={switch_type!r} "
-                    f"(num_adapters={num_adapters})."
+                    f"{_allowed_lens} (num_adapters={num_adapters})."
                 )
             if adapter_token_ids is not None and len(
                 adapter_substitute_token_ids
@@ -240,7 +267,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 )
         self.adapter_substitute_token_ids = adapter_substitute_token_ids
 
-        # SingleSwitch parameters
+        # Switch attention parameters
         self.control_token_gain = control_token_gain
         self.switch_head_dim = switch_head_dim
         self.fused_add_norm = fused_add_norm

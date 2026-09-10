@@ -159,8 +159,8 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     output matches upstream.
 
     Returns a new dict suitable for GraniteSwitchConfig(**result) that has:
-    - num_hidden_layers += 1 (1 cache slot for SingleSwitch)
-    - layer_types prepended with "attention" (switch layer type)
+    - num_hidden_layers += 2 (2 cache slots for MultiSwitch)
+    - layer_types prepended with two "attention" (the switch cache slots)
     - LoRA adapter config fields
     - adapter_token_ids (rewritten to substitute ids by the switch)
     - adapter_substitute_token_ids (token-exchange substitutes)
@@ -168,9 +168,12 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     """
     cfg = dict(cfg_dict)
 
-    # Prepend placeholder entry for switch cache slot (SingleSwitch: 1 slot)
-    cfg["num_hidden_layers"] = cfg["num_hidden_layers"] + 1
-    cfg["layer_types"] = ["attention", *list(cfg["layer_types"])]
+    # Prepend placeholder entries for the switch cache slots. MultiSwitch (the
+    # only engine) owns 2 slots (counting + memory), so +2 keeps every base
+    # decoder layer -- these callers pass no control tokens, so the skinned
+    # model stays bit-exact with upstream.
+    cfg["num_hidden_layers"] = cfg["num_hidden_layers"] + 2
+    cfg["layer_types"] = ["attention", "attention", *list(cfg["layer_types"])]
 
     # Adapter configuration
     cfg["num_adapters"] = num_adapters
@@ -179,7 +182,7 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     adapter_names = [f"adapter_{i}" for i in range(num_adapters)]
     cfg["adapter_names"] = adapter_names
 
-    # SingleSwitch: num_adapters entries
+    # num_adapters control-token entries
     cfg["adapter_token_ids"] = [_ADAPTER_TOKEN_BASE + i for i in range(num_adapters)]
     # Token-exchange substitute ids — use a benign shared id (the BOS-or-
     # equivalent doesn't matter for these synthetic equivalence tests since
@@ -196,8 +199,7 @@ def make_active_adapter_input(batch_size, seq_len, seed=42):
     non-zero adapter_indices. Fill tokens are drawn from [0, 100) to
     avoid collisions with control tokens (101+).
 
-    SingleSwitch: single adapter activation (one-shot, no mid-sequence
-    transitions). Place one control token early in the sequence.
+    Single adapter activation: place one control token early in the sequence.
 
     Returns:
         input_ids: [batch_size, seq_len] LongTensor
@@ -206,8 +208,7 @@ def make_active_adapter_input(batch_size, seq_len, seed=42):
     # Fill with tokens from [0, 100) — no control token collisions
     input_ids = torch.randint(0, 100, (batch_size, seq_len))
 
-    # SingleSwitch: single adapter activation (one-shot, no mid-sequence
-    # transitions). Place one control token early in the sequence.
+    # Single adapter activation: place one control token early in the sequence.
     input_ids[:, 2] = _ADAPTER_TOKEN_BASE
 
     return input_ids

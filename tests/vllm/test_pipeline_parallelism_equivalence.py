@@ -13,8 +13,8 @@ This test asserts *correctness*: the same pre-composed checkpoint, with an
 adapter active, must generate identical greedy tokens under PP=2 and PP=1.
 Identical tokens ⇒ the per-rank recompute matches what a single rank computes.
 
-Requires ≥2 GPUs (skipped otherwise) and downloads a real model
-(requires_model). Worker: _pp_equivalence_worker.py (run / compare phases).
+Requires ≥2 GPUs (skipped otherwise) and composes a real MultiSwitch checkpoint
+(requires_model, E2E-gated). Worker: _pp_equivalence_worker.py (run / compare).
 """
 
 import importlib.util
@@ -29,8 +29,17 @@ _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 _WORKER = Path(__file__).parent / "_pp_equivalence_worker.py"
 _REPO_ROOT = _WORKER.parents[2]
 
-MODEL_ID = "ibm-granite/granite-switch-4.1-3b-preview"
-_TIMEOUT = 1800  # download + 2× (vLLM load + generate)
+# The published previews are legacy SingleSwitch checkpoints and no longer load;
+# compose a real MultiSwitch checkpoint on demand (warm-reused under
+# GRANITE_SWITCH_E2E_DIR), the same one test_multi_switch_mixed_tech builds. PP
+# only needs a loadable checkpoint with an active adapter — any MultiSwitch does.
+BASE_MODEL = "ibm-granite/granite-4.1-3b"
+ADAPTER_REPOS = [
+    "ibm-granite/granitelib-rag-r1.0",
+    "ibm-granite/granitelib-guardian-r1.0",
+]
+_E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e2e"))
+_TIMEOUT = 1800  # compose (warm-reused) + 2× (vLLM load + generate)
 
 
 def _visible_cuda_device_count():
@@ -68,7 +77,40 @@ pytestmark = [
         _visible_cuda_device_count() < 2,
         reason="requires at least 2 visible CUDA GPUs",
     ),
+    pytest.mark.skipif(
+        os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
+        reason="composes a real ~3B checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",
+    ),
 ]
+
+
+@pytest.fixture(scope="module")
+def model_path():
+    """Compose (or warm-reuse) a mixed MultiSwitch checkpoint; return its dir."""
+    out_dir = _E2E_ROOT / "multi-mixed"
+    if (out_dir / "config.json").exists():
+        print(f"warm-reuse {out_dir}", file=sys.stderr)
+        return str(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        "-m",
+        "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        BASE_MODEL,
+        *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
+        "--output",
+        str(out_dir),
+    ]
+    print("composing (mixed):", " ".join(cmd), file=sys.stderr)
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    if r.returncode != 0:
+        pytest.fail(
+            f"mixed compose failed (exit {r.returncode})\n"
+            f"--- stdout ---\n{r.stdout[-3000:]}\n--- stderr ---\n{r.stderr[-3000:]}",
+            pytrace=False,
+        )
+    return str(out_dir)
 
 
 def _subprocess_env():
@@ -108,7 +150,7 @@ def _run_step(step_name, *cmd_args, timeout):
     )
 
 
-def test_pp2_matches_pp1_token_equivalence(tmp_path):
+def test_pp2_matches_pp1_token_equivalence(tmp_path, model_path):
     """Same checkpoint + active adapter: PP=2 greedy tokens must equal PP=1."""
     work_dir = str(tmp_path)
 
@@ -117,7 +159,7 @@ def test_pp2_matches_pp1_token_equivalence(tmp_path):
         "run pp1",
         "run",
         "--model",
-        MODEL_ID,
+        model_path,
         "--work-dir",
         work_dir,
         "--pp-size",
@@ -132,7 +174,7 @@ def test_pp2_matches_pp1_token_equivalence(tmp_path):
         "run pp2",
         "run",
         "--model",
-        MODEL_ID,
+        model_path,
         "--work-dir",
         work_dir,
         "--pp-size",

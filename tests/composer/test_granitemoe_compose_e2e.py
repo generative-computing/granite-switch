@@ -22,6 +22,7 @@ import torch
 from safetensors.torch import load_file
 
 import granite_switch.hf  # noqa: F401 — registers AutoModel
+from granite_switch.config import SWITCH_CACHE_LAYERS
 
 # The synthetic base/adapter builders live in ``tests/shared`` because the vLLM
 # TP suite needs the same composed checkpoint — see ``TestTPGraniteMoe`` in
@@ -266,10 +267,12 @@ class TestGraniteMoeLoRACompose:
             )
 
     def test_switch_layer_reserved_at_front(self, lora_build):
-        """The switch owns cache slot 0, so num_hidden_layers grows by one."""
+        """The switch reserves its cache slots at the front, so
+        ``num_hidden_layers`` grows by ``SWITCH_CACHE_LAYERS`` (MultiSwitch, the
+        only engine, owns two: counting + memory)."""
         config = json.loads((lora_build.output_dir / "config.json").read_text())
 
-        assert config["num_hidden_layers"] == NUM_LAYERS + 1
+        assert config["num_hidden_layers"] == NUM_LAYERS + SWITCH_CACHE_LAYERS
         assert len(lora_build.model.model.layers) == NUM_LAYERS
 
     def test_forward_and_roundtrip(self, lora_build):

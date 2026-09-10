@@ -20,9 +20,9 @@ filter at all. Nothing composed an aLoRA-only checkpoint and checked that an
 aLoRA-placed control token yields base-before / adapter-after routing on a real
 model. The template's placement logic is unit-tested in
 tests/composer/test_chat_template.py with no model attached, so the two halves --
-placement and routing -- were never joined. That is the same shape as all three
-bugs fixed on this branch: a layer correct in isolation, never crossed end to end.
-aLoRA is the technology whose entire semantics depend on that placement.
+placement and routing -- were never joined: a layer correct in isolation, never
+crossed end to end. aLoRA is the technology whose entire semantics depend on that
+placement.
 
 Heavy: composes a real granite-4.1-3b with --technology-filter alora. Gated on
 GRANITE_SWITCH_E2E_MODELS=1 like the other real-checkpoint suites.
@@ -69,8 +69,6 @@ def _compose_alora():
         *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
         "--technology-filter",
         "alora",
-        "--switch-type",
-        "multi",
         "--output",
         str(out_dir),
     ]
@@ -96,9 +94,6 @@ def alora_model():
 
     out_dir = _compose_alora()
     config = GraniteSwitchConfig.from_pretrained(out_dir)
-    assert config.switch_type == "multi", (
-        f"composed switch_type={config.switch_type!r}, expected 'multi'"
-    )
     tok = AutoTokenizer.from_pretrained(out_dir)
     model = GraniteSwitchForCausalLM.from_pretrained(out_dir).eval()
     assert isinstance(model.model.switch, MultiSwitch)

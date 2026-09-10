@@ -14,7 +14,6 @@ from tests.shared.generation_models import (
     HYBRID_CFG,
     basic_overrides,
     save_switch_model,
-    single_overrides,
 )
 
 _CUDA_AVAILABLE = torch.cuda.is_available()
@@ -127,7 +126,7 @@ def _sparse_moe_model(tmp_path):
     from tests.shared.granite4_equivalence import GRANITEMOE_MINI
 
     cfg = GRANITEMOE_MINI["moe-20b"]
-    return save_switch_model(cfg, single_overrides(cfg), tmpdir=tmp_path)
+    return save_switch_model(cfg, basic_overrides(cfg), tmpdir=tmp_path)
 
 
 def _assert_batch_generated(generated, vocab_size):
@@ -178,7 +177,7 @@ class TestNoSwitch:
         )
 
 
-class TestSingleSwitch:
+class TestMultiSwitch:
     def test_generates_tokens(self, tmp_path):
         model_dir = save_switch_model(
             HYBRID_CFG,

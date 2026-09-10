@@ -41,7 +41,7 @@ sequence and never knows a control token existed. The LUT is built in
 
 ``num_cache_layers == 2``: the switch owns two logical cache slots (counting +
 memory) at ``layer_idx`` and ``layer_idx + 1``. The property returns 2 so the
-model glue can account for both (SingleSwitch owns 1).
+model glue can account for both.
 
 The cache params below are the LIVE ``generate()`` path, not legacy scaffolding.
 ``GraniteSwitchModel.forward`` creates a ``DynamicCache`` whenever ``use_cache``
@@ -129,9 +129,9 @@ class MultiSwitch(nn.Module):
             ``0..num_adapters``. Matches ``GraniteSwitchConfig.num_adapters``.
         config: Model configuration. Provides backbone head geometry, the
             token-exchange substitute ids, and the ``ms_*`` coded-engine params.
-        control_token_gain: Accepted for signature parity with SingleSwitch /
-            the modeling glue. The coded engine's key scaling is
-            ``ms_memory_gain``, so this argument is not used by the memory head.
+        control_token_gain: Accepted for signature parity with the modeling
+            glue. The coded engine's key scaling is ``ms_memory_gain``, so this
+            argument is not used by the memory head.
         switch_head_dim: Fallback head_dim (>= 32) for standalone/test mode
             when no backbone geometry is available on ``config``.
         layer_idx: Base cache slot index. Counting uses ``layer_idx``, memory
@@ -155,7 +155,7 @@ class MultiSwitch(nn.Module):
         self.memory_layer_idx = layer_idx + 1
 
         # ── Expert-id offset (two accepted adapter_token_ids layouts).
-        #   * num_adapters entries (SingleSwitch-style, no base-reset slot):
+        #   * num_adapters entries (no base-reset slot):
         #     adapter_token_ids[i] fires adapter i+1 -> expert_id = argmax + 1.
         #   * num_adapters + 1 entries (base-reset layout): adapter_token_ids[0]
         #     is the base-reset token (fires 0) and [1..] fire 1.. -> expert_id
@@ -280,6 +280,33 @@ class MultiSwitch(nn.Module):
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
         else:
             self.control_to_substitute_lut = None
+
+    def _apply(self, *args, **kwargs):
+        """Keep ``codebook`` in fp32 across ``.to()`` / ``.half()`` / ``.bfloat16()``.
+
+        ``nn.Module._apply`` casts every float buffer, so ``model.to(bfloat16)`` --
+        which the composer does at ``compose_utils.py:281`` -- would take the
+        codebook with it. That makes save/load non-idempotent: ``__init__`` rebuilds
+        this buffer as fp32 on every load, so a cast model writes bf16 while the
+        reload of it writes fp32, and the same model serializes to two different
+        byte counts -- a 262,144-byte gap that is exactly the 2048x64 codebook.
+        Caught by ``test_save_load_compose.py::TestPhase2_DoubleSerialization``,
+        which compares aggregate safetensors payload size.
+
+        Serialization is the whole reason; the forward path is NOT at risk and must
+        not be cited as one. The codebook's entries are +/-1/sqrt(N) = +/-0.125,
+        exact in bf16, and the memory key it feeds is assigned into an fp32
+        destination below, which upcasts whatever arrives.
+
+        ``persistent=False`` is not an alternative -- see the ``register_buffer``
+        note above for why the buffer must be in the state_dict.
+        """
+        out = super()._apply(*args, **kwargs)
+        if getattr(self, "codebook", None) is not None and (
+            self.codebook.dtype != torch.float32
+        ):
+            self.codebook = self.codebook.to(torch.float32)
+        return out
 
     @property
     def num_cache_layers(self) -> int:

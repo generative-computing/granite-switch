@@ -11,7 +11,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
-from granite_switch.hf.switch.single import SingleSwitch
+from granite_switch.hf.switch import MultiSwitch
 
 # ── Helpers ────────────────────────────────────────────────────────
 
@@ -49,13 +49,13 @@ def _set_nonzero_lora_B(model, scale=0.1):
 
 
 @pytest.fixture
-def tiny_single_config():
-    """Minimal SingleSwitch config for CPU tests (token exchange)."""
+def tiny_switch_config():
+    """Minimal MultiSwitch config for CPU tests (token exchange)."""
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=3,  # 1 switch + 2 decoder
+        num_hidden_layers=4,  # 2 switch slots + 2 decoder
         num_attention_heads=4,
         num_key_value_heads=4,
         num_adapters=2,
@@ -74,10 +74,10 @@ def tiny_single_config():
 
 
 class TestModelInstantiation:
-    def test_single_switch_model_creates(self, tiny_config):
+    def test_switch_model_creates(self, tiny_config):
         model = GraniteSwitchForCausalLM(tiny_config)
-        assert isinstance(model.model.switch, SingleSwitch)
-        assert len(model.model.layers) == 2  # num_hidden_layers - 1 switch
+        assert isinstance(model.model.switch, MultiSwitch)
+        assert len(model.model.layers) == 2  # num_hidden_layers - 2 switch slots
 
     def test_no_adapter_model_creates(self, tiny_config_no_adapters):
         model = GraniteSwitchForCausalLM(tiny_config_no_adapters)
@@ -155,7 +155,8 @@ class TestCausalLMOutputFields:
             output = model(input_ids=input_ids, output_hidden_states=True)
         assert output.hidden_states is not None
         # num_decoder_layers + 1 (input to first layer + output of each layer after norm)
-        num_decoder_layers = tiny_config.num_hidden_layers - 1  # minus switch
+        # minus the switch's 2 cache slots
+        num_decoder_layers = tiny_config.num_hidden_layers - 2
         assert len(output.hidden_states) == num_decoder_layers + 1
 
 
@@ -227,9 +228,9 @@ class TestAdapterIndicesWiring:
 class TestActivatingTokenSwitch:
     """Test that activating tokens properly trigger adapter switching."""
 
-    def test_activating_adapter_indices_nonzero(self, tiny_single_config):
-        """SingleSwitch: activating token produces adapter_indices > 0 at and after."""
-        config = tiny_single_config
+    def test_activating_adapter_indices_nonzero(self, tiny_switch_config):
+        """MultiSwitch: activating token produces adapter_indices > 0 at and after."""
+        config = tiny_switch_config
         model = GraniteSwitchForCausalLM(config).eval()
         _set_adapter_token_ids(model, config.adapter_token_ids)
 
@@ -256,7 +257,7 @@ def tiny_native_config():
         vocab_size=300,
         hidden_size=64,
         intermediate_size=128,
-        num_hidden_layers=3,  # 1 switch + 2 decoder
+        num_hidden_layers=4,  # 2 switch slots + 2 decoder
         num_attention_heads=4,
         num_key_value_heads=4,
         num_adapters=2,

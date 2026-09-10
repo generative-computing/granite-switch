@@ -16,11 +16,11 @@ Examples:
   # Built-in adapter slots only
   python compose_granite_switch.py --built-in-adapters base
 
-  # MultiSwitch with a return-to-base control token (<|base_reset|>), so one
-  # request can route base -> adapter -> base -> another adapter
+  # With a return-to-base control token (<|base_reset|>), so one request can
+  # route base -> adapter -> base -> another adapter
   python compose_granite_switch.py \\
       --adapters ibm-granite/granitelib-core-r1.0 \\
-      --switch-type multi --base-reset-token
+      --base-reset-token
 
   # Include only specific adapters from a library
   python compose_granite_switch.py \\
@@ -78,10 +78,7 @@ from granite_switch.composer.tokenizer_setup import (
     find_reserved_never_emitted_token_id,
     load_activation_anchor,
 )
-from granite_switch.composer.validator import (
-    validate_base_reset_switch_type,
-    validate_control_lut,
-)
+from granite_switch.composer.validator import validate_control_lut
 from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
 from granite_switch.config import ASR_DTYPES
 from granite_switch.token_exchange import rebuild_control_to_substitute_lut
@@ -96,25 +93,22 @@ def _load_tokenizer(model_name_or_path):
     return AutoTokenizer.from_pretrained(model_name_or_path)
 
 
-def build_control_token_lists(tokenizer, all_discovered, switch_type, base_reset):
+def build_control_token_lists(tokenizer, all_discovered, base_reset):
     """Add the control tokens and build their index-aligned substitute ids.
 
     Kept as one function because the two lists must agree in length and order:
     ``GraniteSwitchConfig`` validates the lengths and the token-exchange LUT zips
     them, so growing one without the other shifts every adapter's substitute by
-    one. The switch-type guard runs first, before the tokenizer is mutated, so a
-    rejected combination leaves nothing half-applied.
+    one.
 
     Args:
         tokenizer: HuggingFace tokenizer (mutated: control tokens are added).
         all_discovered: ``(adapter_path, adapter_name, technology, source)`` tuples.
-        switch_type: Requested switch engine, or None for the default.
         base_reset: Whether to also emit the ``<|base_reset|>`` control token.
 
     Returns:
         ``(adapter_token_ids, special_tokens, adapter_substitute_token_ids)``
     """
-    validate_base_reset_switch_type(base_reset, switch_type)
     adapter_token_ids, special_tokens = add_control_tokens(
         tokenizer, all_discovered, base_reset=base_reset
     )
@@ -287,13 +281,9 @@ def refresh_switch_control_lut(model) -> bool:
     ``len(tokenizer)`` one past the last control id — so a stale table is
     specific to ``--enable-audio`` rather than universal.
 
-    Extracted from ``build()`` so the rebuild can be tested over every switch
-    engine without composing a real checkpoint. It used to be an inline
-    ``switch.rebuild_control_to_substitute_lut(...)`` method call, which existed
-    only on ``SingleSwitch``, so ``--switch-type multi --enable-audio`` raised
-    ``AttributeError`` here. Every real multi-compose test is gated behind
-    ``GRANITE_SWITCH_E2E_MODELS=1`` (unset in CI) and none of them enables audio,
-    so nothing caught it.
+    Extracted from ``build()`` so the rebuild can be tested without composing a
+    real checkpoint (the real audio-compose tests are gated behind
+    ``GRANITE_SWITCH_E2E_MODELS=1``, unset in CI).
 
     Args:
         model: Composed model, after ``resize_token_embeddings``.
@@ -685,7 +675,7 @@ Examples:
   python compose_granite_switch.py --adapters ibm-granite/granitelib-guardian-r1.0 --exclude-adapters factuality-detection
   python compose_granite_switch.py --adapters ibm-granite/granitelib-rag-r1.0 --technology-filter lora
   python compose_granite_switch.py --adapters ibm-granite/granitelib-rag-r1.0 --list-adapters
-  python compose_granite_switch.py --adapters ibm-granite/granitelib-core-r1.0 --switch-type multi --base-reset-token
+  python compose_granite_switch.py --adapters ibm-granite/granitelib-core-r1.0 --base-reset-token
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -726,17 +716,6 @@ Examples:
         type=int,
         default=None,
         help="Dimension of Q/K/V vectors in switch attention",
-    )
-    parser.add_argument(
-        "--switch-type",
-        type=str,
-        default=None,
-        choices=["single", "multi"],
-        help="Adapter-selection engine embedded in the composed checkpoint. "
-        "'single' (default) uses the SingleSwitch attention router; "
-        "'multi' is the native multi-transition Kerdock/DG coded-memory "
-        "engine. Persisted to config.json so from_pretrained rebuilds the "
-        "matching engine.",
     )
     parser.add_argument(
         "--ms-code-m",
@@ -917,11 +896,6 @@ Examples:
 
 def build():
     args = _compose_argparser().parse_args()
-
-    # Argument-compatibility checks first: everything below resolves and downloads
-    # the base model (~7 GB), so an incompatible flag pair must be rejected before
-    # that, not in STEP 1. build_control_token_lists re-checks for direct callers.
-    validate_base_reset_switch_type(args.base_reset_token, args.switch_type)
 
     if args.target_model is None and args.base_model:
         args.target_model = args.base_model.split("/")[-1]
@@ -1141,13 +1115,11 @@ def build():
     # so probing here rather than after configure_chat_template is equivalent.
     (
         adapter_token_ids,
-        # Not unused on this branch: add_audio_token re-passes these so the
-        # marker call does not evict them from additional_special_tokens.
+        # Not unused: add_audio_token re-passes these so the marker call does
+        # not evict them from additional_special_tokens.
         special_tokens,
         adapter_substitute_token_ids,
-    ) = build_control_token_lists(
-        tokenizer, all_discovered, args.switch_type, args.base_reset_token
-    )
+    ) = build_control_token_lists(tokenizer, all_discovered, args.base_reset_token)
 
     # Audio cascade: add the <|audio|> marker token before the embedding resize.
     #
@@ -1213,12 +1185,9 @@ def build():
     optional_kwargs = {}
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
-    # Switch-engine selection + coded-engine params. These flow through
+    # Coded-engine (MultiSwitch) params. These flow through
     # from_base_and_adapters(**kwargs) -> config_kwargs -> GraniteSwitchConfig,
-    # so they persist to config.json and from_pretrained rebuilds the right
-    # engine via create_switch(config.switch_type).
-    if args.switch_type is not None:
-        optional_kwargs["switch_type"] = args.switch_type
+    # so they persist to config.json and from_pretrained rebuilds the switch.
     if args.ms_code_m is not None:
         optional_kwargs["ms_code_m"] = args.ms_code_m
     if args.ms_memory_gain is not None:

@@ -1,21 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
-"""PRESERVE_MIXED_HISTORY is only correct if the prompt is sent as token ids.
+"""``Conversation`` builds prompts that are only correct if sent as token ids.
 
-That requirement lives outside ``Conversation``: the class builds ids and never
-learns how they travel. Posting ``messages`` to ``/v1/chat/completions`` instead
-makes the server re-render and re-tokenize, which drops earlier turns' control
-tokens -- reverting to RE_PREFILL with no exception, no changed return value, and
-no symptom a caller can see except a prefix-cache hit rate they were not
-measuring.
+Both policies reuse previously-sent ids as a stable prefix, so both must travel
+as ids. That requirement lives outside ``Conversation``: the class builds ids and
+never learns how they travel. Posting ``messages`` to ``/v1/chat/completions``
+instead makes the server re-render and re-tokenize, which drops earlier turns'
+control tokens and re-tokenizes the prefix -- degrading cache reuse with no
+exception, no changed return value, and no symptom a caller can see except a
+prefix-cache hit rate they were not measuring.
 
 So the class cannot make the mistake impossible; it can only make the obvious
-route correct and the wrong route loud. These tests pin both halves:
+route correct. These tests pin that:
 
   * ``build_prompt`` returns ``PromptTokenIds``, a ``list`` subclass carrying
-    ``requires_token_ids`` so a transport layer can check rather than assume;
+    ``requires_token_ids`` (always True) so a transport layer can check;
   * ``completion_payload`` is the ready-to-post body for either policy;
-  * ``chat_payload`` REFUSES under PRESERVE rather than returning a body that
-    would silently behave as the other policy.
+  * there is no ``chat_payload`` -- the chat endpoint cannot carry ids, so
+    ``Conversation`` does not offer a body for it.
 
 CPU-only; stub tokenizer over the real Granite fixture template.
 """
@@ -82,13 +83,13 @@ class TestPromptTokenIds:
         assert len(ids + [0]) == len(ids) + 1  # noqa: RUF005
         assert all(isinstance(t, int) for t in ids)
 
-    def test_requires_token_ids_only_under_preserve(self, tok, config):
-        """The flag is the whole point: it distinguishes must-send-ids from may."""
+    def test_requires_token_ids_true_for_both_policies(self, tok, config):
+        """Both policies reuse sent ids as a prefix, so both must travel as ids."""
         preserve = _conv(tok, config, KVHistoryPolicy.PRESERVE_MIXED_HISTORY, turns=0)
         reprefill = _conv(tok, config, KVHistoryPolicy.RE_PREFILL, turns=0)
 
         assert preserve.build_prompt(adapter=A_NAME).requires_token_ids is True
-        assert reprefill.build_prompt(adapter=A_NAME).requires_token_ids is False
+        assert reprefill.build_prompt(adapter=A_NAME).requires_token_ids is True
 
 
 class TestCompletionPayload:
@@ -122,38 +123,23 @@ class TestCompletionPayload:
         assert body["prompt"][: len(sent)] == sent
 
 
-class TestChatPayloadRefusesUnderPreserve:
-    """The wrong route must fail loudly instead of degrading quietly."""
+class TestChatPayloadRemoved:
+    """The chat endpoint cannot carry ids, so ``Conversation`` offers no body for it."""
 
-    def test_raises_and_says_what_to_do(self, tok, config):
-        conv = _conv(tok, config, KVHistoryPolicy.PRESERVE_MIXED_HISTORY)
-
-        with pytest.raises(RuntimeError) as exc:
-            conv.chat_payload(adapter=B_NAME)
-
-        message = str(exc.value)
-        assert "chat/completions" in message
-        assert "completion_payload" in message, (
-            "the error must name the call to use instead; an error that only says "
-            "no leaves the caller to guess, and the guess is usually the bug"
+    @pytest.mark.parametrize("policy", BOTH_POLICIES)
+    def test_no_chat_payload_method(self, tok, config, policy):
+        conv = _conv(tok, config, policy)
+        assert not hasattr(conv, "chat_payload"), (
+            "chat_payload was removed: it returned a messages body the chat "
+            "endpoint re-renders server-side, which cannot carry the ids both "
+            "policies now depend on. Callers use completion_payload."
         )
-        assert "RE_PREFILL" in message
 
-    def test_re_prefill_is_allowed_and_carries_the_adapter(self, tok, config):
-        """RE_PREFILL is exactly what the chat endpoint does, so permit it."""
-        conv = _conv(tok, config, KVHistoryPolicy.RE_PREFILL)
-        body = conv.chat_payload(adapter=B_NAME, max_tokens=24)
+    def test_messages_view_still_drops_control_tokens(self, tok, config):
+        """The text view still loses history's control tokens under PRESERVE.
 
-        assert body["chat_template_kwargs"]["adapter_name"] == B_NAME
-        assert body["max_tokens"] == 24
-        assert [m["role"] for m in body["messages"]] == ["user", "assistant", "user"]
-
-    def test_messages_view_is_why_chat_payload_refuses(self, tok, config):
-        """Concretely: the text view has lost turn 1's control token.
-
-        Sending it would be sending a different conversation, not a slower render
-        of the same one -- which is what makes the refusal a correctness matter
-        rather than a performance one.
+        This is why the ids path is mandatory: the text view is a different
+        conversation than the ids one, not a slower render of the same one.
         """
         conv = _conv(tok, config, KVHistoryPolicy.PRESERVE_MIXED_HISTORY)
         control = f"<|{A_NAME}|>"
@@ -162,5 +148,5 @@ class TestChatPayloadRefusesUnderPreserve:
         assert not any(control in m["content"] for m in conv.messages)
         assert control_id in conv.sent_token_ids, (
             "the ids kept it while the text view dropped it; that divergence is "
-            "the reason the two transports are not interchangeable"
+            "why the prompt must be sent as ids"
         )

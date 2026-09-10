@@ -142,3 +142,27 @@ class TestGuardUsesTheBound:
                 conv._assert_control_budget(ids)
         else:
             conv._assert_control_budget(ids)  # 5000 text tokens are irrelevant
+
+    def test_reprefill_policy_never_accumulates_control_tokens(self):
+        """RE_PREFILL drops history's control tokens, so the ceiling is
+        PRESERVE-only: many turns never approach the bound.
+
+        The guard exists for PRESERVE, which keeps every turn's control token.
+        RE_PREFILL demotes history to base, so each request carries at most the
+        current turn's one control token no matter how long the conversation.
+        """
+        from granite_switch import Conversation, KVHistoryPolicy
+        from tests.shared.conversation_stubs import StubConfig, make_stub_tokenizer
+
+        tok = make_stub_tokenizer([("unc", "alora", "<certainty>")])
+        ctl = tok.token_id("<|unc|>")
+        conv = Conversation(
+            tok, policy=KVHistoryPolicy.RE_PREFILL, config=StubConfig([ctl])
+        )
+        for i in range(50):
+            conv.user(f"Turn {i}: answerable? <certainty>")
+            ids = list(conv.build_prompt(adapter="unc"))  # no raise
+            assert sum(1 for t in ids if t == ctl) <= 1, (
+                f"turn {i} accumulated more than one control token under RE_PREFILL"
+            )
+            conv.record_answer("Answer.", adapter="unc")

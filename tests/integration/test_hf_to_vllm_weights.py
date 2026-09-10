@@ -219,18 +219,23 @@ class _HFToVLLMWeightTestBase:
 
     def _setup_vllm_kv_caches(self):
         """Allocate KV caches for all attention layers in the vLLM model."""
+        from vllm.model_executor.layers.attention.attention import Attention
+
         self._kv_caches = []
         self._attention_map = {}
 
         # Subtract the switch's cache slot count to get real decoder layers.
-        # SingleSwitch uses 1 cache slot.
+        # MultiSwitch owns 2 slots (counting + memory).
         layer_offset = self.vllm_model.model.switch.num_cache_layers
         num_decoder_layers = self.config.num_hidden_layers - layer_offset
         num_blocks = (MAX_TOKENS + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
 
-        # Switch attention
+        # Switch attention layers (counting + memory), by their real layer_name
+        # (the prefix passed at construction: switch.multi.0 / switch.multi.1).
         switch = self.vllm_model.model.switch
-        self._setup_single_attn(switch.attn, "switch.layers.0", num_blocks)
+        for module in switch.modules():
+            if isinstance(module, Attention):
+                self._setup_single_attn(module, module.layer_name, num_blocks)
 
         # Decoder attention layers
         for i in range(num_decoder_layers):
@@ -387,19 +392,19 @@ class _HFToVLLMWeightTestBase:
 
 
 # ════════════════════════════════════════════════════════════════════
-# SingleSwitch forward equivalence
+# MultiSwitch forward equivalence
 # ════════════════════════════════════════════════════════════════════
 
 
-class TestSingleSwitchForwardEquivalence(_HFToVLLMWeightTestBase):
-    """Verify HF→vLLM weight loading produces equivalent logits for SingleSwitch."""
+class TestMultiSwitchForwardEquivalence(_HFToVLLMWeightTestBase):
+    """Verify HF→vLLM weight loading produces equivalent logits for MultiSwitch."""
 
     def _config(self):
         return GraniteSwitchConfig(
             vocab_size=256,
             hidden_size=64,
             intermediate_size=128,
-            num_hidden_layers=3,
+            num_hidden_layers=4,  # 2 MultiSwitch cache slots + 2 decoder
             num_attention_heads=2,
             num_key_value_heads=2,
             num_adapters=2,

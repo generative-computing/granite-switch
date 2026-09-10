@@ -22,7 +22,7 @@ import pytest
 BASE_MODEL = "ibm-granite/granite-4.0-micro"
 ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
 BASE_VOCAB_SIZE = 100352
-BASE_NUM_LAYERS = 41  # switch model: base 40 + 1 switch layer
+BASE_NUM_LAYERS = 42  # switch model: base 40 + 2 MultiSwitch cache slots
 BASE_PARAM_COUNT = 3_402_836_480
 BUILD_TIMEOUT = 3600  # 60 min (parallel xdist workers compete for downloads)
 

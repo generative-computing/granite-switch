@@ -1,23 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The ``--base-reset-token`` compose option: CLI wiring and switch-type guard.
+"""The ``--base-reset-token`` compose option: CLI wiring and compose layout.
 
-The base-reset slot only means anything to MultiSwitch: the coded engine reads
-``adapter_token_ids[0]`` as expert id 0 when the list is ``num_adapters + 1``
-long. SingleSwitch has no return-to-base mechanism and ``GraniteSwitchConfig``
-rejects the longer list for it, so composing that combination would either fail
-late or produce a checkpoint whose extra token routes to a nonexistent adapter.
-Fail at argument-validation time instead, with an actionable message.
+The base-reset slot reads ``adapter_token_ids[0]`` as expert id 0 when the
+control-token list is ``num_adapters + 1`` long, so one request can return to
+base mid-stream. MultiSwitch is the only engine, so the option is always valid;
+these tests pin the CLI flag wiring and that compose emits the layout the engine
+reads as base-reset.
 """
 
 from unittest.mock import patch
-
-import pytest
 
 from granite_switch.composer.compose_granite_switch import (
     _compose_argparser,
     build_control_token_lists,
 )
-from granite_switch.composer.validator import validate_base_reset_switch_type
 from tests.hf.test_multi_switch import _MockSwitchConfig
 from tests.shared.multi_switch_cases import TEXT_TOKEN
 
@@ -37,55 +33,9 @@ class TestBaseResetCliFlag:
 
     def test_flag_sets_true(self):
         args = _compose_argparser().parse_args(
-            ["--adapters", "org/lib", "--switch-type", "multi", "--base-reset-token"]
+            ["--adapters", "org/lib", "--base-reset-token"]
         )
         assert args.base_reset_token is True
-
-
-class TestGuardFiresBeforeAnyDownload:
-    """An incompatible flag pair must be rejected before the base model is fetched.
-
-    The check used to live in STEP 1, which runs after the base model is resolved
-    and downloaded — so a fresh machine pulled ~7 GB before being told the flags
-    conflict. Point ``--base-model`` at a nonexistent repo: if validation happens
-    first the error is about the flags, and if it happens late the resolver's
-    download error surfaces instead.
-    """
-
-    def test_rejected_before_base_model_resolution(self, monkeypatch, tmp_path):
-        from granite_switch.composer.compose_granite_switch import build
-
-        monkeypatch.setattr(
-            "sys.argv",
-            [
-                "compose",
-                "--base-model",
-                "definitely-not-an-org/definitely-not-a-model",
-                "--built-in-adapters",
-                "spare",
-                "--switch-type",
-                "single",
-                "--base-reset-token",
-                "--output",
-                str(tmp_path / "out"),
-            ],
-        )
-        with pytest.raises(ValueError, match="base-reset-token requires"):
-            build()
-
-
-class TestBaseResetSwitchTypeGuard:
-    def test_multi_is_accepted(self):
-        validate_base_reset_switch_type(True, "multi")  # must not raise
-
-    @pytest.mark.parametrize("switch_type", ["single", None])
-    def test_non_multi_raises(self, switch_type):
-        with pytest.raises(ValueError, match="base-reset"):
-            validate_base_reset_switch_type(True, switch_type)
-
-    @pytest.mark.parametrize("switch_type", ["single", "multi", None])
-    def test_no_op_when_flag_is_off(self, switch_type):
-        validate_base_reset_switch_type(False, switch_type)  # must not raise
 
 
 class TestBuildControlTokenLists:
@@ -98,12 +48,10 @@ class TestBuildControlTokenLists:
 
     _ADAPTERS = [("/a", "rag", "alora", None), ("/b", "code", "lora", None)]
 
-    def _run(self, base_reset, switch_type="multi"):
+    def _run(self, base_reset):
         tokenizer = MockTokenizer(initial_vocab_size=500)
         with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
-            return build_control_token_lists(
-                tokenizer, self._ADAPTERS, switch_type, base_reset
-            )
+            return build_control_token_lists(tokenizer, self._ADAPTERS, base_reset)
 
     def test_base_reset_grows_both_lists_and_leads_with_base(self):
         token_ids, special_tokens, substitute_ids = self._run(base_reset=True)
@@ -138,7 +86,7 @@ class TestBuildControlTokenLists:
         tokenizer = _Tok(initial_vocab_size=500)
         with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
             token_ids, _special, _subs = build_control_token_lists(
-                tokenizer, self._ADAPTERS, "multi", base_reset=True
+                tokenizer, self._ADAPTERS, base_reset=True
             )
 
         cfg = _MockSwitchConfig(
@@ -179,7 +127,7 @@ class TestBuildControlTokenLists:
         tokenizer = _Tok(initial_vocab_size=500)
         with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
             token_ids, _special, _subs = build_control_token_lists(
-                tokenizer, self._ADAPTERS, "multi", base_reset=False
+                tokenizer, self._ADAPTERS, base_reset=False
             )
 
         cfg = _MockSwitchConfig(
@@ -187,13 +135,3 @@ class TestBuildControlTokenLists:
         )
         cfg.vocab_size = 2000
         assert create_switch(cfg, layer_idx=0)._expert_id_offset == 1
-
-    def test_guard_runs_before_any_token_is_added(self):
-        """A rejected combination must not leave the tokenizer half-mutated."""
-        tokenizer = MockTokenizer(initial_vocab_size=500)
-        with pytest.raises(ValueError, match="base-reset"):
-            with patch(_PROBE, return_value=42):
-                build_control_token_lists(
-                    tokenizer, self._ADAPTERS, "single", base_reset=True
-                )
-        assert len(tokenizer) == 500

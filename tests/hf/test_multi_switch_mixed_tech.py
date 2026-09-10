@@ -19,13 +19,12 @@ Why that matters. The chat template applies technology-SPECIFIC placement:
 
 In a mixed checkpoint the template's adapter_map holds both types and the routing
 shape depends on which adapter you name. A LoRA adapter taking the aLoRA path (or
-the reverse) would produce the wrong routing shape while still "working". That is
-two layers each correct in isolation and never crossed -- the same shape as all
-three bugs fixed on this branch.
+the reverse) would produce the wrong routing shape while still "working" -- two
+layers each correct in isolation and never crossed end to end.
 
-Also covers checkpoint re-save stability (see TestResaveStability): the headline bug
-on this branch was buffers silently vanishing on load, so a second save/load round
-trip is worth asserting rather than assuming.
+Also covers checkpoint re-save stability (see TestResaveStability): persistent
+buffers can silently vanish on load, so a second save/load round trip is worth
+asserting rather than assuming.
 
 Heavy: composes a real granite-4.1-3b with NO technology filter. Gated on
 GRANITE_SWITCH_E2E_MODELS=1.
@@ -74,8 +73,6 @@ def _compose_mixed():
         BASE_MODEL,
         *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
         # deliberately NO --technology-filter
-        "--switch-type",
-        "multi",
         "--output",
         str(out_dir),
     ]
@@ -101,7 +98,6 @@ def mixed_model():
 
     out_dir = _compose_mixed()
     config = GraniteSwitchConfig.from_pretrained(out_dir)
-    assert config.switch_type == "multi"
     tok = AutoTokenizer.from_pretrained(out_dir)
     model = GraniteSwitchForCausalLM.from_pretrained(out_dir).eval()
     assert isinstance(model.model.switch, MultiSwitch)
@@ -302,8 +298,8 @@ class TestMixedPlacementAndRouting:
 class TestResaveStability:
     """A composed checkpoint must survive being re-saved and reloaded.
 
-    The headline bug on this branch was the codebook and substitute LUT silently
-    vanishing on ``from_pretrained``. ``test_multi_switch_buffers.py`` covers ONE
+    The codebook and substitute LUT are persistent buffers that can silently
+    vanish on ``from_pretrained``. ``test_multi_switch_buffers.py`` covers ONE
     round trip on a synthetic model; this covers a second round trip on the real
     composed artifact, where a re-save could drop or alter a buffer with nobody
     noticing.

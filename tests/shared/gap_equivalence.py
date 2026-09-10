@@ -11,8 +11,8 @@ from tests.shared.granite4_equivalence import _ADAPTER_TOKEN_BASE
 
 # ── Constants ─────────────────────────────────────────────────────
 
-# Switch types available for testing (MVP: SingleSwitch only)
-SWITCH_TYPES = ["single"]
+# Switch types available for testing (MultiSwitch is the only engine)
+SWITCH_TYPES = ["multi"]
 
 # Attention-only configs (RoPE, no Mamba) — KV hiding only works with attention.
 ATTN_ONLY_NAMES = ["4.0-350m", "4.0-1b", "4.0-micro"]
@@ -22,9 +22,9 @@ ATTN_ONLY_NAMES = ["4.0-350m", "4.0-1b", "4.0-micro"]
 
 
 def ctrl_token():
-    """Return the control token ID for SingleSwitch.
+    """Return the control token ID for the switch.
 
-    SingleSwitch (num_adapters=1): adapter_token_ids=[101] → 101 is adapter_0.
+    num_adapters=1: adapter_token_ids=[101] → 101 is adapter_0.
     """
     return _ADAPTER_TOKEN_BASE  # 101
 

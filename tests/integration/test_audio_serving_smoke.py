@@ -6,8 +6,8 @@ path the low-level tests bypass (CUDA graphs, the ASR processor inside vLLM's
 EngineCore subprocess, the multi-clip splice, generation).
 
 Deliberately does NOT assert transcript content: WER and adapter-routing
-correctness are separate boxes, covered by the eval harness and
-test_switch_e2e_compose.py. Synthetic tones keep the test asset-free.
+correctness are separate boxes, covered by the eval harness and the MultiSwitch
+serving e2e tests. Synthetic tones keep the test asset-free.
 
 Opt in explicitly: `pytest -m "slow and requires_model and gpu"`.
 """
@@ -29,8 +29,7 @@ if importlib.util.find_spec("vllm") is None:
     pytest.skip("requires vLLM installed", allow_module_level=True)
 
 
-# Kept in lockstep with test_switch_e2e_compose.py so both E2E files exercise the
-# same model matrix.
+# E2E model matrix: base model + adapter-library pairs.
 _DEFAULT_BASE_MODEL_PAIRS = [
     ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
     ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
@@ -58,7 +57,7 @@ def _load_experimental_pairs():
 
 BASE_MODEL_PAIRS = _DEFAULT_BASE_MODEL_PAIRS + _load_experimental_pairs()
 
-COMPOSE_TIMEOUT_S = 1800  # 30 min — matches test_switch_e2e_compose.py
+COMPOSE_TIMEOUT_S = 1800  # 30 min — generous for a real compose
 _TARGET_SR = 16_000
 
 
@@ -160,8 +159,8 @@ def test_text_only_serving(served):
 def test_adapter_control_token_serving(served):
     """An adapter control token routes through the switch under serving.
 
-    Routing correctness is test_switch_e2e_compose.py's job; the bar here is
-    that the switch path runs in the live engine and still generates.
+    Routing correctness is the MultiSwitch serving e2e tests' job; the bar here
+    is that the switch path runs in the live engine and still generates.
     """
     from vllm import SamplingParams
     from vllm.inputs import TokensPrompt

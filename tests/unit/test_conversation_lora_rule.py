@@ -1,24 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""LoRA adapters always use RE_PREFILL; PRESERVE_MIXED_HISTORY is aLoRA-only.
+"""A LoRA turn falls back to a full text render; it is never refused.
 
-Why the rule exists. The template emits a LoRA adapter's control token at
+Why the fallback exists. The template emits a LoRA adapter's control token at
 sequence position 0 (its LoRA prefix insertion, which also suppresses the role
 marker that would follow). Position 0 is inside the already-sent prefix on every
-turn after the first, so the delta can never be derived and the policy cannot
-hold.
+turn after the first, so the delta can never carry it. Rather than refuse,
+``build_prompt`` falls back to a full text render for that turn -- exactly what
+RE_PREFILL does anyway. Nothing detects "LoRA"; the append test
+(:meth:`Conversation._appendable`) simply fails because the control token is not
+in the delta region, and a full render is the natural result.
 
-Why the refusal is up front rather than at the point of failure. Turn 1 takes the
-full-render path, where there is no prefix to preserve, so a LoRA adapter WOULD
-work there -- and then fail on turn 2, and on every turn after it. It is refused
-anyway, because a conversation does not change adapter technology mid-dialogue: a
-LoRA turn 1 is a LoRA turn 2, so "it works on turn 1" is not a case anyone can
-actually use. Succeeding once and failing forever is also worse than refusing
-immediately, because by turn 2 a caller has a transcript that cannot continue
-under the policy it chose.
-
-Position 0 is a reliable signature: an aLoRA adapter activates either inside a
-user message (Pass 2) or at the assistant boundary (the fallback), and both sit
-after the opening role marker.
+Position 0 is a reliable signature only in that it is never >= len(prev): an
+aLoRA adapter activates inside a user message or at the assistant boundary, both
+after the opening marker, so it lands in the delta and appends.
 
 CPU-only; stub tokenizer over the real Granite fixture template.
 """
@@ -45,55 +39,35 @@ def config(tok):
     return StubConfig([tok.token_id(f"<|{LORA}|>"), tok.token_id(f"<|{ALORA}|>")])
 
 
-class TestLoraIsRePrefillOnly:
-    def test_refused_on_the_very_first_turn(self, tok, config):
-        """Refuse immediately, not after a turn has already been committed."""
-        conv = Conversation(
-            tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
-        )
+class TestLoraFallsBackToFullRender:
+    @pytest.mark.parametrize(
+        "policy",
+        [KVHistoryPolicy.RE_PREFILL, KVHistoryPolicy.PRESERVE_MIXED_HISTORY],
+    )
+    def test_turn_one_lora_does_not_raise(self, tok, config, policy):
+        """Turn 1 is a full render under both policies, so a LoRA adapter works."""
+        conv = Conversation(tok, policy=policy, config=config)
         conv.user(Q1)
+        ids = conv.build_prompt(adapter=LORA)  # no raise
 
-        with pytest.raises(RuntimeError) as exc:
-            conv.build_prompt(adapter=LORA)
+        assert ids
+        assert ids[0] == tok.token_id(f"<|{LORA}|>"), "LoRA control token at position 0"
+        assert ids.requires_token_ids is True
 
-        message = str(exc.value)
-        assert "LoRA" in message
-        assert "position 0" in message
-        assert "RE_PREFILL" in message, (
-            "the error must name the policy to use instead; the caller's next "
-            "action is to switch policy, so the message should say so"
-        )
-        assert LORA in message, "name the adapter, so the caller knows which one"
-
-    def test_transcript_is_untouched_by_the_refusal(self, tok, config):
-        """A refused build_prompt must not leave half a turn behind.
-
-        Otherwise a caller that catches the error and switches policy would carry
-        a transcript that no longer matches anything the model was sent.
-        """
-        conv = Conversation(
-            tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
-        )
-        conv.user(Q1)
-        with pytest.raises(RuntimeError):
-            conv.build_prompt(adapter=LORA)
-
-        assert conv.sent_token_ids == []
-        with pytest.raises(RuntimeError):
-            conv.record_answer("T1566.", adapter=LORA)
-
-    def test_same_adapter_is_fine_under_re_prefill(self, tok, config):
-        """The rule is about the policy, not about the adapter being unusable."""
+    def test_re_prefill_lora_matches_a_from_scratch_render(self, tok, config):
+        """RE_PREFILL + LoRA sends exactly what rendering the transcript would."""
         conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
         conv.user(Q1)
-        ids = conv.build_prompt(adapter=LORA)
+        conv.build_prompt(adapter=LORA)
+        conv.record_answer("T1566.", adapter=LORA)
+        conv.user("And the tactic?")
+        got = list(conv.build_prompt(adapter=LORA))
 
-        assert ids, "a LoRA adapter under RE_PREFILL is an ordinary request"
-        assert tok.token_id(f"<|{LORA}|>") in ids
-        assert ids.requires_token_ids is False
+        want = list(conv._encode(conv._render(conv._messages, gen=True, adapter=LORA)))
+        assert got == want
 
     def test_alora_still_works_under_preserve(self, tok, config):
-        """Non-vacuity: the guard must not reject the case the policy is for."""
+        """Non-vacuity: aLoRA still appends and preserves under PRESERVE."""
         conv = Conversation(
             tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
         )
@@ -106,8 +80,8 @@ class TestLoraIsRePrefillOnly:
         assert p2[: len(p1)] == list(p1), "PRESERVE must still preserve for aLoRA"
         assert tok.token_id(f"<|{ALORA}|>") in p1
 
-    def test_base_turns_are_not_mistaken_for_lora(self, tok, config):
-        """adapter=None emits no control token, so it cannot be at position 0."""
+    def test_base_turn_is_appendable(self, tok, config):
+        """adapter=None emits no control token, so the append test passes it."""
         conv = Conversation(
             tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
         )
@@ -116,3 +90,26 @@ class TestLoraIsRePrefillOnly:
 
         assert ids
         assert not any(t in ids for t in config.adapter_token_ids)
+
+
+class TestAppendableHelper:
+    """`_appendable` decides append vs full render, from control-token position."""
+
+    def test_control_token_in_delta_region_is_appendable(self, tok, config):
+        conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+        prev = "<|start_of_role|>user<|end_of_role|>earlier"
+        full = prev + "<|later|><|unc|>certainty"  # control string after len(prev)
+        # Uses the real control texts of this checkpoint via _control_texts().
+        assert conv._appendable(full, prev) is True
+
+    def test_control_token_inside_prev_is_not_appendable(self, tok, config):
+        conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+        control = f"<|{LORA}|>"
+        full = control + "everything else"
+        prev = control + "every"  # control token at index 0, inside prev
+        assert conv._appendable(full, prev) is False
+
+    def test_no_control_token_is_appendable_when_prefix_holds(self, tok, config):
+        conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+        assert conv._appendable("abcdef", "abc") is True
+        assert conv._appendable("xyz", "abc") is False  # not even a prefix

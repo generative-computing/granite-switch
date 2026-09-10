@@ -1,24 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Real compose over ``switch_type`` x audio — the combination that crashed.
+"""Real compose of ``--enable-audio`` — the combination that crashed.
 
-``--switch-type multi --enable-audio`` used to die at the end of ``build()``:
+``compose --enable-audio`` used to die at the end of ``build()``:
 
     AttributeError: 'MultiSwitch' object has no attribute
     'rebuild_control_to_substitute_lut'
 
-Both flags are needed. The control->substitute table is sized
-``max(base_vocab_size, max_ctrl_id + 1)`` and control ids are appended, so after
-N control tokens it already equals ``len(tokenizer)`` and the rebuild is skipped
-— text-only ``multi`` compose is fine. ``<|audio|>`` adds a token that is *not* a
-control token, pushing the vocabulary one past the last control id, which makes
-the table stale and sends compose into the rebuild that only SingleSwitch could
-service.
-
-Nothing covered that intersection. Four tests run a real
-``compose --switch-type multi`` and every one is gated behind
-``GRANITE_SWITCH_E2E_MODELS=1`` (which no workflow sets); the three
-``--enable-audio`` tests all leave ``switch_type`` at its default. Hence a green
-3655-test GPU run on the broken commit.
+The control->substitute table is sized ``max(base_vocab_size, max_ctrl_id + 1)``
+and control ids are appended, so after N control tokens it already equals
+``len(tokenizer)`` and the rebuild is skipped — text-only compose is fine.
+``<|audio|>`` adds a token that is *not* a control token, pushing the vocabulary
+one past the last control id, which makes the table stale and sends compose into
+the rebuild that used to be missing on ``MultiSwitch``.
 
 Markers are ``slow`` + ``requires_model`` + ``audio``, matching
 ``test_compose_e2e.py`` and deliberately NOT env-gated: gating is what hid the
@@ -26,10 +19,7 @@ bug. ``tests/composer/test_control_lut_refresh.py`` covers the same call site in
 seconds on a tiny model; this is the end-to-end proof that a real compose of the
 combination completes and ships a loadable checkpoint.
 
-Cost: two composes of the default base model (module-scoped, one per engine).
-The ``single`` leg is the control — it always worked, so a failure there means
-the token-exchange consolidation broke something rather than that the multi fix
-is wrong.
+Cost: one compose of the default base model (module-scoped).
 """
 
 import json
@@ -47,7 +37,7 @@ BUILD_TIMEOUT = 3600
 _LUT_KEY = "model.switch.control_to_substitute_lut"
 
 
-def _compose(output_dir, switch_type):
+def _compose(output_dir):
     cmd = [
         sys.executable,
         "-m",
@@ -57,8 +47,6 @@ def _compose(output_dir, switch_type):
         "--technology-filter",
         "lora",
         "--enable-audio",
-        "--switch-type",
-        switch_type,
         "--output",
         str(output_dir),
     ]
@@ -69,10 +57,9 @@ def _compose(output_dir, switch_type):
         print("STDERR:", result.stderr[-3000:])
 
     # The regression itself: this returned non-zero with an AttributeError
-    # traceback for switch_type="multi".
+    # traceback for MultiSwitch (the only engine).
     assert result.returncode == 0, (
-        f"compose --switch-type {switch_type} --enable-audio failed "
-        f"(exit {result.returncode}).\n"
+        f"compose --enable-audio failed (exit {result.returncode}).\n"
         f"STDOUT tail:\n{result.stdout[-2000:]}\n"
         f"STDERR tail:\n{result.stderr[-2000:]}"
     )
@@ -80,13 +67,8 @@ def _compose(output_dir, switch_type):
 
 
 @pytest.fixture(scope="module")
-def audio_single(tmp_path_factory):
-    return _compose(tmp_path_factory.mktemp("audio-single") / "model", "single")
-
-
-@pytest.fixture(scope="module")
 def audio_multi(tmp_path_factory):
-    return _compose(tmp_path_factory.mktemp("audio-multi") / "model", "multi")
+    return _compose(tmp_path_factory.mktemp("audio-multi") / "model")
 
 
 def _lut_numel(output_dir):
@@ -113,9 +95,8 @@ def _lut_numel(output_dir):
     pytest.fail(f"{_LUT_KEY} not found in {[p.name for p in files]}")
 
 
-def _assert_consistent(output_dir, switch_type):
+def _assert_consistent(output_dir):
     config = json.loads((output_dir / "config.json").read_text())
-    assert config["switch_type"] == switch_type, config.get("switch_type")
 
     vocab_size = config["vocab_size"]
     ctrl_ids = config["adapter_token_ids"]
@@ -143,13 +124,7 @@ def _assert_consistent(output_dir, switch_type):
 @pytest.mark.xdist_group("multi_audio_compose_e2e")
 def test_multi_audio_compose_ships_a_consistent_control_lut(audio_multi):
     """The regression: this compose used to raise AttributeError."""
-    _assert_consistent(audio_multi, "multi")
-
-
-@pytest.mark.xdist_group("multi_audio_compose_e2e")
-def test_single_audio_compose_still_ships_a_consistent_control_lut(audio_single):
-    """Control leg — always worked, so a failure means the shared rebuild broke it."""
-    _assert_consistent(audio_single, "single")
+    _assert_consistent(audio_multi)
 
 
 @pytest.mark.xdist_group("multi_audio_compose_e2e")
