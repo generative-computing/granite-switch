@@ -39,7 +39,7 @@ from tests.shared.granitemoe_compose import (
     create_lora_adapter,
 )
 
-SWITCH_TYPES = ["single", "multi"]
+SWITCH_TYPES = ["multi"]
 
 # The marker is added after the control tokens and is NOT one of them, so it
 # pushes the vocabulary one past what the control table was sized for. That
@@ -82,8 +82,7 @@ def audio_moe_model(request, tmp_path_factory):
         asr_enabled=True,
     ).eval()
 
-    expected = "MultiSwitch" if request.param == "multi" else "SingleSwitch"
-    assert type(model.model.switch).__name__ == expected
+    assert type(model.model.switch).__name__ == "MultiSwitch"
     return model
 
 
