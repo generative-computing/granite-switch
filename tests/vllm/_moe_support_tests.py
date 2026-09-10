@@ -464,7 +464,7 @@ class TestSRMoEWeightLoad(_WeightLoadBase):
         """The SR loader had no ``block_sparse_moe`` handling whatsoever.
 
         A composed SR checkpoint is saved from the HF SR model, whose layer holds
-        the same ``GraniteMoeHybridMoE``, so the tensor names and stacked shapes
+        the same ``GraniteMoeMoE``, so the tensor names and stacked shapes
         are identical to the LoRA case — hence one shared remap helper rather than
         two copies that can drift.
         """

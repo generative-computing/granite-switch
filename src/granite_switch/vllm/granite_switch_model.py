@@ -33,8 +33,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces import (
-    HasInnerState,
-    IsHybrid,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -410,11 +408,9 @@ class GraniteSwitchModel(nn.Module):
 )
 class GraniteSwitchForCausalLM(
     nn.Module,
-    HasInnerState,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    IsHybrid,
 ):
     """
     Granite model with switch for causal language modeling.

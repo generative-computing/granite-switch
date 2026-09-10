@@ -188,10 +188,12 @@ class GraniteSwitchComposer:
         for field_name, default in arch.optional_config_fields.items():
             config_kwargs[field_name] = getattr(base_config, field_name, default)
 
-        # For Granite 3.x whose arch descriptor doesn't include
-        # shared_intermediate_size, default it to intermediate_size.
-        # GraniteMoeHybridConfig defaults it to 1024 (not None), so
-        # GraniteSwitchConfig's fallback logic doesn't trigger.
+        # For a dense Granite base whose arch descriptor doesn't include
+        # shared_intermediate_size, supply it explicitly from intermediate_size:
+        # a dense Granite layer always has a shared MLP of that width. This makes
+        # the composer the source of truth and does not rely on any parent-class
+        # default (GraniteMoeShared defaults it to 0, which is the "no shared MLP"
+        # sentinel — GraniteSwitchConfig would keep that 0 verbatim if passed).
         if "shared_intermediate_size" not in config_kwargs:
             config_kwargs["shared_intermediate_size"] = config_kwargs[
                 "intermediate_size"

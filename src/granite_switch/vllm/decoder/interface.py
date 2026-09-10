@@ -138,7 +138,7 @@ def _audit_loaded(params_dict, loaded_params, model, *, label: str) -> None:
 #   block_sparse_moe.router.layer.weight  [E, H]     -> block_sparse_moe.gate.weight
 #
 # Shared by BOTH adaptations: a composed SR checkpoint is written by the HF SR
-# model, whose layer holds the same GraniteMoeHybridMoE, so the tensor names and
+# model, whose layer holds the same GraniteMoeMoE, so the tensor names and
 # stacked shapes are identical to the LoRA case.
 # --------------------------------------------------------------------------- #
 _MOE_INPUT_SUFFIX = ".block_sparse_moe.input_linear.weight"

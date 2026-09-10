@@ -410,7 +410,7 @@ def stack_adapters(
     Uses ``remapper.remap_adapter_name()`` for name remapping, then handles
     stacking, zero-padding, lora_B pre-scaling, and fused-to-sliced splitting.
 
-    Split handling (for natively fused modules like GraniteMoeHybrid's
+    Split handling (for natively fused modules like GraniteMoeShared's
     ``input_linear``):
 
     - ``split_type="duplicate"``: Copy the same tensor to each slice.

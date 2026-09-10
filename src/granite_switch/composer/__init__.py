@@ -11,8 +11,8 @@ from .arch import (
     granite_dense_arch,
     granite_dense_sr_arch,
     granite_moe_arch,
-    granite_moe_hybrid_arch,
-    granite_moe_hybrid_sr_arch,
+    granite_moe_shared_arch,
+    granite_moe_shared_sr_arch,
     granite_moe_sr_arch,
     resolve_arch,
 )
@@ -28,8 +28,8 @@ __all__ = [
     "granite_dense_arch",
     "granite_dense_sr_arch",
     "granite_moe_arch",
-    "granite_moe_hybrid_arch",
-    "granite_moe_hybrid_sr_arch",
+    "granite_moe_shared_arch",
+    "granite_moe_shared_sr_arch",
     "granite_moe_sr_arch",
     "resolve_arch",
 ]

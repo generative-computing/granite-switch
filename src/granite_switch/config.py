@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for Granite model with adapter switching."""
 
-from transformers import GraniteMoeHybridConfig
+from transformers import GraniteMoeSharedConfig
 
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
@@ -15,7 +15,7 @@ ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 SWITCH_CACHE_LAYERS = 2
 
 
-class GraniteSwitchConfig(GraniteMoeHybridConfig):
+class GraniteSwitchConfig(GraniteMoeSharedConfig):
     """Configuration class for GraniteSwitch model.
 
     Extends the Granite base config with parameters for adapter switching.
@@ -179,28 +179,37 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         layer_types: list[str] | None = None,
         **kwargs,
     ):
-        # Compute default layer_types before parent init.
-        # layer_types must have length == num_hidden_layers (includes switch layer at
-        # index 0 when adapters are present). This ensures DynamicCache pre-allocation
-        # matches the global layer indices used by decoder layers.
-        if layer_types is None:
-            num_hidden_layers = kwargs.get("num_hidden_layers", 32)
-            layer_types = ["attention"] * num_hidden_layers
-
         super().__init__(
             num_local_experts=num_local_experts,
-            position_embedding_type=position_embedding_type,
-            layer_types=layer_types,
             **kwargs,
         )
 
-        # Default shared_intermediate_size from intermediate_size.  Granite 4
-        # models all have a shared_mlp; for dense ones its width equals
-        # intermediate_size.  The test MUST stay ``is None``: 0 is the explicit
-        # "no shared MLP" encoding used by pure sparse MoE bases (granitemoe),
-        # and a falsy test would silently resurrect the module.
-        if self.shared_intermediate_size is None:
-            self.shared_intermediate_size = self.intermediate_size
+        # layer_types and position_embedding_type are switch-owned attributes.
+        # The GraniteMoeShared parent (unlike the old GraniteMoeHybrid one) does
+        # not declare them, but internal readers still depend on them: the
+        # lora_target_modules auto-detection below reads ``self.layer_types``, and
+        # the decoders gate RoPE on ``position_embedding_type``.  The switch model
+        # is attention-only, so layer_types is always all-"attention"; its length
+        # must equal num_hidden_layers so DynamicCache pre-allocation matches the
+        # global layer indices used by decoder layers.
+        if layer_types is None:
+            num_hidden_layers = kwargs.get("num_hidden_layers", 32)
+            layer_types = ["attention"] * num_hidden_layers
+        self.layer_types = layer_types
+        self.position_embedding_type = position_embedding_type
+
+        # Resolve shared_intermediate_size independently of the parent default.
+        # The GraniteMoeShared parent defaults it to 0, which is ALSO the explicit
+        # "no shared MLP" sentinel used by pure sparse-MoE bases (granitemoe).  So
+        # the switch config must decide it itself rather than inherit a magic
+        # default: an explicitly-supplied value (including 0) is honored verbatim;
+        # only when it is left unset do we resolve it — dense (no experts) gets a
+        # shared MLP sized to intermediate_size, pure MoE keeps the 0 sentinel.
+        # This is a compose-time decision that is then frozen into config.json.
+        if kwargs.get("shared_intermediate_size") is None:
+            self.shared_intermediate_size = (
+                0 if num_local_experts > 0 else self.intermediate_size
+            )
 
         # Validate num_adapters
         if num_adapters < 0:
