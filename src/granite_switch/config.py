@@ -3,6 +3,14 @@
 
 from transformers import GraniteMoeHybridConfig
 
+# Layer-type names that mean "a full attention layer". transformers renamed
+# "attention" to "full_attention" in 5.16 and rewrites the value inside
+# PreTrainedConfig.__init__, so a config built with either spelling — or loaded
+# from a checkpoint written by either version — must be recognized. Comparing
+# against the bare string silently dropped the attention LoRA target groups on
+# 5.16, leaving adapters with MLP targets only.
+ATTENTION_LAYER_TYPES = frozenset({"attention", "full_attention"})
+
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 
@@ -53,13 +61,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             asr_enabled (bool): Register the audio preprocessor that transcribes
                 audio and splices the transcript into the prompt. Default: False.
             asr_model_id (Optional[str]): HF id of the speech-to-text model. None
-                falls back to a small built-in default.
-            asr_device (str): Device the ASR model runs on. Default "cpu" keeps
-                vLLM's GPU KV-cache budget clean.
+                falls back to the built-in default (Granite Speech 5.0 TurboCTC,
+                a 470M English CTC encoder).
+            asr_device (str): Device the ASR model runs on. Default "cuda" — the
+                default encoder is small and GPU-bound work is what makes it fast.
+                Set "cpu" to keep vLLM's GPU memory budget entirely for KV cache.
             asr_dtype (Optional[str]): Precision the ASR weights load in, one of
-                ASR_DTYPES. None/"auto" derives it from asr_device (float16 on
-                CUDA). An encoder with BatchNorm layers must set "float32".
-                Default: None.
+                ASR_DTYPES. None/"auto" derives it from asr_device (bfloat16 on
+                CUDA, float32 otherwise). bfloat16 because it is the default
+                checkpoint's own dtype and keeps float32's exponent range, which
+                suits an encoder with BatchNorm layers; float16 still works on the
+                default model and can be set explicitly. Default: None.
             asr_pipeline_kwargs (Optional[dict]): Extra kwargs merged into the
                 ``transformers.pipeline(...)`` construction, e.g.
                 ``{"chunk_length_s": 15}``. Baked into the transcriber cache key.
@@ -72,15 +84,21 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 synchronous transcriptions one request can trigger and the startup
                 profiling pass; ``--limit-mm-per-prompt`` may lower it, not raise
                 it. Default: 32.
-            asr_chunk_length_s (float): Chunker window length in seconds. Only
-                used when asr_self_chunks is False. Default: 30.0.
+            asr_chunk_length_s (float): Chunker window length in seconds, and so
+                also the longest clip that reaches the backend in one piece (a
+                shorter clip is a single segment). Only used when asr_self_chunks
+                is False. Default: 120.0 — what the default CTC encoder handles in
+                one pass before activation memory dominates.
             asr_chunk_overlap_s (float): Overlap in seconds between chunker
                 windows, de-duplicated by the transcript merge. Only used when
                 asr_self_chunks is False. Default: 5.0.
             asr_self_chunks (bool): True when the backend chunks long audio
                 itself (Whisper's timestamp stitching beats our text-level merge),
                 bypassing our chunker. False routes audio through the
-                split/transcribe/merge chunker instead. Default: True.
+                split/transcribe/merge chunker instead. Default: False — the
+                default CTC backend does not self-chunk, and the HF pipeline's own
+                CTC chunking mis-trims seams for it (it needs the model to publish
+                inputs_to_logits_ratio, which this checkpoint does not).
 
         Shadow Residual (SR) parameters:
             dual_stream (bool): Whole-checkpoint decoder mode. ``False`` (default) =
@@ -160,14 +178,14 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Audio (ASR) preprocessing parameters
         asr_enabled: bool = False,
         asr_model_id: str | None = None,
-        asr_device: str = "cpu",
+        asr_device: str = "cuda",
         asr_dtype: str | None = None,
         asr_pipeline_kwargs: dict | None = None,
         asr_generate_kwargs: dict | None = None,
         asr_max_audio_clips: int = 32,
-        asr_chunk_length_s: float = 30.0,
+        asr_chunk_length_s: float = 120.0,
         asr_chunk_overlap_s: float = 5.0,
-        asr_self_chunks: bool = True,
+        asr_self_chunks: bool = False,
         # Shadow Residual (SR) parameters
         cross_stream_rank: int | None = None,
         dual_stream: bool = False,
@@ -367,7 +385,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
             if self.num_adapters > 0:
                 # Attention modules (present in all attention layers)
-                if any(lt == "attention" for lt in self.layer_types):
+                if any(lt in ATTENTION_LAYER_TYPES for lt in self.layer_types):
                     lora_target_modules.extend(
                         [
                             "qkv_proj",  # Q/K/V fused

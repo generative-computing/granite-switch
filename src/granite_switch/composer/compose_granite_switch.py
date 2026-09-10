@@ -819,14 +819,16 @@ Examples:
         type=str,
         default=None,
         help="HF id of the speech-to-text model the audio preprocessor loads. "
-        "Requires --enable-audio; ignored without it. Defaults to a small built-in model when unset.",
+        "Requires --enable-audio; ignored without it. Defaults to ibm-granite/"
+        "granite-speech-5.0-470m-turboctc (470M English CTC) when unset.",
     )
     parser.add_argument(
         "--asr-device",
         type=str,
-        default="cpu",
-        help="Device the ASR model runs on (default: cpu). Use e.g. cuda:0 to "
-        "run transcription on GPU (watch vLLM's KV-cache memory budget).",
+        default="cuda",
+        help="Device the ASR model runs on (default: cuda). Use cpu to leave "
+        "vLLM's whole GPU memory budget to the KV cache, at the cost of much "
+        "slower transcription.",
     )
     parser.add_argument(
         "--asr-dtype",
@@ -834,8 +836,9 @@ Examples:
         default=None,
         choices=ASR_DTYPES,
         help="Precision the ASR weights load in. Default derives it from "
-        "--asr-device (float16 on CUDA, float32 on CPU); set float32 for an "
-        "encoder that cannot run in half precision (e.g. one with BatchNorm). "
+        "--asr-device (bfloat16 on CUDA, float32 on CPU); bfloat16 is the "
+        "default checkpoint's own dtype and keeps float32's exponent range. "
+        "float16 also works on that model and may be set explicitly. "
         "Requires --enable-audio; ignored without it.",
     )
     parser.add_argument(
@@ -852,8 +855,10 @@ Examples:
         default=None,
         help="JSON object of default decode kwargs applied on every "
         'transcription, e.g. \'{"language": "de", "task": '
-        '"transcribe"}\' for multilingual Whisper. Per-request '
-        "mm_processor_kwargs override these. Requires --enable-audio; ignored without it.",
+        '"transcribe"}\' for a multilingual generative model such as Whisper. '
+        "Ignored by a CTC backend (the default), which has no decoder to steer. "
+        "Per-request mm_processor_kwargs override these. Requires "
+        "--enable-audio; ignored without it.",
     )
     parser.add_argument(
         "--asr-max-audio-clips",
@@ -867,8 +872,10 @@ Examples:
         dest="asr_self_chunks",
         action="store_true",
         default=None,
-        help="Backend chunks long audio itself (Whisper default). Mutually "
-        "exclusive with --asr-no-self-chunks.",
+        help="Backend chunks long audio itself (a generative backend such as "
+        "Whisper stitches its own windows from timestamps), bypassing our "
+        "chunker. Also feeds an arbitrarily long clip to a CTC backend in one "
+        "pass. Mutually exclusive with --asr-no-self-chunks.",
     )
     parser.add_argument(
         "--asr-no-self-chunks",
@@ -881,8 +888,9 @@ Examples:
         "--asr-chunk-length-s",
         type=float,
         default=None,
-        help="Chunker window length in seconds (default 30.0). Only used when "
-        "the backend does not self-chunk. Requires --enable-audio; ignored without it.",
+        help="Chunker window length in seconds (default 120.0), which is also "
+        "the longest clip handed to the backend whole. Only used when the "
+        "backend does not self-chunk. Requires --enable-audio; ignored without it.",
     )
     parser.add_argument(
         "--asr-chunk-overlap-s",

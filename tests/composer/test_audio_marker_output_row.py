@@ -13,9 +13,15 @@ The fixup copies a reserved ``<|unused_N|>`` row, whose logit the base model was
 trained to keep low, into the marker's row. Covered here:
 
 * the reserved-token lookup (found, absent, highest-id-wins)
-* the row copy on the untied path (Granite 4.2, distinct ``lm_head``)
-* the row copy on the tied path (Granite 4.0/4.1, shared matrix)
+* the row copy on the untied path (distinct ``lm_head``)
+* the row copy on the tied path (shared matrix)
 * neighbouring rows are left alone
+
+The row copy is also parametrized over the MLP topology. The fixup only ever
+touches embedding rows, so a dense base and a pure sparse MoE base
+(``shared_intermediate_size == 0``, no ``shared_mlp`` module at all) must behave
+identically -- and if a shared-MLP-shaped assumption ever creeps into the model
+construction the fixup runs against, the sparse arm is what notices.
 """
 
 import pytest
@@ -36,8 +42,30 @@ _RESERVED_ID = 253
 _BYSTANDER_ID = 254
 
 
-def _tiny_config(tie: bool) -> GraniteSwitchConfig:
+# (tie, sparse_moe) ids for the row-copy cases.
+_TOPOLOGIES = [
+    pytest.param(False, False, id="untied-dense"),
+    pytest.param(True, False, id="tied-dense"),
+    pytest.param(False, True, id="untied-sparse_moe"),
+    pytest.param(True, True, id="tied-sparse_moe"),
+]
+
+
+def _tiny_config(tie: bool, sparse_moe: bool = False) -> GraniteSwitchConfig:
+    # shared_intermediate_size == 0 is upstream's encoding for "no shared MLP",
+    # so it is a meaningful value, never a falsy one. A layer needs at least one
+    # MLP path, hence the expert bank.
+    moe_fields = (
+        {
+            "shared_intermediate_size": 0,
+            "num_local_experts": 4,
+            "num_experts_per_tok": 2,
+        }
+        if sparse_moe
+        else {}
+    )
     return GraniteSwitchConfig(
+        **moe_fields,
         vocab_size=300,
         hidden_size=64,
         intermediate_size=128,
@@ -104,9 +132,9 @@ class TestInitializeAudioMarkerOutputRow:
     so it is worth pinning separately from the control tokens.
     """
 
-    @pytest.mark.parametrize("tie", [False, True], ids=["untied", "tied"])
-    def test_marker_row_matches_reserved_row(self, tie):
-        model = GraniteSwitchForCausalLM(_tiny_config(tie=tie))
+    @pytest.mark.parametrize(("tie", "sparse_moe"), _TOPOLOGIES)
+    def test_marker_row_matches_reserved_row(self, tie, sparse_moe):
+        model = GraniteSwitchForCausalLM(_tiny_config(tie=tie, sparse_moe=sparse_moe))
         head = model.get_output_embeddings().weight
 
         reserved_before = head[_RESERVED_ID].clone()
@@ -121,9 +149,9 @@ class TestInitializeAudioMarkerOutputRow:
         # The source row is copied from, not moved.
         assert torch.equal(head[_RESERVED_ID], reserved_before)
 
-    @pytest.mark.parametrize("tie", [False, True], ids=["untied", "tied"])
-    def test_other_rows_untouched(self, tie):
-        model = GraniteSwitchForCausalLM(_tiny_config(tie=tie))
+    @pytest.mark.parametrize(("tie", "sparse_moe"), _TOPOLOGIES)
+    def test_other_rows_untouched(self, tie, sparse_moe):
+        model = GraniteSwitchForCausalLM(_tiny_config(tie=tie, sparse_moe=sparse_moe))
         head = model.get_output_embeddings().weight
         bystander = head[_BYSTANDER_ID].clone()
         control_rows = head[[250, 251]].clone()

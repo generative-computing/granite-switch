@@ -15,7 +15,13 @@ The audio path needs vLLM's audio deps (`av`, `soundfile`, `resampy`, `scipy`) t
 decode and resample the incoming waveform. They come from vLLM's own `[audio]`
 extra, which the `audio` extra here pulls in (as `vllm[audio]`). A plain
 `uv sync --extra vllm` omits them, so it gives you a checkpoint that fails on any
-non-16 kHz input:
+non-16 kHz input.
+
+The `audio` extra also requires **transformers >= 5.16**, the release that added
+`granite_speech5_ctc` — the architecture of the default ASR model. On an older
+transformers the first transcription raises an `ImportError` naming the fix
+(the rest of the package still works on an older release, which is why the
+requirement sits on the extra rather than the core dependency).
 
 ```bash
 # Serving an audio-enabled checkpoint
@@ -42,20 +48,29 @@ This adds the `<|audio|>` marker token to the tokenizer and writes the audio
 settings into `config.json` so the checkpoint is self-describing:
 
 ```json
-{ "asr_enabled": true, "asr_model_id": null, "asr_device": "cpu" }
+{ "asr_enabled": true, "asr_model_id": null, "asr_device": "cuda" }
 ```
 
-- `asr_model_id` — HF id of the speech-to-text model (default: a small built-in
-  `distil-whisper/distil-small.en`). Override with `--asr-model <hf-id>`, e.g.
-  `openai/whisper-small` for multilingual.
-- `asr_device` — `cpu` (default) keeps vLLM's GPU KV-cache budget clean; set
-  `--asr-device cuda:0` to run transcription on GPU (watch GPU memory).
+- `asr_model_id` — HF id of the speech-to-text model (default:
+  `ibm-granite/granite-speech-5.0-470m-turboctc`, a 470M English conformer CTC
+  encoder). Override with `--asr-model <hf-id>`, e.g. `openai/whisper-small` for
+  multilingual.
+- `asr_device` — `cuda` (default): the default encoder is small and its speed
+  comes from running on GPU. Set `--asr-device cpu` to leave vLLM's whole GPU
+  memory budget to the KV cache — transcription is then several times slower
+  (measured ~3x realtime on a laptop CPU, i.e. a 10-minute clip takes minutes).
+  On GPU, mind that vLLM pre-allocates its KV cache first, so a tight
+  `--gpu-memory-utilization` can leave too little for the ASR weights.
 - `asr_dtype` — precision the ASR weights load in. Unset (default) derives it
-  from the device: `float16` on CUDA, `float32` on CPU. Half precision halves
-  the ASR weight footprint and is what the Whisper-family defaults expect, but
-  it is not universally safe — an encoder with **BatchNorm** layers raises
+  from the device: `bfloat16` on CUDA, `float32` on CPU. bfloat16 because it is
+  the default checkpoint's own dtype (no conversion implied) and because it keeps
+  float32's exponent range, which is the safer choice for an encoder carrying
+  **BatchNorm** in every conv block. Note that float16 is *not* rejected by this
+  model — measured on an A100 (torch 2.10 / transformers 5.16) it loads and
+  transcribes correctly — so bfloat16 is a considered default, not a hard
+  requirement. A different encoder may still hit
   `Expected weight to have type Float but got Half`, since BatchNorm will not
-  promote a float16 weight against float32 features. Such a checkpoint needs
+  promote a float16 weight against float32 features; such a checkpoint needs
   `--asr-dtype float32`. Accepted: `auto`, `float16`, `bfloat16`, `float32`.
 
 Audio capability is **gated per checkpoint** by `asr_enabled`: a checkpoint built
@@ -78,7 +93,8 @@ needed to swap or steer any HF `automatic-speech-recognition` model:
   pipeline is built, so they are folded into the transcriber cache key.
 - `asr_generate_kwargs` — **decode-time** defaults applied on every transcription
   (e.g. `language`, `task` for a multilingual Whisper). Applied at call time, so
-  one loaded pipeline is reused. Ignored by non-generative backends (e.g. CTC).
+  one loaded pipeline is reused. Dropped for a CTC backend (the default), which
+  has no ``generate()`` to steer.
 
 Set them at compose time (JSON), which writes them into `config.json`:
 
@@ -117,15 +133,25 @@ Shorten the audio or serve with a larger `--max-model-len`. Relevant config fiel
 
 **Long single clips** are handled two ways, selected by `asr_self_chunks`:
 
-- `asr_self_chunks: true` (default) — the backend chunks internally. The Whisper
-  pipeline does this via `chunk_length_s` with timestamp-based stitching, so our
-  chunker is bypassed.
-- `asr_self_chunks: false` — route audio through the **encoder-agnostic** chunker:
-  split into overlapping windows (`asr_chunk_length_s`, default `30.0`;
-  `asr_chunk_overlap_s`, default `5.0`), transcribe each, and merge with
-  overlap de-duplication. Use this for a backend with a fixed input window (e.g. a
-  speech encoder that cannot self-chunk); the transcript stitching then lives
-  above the backend so any backend inherits long-audio support.
+- `asr_self_chunks: false` (default) — route audio through the
+  **encoder-agnostic** chunker: split into overlapping windows
+  (`asr_chunk_length_s`, default `120.0`; `asr_chunk_overlap_s`, default `5.0`),
+  transcribe each, and merge with overlap de-duplication. A clip at or under the
+  window is a single segment and reaches the backend whole, so the CTC default
+  handles everything up to two minutes in one pass and only longer clips are
+  split. The window is what bounds activation memory: measured on CPU, peak RSS
+  was ~1.4GB at 60s of audio, ~2.3GB at 300s and ~3.5GB at 600s.
+- `asr_self_chunks: true` — the backend handles long audio itself. For a
+  generative backend that means its own timestamp-based stitching (Whisper), which
+  is more precise than our text-level merge. For a CTC backend it means feeding an
+  arbitrarily long clip in one pass — its block attention keeps cost linear in
+  duration, so this is a memory-for-accuracy trade rather than a hard limit.
+
+The HF pipeline's *own* CTC chunking is deliberately never used: it rescales chunk
+stride by the model's `inputs_to_logits_ratio`, which the CTC default does not
+publish, so the pipeline falls back to `1` and trims every seam at the wrong
+offset. `chunk_length_s` therefore reaches only a generative backend, and only at
+call time — once the pipeline exists and its kind is known.
 
 These are settable at compose time and are equally editable in `config.json`:
 
@@ -199,10 +225,25 @@ in automatically — callers send standard chat messages, no manual marker neede
 
 Both Granite chat-template families are supported, detected at compose time:
 
-| Family | Models | How the marker is emitted |
+| Family | Role markers | How the marker is emitted |
 |---|---|---|
-| `granite_format` | 4.0 / 4.1 | An `elif` added to the existing content-part loop |
-| `chatml` | 4.2 | A flattening block, since ChatML has no content-part loop |
+| `granite_format` | `<\|start_of_role\|>` | An `elif` added to the existing content-part loop |
+| `chatml` | `<\|im_start\|>` | A flattening block, since ChatML has no content-part loop |
+
+**Nothing on the audio path is architecture-specific.** The compose-time gate is
+`model_type.startswith("granite")` and the injection above keys off the *detected
+template family*, never the architecture — so a dense base and a pure sparse MoE
+base (`granitemoe`, no `shared_mlp`) go down identical code, and the marker's
+output-row fixup only ever touches embedding rows. What does differ is the
+adapter surface, not the audio: see *Audio + adapters* below.
+
+A base whose tokenizer carries **no chat template at all** is *not* refused:
+`configure_audio_chat_template` warns and returns, and compose completes. The
+checkpoint then carries `asr_enabled: true` while its template emits no
+`<|audio|>` marker, so an audio content part on the chat path is dropped rather
+than transcribed — offline `llm.generate` with a hand-written marker still works.
+Compose from the instruct-tuned sibling, or supply a template first. (A template
+that *is* present but whose family cannot be identified does raise.)
 
 The ChatML template consumes `message.content` as a string
 (`{%- set content = message.content | string %}`), so a multimodal parts *list*
@@ -248,7 +289,7 @@ is rejected.
 
 Compose therefore copies a reserved `<|unused_N|>` row into the marker's row, so
 its logit is identical to a token the base model was trained not to emit, for
-every hidden state. On the tied path (4.0/4.1) that row is shared with the input
+every hidden state. On a tied-embedding base that row is shared with the input
 embedding, which is inert here: the marker is replaced by transcript ids before
 the decoder runs, and a marker without a matching audio item is rejected
 up-front, so the marker's input row is never read.
@@ -263,15 +304,23 @@ rather than the basis.
 If a vocabulary has no reserved slots, compose warns and leaves the row as
 generated. Note the inventory is not stable across releases (4.1 has 69 unused
 ids, 4.2 has 72), so nothing should depend on a specific count or id range —
-`find_reserved_never_emitted_token_id` looks them up each time.
+`find_reserved_never_emitted_token_id` looks them up each time. The rows are
+present on `granitemoe` bases too, so this policy needs no architecture-specific
+fallback.
 
 ## Limitations (alpha)
 
 - **Cascade, not end-to-end.** Prosody/emotion/uncertainty are lost; ASR errors
   propagate to the LLM. Two models run sequentially (ASR then LLM).
-- **English by default** (`distil-whisper/distil-small.en`). Use `--asr-model`
-  with a multilingual model and set the language via `asr_generate_kwargs` (or
+- **English only by default** (`ibm-granite/granite-speech-5.0-470m-turboctc`),
+  and being CTC it has no language/task knobs at all, so the per-request
+  `language` override is inert. For other languages use `--asr-model` with a
+  multilingual generative model and set the language via `asr_generate_kwargs` (or
   per request via `mm_processor_kwargs`; see *Tuning the ASR model* above).
+- **Transcripts from the CTC default are lowercase and unpunctuated**
+  (`what is the capital of israel`). They are spliced into the prompt as ordinary
+  text, so the LLM reads them that way. A generative backend such as Whisper
+  restores case and punctuation.
 - **HF `pipeline` backends only.** Any `automatic-speech-recognition` pipeline
   model works via config alone; a non-pipeline backend (cloud STT, faster-whisper,
   a custom encoder) still needs a code-level plug point — tracked as future work.
@@ -279,8 +328,10 @@ ids, 4.2 has 72), so nothing should depend on a specific count or id range —
   context split across the request's clips, so many/long clips together are bound
   by `max_model_len` (see *Long audio & multiple clips* above).
 - Chunk-merge de-duplication is text-level (word overlap at each seam); it can
-  mis-handle a phrase legitimately repeated across a window boundary. Whisper's
-  internal timestamp stitching (`asr_self_chunks: true`) is more precise.
+  mis-handle a phrase legitimately repeated across a window boundary. A generative
+  backend's internal timestamp stitching (`asr_self_chunks: true`) is more
+  precise, but is unavailable for the CTC default — hence the wide 120s window,
+  which leaves most clips seam-free.
 
 ## Audio + adapters
 
@@ -290,6 +341,13 @@ forward pass on the multimodal path; the switch then detects adapter control
 tokens as usual, and `embed_input_ids` applies the same token-exchange rewrite
 (control → substitute id) used for text — so an audio request that activates an
 adapter behaves identically to the text equivalent.
+
+On a **pure sparse MoE** base the adapter surface is attention-only (`qkv_proj`,
+`o_proj`), because there is no `shared_mlp` for the MLP-side groups to attach to —
+see [SUPPORTED_MODELS.md](SUPPORTED_MODELS.md#pure-sparse-moe-granitemoe). Where
+no adapter library targets such a base yet, compose an adapter-free audio skin
+with `--built-in-adapters base --enable-audio`: the marker, its output row and the
+control-LUT sizing are all independent of how many adapters are present.
 
 ## Tests
 
@@ -309,5 +367,9 @@ pytest -m "audio and not gpu" -v -s --tb=short
   and per-request decode-kwargs resolution). No GPU/vLLM required.
 - `tests/unit/test_config.py` — round-trips `asr_pipeline_kwargs` /
   `asr_generate_kwargs` through save/load.
+- `tests/integration/test_asr_ctc_default_gpu.py` (GPU, downloads the ~1GB
+  checkpoint) — the default CTC model through `ASRTranscriber`: bfloat16 on CUDA,
+  CTC classification, a correct transcript with client decode kwargs dropped, the
+  float16/BatchNorm guard, and the 120s single-pass/chunked boundary.
 - End-to-end (GPU): compose an `--enable-audio` checkpoint, then an audio request
   through vLLM produces an answer and text-only requests are unaffected.
