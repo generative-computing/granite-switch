@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Long-lived subprocess worker for vLLM MultiSwitch tests (coded engine).
 
-Generalizes ``_single_switch_worker.py`` to the Kerdock/DG coded-memory
-MultiSwitch engine:
+Drives the Kerdock/DG coded-memory MultiSwitch engine:
 
 - ``multi`` — 2 Attention layers (counting slot + memory slot). Each needs its
   own KV-cache tensor and its own entry in the ForwardContext's

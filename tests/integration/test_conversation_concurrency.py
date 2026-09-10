@@ -86,7 +86,6 @@ def _run(command, model_dir, extra=()):
 def test_two_preserve_conversations_do_not_disturb_each_other():
     data = _run("concurrent", _model_dir())
     assert not data.get("error"), data["error"]
-    assert data["switch_type"] == "multi", data["switch_type"]
 
     solo, conc = data["arms"]["solo"], data["arms"]["conc"]
     print(

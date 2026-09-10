@@ -22,7 +22,7 @@ import torch
 from tests.shared.generation_models import (
     DENSE_CFG,
     save_switch_model,
-    single_overrides,
+    switch_overrides,
 )
 from tests.shared.granite4_equivalence import GRANITEMOE_MINI
 
@@ -54,7 +54,7 @@ def _build_model(tmpdir, arch):
     }
     return save_switch_model(
         base_cfg,
-        single_overrides(base_cfg),
+        switch_overrides(base_cfg),
         tmpdir=tmpdir,
     )
 

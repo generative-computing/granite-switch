@@ -204,7 +204,8 @@ class TestZeroAdapterNoHiding:
     No control tokens in input -- adapter_indices=0 everywhere.
     No hiding triggered (no adapter tokens in input).
 
-    SingleSwitch: bit-exact (no counting head, no position perturbation).
+    Skinned: bit-exact -- with no control token the switch is inert (no
+    counting perturbation, adapter_indices=0), so logits match upstream.
     """
 
     @pytest.fixture(params=_MODEL_NAMES)
@@ -223,7 +224,7 @@ class TestZeroAdapterNoHiding:
             upstream_out = upstream(input_ids=input_ids, use_cache=False)
             switch_out = switch(input_ids=input_ids, use_cache=False)
 
-        # SingleSwitch is bit-exact (no counting head, no position perturbation)
+        # Skinned: bit-exact -- the switch is inert with no control token
         torch.testing.assert_close(
             switch_out.logits,
             upstream_out.logits,

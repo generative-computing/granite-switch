@@ -6,7 +6,7 @@ Architecture:
         ↓
     Embedding Layer (frozen)
         ↓
-    SingleSwitch (adapter selection)
+    MultiSwitch (adapter selection)
         ↓
     Adapter Indices (per token)
         ↓
@@ -171,10 +171,10 @@ class GraniteSwitchModel(nn.Module):
 
         # 3. Base transformer layers with custom LoRA
         #
-        # When adapters are present, config.num_hidden_layers includes a placeholder
-        # entry for the switch's KV cache slot (SingleSwitch uses 1 slot for its
-        # single attention head). This placeholder exists for HF DynamicCache
-        # sizing; vLLM auto-discovers its Attention layers and doesn't need it.
+        # When adapters are present, config.num_hidden_layers includes placeholder
+        # entries for the switch's KV cache slots (MultiSwitch uses 2: a counting
+        # slot and a memory slot). These placeholders exist for HF DynamicCache
+        # sizing; vLLM auto-discovers its Attention layers and doesn't need them.
         # We subtract the switch's cache slot count to recover the true number of
         # decoder layers, and use it as an offset into layer_types (whose first
         # entry is an "attention" placeholder for the switch).
@@ -295,7 +295,7 @@ class GraniteSwitchModel(nn.Module):
                 # request counts against a missing baseline, recovers a wrong
                 # write address ``n``, and retrieves whatever adapter happens to
                 # live at that address (arbitrary mis-routing, not a uniform
-                # off-by-one). SingleSwitch has no counting stage and ignores it.
+                # off-by-one).
                 adapter_indices, modified_input_ids = self.switch(
                     input_ids=input_ids,
                     adapter_token_ids=self.adapter_token_ids,

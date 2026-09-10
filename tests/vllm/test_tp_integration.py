@@ -194,9 +194,12 @@ def _build_and_compare(
 class TestTPRealAdapters:
     """TP=1 vs TP=2 with real adapters from granite-lib-rag (granite-4.0-micro).
 
-    Includes a chat-template prompt that activates the answerability adapter
-    via intrinsic_name, testing that adapter control tokens are handled
-    correctly under tensor parallelism.
+    Exercises the coded MultiSwitch engine (the only engine), which owns TWO
+    extra attention layers with their own KV cache slots (counting + memory) --
+    the obvious thing tensor-parallel sharding can get wrong. Includes a
+    chat-template prompt that activates the answerability adapter via
+    intrinsic_name, so adapter control-token placement is exercised under
+    sharding too. TP=1 and TP=2 logprobs must agree.
     """
 
     def test_tp_logprobs_agree(self, tmp_path):
@@ -238,8 +241,6 @@ class TestTPMultiSwitch:
                 "ibm-granite/granite-4.0-micro",
                 "--adapter-repos",
                 "ibm-granite/granitelib-rag-r1.0",
-                "--switch-type",
-                "multi",
             ],
             label="granite-4.0-micro-rag-multi",
             intrinsic_name="answerability",

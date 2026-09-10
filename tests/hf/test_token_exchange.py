@@ -26,7 +26,9 @@ def _build(num_adapters=2, substitute_ids=(1, 7)):
         hidden_size=32,
         num_attention_heads=4,
         num_key_value_heads=2,
-        num_hidden_layers=2,
+        # MultiSwitch reserves 2 cache slots (counting + memory), so 3 hidden
+        # layers leaves exactly 1 physical decoder layer (at past_key_values index 2).
+        num_hidden_layers=3,
         intermediate_size=64,
         shared_intermediate_size=64,
         max_position_embeddings=64,
@@ -95,8 +97,9 @@ class TestKVCacheHeadDim:
             config,
             torch.tensor([[10, 20, 100, 40]], dtype=torch.long),
         )
-        # layers[0] is the switch; layers[1] is the first decoder layer.
-        decoder_key = out.past_key_values.layers[1].keys
+        # layers[0] and [1] are the switch cache slots (counting + memory);
+        # layers[2] is the first decoder layer.
+        decoder_key = out.past_key_values.layers[2].keys
         assert decoder_key.shape[-1] == config.projection_head_dim
 
 
@@ -111,7 +114,7 @@ class TestSwitchStillDetectsAdapter:
         )
         adapter_indices = model.model._last_adapter_indices
         # Position 2 is the control token for adapter 0 (1-indexed output).
-        # Positions after it inherit adapter=1 (SingleSwitch persists once fired).
+        # Positions after it inherit adapter=1 (latest-wins persists once fired).
         assert adapter_indices[0, 0].item() == 0
         assert adapter_indices[0, 1].item() == 0
         assert adapter_indices[0, 2].item() == 1
@@ -243,7 +246,7 @@ class TestControlLutRebuildAcrossSwitchEngines:
     what let this through a green suite.
     """
 
-    @pytest.mark.parametrize("switch_type", ["single", "multi"])
+    @pytest.mark.parametrize("switch_type", ["multi"])
     def test_rebuild_agrees_with_vocab_size(self, switch_type):
         config = _build(substitute_ids=(5, 7))
         config.switch_type = switch_type
@@ -265,7 +268,7 @@ class TestControlLutRebuildAcrossSwitchEngines:
         assert lut[101].item() == 7
         assert int((lut >= 0).sum()) == 2
 
-    @pytest.mark.parametrize("switch_type", ["single", "multi"])
+    @pytest.mark.parametrize("switch_type", ["multi"])
     def test_empty_adapter_ids_yield_no_table(self, switch_type):
         """An empty id list is "no mapping", not ``max(())``.
 

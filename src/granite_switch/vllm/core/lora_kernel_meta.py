@@ -268,7 +268,7 @@ class FusedLoRAKernelMeta(nn.Module):
 
         Args:
             adapter_indices: [num_tokens] with values 0=base, 1..num_adapters.
-                             Global adapter indices as returned by SingleSwitch.
+                             Global adapter indices as returned by the switch.
             ctx: Shared LoRAContext to populate.
         """
         assert self._remap_tables_t is not None, (

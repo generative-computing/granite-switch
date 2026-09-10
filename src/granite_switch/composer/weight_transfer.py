@@ -314,9 +314,9 @@ def _validate_base_transfer(
     buffer names, exclude the whole switch subtree (any key under ``switch``).
 
     ``loaded_switch_params`` is deliberately NOT filtered by presence in
-    ``switch_state_dict``. Every mapped target does exist for both engines: the
-    composer inflates ``num_hidden_layers`` by ``_switch_cache_layers(switch_type)``
-    (``compose_utils.py``) and the model subtracts the same count in
+    ``switch_state_dict``. Every mapped target does exist: the composer inflates
+    ``num_hidden_layers`` by ``SWITCH_CACHE_LAYERS`` (``config.py``) and the model
+    subtracts the same count in
     ``modeling_granite_switch.py``, so the composed backbone retains every base
     decoder layer. Filtering on presence would make ``missing_in_switch`` a subset
     of ``expected_switch_params`` by construction -- it could never fire -- and

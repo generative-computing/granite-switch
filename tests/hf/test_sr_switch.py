@@ -55,7 +55,7 @@ _BASE_KWARGS = dict(
     vocab_size=300,
     hidden_size=64,
     intermediate_size=128,
-    num_hidden_layers=3,  # 1 switch + 2 decoder
+    num_hidden_layers=4,  # 2 MultiSwitch cache slots (counting + memory) + 2 decoder
     num_attention_heads=4,
     num_key_value_heads=4,
     max_lora_rank=4,
@@ -115,7 +115,7 @@ class TestSRModelInstantiation:
     def test_sr_model_creates_with_shared_kv(self, sr_config):
         model = GraniteSwitchForCausalLM(sr_config)
         assert model.model.switch is not None
-        assert len(model.model.layers) == 2  # num_hidden_layers - 1 switch
+        assert len(model.model.layers) == 2  # num_hidden_layers - 2 switch slots
 
     def test_layer_class_follows_dual_stream(self, sr_config, single_only_config):
         """One model class, two layer classes, chosen from ``dual_stream``."""

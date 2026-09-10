@@ -11,7 +11,6 @@ from collections import defaultdict
 
 import torch
 
-from ..config import MULTI_SWITCH_TYPES
 from .arch import ArchDescriptor
 
 
@@ -63,35 +62,6 @@ def validate_control_lut(model) -> None:
         f"refresh_switch_control_lut, so reaching this error means that step was "
         f"skipped or ran too early."
     )
-
-
-def validate_base_reset_switch_type(base_reset: bool, switch_type) -> None:
-    """Reject ``--base-reset-token`` on a switch engine that cannot use it.
-
-    Only MultiSwitch reads ``adapter_token_ids[0]`` as a base-reset slot (it
-    keys off the list being ``num_adapters + 1`` long). SingleSwitch has no
-    mechanism to re-select base mid-sequence, and ``GraniteSwitchConfig`` only
-    allows the longer list for multi engines — so the combination fails later
-    with a length error that does not say why. Fail here instead.
-
-    Args:
-        base_reset: Whether the base-reset control token was requested.
-        switch_type: The requested switch engine (``None`` means the default,
-            which is SingleSwitch).
-
-    Raises:
-        ValueError: if ``base_reset`` is requested for a non-multi engine.
-    """
-    if not base_reset:
-        return
-    if switch_type not in MULTI_SWITCH_TYPES:
-        raise ValueError(
-            f"--base-reset-token requires --switch-type in {list(MULTI_SWITCH_TYPES)}, "
-            f"got {switch_type!r}. Only MultiSwitch can return to base mid-sequence: "
-            f"it reads adapter_token_ids[0] as expert id 0 when the list is "
-            f"num_adapters + 1 long. SingleSwitch has no return-to-base mechanism "
-            f"and GraniteSwitchConfig rejects the longer list for it."
-        )
 
 
 def validate_cross_stream_population(model):

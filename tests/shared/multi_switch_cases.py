@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared test cases for the MultiSwitch engine (HF and vLLM).
 
-Mirror of ``tests/shared/single_switch_cases.py`` for the native
-multi-transition Kerdock/DG coded-memory engine (``switch_type="multi"``):
+Cases for the native multi-transition Kerdock/DG coded-memory engine:
 coded-memory routing over two tiny attention heads (counting + memory).
 
-The engine adds *multi-transition* semantics on top of SingleSwitch: the
+The engine's defining property is *multi-transition* semantics: the
 adapter selected at each position is the expert written by the **most recent
 control token at or before that position** — exact for arbitrarily many
-transitions per request. SingleSwitch's ±gain attention *averages* competing
+transitions per request. A naive ±gain attention signal *averages* competing
 control tokens, so an A(higher)→B(lower) sequence mis-routes; the multi engine
 picks latest-wins exactly.
 

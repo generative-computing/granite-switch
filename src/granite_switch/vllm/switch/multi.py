@@ -43,7 +43,7 @@ sequence and never knows a control token existed.
 
 ``num_cache_layers == 2``: this switch constructs two ``vllm.Attention`` layers
 (the counting slot + the memory slot), each consuming one KV-cache group. This
-is the rationale for the property returning 2 (SingleSwitch returns 1).
+is the rationale for the property returning 2.
 
 Batching (vLLM): the counting/memory attention runs over the flat token stream
 vLLM hands the model, and the counting anchor is derived from the ``positions``
@@ -126,10 +126,10 @@ class MultiSwitch(nn.Module):
             Index 0 always means base/no-adapter; valid adapter indices are
             ``0..num_adapters``. Matches ``GraniteSwitchConfig.num_adapters``.
         vllm_config: vLLM configuration (provides dtype, cache/quant config).
-        control_token_gain: Accepted for signature parity with SingleSwitch /
-            the modeling glue. The coded engine's key scaling is
-            ``ms_memory_gain`` (the codes carry the addressing, not a single
-            gain dim), so this argument is not used by the memory head.
+        control_token_gain: Accepted for signature parity with the modeling
+            glue. The coded engine's key scaling is ``ms_memory_gain`` (the
+            codes carry the addressing, not a single gain dim), so this argument
+            is not used by the memory head.
         switch_head_dim: Fallback head_dim (>= 32) for standalone/test mode
             when no backbone geometry is available on ``config``.
         config: GraniteSwitchConfig (provides backbone head geometry + the
@@ -163,7 +163,7 @@ class MultiSwitch(nn.Module):
             hf_config = vllm_config.model_config.hf_config
 
         # ── Expert-id offset (two accepted adapter_token_ids layouts).
-        #   * num_adapters entries (SingleSwitch-style, no base-reset slot):
+        #   * num_adapters entries (no base-reset slot):
         #     adapter_token_ids[i] fires adapter i+1 -> expert_id = argmax + 1.
         #   * num_adapters + 1 entries (base-reset layout): adapter_token_ids[0]
         #     is the base-reset token (fires 0) and [1..] fire 1.. -> expert_id
@@ -358,7 +358,7 @@ class MultiSwitch(nn.Module):
         # modules, so their Q/K/V must match the cache. The HF twin forces fp32 for
         # the counting head and is exact past n=4095; a bf16 cache quantizes the
         # 1/(1+n) signal and inverts exactly only to n=188 (189 aliases). See
-        # docs/MULTISWITCH_EXPLAINED.html section 8; the bound itself is pinned by
+        # docs/MULTISWITCH_EXPLAINED.md section 8; the bound itself is pinned by
         # tests/unit/test_counting_ceiling.py and enforced (client-side only) by
         # conversation.MAX_RETAINED_CONTROL_TOKENS.
         dtype = self.dtype

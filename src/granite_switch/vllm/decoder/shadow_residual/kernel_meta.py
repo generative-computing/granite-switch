@@ -64,7 +64,7 @@ class SRFusedLoRAKernelMeta(FusedLoRAKernelMeta):
 
         Args:
             adapter_indices: ``[M]`` real ids (0=base, 1..num_adapters), one per
-                real input token — as returned by SingleSwitch.
+                real input token — as returned by the switch.
             ctx: shared SRLoRAContext to populate.
         """
         assert self._remap_tables_t is not None, (

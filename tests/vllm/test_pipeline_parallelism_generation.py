@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Granite Switch vLLM pipeline-parallel generation test.
 
-This is a regression test for the 41-vs-40 layer-count mismatch under PP>1:
-the saved config includes one SingleSwitch cache slot plus 40 decoder layers,
-while the decoder ModuleList contains only the 40 real decoder layers.
+This is a regression test for the layer-count mismatch under PP>1:
+the saved config includes the MultiSwitch cache slots (2) plus the real decoder
+layers, while the decoder ModuleList contains only the real decoder layers.
 
 The test intentionally asserts that PP=2 generation succeeds. On the current
 buggy implementation it is expected to fail on a 2-GPU machine; after fixing

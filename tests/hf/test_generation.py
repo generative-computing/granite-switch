@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """HF generation tests: smoke tests and KV cache consistency.
 
-Validates autoregressive generation for SingleSwitch models.
+Validates autoregressive generation for MultiSwitch models.
 Tests run on CPU with random weights (no pretrained checkpoint needed).
 
 Key test: prefill-decode consistency verifies that feeding tokens one at a
 time through the KV cache produces the same logits as a single full-prefill
-forward pass.  This directly validates the past_key_values.update() fix in
-SingleSwitch.
+forward pass.  This directly validates the past_key_values.update() path in
+the switch.
 """
 
 import torch
@@ -75,10 +75,10 @@ def _incremental_decode_logits(model, input_ids):
     return torch.cat(all_logits, dim=1)  # [1, seq, vocab]
 
 
-# ── SingleSwitch ───────────────────────────────────────────────────
+# ── MultiSwitch ────────────────────────────────────────────────────
 
 
-class TestSingleSwitchGeneration:
+class TestMultiSwitchGeneration:
     def _make(self, seed=42):
         model, cfg = make_switch_model(
             DENSE_CFG,

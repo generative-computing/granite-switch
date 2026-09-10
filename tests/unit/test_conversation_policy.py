@@ -52,6 +52,81 @@ def _two_turns(tok, config, policy):
     return conv, p1, p2
 
 
+def _run_reprefill(tok, config, n_turns):
+    """RE_PREFILL over n_turns with adapter A each turn; the user message carries
+    the aLoRA invocation so this turn's control token lands in the new region.
+
+    Returns the conversation, the ids sent each turn, and the base-ids reused at
+    build time each turn (None where nothing was reusable yet).
+    """
+    conv = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+    sent, base_at_build = [], []
+    for i in range(n_turns):
+        conv.user(f"Turn {i}: is this answerable? <certainty>")
+        base = conv._re_base_ids
+        base_at_build.append(None if base is None else list(base))
+        ids = list(conv.build_prompt(adapter=A_NAME))
+        sent.append(ids)
+        conv.record_answer("Answer.", adapter=A_NAME)
+    return conv, sent, base_at_build
+
+
+class TestReprefillIdReuse:
+    """RE_PREFILL reuses base-demoted ids across turns (lag by one turn)."""
+
+    def test_output_equals_a_from_scratch_render(self, tok, config):
+        """Id reuse must send EXACTLY what rendering the transcript would.
+
+        This is the load-bearing invariant: reuse is a cache optimization, never
+        a change to what the model sees. A from-scratch RE_PREFILL render is the
+        reference.
+        """
+        conv, sent, _base = _run_reprefill(tok, config, 3)
+        scratch = Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=config)
+        for i in range(3):
+            scratch.user(f"Turn {i}: is this answerable? <certainty>")
+            want = list(
+                scratch._encode(
+                    scratch._render(scratch._messages, gen=True, adapter=A_NAME)
+                )
+            )
+            assert sent[i] == want, f"turn {i} diverges from a from-scratch render"
+            scratch.build_prompt(adapter=A_NAME)
+            scratch.record_answer("Answer.", adapter=A_NAME)
+
+    def test_sent_ids_carry_no_history_control_tokens(self, tok, config):
+        """RE_PREFILL demotes history to base, so each send has at most this
+        turn's one control token -- never an earlier turn's."""
+        conv, sent, _base = _run_reprefill(tok, config, 4)
+        for i, ids in enumerate(sent):
+            n = sum(1 for t in ids if t in conv._control_ids)
+            assert n <= 1, f"turn {i} carries {n} control tokens; history leaked one"
+
+    def test_deep_prefix_is_byte_stable_turn_to_turn(self, tok, config):
+        """The reused base prefix equals ids actually sent the previous turn.
+
+        That equality is the whole point: the server's cached blocks for the
+        previous turn match this turn's prefix, so they are reused rather than
+        recomputed.
+        """
+        conv, sent, base_at_build = _run_reprefill(tok, config, 4)
+        for i in (2, 3):
+            base = base_at_build[i]
+            assert base, f"turn {i} should have had a reusable base prefix"
+            assert sent[i][: len(base)] == base, "reused base is this turn's prefix"
+            assert sent[i - 1][: len(base)] == base, (
+                "the reused base was byte-identically sent last turn, so the cache hits"
+            )
+
+    def test_lag_is_one_turn(self, tok, config):
+        """Turn 1 has no reusable base (turn 0 was sent with its adapter); reuse
+        begins at turn 2."""
+        conv, sent, base_at_build = _run_reprefill(tok, config, 3)
+        assert base_at_build[0] is None
+        assert base_at_build[1] is None
+        assert base_at_build[2], "reuse begins once a turn's base form has been sent"
+
+
 class TestControlTokenSurvival:
     """Whether turn 1's control token is still in turn 2's prompt."""
 
@@ -141,15 +216,23 @@ class TestDeltaConstruction:
 
 ASSISTANT_BOUNDARY = "<|start_of_role|>assistant<|end_of_role|>"
 
-# What PRESERVE requires is that THIS turn's control token land in the new turn's
-# region -- at or after len(prev). Four placements the composer can produce, and
-# only two satisfy it. A mixed LoRA+aLoRA checkpoint can hit all four, so all four
-# are covered.
+# What PRESERVE needs to APPEND is that THIS turn's control token land in the new
+# turn's region -- at or after len(prev). When it does not, PRESERVE does not
+# raise: it re-prefills (a full render, history's control tokens dropped for that
+# turn). ``should_work`` is now "appends and preserves" vs "falls back to a
+# re-prefill". A mixed LoRA+aLoRA checkpoint can hit all these placements.
 PLACEMENTS = [
-    # A LoRA-placed adapter (control token at index 0) is deliberately absent: it
-    # is now refused on turn 1, before any delta is attempted, so it cannot be
-    # expressed as a delta-placement outcome. Covered by
-    # tests/unit/test_conversation_lora_rule.py.
+    # A LoRA-placed adapter's control token is at index 0, inside the sent prefix,
+    # so turn 2 cannot append -- it re-prefills.
+    pytest.param(
+        [("ctx", "lora", None), ("req", "alora", ASSISTANT_BOUNDARY)],
+        "first turn",
+        "second turn",
+        "ctx",
+        "ctx",
+        False,
+        id="lora-token-at-index-0",
+    ),
     pytest.param(
         [("unc", "alora", "<certainty>"), ("req", "alora", ASSISTANT_BOUNDARY)],
         "first turn <certainty>",
@@ -181,12 +264,15 @@ PLACEMENTS = [
 
 
 class TestControlTokenPlacement:
-    """PRESERVE works iff this turn's control token lands in the new turn."""
+    """PRESERVE appends iff this turn's control token lands in the new turn.
+
+    When it does not, PRESERVE re-prefills for that turn instead of raising.
+    """
 
     @pytest.mark.parametrize(
         "adapters,turn1,turn2,adapter_a,adapter_b,should_work", PLACEMENTS
     )
-    def test_placement_decides_whether_preserve_is_possible(
+    def test_placement_decides_append_vs_reprefill(
         self, adapters, turn1, turn2, adapter_a, adapter_b, should_work
     ):
         tok = make_stub_tokenizer(adapters)
@@ -203,31 +289,25 @@ class TestControlTokenPlacement:
 
         if should_work:
             second = conv.build_prompt(adapter=adapter_b)
-            assert second[: len(first)] == first
+            assert second[: len(first)] == first, "an appendable turn preserves"
             assert sum(1 for t in second if t in set(control_ids)) == 2
+            assert conv.reprefills == 0
             return
 
-        # The failure must name the placement, not blame the template: the
-        # template IS append-only here, and a no-adapter render still yields a
-        # clean prefix. Reporting "not append-only" sent readers to the wrong file.
-        with pytest.raises(RuntimeError) as excinfo:
-            conv.build_prompt(adapter=adapter_b)
-        message = str(excinfo.value)
-        assert "control token" in message and "character" in message, (
-            f"expected the placement-specific diagnosis, got: {message}"
-        )
-        assert "not append-only" not in message, (
-            "the generic template diagnosis fired for a placement problem; that is "
-            "the misdiagnosis this test exists to prevent"
-        )
+        # The control token lands inside the already-sent prefix, so PRESERVE
+        # cannot append. It re-prefills instead of raising: a valid full render,
+        # counted, that no longer extends the preserved prefix.
+        second = conv.build_prompt(adapter=adapter_b)
+        assert second, "a re-prefill still produces a valid prompt"
+        assert conv.reprefills == 1, "the unappendable turn was re-prefilled"
 
-    def test_diagnostic_is_not_silently_inert(self):
-        """The placement message needs the tokenizer's control-token spellings.
+    def test_control_texts_recoverable_for_appendable_decision(self):
+        """`_appendable` needs the tokenizer's control-token spellings.
 
         ``_control_texts`` swallows exceptions, so a tokenizer without
-        ``convert_ids_to_tokens`` degrades to the generic message and every
-        assertion above would pass for the wrong reason -- which is exactly what
-        happened before the stub grew that method.
+        ``convert_ids_to_tokens`` would degrade `_control_char_index` to -1 and
+        call every turn appendable -- silently wrong. Assert the spellings are
+        recovered so the append decision is real.
         """
         tok = make_stub_tokenizer([("unc", "alora", "<certainty>")])
         conv = Conversation(
@@ -236,8 +316,8 @@ class TestControlTokenPlacement:
             config=StubConfig([tok.token_id("<|unc|>")]),
         )
         assert conv._control_texts() == ["<|unc|>"], (
-            "control-token spellings could not be recovered, so the placement "
-            "diagnostic is dead code"
+            "control-token spellings could not be recovered, so _appendable would "
+            "wrongly treat every turn as appendable"
         )
 
 
@@ -380,12 +460,6 @@ class TestTemplateKwargs:
 
 
 class TestGuards:
-    def test_preserve_rejects_a_single_switch_checkpoint(self, tok):
-        """SingleSwitch averages competing control tokens, so this must not run."""
-        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")], switch_type="single")
-        with pytest.raises(ValueError, match="switch_type='multi'"):
-            Conversation(tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=cfg)
-
     def test_preserve_requires_config(self, tok):
         """Omitting config disables both guards, so it must be refused.
 
@@ -401,9 +475,9 @@ class TestGuards:
         conv.user(Q1)
         assert conv.build_prompt(adapter=A_NAME)
 
-    def test_re_prefill_works_on_a_single_switch_checkpoint(self, tok):
-        """The twin: the guard must not over-reach and block the default policy."""
-        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")], switch_type="single")
+    def test_re_prefill_works_with_config(self, tok):
+        """The twin: the config guard must not over-reach and block the default policy."""
+        cfg = StubConfig([tok.token_id(f"<|{A_NAME}|>")])
         Conversation(tok, policy=KVHistoryPolicy.RE_PREFILL, config=cfg)
 
 
