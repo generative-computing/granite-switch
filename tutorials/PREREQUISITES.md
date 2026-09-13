@@ -42,7 +42,7 @@ For production inference with vLLM:
 
 ```bash
 pip install "granite-switch[vllm]"    # CUDA 12.x
-pip install "granite-switch[vllm20]"  # CUDA 13+ (requires PyTorch 2.11+)
+pip install "granite-switch[vllm28]"  # CUDA 13+ (requires PyTorch 2.13+)
 ```
 
 This includes:
