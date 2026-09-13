@@ -55,7 +55,7 @@ def _cache_disabling_kwargs():
     """LLM kwargs that turn off the multimodal processor cache.
 
     The knob was renamed across the vLLM range this project supports (0.19.x and
-    0.20.x are both allowed in pyproject): older builds expose
+    0.28.x are both allowed in pyproject): older builds expose
     ``disable_mm_preprocessor_cache``, newer ones ``mm_processor_cache_gb``.
     Returns an empty dict when neither exists, so the caller can skip rather than
     silently exercise the cached path.
