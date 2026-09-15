@@ -14,6 +14,14 @@ ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 # physical decoder-layer count.
 SWITCH_CACHE_LAYERS = 2
 
+# Layer-type string stored in ``config.layer_types``. The switch model is
+# attention-only, so every entry is this value. It must be a key in
+# transformers' ``DYNAMIC_LAYER_TYPE_MAPPING`` (``full_attention``), because
+# ``DynamicCache(config=...)`` dispatches on it to pre-allocate per-layer caches.
+# (An internal shorthand like "attention" is not a valid mapping key and raises
+# KeyError at cache init on transformers >= 5.10.)
+ATTENTION_LAYER_TYPE = "full_attention"
+
 
 class GraniteSwitchConfig(GraniteMoeSharedConfig):
     """Configuration class for GraniteSwitch model.
@@ -189,12 +197,12 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
         # not declare them, but internal readers still depend on them: the
         # lora_target_modules auto-detection below reads ``self.layer_types``, and
         # the decoders gate RoPE on ``position_embedding_type``.  The switch model
-        # is attention-only, so layer_types is always all-"attention"; its length
-        # must equal num_hidden_layers so DynamicCache pre-allocation matches the
-        # global layer indices used by decoder layers.
+        # is attention-only, so layer_types is always all-``full_attention``; its
+        # length must equal num_hidden_layers so DynamicCache pre-allocation
+        # matches the global layer indices used by decoder layers.
         if layer_types is None:
             num_hidden_layers = kwargs.get("num_hidden_layers", 32)
-            layer_types = ["attention"] * num_hidden_layers
+            layer_types = [ATTENTION_LAYER_TYPE] * num_hidden_layers
         self.layer_types = layer_types
         self.position_embedding_type = position_embedding_type
 
@@ -376,7 +384,7 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
 
             if self.num_adapters > 0:
                 # Attention modules (present in all attention layers)
-                if any(lt == "attention" for lt in self.layer_types):
+                if any(lt == ATTENTION_LAYER_TYPE for lt in self.layer_types):
                     lora_target_modules.extend(
                         [
                             "qkv_proj",  # Q/K/V fused

@@ -370,9 +370,10 @@ def granite_moe_arch(base_config=None) -> ArchDescriptor:
     ``shared_mlp``.  The descriptor is therefore ``_common_attn_groups()`` and
     nothing else — a strict subset of :func:`granite_moe_shared_arch`.
 
-    The frozen expert tensors (``block_sparse_moe.input_linear`` /
-    ``output_linear`` / ``router.layer``) are named identically in the switch
-    model, so with no shared-MLP group to shadow them they transfer by identity.
+    The frozen expert tensors (``block_sparse_moe.experts.gate_up_proj`` /
+    ``experts.down_proj`` / ``router.weight`` in the transformers-5.16 layout)
+    are named identically in the switch model, so with no shared-MLP group to
+    shadow them they transfer by identity.
 
     ``shared_intermediate_size`` is pinned to ``0``, which is upstream's own
     encoding for "no shared MLP"

@@ -86,19 +86,24 @@ class TestSharedIntermediateSize:
 
 
 class TestLayerTypesDefault:
-    """layer_types defaults to all-attention with length == num_hidden_layers."""
+    """layer_types defaults to all-full_attention with length == num_hidden_layers.
+
+    The value must be ``full_attention`` (a key in transformers'
+    DYNAMIC_LAYER_TYPE_MAPPING), not the bare ``attention`` shorthand — otherwise
+    ``DynamicCache(config=...)`` raises KeyError when it dispatches per-layer.
+    """
 
     def test_default_layer_types_when_omitted(self):
         cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=4)
-        assert cfg.layer_types == ["attention"] * 4
+        assert cfg.layer_types == ["full_attention"] * 4
 
     def test_explicit_layer_types_preserved(self):
         cfg = GraniteSwitchConfig(
             num_adapters=0,
             num_hidden_layers=3,
-            layer_types=["attention", "attention", "attention"],
+            layer_types=["full_attention", "full_attention", "full_attention"],
         )
-        assert cfg.layer_types == ["attention", "attention", "attention"]
+        assert cfg.layer_types == ["full_attention", "full_attention", "full_attention"]
 
 
 class TestLoraTargetModulesDefault:

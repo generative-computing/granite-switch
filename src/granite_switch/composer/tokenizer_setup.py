@@ -288,6 +288,27 @@ def get_alora_first_invocation_token_id(adapter_path: str) -> int:
     return _load_alora_invocation_token_ids(adapter_path)[0]
 
 
+def _alora_invocation_drop_chars(first_token_id: int, tokenizer) -> int:
+    """Number of leading characters of the invocation text that its first
+    token spans, under *tokenizer*.
+
+    Pass 2 of the chat template writes the control token followed by the
+    invocation text with its first *token* removed (the runtime swaps the
+    control-token embedding for the first-invocation-token embedding, so
+    re-emitting that token would duplicate it at the swap site). The template
+    can only slice the invocation *string*, so it needs the character length of
+    the first token — not a hardcoded 1. For most Granite invocations the first
+    token is a lone ``<`` (1 char), but some (e.g. ``<context>`` ->
+    ``<context``) tokenize with a multi-character first token under newer
+    tokenizers, and dropping a single character there would leave a partial
+    token in the tail.
+
+    Computed by decoding the first invocation token id, so it stays consistent
+    with the sequence the runtime swaps and needs only ``tokenizer.decode``.
+    """
+    return len(tokenizer.decode([first_token_id], skip_special_tokens=False))
+
+
 #: A ``{{- ... }}`` emission in a Jinja template.
 _EMISSION_RE = re.compile(r"\{\{-?\s*(.*?)\s*-?\}\}", re.DOTALL)
 
@@ -939,6 +960,17 @@ def configure_chat_template(
                 sr_anchors.add(anchor_text)
             else:
                 entry["invocation_text"] = anchor_text
+                # Chars the first invocation token spans; Pass 2 drops exactly
+                # these from the tail so the runtime embedding swap does not
+                # duplicate the first token (see _alora_invocation_drop_chars).
+                # Re-encode the decoded invocation text with this tokenizer to
+                # get the first token id (mirrors the SR encode round-trip).
+                first_invocation_id = tokenizer.encode(
+                    anchor_text, add_special_tokens=False
+                )[0]
+                entry["invocation_drop_chars"] = str(
+                    _alora_invocation_drop_chars(first_invocation_id, tokenizer)
+                )
         adapter_mapping[adapter_name] = entry
 
     if len(sr_anchors) > 1:
@@ -955,7 +987,8 @@ def configure_chat_template(
             mapping_entries.append(
                 f"    '{adapter_name}': {{'token': '{info['token']}', "
                 f"'type': '{info['type']}', "
-                f"'invocation_text': '{info['invocation_text']}'}}"
+                f"'invocation_text': '{info['invocation_text']}', "
+                f"'invocation_drop_chars': {info['invocation_drop_chars']}}}"
             )
         else:
             mapping_entries.append(
@@ -969,11 +1002,13 @@ def configure_chat_template(
 {%- set adapter_token = '' %}
 {%- set adapter_type = '' %}
 {%- set adapter_invocation_text = '' %}
+{%- set adapter_invocation_drop_chars = 1 %}
 {%- if adapter_name is defined and adapter_name in adapter_map %}
 {%- set adapter_token = adapter_map[adapter_name]['token'] %}
 {%- set adapter_type = adapter_map[adapter_name]['type'] %}
 {%- if adapter_map[adapter_name]['type'] == 'alora' %}
 {%- set adapter_invocation_text = adapter_map[adapter_name]['invocation_text'] %}
+{%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
 
@@ -1047,30 +1082,32 @@ def configure_chat_template(
     # in the message.
     #
     # Token drop (mirrors the role-marker skip-once flag used for LoRA /
-    # assistant-boundary ALoRA): we also omit the FIRST CHARACTER of the
-    # invocation text. The runtime embedding swap replaces the control-token
-    # embedding with the first-invocation-token's embedding; writing the full
-    # invocation text after the control token would then produce two copies
-    # of that first-invocation-token back to back — an OOD pattern at the
-    # swap site.
+    # assistant-boundary ALoRA): we omit the FIRST TOKEN of the invocation
+    # text. The runtime embedding swap replaces the control-token embedding with
+    # the first-invocation-token's embedding; writing the full invocation text
+    # after the control token would then produce two copies of that
+    # first-invocation-token back to back — an OOD pattern at the swap site.
     #
-    # For every granite_format ALoRA invocation text in the standard Granite adapter
-    # library (<requirements>, <certainty>, <guardian>, <context>, etc.) the
-    # first character is a single '<' that the tokenizer emits as its own token,
-    # and the tail of the string retokenizes identically to the tail of the full
-    # string. So dropping the first character on the string side is equivalent
-    # to dropping exactly the first token on the tokenized side. For ChatML the
+    # Jinja can only slice the invocation *string*, not its tokens, so the drop
+    # is expressed as a per-adapter character count baked into ``adapter_map``
+    # (``invocation_drop_chars`` = the length of the first invocation token's
+    # decoded text; see ``get_alora_invocation_drop_chars``). For most Granite
+    # invocations the first token is a lone '<' (drop 1), but some — e.g.
+    # ``<context>`` (first token ``<context``), ``<citation>``, ``<hallucination>``
+    # under tokenizers >= 0.23.1 — tokenize with a multi-character first token,
+    # where a hardcoded 1-char drop would leave a partial token in the tail.
+    # Computing the count at compose time keeps the string slice equivalent to a
+    # first-token drop regardless of the tokenizer's merges. For ChatML the
     # trained 4.2 adapters use the assistant-boundary invocation
     # (<|im_start|>assistant\\n) and therefore take the fallback path below, not
-    # Pass 2; a user-message ChatML ALoRA whose invocation text does not begin
-    # with a standalone-tokenizing character would need the first-token-drop
-    # invariant re-checked (see the property test in test_chat_template.py).
+    # Pass 2. The invariant is guarded by the property test in
+    # test_chat_template.py.
     #
     # ``content_var`` is ``content.val`` for the granite_format namespace-object content
     # or ``content`` for ChatML's plain-string content.
     alora_pass2 = (
-        """    {#- ALoRA Pass 2: inject activation token AND drop the first char of
-         the invocation text so the runtime-swapped embedding doesn't duplicate. -#}
+        """    {#- ALoRA Pass 2: inject activation token AND drop the first token's
+         chars of the invocation text so the runtime-swapped embedding doesn't duplicate. -#}
     {%- if loop.index0 == ns.alora_target_idx %}
         {%- set _parts = """
         + content_var
@@ -1078,7 +1115,7 @@ def configure_chat_template(
         {%- if _parts | length > 1 %}
             {%- set """
         + content_var
-        + """ = _parts[0] + ns.adapter_token + ns.adapter_invocation_text[1:] + _parts[1] %}
+        + """ = _parts[0] + ns.adapter_token + ns.adapter_invocation_text[ns.adapter_invocation_drop_chars:] + _parts[1] %}
         {%- endif %}
     {%- endif %}
 """
@@ -1126,6 +1163,7 @@ def configure_chat_template(
             "\n                       adapter_token=adapter_token,"
             "\n                       adapter_type=adapter_type,"
             "\n                       adapter_invocation_text=adapter_invocation_text,"
+            "\n                       adapter_invocation_drop_chars=adapter_invocation_drop_chars,"
             "\n                       alora_target_idx=-1,"
             "\n                       skip_next_role_marker=false"
             "\n                       )"

@@ -20,7 +20,7 @@ DENSE_CFG = dict(
     num_key_value_heads=1,
     intermediate_size=192,
     shared_intermediate_size=192,
-    layer_types=["attention", "attention", "attention"],
+    layer_types=["full_attention", "full_attention", "full_attention"],
     max_position_embeddings=2048,
     attention_bias=False,
     mlp_bias=False,
@@ -62,7 +62,7 @@ def switch_overrides(base_cfg):
         "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
         "num_hidden_layers": len(base_layers) + 2,
-        "layer_types": ["attention", "attention", *base_layers],
+        "layer_types": ["full_attention", "full_attention", *base_layers],
     }
 
 

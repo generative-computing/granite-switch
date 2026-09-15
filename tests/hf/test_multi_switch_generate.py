@@ -47,7 +47,7 @@ def _overrides(base_cfg):
         "switch_type": "multi",
         # +2 layers: the coded switch owns 2 cache slots (counting + memory).
         "num_hidden_layers": len(base_cfg["layer_types"]) + 2,
-        "layer_types": ["attention", "attention"] + base_cfg["layer_types"],
+        "layer_types": ["full_attention", "full_attention"] + base_cfg["layer_types"],
     }
 
 

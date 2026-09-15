@@ -10,8 +10,8 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "torch>=2.10.0",
-    "transformers>=5.5.1,<5.10.0",
+    "torch>=2.11.0",
+    "transformers>=5.16,<=5.17.0",
 ]
 
 [project.urls]
@@ -20,8 +20,8 @@ Documentation = "https://github.com/generative-computing/granite-switch/tree/mai
 
 [project.optional-dependencies]
 hf = ["accelerate>=0.20.0"]
-vllm = ["vllm>=0.19.1,<0.20.0"]
-vllm20 = ["vllm>=0.20.0,<0.21.0"]
+vllm = ["vllm>=0.24.0,<0.25.0"]
+vllm20 = ["vllm>=0.25.0,<0.26.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
@@ -56,8 +56,8 @@ markers = [
 ]
 
 [dependency-groups]
-vllm19     = ["vllm>=0.19.1,<0.20.0"]
-vllm20     = ["vllm>=0.20.0,<0.21.0"]
+vllm19     = ["vllm>=0.24.0,<0.25.0"]
+vllm20     = ["vllm>=0.25.0,<0.26.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).

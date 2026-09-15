@@ -265,9 +265,9 @@ def _classify_base_weights(
             src_name = g.peft_modules[0]
             if f".{src_name}.weight" in base_name:
                 # Verify the weight belongs to the expected parent module.
-                # Without this, MoE expert weights (e.g.,
-                # block_sparse_moe.experts.N.input_linear) falsely match
-                # shared_mlp groups that also use "input_linear".
+                # Without this, a target module name (e.g. "down_proj") could
+                # match the same name under an unintended parent (e.g. the MoE
+                # expert bank vs. the dense shared_mlp).
                 if f".{g.effective_source_parent}." not in base_name:
                     break  # Wrong parent — fall through to (D)
                 layer_match = re.search(arch.layer_pattern, base_name)

@@ -7,7 +7,7 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 
 import torch
 
-from ..config import SWITCH_CACHE_LAYERS
+from ..config import ATTENTION_LAYER_TYPE, SWITCH_CACHE_LAYERS
 from .adapter_loader import (
     _extract_modules_from_weights,
     detect_lora_config,
@@ -199,11 +199,11 @@ class GraniteSwitchComposer:
                 "intermediate_size"
             ]
 
-        # Normalize layer_types: map everything to "attention" (only attention
-        # layers are supported).
+        # Normalize layer_types: map everything to the attention layer type
+        # (only attention layers are supported).
         lt = config_kwargs.get("layer_types")
         if lt is not None:
-            config_kwargs["layer_types"] = ["attention" for _ in lt]
+            config_kwargs["layer_types"] = [ATTENTION_LAYER_TYPE for _ in lt]
 
         # When adapters are present, reserve the switch's cache slots at the
         # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
@@ -215,7 +215,7 @@ class GraniteSwitchComposer:
             )
             if config_kwargs.get("layer_types") is not None:
                 config_kwargs["layer_types"] = [
-                    *(["attention"] * SWITCH_CACHE_LAYERS),
+                    *([ATTENTION_LAYER_TYPE] * SWITCH_CACHE_LAYERS),
                     *list(config_kwargs["layer_types"]),
                 ]
 

@@ -41,12 +41,12 @@ This includes:
 For production inference with vLLM:
 
 ```bash
-pip install "granite-switch[vllm]"    # CUDA 12.x
-pip install "granite-switch[vllm20]"  # CUDA 13+ (requires PyTorch 2.11+)
+pip install "granite-switch[vllm]"    # vLLM 0.24.x (CUDA 13+, PyTorch 2.11+)
+pip install "granite-switch[vllm20]"  # vLLM 0.25.x (CUDA 13+, PyTorch 2.11+)
 ```
 
 This includes:
-- `vllm>=0.19.1` for high-performance inference
+- `vllm>=0.24.0` for high-performance inference
 - Tensor parallelism support for multi-GPU setups
 
 ### Mellea Integration
