@@ -22,8 +22,8 @@ non-16 kHz input:
 uv sync --extra vllm --extra audio     # or --extra vllm20 --extra audio
 
 # Development / running the test suite (the dev groups include audio already)
-uv sync --group dev                    # vLLM 0.24.x
-uv sync --group dev-vllm20             # vLLM 0.25.x
+uv sync --group dev                    # vLLM 0.26.x
+uv sync --group dev-vllm20             # vLLM 0.27.x
 ```
 
 ## Building an audio-enabled checkpoint
