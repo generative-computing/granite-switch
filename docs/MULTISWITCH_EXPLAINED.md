@@ -480,28 +480,54 @@ rendered:     <|req_check|>requirements>req1
               ^^^^^^^^^^^^^ becomes '<' at runtime, reconstructing the invocation
 ```
 
-The omitted unit is the first **character**, sliced in the emitted Jinja itself:
+The omitted unit is the invocation's first **token as the adapter recorded it**, decoded at compose time and baked into `adapter_map` as `invocation_tail`, so the emitted Jinja does no slicing of its own:
 
 ```
-# src/granite_switch/composer/tokenizer_setup.py:478  (Pass 2, inside the emitted template)
-= _parts[0] + ns.adapter_token + ns.adapter_invocation_text[1:] + _parts[1]
+# src/granite_switch/composer/tokenizer_setup.py  (Pass 2, inside the emitted template)
+= _parts[0] + ns.adapter_token + ns.adapter_invocation_tail + _parts[1]
 ```
 
-> **The character rule and the token rule are not the same rule**
+`invocation_tail` is `tokenizer.decode(alora_invocation_tokens[1:])` -- the same list `build_substitute_token_ids` takes the substitute from, one element in.
+
+> **Both halves must read the same source, and two plausible rules do not**
 >
-> They coincide only when the first character tokenizes alone. Measured across six cached Granite tokenizers (4.1-3b, 4.1-8b, 4.0-micro, 4.0-h-tiny, switch-4.1-3b-preview, 3.3-2b-instruct), the first token of every library invocation -- `<requirements>`, `<certainty>`, `<guardian>`, `<context>` -- is `'<'`, so the two rules agree on everything currently shipped. The exposure is **latent, not active**.
+> The swap side substitutes `alora_invocation_tokens[0]`. So the emit side must emit the decoding of `alora_invocation_tokens[1:]` and nothing else. Fixing this closes generative-computing/granite-switch#108, whose own fix sketch proposes the second of the two wrong rules below.
 >
-> Two subtleties, both worth knowing: `<context>` is *not* a counterexample -- `'<context'` is a real vocab entry (id 35628 on granite-4.1-3b) but BPE never produces it for `'<context>'`, which encodes as `['<', 'context', '>']`. The real counterexamples are Granite's structural markers, which are single vocab entries:
+> Measured on granite-4.1-3b under transformers 5.9.0, for an adapter recording `[27, 2196, 29]` (`['<', 'context', '>']`) and therefore substituting `27` (`'<'`):
 >
 > ```
-> </documents>   ['</documents>']    token tail=''   char tail='/documents>'
-> </think>       ['</think>']        token tail=''   char tail='/think>'
+> rule                              tail          on wire            trained
+> character   text[1:]              'context>'    [27, 2196, 29]     right (coincidence)
+> local token retokenize + slice    '>'           [27, 29]           WRONG - 'context' dropped
+> adapter     decode(ids[1:])       'context>'    [27, 2196, 29]     right, by construction
+> ```
+>
+> The middle row is the trap: transformers 5.9.0 re-tokenizes `'<context>'` as `['<context', '>']` (it instantiates a backend that honours the file's `Split` pre-tokenizer instead of overriding it with ByteLevel, as 5.8.1 does on the same files), so slicing by the *local* first token disagrees with a substitute that came from the *adapter's* first token, and the word disappears from the prompt.
+>
+> **Neither wrong rule is active on anything published today.** Every aLoRA in `granitelib-{rag,core,guardian}-r1.0` records one of four sequences, and all four re-tokenize identically under 5.8.1 and 5.9.0, so all three rules agree on them:
+>
+> ```
+> [100264, 78191, 100265]  '<|start_of_role|>assistant<|end_of_role|>'  12 adapters
+> [27, 71226, 29]          '<requirements>'                              3
+> [27, 12525, 18773, 29]   '<certainty>'                                 3
+> [27, 27190, 1122, 29]    '<guardian>'                                 12
+> ```
+>
+> `'<context>'` is a probe string in the tests, not an adapter invocation -- `context_relevance` activates at the assistant boundary. So #108's exposure is latent, on either wrong rule. What makes it worth fixing anyway is the row below, which is not version-dependent, and that both wrong rules rest on a coincidence between two independently-produced tokenizations that no invariant protects.
+>
+> The character rule is right there by luck and wrong on Granite's own structural markers, which are single vocab entries:
+>
+> ```
+> </documents>   ['</documents>']   adapter tail=''   char tail='/documents>'
+> </think>       ['</think>']       adapter tail=''   char tail='/think>'
 >
 > under the character rule, a </documents> invocation renders FOUR tokens
 > where the adapter was trained on ONE.
 > ```
+>
+> Only the adapter rule is right in every case, and it is the only one that never re-tokenizes: the sole tokenizer call is a `decode`, so the result cannot drift with the installed version.
 
-The code applies the character rule, not the token rule: there is no `alora_invocation_tail()` helper in this tree.
+The code applies the adapter rule. `alora_invocation_tail()` has no character-rule fallback -- empty or non-compositional ids raise, because the fallback is precisely the corruption. `TestMergedFirstTokenRenderEndToEnd` pins both halves through a real render on the 5.9.0 tokenization without needing 5.9.0 installed; `TestInvocationTailProperty` pins the rule against a real Granite tokenizer across every training shape.
 
 > **A checkpoint's template and its buffers are a matched pair**
 >

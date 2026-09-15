@@ -23,6 +23,7 @@ Code paths covered:
   - End-to-end: adapter_config.json → render (no patching)
 """
 
+import contextlib
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -31,12 +32,37 @@ import pytest
 from jinja2 import Environment
 
 from granite_switch.composer.tokenizer_setup import (
+    build_substitute_token_ids,
     configure_audio_chat_template,
     configure_chat_template,
     detect_template_format,
 )
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
+_IDS_TARGET = "granite_switch.composer.tokenizer_setup._load_alora_invocation_token_ids"
+
+
+def _fake_alora(invocation_text, tokenizer, trained_ids=None):
+    """Patch both halves of an adapter's invocation metadata at once.
+
+    ``configure_chat_template`` reads an aLoRA's invocation twice and for two
+    different purposes: the decoded TEXT (what Pass 1 matches on) and the recorded
+    TOKEN IDS (what the substitute and the Pass-2 tail come from). A test that
+    patches only the first leaves the second reading a nonexistent
+    adapter_config.json.
+
+    ``trained_ids`` defaults to *tokenizer*'s own split of the text, which is the
+    honest default: for these stubs the trainer's tokenizer and the local one are
+    the same object. Pass it explicitly only to model the mismatch between them --
+    see ``TestMergedFirstTokenRenderEndToEnd``.
+    """
+    if trained_ids is None:
+        trained_ids = tokenizer(invocation_text)["input_ids"]
+    return (
+        patch(_PATCH_TARGET, return_value=invocation_text),
+        patch(_IDS_TARGET, return_value=trained_ids),
+    )
+
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 with open(os.path.join(_FIXTURES, "granite_chat_template.jinja")) as _f:
@@ -45,8 +71,97 @@ with open(os.path.join(_FIXTURES, "granite_chatml_template.jinja")) as _f:
     _CHATML_TEMPLATE = _f.read()
 
 
-def _make_tokenizer():
-    return SimpleNamespace(chat_template=_GRANITE_TEMPLATE)
+class _StubTokenizer:
+    """Tokenizer stub that can actually TOKENIZE, not just hold a template.
+
+    ``configure_chat_template`` computes each aLoRA's Pass-2 tail with
+    :func:`alora_invocation_tail`, which needs the first *token* of the
+    invocation text. A stub exposing only ``chat_template`` (what these tests
+    used before) cannot answer that, so every render-level test here silently
+    fell back to the character rule and none of them covered the fix for
+    generative-computing/granite-switch#108. There is no fallback any more, so
+    the stub has to tokenize.
+
+    ``merges`` names multi-character pieces that swallow their neighbours,
+    longest-match-first. Empty (the default) reproduces the ByteLevel shape
+    Granite 4.1 has under transformers 5.8.1 -- ``'<requirements>'`` ->
+    ``['<', 'requirements', '>']`` -- so existing expectations are unchanged.
+    Passing ``merges=('<context',)`` reproduces the 5.9.0 ``Split`` shape --
+    ``'<context>'`` -> ``['<context', '>']`` -- which is the tokenization #108
+    reports and the one the character rule corrupts.
+    """
+
+    _FIRST_ID = 1000
+
+    def __init__(self, chat_template, decode_map=None, merges=()):
+        self.chat_template = chat_template
+        self._decode_map = decode_map or {}
+        # Longest first, so '<context' wins over '<' at the same position.
+        self._merges = sorted(merges, key=len, reverse=True)
+        self._piece_to_id = {}
+        self._id_to_piece = {}
+
+    def _pieces(self, text):
+        """Split *text* the way a BPE pre-tokenizer would, per ``merges``."""
+        out, i = [], 0
+        while i < len(text):
+            for merge in self._merges:
+                if text.startswith(merge, i):
+                    out.append(merge)
+                    i += len(merge)
+                    break
+            else:
+                if text[i].isalnum():
+                    j = i
+                    while j < len(text) and text[j].isalnum():
+                        j += 1
+                    out.append(text[i:j])
+                    i = j
+                else:
+                    out.append(text[i])
+                    i += 1
+        return out
+
+    def _id_for(self, piece):
+        if piece not in self._piece_to_id:
+            token_id = self._FIRST_ID + len(self._piece_to_id)
+            self._piece_to_id[piece] = token_id
+            self._id_to_piece[token_id] = piece
+        return self._piece_to_id[piece]
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [self._id_for(p) for p in self._pieces(text)]}
+
+    def ids_for_pieces(self, pieces):
+        """Ids for an explicit split, e.g. an adapter's recorded tokenization.
+
+        Lets a test state 'the adapter was trained on [<, context, >]' even on a
+        stub whose own ``merges`` would split that text differently -- which is
+        the situation the fix exists for.
+        """
+        return [self._id_for(p) for p in pieces]
+
+    def decode(self, token_ids, skip_special_tokens=False):
+        """Decode, preferring an exact whole-sequence mapping.
+
+        Falls back to per-id mappings and then to pieces this instance minted, so
+        a fixture can declare ids one at a time and still have the full sequence
+        decode compositionally -- which ``alora_invocation_tail`` requires.
+        """
+        key = tuple(token_ids)
+        if key in self._decode_map:
+            return self._decode_map[key]
+        out = []
+        for i in token_ids:
+            if (i,) in self._decode_map:
+                out.append(self._decode_map[(i,)])
+            else:
+                out.append(self._id_to_piece[i])
+        return "".join(out)
+
+
+def _make_tokenizer(merges=()):
+    return _StubTokenizer(_GRANITE_TEMPLATE, merges=merges)
 
 
 def _render(tokenizer, **kwargs):
@@ -92,8 +207,10 @@ class TestConfigureChatTemplate:
         sequence tokenizes the same as '<requirements>' with no duplicate.
         The fallback block does NOT fire (alora_target_idx >= 0).
         """
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
-            tokenizer = _make_tokenizer()
+        tokenizer = _make_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
 
         result = _render(
@@ -124,10 +241,12 @@ class TestConfigureChatTemplate:
         text (here the assistant role token sequence), so ns.alora_target_idx stays -1
         and the fallback block fires.
         """
-        with patch(
-            _PATCH_TARGET, return_value="<|start_of_role|>assistant<|end_of_role|>"
-        ):
-            tokenizer = _make_tokenizer()
+        tokenizer = _make_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora(
+                "<|start_of_role|>assistant<|end_of_role|>", tokenizer
+            ):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "answerability", "alora")])
 
         result = _render(
@@ -162,8 +281,10 @@ class TestConfigureChatTemplate:
         loop.index0, causing the wrong message to be targeted in Pass 2 and a
         subsequent crash on _parts[1] when rsplit found no separator.
         """
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
-            tokenizer = _make_tokenizer()
+        tokenizer = _make_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
 
         messages = [
@@ -230,8 +351,10 @@ class TestConfigureChatTemplate:
             _make_tokenizer(), messages=messages, add_generation_prompt=True
         )
 
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
-            tokenizer = _make_tokenizer()
+        tokenizer = _make_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(
                 tokenizer,
                 [("/path/a", "ctx_rel", "lora"), ("/path/b", "req_check", "alora")],
@@ -241,66 +364,336 @@ class TestConfigureChatTemplate:
         assert modified == original
 
 
-class TestInvocationFirstCharDropProperty:
-    """Standalone property test on a real Granite tokenizer: dropping the first
-    character of an ALoRA invocation text yields the same tail-token sequence
-    as tokenizing the full invocation text and dropping its first token. This
-    is the BPE-level invariant the Pass-2 edit relies on — if a future
-    tokenizer change breaks it, the template-level drop would silently corrupt
-    the tail of the invocation.
+@pytest.mark.requires_model
+class TestInvocationTailProperty:
+    """The Pass-2 tail must reconstruct the sequence the ADAPTER was trained on.
+
+    The invariant has two halves and they must read the same source. The swap side
+    substitutes ``alora_invocation_tokens[0]``
+    (``build_substitute_token_ids`` -> ``get_alora_first_invocation_token_id``); the
+    emit side must therefore emit ``decode(alora_invocation_tokens[1:])``. Anything
+    derived from re-tokenizing the decoded text can disagree with the substitute,
+    because the installed tokenizer need not split the text the way the trainer did.
+
+    Three rules are compared below on a real Granite tokenizer, because two of them
+    look right and are not (generative-computing/granite-switch#108):
+
+        rule                        '<context>' trained [27, 2196, 29]   '</documents>'
+        character   text[1:]        'context>'   right (coincidence)     WRONG
+        local token retokenize      '>'          WRONG on tf 5.9.0       right
+        adapter     decode(ids[1:]) 'context>'   right                   right
+
+    Only the third is right in both, and it is the only one that never
+    re-tokenizes. ``#108``'s own fix sketch proposes the second.
+
+    Pinned revision: #127 saw an unpinned fetch tokenize '<context>' as
+    ['<context', '>'] on one CI runner and wrote it off as a partial download. That
+    is the legitimate transformers >= 5.9.0 tokenization -- and the reason the rule
+    under test must not depend on it at all.
     """
 
-    _INVOCATIONS = [
-        "<requirements>",
-        "<certainty>",
-        "<guardian>",
-        "<context>",
-    ]
+    _MODEL = "ibm-granite/granite-4.1-3b"
+    _REVISION = "main"
+
+    # A hypothetical adapter recording '<context>' as ['<', 'context', '>']. NOT a
+    # published invocation: every aLoRA in granitelib-{rag,core,guardian}-r1.0
+    # records the assistant role sequence, '<requirements>', '<certainty>' or
+    # '<guardian>', and all four re-tokenize identically on 5.8.1 and 5.9.0.
+    # '<context>' is the string #108 reports on, and it is the smallest case where
+    # a recorded tokenization and a local one can diverge, which is the property
+    # under test -- so it is a probe, not a claim about shipped adapters.
+    _TRAINED_CONTEXT = [27, 2196, 29]
 
     def _get_tokenizer(self):
         from transformers import AutoTokenizer
 
         try:
-            return AutoTokenizer.from_pretrained("ibm-granite/granite-4.1-3b")
+            return AutoTokenizer.from_pretrained(self._MODEL, revision=self._REVISION)
         except Exception as e:
-            import pytest
-
             pytest.skip(f"could not fetch Granite tokenizer: {e}")
 
-    def test_first_char_drop_equals_first_token_drop(self):
+    @staticmethod
+    def _trained_variants(tok):
+        """Every training shape that must round-trip, as ``{label: ids}``."""
+        return {
+            "'<context>' recorded as ['<', 'context', '>']": [27, 2196, 29],
+            "'<context>' as this tokenizer splits it": tok(
+                "<context>", add_special_tokens=False
+            ).input_ids,
+            "'</documents>' (single vocab entry)": tok(
+                "</documents>", add_special_tokens=False
+            ).input_ids,
+            "'<requirements>'": tok(
+                "<requirements>", add_special_tokens=False
+            ).input_ids,
+        }
+
+    def test_substitute_plus_tail_reconstructs_the_trained_sequence(self):
+        """The invariant itself, over every training shape.
+
+        ``[ids[0]] + tokenize(tail)`` must equal ``ids`` -- ids[0] because that is
+        literally what the runtime swaps in, and ``tokenize`` because the tail
+        reaches the model as text in the rendered prompt.
+        """
+        from granite_switch.composer.tokenizer_setup import alora_invocation_tail
+
         tok = self._get_tokenizer()
-        for invocation in self._INVOCATIONS:
-            full_ids = tok(invocation, add_special_tokens=False).input_ids
-            dropped_ids = tok(invocation[1:], add_special_tokens=False).input_ids
-            assert full_ids[1:] == dropped_ids, (
-                f"invocation {invocation!r}: dropping first char of the "
-                f"string produced tokens {dropped_ids} but the tail of the "
-                f"full tokenization is {full_ids[1:]}"
+        for label, trained in self._trained_variants(tok).items():
+            tail = alora_invocation_tail(trained, tok)
+            on_wire = [trained[0], *tok(tail, add_special_tokens=False).input_ids]
+            assert on_wire == trained, (
+                f"{label}: control token (standing in for {trained[0]}) plus tail "
+                f"{tail!r} reaches the model as {on_wire}, but the adapter was "
+                f"trained on {trained}."
             )
 
-    def test_first_token_is_single_character(self):
-        """Sanity: the first token of each invocation must be exactly one
-        character (the leading '<'). Otherwise dropping invocation_text[1:]
-        in Jinja would drop the wrong number of characters."""
+    def test_retokenizing_rule_would_break_a_divergent_recording(self):
+        """Anti-regression against #108's own suggested fix.
+
+        Guards the specific way this went wrong once: taking the tail from the
+        LOCAL tokenizer's first token silently drops 'context' when the installed
+        transformers merges '<context'. No published adapter records '<context>',
+        so this is the latent case rather than a live one -- but it is the case the
+        rule has to be right about, because nothing keeps a recorded tokenization
+        and a local one in step. Skips where the merge does not happen, so the test
+        states its own precondition rather than assuming a version.
+        """
+        from granite_switch.composer.tokenizer_setup import alora_invocation_tail
+
         tok = self._get_tokenizer()
-        for invocation in self._INVOCATIONS:
-            first_id = tok(invocation, add_special_tokens=False).input_ids[0]
-            first_str = tok.decode([first_id])
-            assert first_str == invocation[0], (
-                f"invocation {invocation!r}: first token decodes to "
-                f"{first_str!r}, expected {invocation[0]!r}"
+        trained = self._TRAINED_CONTEXT
+        text = tok.decode(trained)
+        local_first = tok.decode([tok(text, add_special_tokens=False).input_ids[0]])
+        if len(local_first) == 1:
+            pytest.skip(
+                f"this transformers keeps {local_first!r} a lone token, so the "
+                "retokenizing rule happens to agree here; nothing to discriminate"
             )
 
+        local_rule_tail = text[len(local_first) :]
+        local_on_wire = [
+            trained[0],
+            *tok(local_rule_tail, add_special_tokens=False).input_ids,
+        ]
+        assert local_on_wire != trained, (
+            "the retokenizing rule no longer differs from the trained sequence "
+            "here, so this guard is weaker than it looks"
+        )
+        assert alora_invocation_tail(trained, tok) != local_rule_tail, (
+            "alora_invocation_tail must not agree with the retokenizing rule on "
+            f"{text!r} under this tokenizer"
+        )
 
-class _FixtureTokenizer:
-    """Tokenizer with a decode map for fixture adapter token IDs."""
+    def test_character_rule_breaks_on_single_token_markers(self):
+        """Anti-regression against main's rule.
 
-    def __init__(self, chat_template, decode_map):
-        self.chat_template = chat_template
-        self._decode_map = decode_map
+        Granite's structural markers are single vocab entries, so the character
+        rule emits a whole word after a whole-marker substitute. Version
+        independent, unlike the '<context>' case above.
+        """
+        from granite_switch.composer.tokenizer_setup import alora_invocation_tail
 
-    def decode(self, token_ids, skip_special_tokens=False):
-        return self._decode_map[tuple(token_ids)]
+        tok = self._get_tokenizer()
+        for marker in ["</documents>", "</think>"]:
+            trained = tok(marker, add_special_tokens=False).input_ids
+            if len(trained) != 1:
+                pytest.skip(f"{marker!r} is not a single token on this tokenizer")
+
+            assert alora_invocation_tail(trained, tok) == "", (
+                f"{marker!r} is one token, so the substitute carries all of it and "
+                "the tail must be empty"
+            )
+            char_on_wire = [
+                trained[0],
+                *tok(marker[1:], add_special_tokens=False).input_ids,
+            ]
+            assert char_on_wire != trained, (
+                f"{marker!r} no longer discriminates the character rule on this "
+                "tokenizer -- find a marker that does, or drop this test"
+            )
+            assert len(char_on_wire) > len(trained), (
+                f"{marker!r}: expected the character rule to ADD tokens, got "
+                f"{char_on_wire} vs {trained}"
+            )
+
+    def test_single_token_invocation_yields_empty_tail(self):
+        from granite_switch.composer.tokenizer_setup import alora_invocation_tail
+
+        tok = self._get_tokenizer()
+        assert alora_invocation_tail([27], tok) == ""
+
+    def test_empty_invocation_tokens_raise(self):
+        from granite_switch.composer.tokenizer_setup import alora_invocation_tail
+
+        tok = self._get_tokenizer()
+        with pytest.raises(ValueError, match="no first token"):
+            alora_invocation_tail([], tok)
+
+
+class TestMergedFirstTokenRenderEndToEnd:
+    """End-to-end through ``configure_chat_template`` on the exact mismatch
+    generative-computing/granite-switch#108 is about, offline and deterministically.
+
+    The adapter records ``['<', 'context', '>']`` for ``'<context>'``. That is a
+    hypothetical recording, not a published one (see
+    ``TestInvocationTailProperty._TRAINED_CONTEXT``); it is the smallest shape on
+    which a recorded and a local tokenization can diverge. The stub tokenizer merges
+    ``'<context'``, so re-tokenizing the decoded text gives a different split --
+    transformers 5.9.0 versus 5.8.1 on identical Granite 4.1 files. Here the merge
+    comes from the stub, so no particular transformers version is required.
+
+    Both halves of the invariant are checked together, which is what makes this an
+    end-to-end test rather than another property test: the substitute comes from
+    ``build_substitute_token_ids`` reading the adapter's tokens, and the tail comes
+    from the rendered prompt.
+
+    #108 asked for exactly this and named a test
+    (``test_context_invocation_injection_not_corrupted_granite_4_1``) that was never
+    committed; this is that test.
+    """
+
+    _MERGED = ("<context",)
+    _TRAINED_PIECES = ["<", "context", ">"]
+    _LOAD_IDS_TARGET = (
+        "granite_switch.composer.tokenizer_setup._load_alora_invocation_token_ids"
+    )
+
+    def _configured(self, factory, merges):
+        """Configure one aLoRA on '<context>' whose adapter recorded the ids above."""
+        tokenizer = factory(merges=merges)
+        trained = tokenizer.ids_for_pieces(self._TRAINED_PIECES)
+        with (
+            patch(_PATCH_TARGET, return_value="<context>"),
+            patch(self._LOAD_IDS_TARGET, return_value=trained),
+        ):
+            configure_chat_template(tokenizer, [("/path/ctx", "ctx_rel", "alora")])
+        return tokenizer, trained
+
+    def test_stub_reproduces_the_issue_tokenization(self):
+        """Guard the guard: without the merge there is nothing to catch."""
+        plain = _StubTokenizer(_GRANITE_TEMPLATE)
+        merged = _StubTokenizer(_GRANITE_TEMPLATE, merges=self._MERGED)
+
+        assert plain._pieces("<context>") == ["<", "context", ">"], (
+            "the default stub must reproduce the ByteLevel / transformers 5.8.1 "
+            "shape, or the other render expectations here are being changed"
+        )
+        assert merged._pieces("<context>") == ["<context", ">"], (
+            "the merged stub must reproduce the transformers 5.9.0 / Split shape "
+            "from #108, or this class proves nothing"
+        )
+
+    @pytest.mark.parametrize("fmt", ["granite", "chatml"])
+    def test_swapped_stream_reconstructs_the_trained_invocation(self, fmt):
+        """The whole invariant, both halves, through a real render.
+
+        Substitute from the adapter's tokens + tail from the rendered prompt must
+        retokenize to what the adapter was trained on.
+        """
+        factory = _make_tokenizer if fmt == "granite" else _make_chatml_tokenizer
+        tokenizer, trained = self._configured(factory, self._MERGED)
+
+        rendered = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "Judge <context> here"}],
+            add_generation_prompt=True,
+            adapter_name="ctx_rel",
+        )
+        assert "<|ctx_rel|>" in rendered, (
+            f"control token missing from the {fmt} render: {rendered!r}"
+        )
+
+        with patch(self._LOAD_IDS_TARGET, return_value=trained):
+            substitute = build_substitute_token_ids(
+                [("/path/ctx", "ctx_rel", "alora", None)], lora_substitute_id=-1
+            )
+        assert substitute == [trained[0]], (
+            f"the swap side must substitute the adapter's first trained token "
+            f"{trained[0]}, got {substitute}"
+        )
+
+        tail_text = rendered.split("<|ctx_rel|>", 1)[1]
+        on_wire = [
+            substitute[0],
+            *tokenizer(tail_text)["input_ids"][: len(trained) - 1],
+        ]
+        assert on_wire == trained, (
+            f"{fmt}: control token + emitted tail reaches the model as {on_wire} "
+            f"but the adapter was trained on {trained}. Rendered: {rendered!r}"
+        )
+
+    def test_render_emits_the_adapter_tail_not_the_retokenized_one(self):
+        """The regression this class was rewritten for.
+
+        Under the merge, the retokenizing rule emits '>' and drops 'context'
+        entirely while the substitute is still '<'. The adapter rule emits
+        'context>'. This pins which one lands in the prompt.
+        """
+        tokenizer, trained = self._configured(_make_tokenizer, self._MERGED)
+        rendered = _render(
+            tokenizer,
+            messages=[{"role": "user", "content": "Judge <context> here"}],
+            add_generation_prompt=True,
+            adapter_name="ctx_rel",
+        )
+        after = rendered.split("<|ctx_rel|>", 1)[1]
+
+        assert after.startswith("context>"), (
+            "the emitted tail must be the decoding of the adapter's tokens after "
+            f"the first ('context>'), got {after[:20]!r}. Starting with '>' means "
+            "the retokenizing rule is back and 'context' has been dropped."
+        )
+        assert not after.startswith("<context>"), (
+            f"the control token is followed by the FULL invocation, so the swap "
+            f"site carries it twice: {rendered!r}"
+        )
+
+    def test_character_rule_would_corrupt_this_render(self):
+        """Anti-regression: main's rule must visibly fail this same render.
+
+        Here the character rule agrees with the adapter rule (both give
+        'context>'), so the discriminator has to be a single-token marker; this
+        asserts that discrimination survives on the stub.
+        """
+        tokenizer = _make_tokenizer(merges=("</documents>",))
+        trained = tokenizer.ids_for_pieces(["</documents>"])
+        marker = "</documents>"
+
+        char_on_wire = [trained[0], *tokenizer(marker[1:])["input_ids"]]
+        assert char_on_wire != trained, (
+            "'</documents>' no longer discriminates the character rule under this "
+            "stub -- fix the merge or drop this test"
+        )
+        assert len(char_on_wire) > len(trained), (
+            f"expected the character rule to ADD tokens, got {char_on_wire} vs "
+            f"{trained}"
+        )
+
+
+#: Per-id decoding of the context-relevance fixture's alora_invocation_tokens
+#: ([27, 2196, 29] -- '<context>' as Granite 4.1 splits it under ByteLevel). Given
+#: per id, not as one whole-sequence entry, so decode() composes: the Pass-2 tail is
+#: decode(ids[1:]) and must concatenate with decode(ids[:1]) to the full text.
+_CONTEXT_DECODE_MAP = {(27,): "<", (2196,): "context", (29,): ">"}
+
+#: Same, for the answerability fixture, whose invocation is the assistant role
+#: sequence ([100264, 78191, 100265]). The whole-sequence entry stays: it is what
+#: Pass 1 matches on, and it must equal the concatenation of the per-id ones.
+_ANSWERABILITY_DECODE_MAP = {
+    (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
+    (100264,): "<|start_of_role|>",
+    (78191,): "assistant",
+    (100265,): "<|end_of_role|>",
+}
+
+
+class _FixtureTokenizer(_StubTokenizer):
+    """``_StubTokenizer`` with a decode map for fixture adapter token IDs.
+
+    The decode map answers the adapter-config ids the fixtures declare; anything
+    else falls through to the stub's own tokenize/decode, which is what lets the
+    Pass-2 tail be computed for real here.
+    """
 
 
 class TestEndToEndAdapterConfigToRender:
@@ -319,12 +712,7 @@ class TestEndToEndAdapterConfigToRender:
     def test_alora_fallback_from_adapter_config(self):
         """ALoRA adapter whose invocation tokens decode to the assistant role
         sequence → fallback path (token before generation prompt)."""
-        tokenizer = self._make_tokenizer(
-            {
-                # [100264, 78191, 100265] → assistant role sequence
-                (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
-            }
-        )
+        tokenizer = self._make_tokenizer(_ANSWERABILITY_DECODE_MAP)
         configure_chat_template(
             tokenizer,
             [
@@ -359,7 +747,7 @@ class TestEndToEndAdapterConfigToRender:
         inserting the control token, so "<context>" becomes
         "<|context_relevance|>context>" in the rendered output.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer(_CONTEXT_DECODE_MAP)
         configure_chat_template(
             tokenizer,
             [
@@ -391,7 +779,7 @@ class TestEndToEndAdapterConfigToRender:
 
         Same first-character drop as the start-of-message case.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer(_CONTEXT_DECODE_MAP)
         configure_chat_template(
             tokenizer,
             [
@@ -427,7 +815,7 @@ class TestEndToEndAdapterConfigToRender:
         land before the second <context>, not the first. First occurrence
         remains intact with its '<'; only the second has its '<' dropped.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer(_CONTEXT_DECODE_MAP)
         configure_chat_template(
             tokenizer,
             [
@@ -481,10 +869,7 @@ class TestEndToEndAdapterConfigToRender:
     def test_mixed_adapters_from_adapter_config(self):
         """All three adapter types composed together, each activated independently."""
         tokenizer = self._make_tokenizer(
-            {
-                (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
-                (27,): "<context>",
-            }
+            {**_ANSWERABILITY_DECODE_MAP, **_CONTEXT_DECODE_MAP}
         )
         configure_chat_template(
             tokenizer,
@@ -545,8 +930,8 @@ class TestEndToEndAdapterConfigToRender:
 # ---------------------------------------------------------------------------
 
 
-def _make_chatml_tokenizer():
-    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+def _make_chatml_tokenizer(merges=()):
+    return _StubTokenizer(_CHATML_TEMPLATE, merges=merges)
 
 
 class TestDetectTemplateFormat:
@@ -655,8 +1040,10 @@ class TestConfigureChatTemplateChatML:
         prompt. Skip-once suppresses the generation-prompt <|im_start|>, leaving
         ``<|gsm8k|>assistant\\n<think>`` — the runtime swap restores <|im_start|>.
         """
-        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<|im_start|>assistant\n", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
 
         result = _render(
@@ -678,8 +1065,10 @@ class TestConfigureChatTemplateChatML:
 
     def test_alora_fallback_thinking_off(self):
         """ALoRA fallback works with enable_thinking=False (<think></think>)."""
-        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<|im_start|>assistant\n", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
 
         result = _render(
@@ -700,8 +1089,10 @@ class TestConfigureChatTemplateChatML:
         ``content`` string mutation (not ``content.val``). The control token is
         inserted before the invocation text with its first char dropped.
         """
-        with patch(_PATCH_TARGET, return_value="<context>"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<context>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "ctxrel", "alora")])
 
         result = _render(
@@ -724,8 +1115,10 @@ class TestConfigureChatTemplateChatML:
         iterate the same list so its recorded index matches the main loop.
         A misaligned index would target the wrong message or crash.
         """
-        with patch(_PATCH_TARGET, return_value="<context>"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<context>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "ctxrel", "alora")])
 
         result = _render(
@@ -748,8 +1141,10 @@ class TestConfigureChatTemplateChatML:
         original = _render(
             _make_chatml_tokenizer(), messages=messages, add_generation_prompt=True
         )
-        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<|im_start|>assistant\n", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(
                 tokenizer,
                 [("/path/a", "gsm8k", "alora"), ("/path/b", "my_lora", "lora")],
@@ -761,8 +1156,10 @@ class TestConfigureChatTemplateChatML:
         """Regression: a full multi-turn conversation (system + tools +
         assistant + tool responses) renders with the ALoRA control token in
         exactly one place under ChatML's more complex message handling."""
-        with patch(_PATCH_TARGET, return_value="<|im_start|>assistant\n"):
-            tokenizer = _make_chatml_tokenizer()
+        tokenizer = _make_chatml_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<|im_start|>assistant\n", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "gsm8k", "alora")])
 
         messages = [
@@ -928,8 +1325,8 @@ class TestAudioAndAdapterInjectionsCompose:
 # and that specific regression.
 
 
-def _make_chatml_audio_tokenizer():
-    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+def _make_chatml_audio_tokenizer(merges=()):
+    return _StubTokenizer(_CHATML_TEMPLATE, merges=merges)
 
 
 def _chatml_user_turn(rendered):
@@ -1076,8 +1473,10 @@ class TestAudioAndAdapterInjectionsComposeChatML:
         If that order inverted, Pass 2 would rsplit the list repr and the control
         token would never be placed.
         """
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
-            tokenizer = _make_chatml_audio_tokenizer()
+        tokenizer = _make_chatml_audio_tokenizer()
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
             configure_audio_chat_template(tokenizer)
 

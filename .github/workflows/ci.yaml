@@ -83,3 +83,48 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
           fail_ci_if_error: false
+
+  # The chat-template invocation-tail tests are the reason this job exists.
+  # `uv.lock` pins transformers 5.8.1, but pyproject admits anything under
+  # 5.10.0, and the two versions tokenize Granite 4.1 differently: '<context>'
+  # is ['<', 'context', '>'] on 5.8.1 and ['<context', '>'] on 5.9.0, because
+  # AutoTokenizer resolves tokenizer_class differently and the 5.9.0 class honours
+  # the file's Split pre-tokenizer instead of overriding it with ByteLevel
+  # (generative-computing/granite-switch#108). Nothing in CI ran the admitted
+  # upper end, so a fix argued for 5.9.0 was never executed on it. This job
+  # unpins transformers for one run and executes the composer tests that depend
+  # on tokenization -- and only those, to stay inside the CPU-minutes budget that
+  # keeps tests/composer/ out of test-cpu above.
+  #
+  # `--upgrade-package` rather than a matrix entry: the lock stays authoritative
+  # for every other job, and this one deliberately drifts from it.
+  test-transformers-upper-bound:
+    name: Tokenization tests on the newest allowed transformers
+    needs: pre-commit
+    runs-on: ubuntu-latest
+    continue-on-error: true # a new transformers release must not block a PR
+    steps:
+      - uses: actions/checkout@v4
+
+      # Keep `version` equal to the uv-pre-commit `rev` in .pre-commit-config.yaml.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.8.4"
+          enable-cache: true
+          python-version: "3.11"
+
+      - run: uv sync --group dev --extra hf --extra compose --upgrade-package transformers
+
+      - name: Report the resolved version
+        run: uv run python -c "import transformers; print(transformers.__version__)"
+
+      - name: Tokenization-dependent composer tests
+        run: |
+          # requires_model is NOT excluded here: TestInvocationTailProperty needs
+          # the real Granite tokenizer, and it is the whole point of this job. It
+          # skips itself if the Hub is unreachable rather than failing.
+          uv run pytest \
+            tests/composer/test_chat_template.py \
+            tests/composer/test_tokenizer_setup.py \
+            -m "not gpu and not slow and not deep" \
+            -v -s --tb=short

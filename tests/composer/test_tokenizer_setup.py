@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Unit tests for tokenizer setup functions."""
 
+import contextlib
 import json
 from unittest.mock import patch
 
@@ -15,6 +16,21 @@ from granite_switch.composer.tokenizer_setup import (
 )
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
+_IDS_TARGET = "granite_switch.composer.tokenizer_setup._load_alora_invocation_token_ids"
+
+
+def _fake_alora(invocation_text, tokenizer):
+    """Patch both halves of an aLoRA's invocation metadata.
+
+    configure_chat_template reads the decoded TEXT (what Pass 1 matches on) and the
+    recorded TOKEN IDS (what the substitute and the Pass-2 tail come from). Patching
+    only the text leaves the ids reading a nonexistent adapter_config.json. The ids
+    default to this tokenizer's own split, which for a mock is the trainer's split.
+    """
+    return (
+        patch(_PATCH_TARGET, return_value=invocation_text),
+        patch(_IDS_TARGET, return_value=tokenizer(invocation_text)["input_ids"]),
+    )
 
 
 class MockTokenizer:
@@ -32,6 +48,8 @@ class MockTokenizer:
         self.chat_template = None
         self._decode_map = decode_map or {}
         self._encode_map = encode_map or {}
+        # Ids handed out by encode(), so decode() can round-trip them.
+        self._char_ids: set[int] = set()
 
     def __len__(self):
         return self._vocab_size
@@ -59,16 +77,40 @@ class MockTokenizer:
         return self._vocab.get(token, -1)
 
     def decode(self, token_ids, skip_special_tokens=False):
-        """Decode token IDs to string."""
-        return self._decode_map.get(
-            tuple(token_ids), "".join(f"<tok{t}>" for t in token_ids)
+        """Decode token IDs to string.
+
+        Ids this instance produced from :meth:`encode` decode back to their own
+        character, so ``encode``/``decode`` round-trip. Without that,
+        ``alora_invocation_tail`` cannot match the decoded first token against
+        the invocation text and raises. Ids from anywhere else keep the
+        ``<tokN>`` placeholder form.
+        """
+        key = tuple(token_ids)
+        if key in self._decode_map:
+            return self._decode_map[key]
+        return "".join(
+            chr(t) if t in self._char_ids else f"<tok{t}>" for t in token_ids
         )
 
     def encode(self, text, add_special_tokens=False):
         """Encode a string to token IDs, one id per whitespace-free chunk."""
         if text in self._encode_map:
             return self._encode_map[text]
-        return [ord(c) for c in text]
+        ids = [ord(c) for c in text]
+        self._char_ids.update(ids)
+        return ids
+
+    def __call__(self, text, add_special_tokens=False):
+        """Tokenize like a transformers tokenizer call.
+
+        One id per character, so the mock reproduces the ByteLevel shape where
+        the first token IS the first character and the character and token rules
+        agree (transformers 5.8.1 on Granite 4.1). The tests using this mock are
+        about adapter_map / namespace wiring, not tokenization; the tokenization
+        that discriminates the two rules is covered in test_chat_template.py by
+        ``TestMergedFirstTokenRenderEndToEnd`` and ``TestInvocationTailProperty``.
+        """
+        return {"input_ids": self.encode(text, add_special_tokens)}
 
 
 class TestDecodeAloraInvocationText:
@@ -385,7 +427,9 @@ class TestConfigureChatTemplate:
             "{%- if messages[0] %}\n{{- '<|start_of_role|>' }}{{- messages[0] }}\n{%- endif %}\n"
             "{%- if add_generation_prompt %}\n{{- 'assistant:' }}\n{%- endif %}"
         )
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(
                 tokenizer,
                 [("/path/rag", "rag", "alora"), ("/path/code", "code", "lora")],
@@ -405,7 +449,9 @@ class TestConfigureChatTemplate:
             "{%- if messages[0] %}\n{{- '<|start_of_role|>' }}{{- messages[0] }}\n{%- endif %}\n"
             "{%- if add_generation_prompt %}\n{{- 'end' }}\n{%- endif %}"
         )
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(
                 tokenizer,
                 [("/path/rag", "rag", "alora"), ("/path/code", "code", "lora")],
@@ -427,7 +473,9 @@ class TestConfigureChatTemplate:
             "{%- for message in messages %}\n{{- '<|start_of_role|>' }}{{- message }}\n{%- endfor %}\n"
             "{%- if add_generation_prompt %}\n{{- 'gen' }}\n{%- endif %}"
         )
-        with patch(_PATCH_TARGET, return_value="<requirements>"):
+        with contextlib.ExitStack() as _stack:
+            for _p in _fake_alora("<requirements>", tokenizer):
+                _stack.enter_context(_p)
             configure_chat_template(tokenizer, [("/path/rag", "rag", "alora")])
 
         assert "adapter_token=adapter_token" in tokenizer.chat_template

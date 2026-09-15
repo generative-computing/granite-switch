@@ -279,6 +279,105 @@ def _decode_alora_invocation_text(adapter_path: str, tokenizer) -> str:
     return tokenizer.decode(token_ids, skip_special_tokens=False)
 
 
+def alora_invocation_tail(invocation_token_ids: list[int], tokenizer) -> str:
+    """The invocation text minus its first TOKEN, as the *adapter* tokenized it.
+
+    The runtime swap replaces the control token's embedding with the first token
+    of the adapter's own ``alora_invocation_tokens``
+    (:func:`build_substitute_token_ids` -> :func:`get_alora_first_invocation_token_id`).
+    So the text Pass 2 emits after the control token must be the decoding of
+    ``invocation_token_ids[1:]`` -- the *same* list, one element in. Emit anything
+    else and the on-wire sequence is not what the adapter was trained on.
+
+    Both halves must read the same source, which is the whole subtlety of
+    generative-computing/granite-switch#108. Two rules that look right are not:
+
+    * **Drop one character** (``invocation_text[1:]``, what main does). Correct
+      only when the first token is one character long, which is a property of the
+      tokenizer's merges rather than of the code. Granite's own structural markers
+      are single vocab entries -- ``'</documents>'`` and ``'</think>'`` on
+      granite-4.1-3b -- so there the character rule emits ``'/documents>'`` after a
+      whole-marker substitute: four tokens where the adapter was trained on one.
+
+    * **Drop the local tokenizer's first token** (re-tokenize the decoded text and
+      slice by ``decode(ids[0])``, which is what #108's own fix sketch proposes).
+      This disagrees with the substitute whenever the installed tokenizer splits
+      the text differently than the trainer did, and it fails *silently*: the tail
+      shrinks and a word simply leaves the prompt. For an adapter recording
+      ``[27, 2196, 29]`` (``['<', 'context', '>']``) read under a tokenizer that
+      merges ``'<context'`` -- transformers 5.9.0 on granite-4.1-3b does::
+
+          recorded (adapter_config.json)  [27, 2196, 29]
+          substitute (swap side)          27  '<'
+          retokenizing rule -> tail '>'         on wire [27, 29]   'context' GONE
+          character rule -> tail 'context>'     on wire [27, 2196, 29]  right here
+          this function  -> tail 'context>'     on wire [27, 2196, 29]  right always
+
+    Neither wrong rule is active on anything published today, and that is worth
+    stating precisely rather than overselling the fix. Every aLoRA in
+    granitelib-{rag,core,guardian}-r1.0 records one of four sequences, and all
+    four re-tokenize identically under 5.8.1 and 5.9.0, so all three rules agree
+    on them::
+
+        [100264, 78191, 100265]  '<|start_of_role|>assistant<|end_of_role|>'  12 adapters
+        [27, 71226, 29]          '<requirements>'                              3
+        [27, 12525, 18773, 29]   '<certainty>'                                 3
+        [27, 27190, 1122, 29]    '<guardian>'                                 12
+
+    ``'<context>'`` is a probe string in the tests, not an adapter invocation --
+    ``context_relevance`` activates at the assistant boundary. So #108's exposure
+    is latent for now, on either wrong rule; what makes it worth fixing is that
+    the character rule is already wrong for Granite's own single-token markers
+    (``'</documents>'``, ``'</think>'``), and that both wrong rules depend on a
+    coincidence between two independently-produced tokenizations, which no
+    invariant protects.
+
+    Taking the tail from ``invocation_token_ids`` makes the two halves agree by
+    construction: both read the same list, so no version of the tokenizer can put
+    them out of step, and the only tokenizer call here is a ``decode``.
+
+    What it cannot do is make the *whole* reconstruction version-proof, because the
+    tail reaches the model as text in a rendered prompt and is re-tokenized there.
+    If some future tokenizer merged across the tail's own interior -- encoding
+    ``'context>'`` as one token where the adapter recorded ``['context', '>']`` --
+    the on-wire sequence would differ again, and no compose-time choice of tail
+    could prevent it. That residual is pinned rather than assumed:
+    ``TestInvocationTailProperty.test_substitute_plus_tail_reconstructs_the_trained_sequence``
+    re-tokenizes the tail and compares against the trained ids for every shape the
+    library ships, so it fails on the tokenizer that would break it.
+
+    Args:
+        invocation_token_ids: The adapter's ``alora_invocation_tokens``, verbatim.
+        tokenizer: Used only to ``decode``; never to re-tokenize.
+
+    Returns:
+        The decoding of everything after the first id. ``""`` when the invocation
+        is a single token, which is correct -- the substitute already carries it.
+
+    Raises:
+        ValueError: If ``invocation_token_ids`` is empty, or if the ids do not
+            decode compositionally (``decode(ids) != decode(ids[:1]) +
+            decode(ids[1:])``), which would mean the emitted prompt cannot be
+            reassembled from the two halves.
+    """
+    if not invocation_token_ids:
+        raise ValueError(
+            "alora_invocation_tokens is empty, so there is no first token for the "
+            "runtime swap to substitute and no tail to emit after it."
+        )
+    head = tokenizer.decode(invocation_token_ids[:1])
+    tail = tokenizer.decode(invocation_token_ids[1:])
+    whole = tokenizer.decode(invocation_token_ids)
+    if head + tail != whole:
+        raise ValueError(
+            f"invocation tokens {invocation_token_ids} do not decode "
+            f"compositionally: {head!r} + {tail!r} != {whole!r}. Pass 2 emits the "
+            "tail after a control token standing in for the head, so the two must "
+            "concatenate to the invocation the adapter was trained on."
+        )
+    return tail
+
+
 def get_alora_first_invocation_token_id(adapter_path: str) -> int:
     """Return the first token ID of an ALoRA adapter's invocation sequence.
 
@@ -939,6 +1038,19 @@ def configure_chat_template(
                 sr_anchors.add(anchor_text)
             else:
                 entry["invocation_text"] = anchor_text
+                # Pass 1 matches on the full text; Pass 2 emits this tail. Derived
+                # from the adapter's OWN alora_invocation_tokens -- the same list
+                # build_substitute_token_ids takes the substitute from -- so the
+                # control token plus this tail reconstruct the trained sequence
+                # exactly, on any transformers version. Slicing the text in Jinja
+                # (one character) or re-tokenizing it here (one local token) both
+                # disagree with the substitute on real Granite invocations; see
+                # alora_invocation_tail.
+                # Only the ALoRA leg needs it: an SR control token replaces its
+                # anchor token whole, so there is no remainder to emit.
+                entry["invocation_tail"] = alora_invocation_tail(
+                    _load_alora_invocation_token_ids(adapter_path), tokenizer
+                )
         adapter_mapping[adapter_name] = entry
 
     if len(sr_anchors) > 1:
@@ -955,7 +1067,8 @@ def configure_chat_template(
             mapping_entries.append(
                 f"    '{adapter_name}': {{'token': '{info['token']}', "
                 f"'type': '{info['type']}', "
-                f"'invocation_text': '{info['invocation_text']}'}}"
+                f"'invocation_text': '{info['invocation_text']}', "
+                f"'invocation_tail': '{info['invocation_tail']}'}}"
             )
         else:
             mapping_entries.append(
@@ -969,11 +1082,13 @@ def configure_chat_template(
 {%- set adapter_token = '' %}
 {%- set adapter_type = '' %}
 {%- set adapter_invocation_text = '' %}
+{%- set adapter_invocation_tail = '' %}
 {%- if adapter_name is defined and adapter_name in adapter_map %}
 {%- set adapter_token = adapter_map[adapter_name]['token'] %}
 {%- set adapter_type = adapter_map[adapter_name]['type'] %}
 {%- if adapter_map[adapter_name]['type'] == 'alora' %}
 {%- set adapter_invocation_text = adapter_map[adapter_name]['invocation_text'] %}
+{%- set adapter_invocation_tail = adapter_map[adapter_name]['invocation_tail'] %}
 {%- endif %}
 {%- endif %}
 
@@ -1047,30 +1162,32 @@ def configure_chat_template(
     # in the message.
     #
     # Token drop (mirrors the role-marker skip-once flag used for LoRA /
-    # assistant-boundary ALoRA): we also omit the FIRST CHARACTER of the
-    # invocation text. The runtime embedding swap replaces the control-token
-    # embedding with the first-invocation-token's embedding; writing the full
-    # invocation text after the control token would then produce two copies
-    # of that first-invocation-token back to back — an OOD pattern at the
-    # swap site.
+    # assistant-boundary ALoRA): we also omit the FIRST TOKEN of the invocation
+    # text. The runtime embedding swap replaces the control-token embedding with
+    # the first-invocation-token's embedding; writing the full invocation text
+    # after the control token would then produce two copies of that
+    # first-invocation-token back to back — an OOD pattern at the swap site.
     #
-    # For every granite_format ALoRA invocation text in the standard Granite adapter
-    # library (<requirements>, <certainty>, <guardian>, <context>, etc.) the
-    # first character is a single '<' that the tokenizer emits as its own token,
-    # and the tail of the string retokenizes identically to the tail of the full
-    # string. So dropping the first character on the string side is equivalent
-    # to dropping exactly the first token on the tokenized side. For ChatML the
-    # trained 4.2 adapters use the assistant-boundary invocation
+    # The remainder is ``invocation_tail``, computed per adapter at compose time
+    # by ``alora_invocation_tail`` and baked into ``adapter_map``, so Jinja emits
+    # a precomputed string instead of slicing. Slicing here would have to be
+    # ``invocation_text[1:]`` — minus one CHARACTER — which equals minus one
+    # token only when the first character tokenizes alone. That is a property of
+    # the tokenizer's merges, not of this code, and it is not even version-stable:
+    # on the pinned transformers 5.8.1 all four shipped invocations start with a
+    # lone '<' and the rules agree, but on 5.9.0 '<context>' tokenizes as
+    # ['<context', '>'] and the character rule leaves 'context>' behind. Granite's
+    # own '</documents>' and '</think>' are single vocab entries on either version.
+    # For ChatML the trained 4.2 adapters use the assistant-boundary invocation
     # (<|im_start|>assistant\\n) and therefore take the fallback path below, not
-    # Pass 2; a user-message ChatML ALoRA whose invocation text does not begin
-    # with a standalone-tokenizing character would need the first-token-drop
-    # invariant re-checked (see the property test in test_chat_template.py).
+    # Pass 2. See TestInvocationTailProperty in test_chat_template.py.
     #
     # ``content_var`` is ``content.val`` for the granite_format namespace-object content
     # or ``content`` for ChatML's plain-string content.
     alora_pass2 = (
-        """    {#- ALoRA Pass 2: inject activation token AND drop the first char of
-         the invocation text so the runtime-swapped embedding doesn't duplicate. -#}
+        """    {#- ALoRA Pass 2: inject activation token AND emit the invocation
+         text minus its first TOKEN (adapter_invocation_tail, precomputed at
+         compose time) so the runtime-swapped embedding doesn't duplicate. -#}
     {%- if loop.index0 == ns.alora_target_idx %}
         {%- set _parts = """
         + content_var
@@ -1078,7 +1195,7 @@ def configure_chat_template(
         {%- if _parts | length > 1 %}
             {%- set """
         + content_var
-        + """ = _parts[0] + ns.adapter_token + ns.adapter_invocation_text[1:] + _parts[1] %}
+        + """ = _parts[0] + ns.adapter_token + ns.adapter_invocation_tail + _parts[1] %}
         {%- endif %}
     {%- endif %}
 """
@@ -1126,6 +1243,7 @@ def configure_chat_template(
             "\n                       adapter_token=adapter_token,"
             "\n                       adapter_type=adapter_type,"
             "\n                       adapter_invocation_text=adapter_invocation_text,"
+            "\n                       adapter_invocation_tail=adapter_invocation_tail,"
             "\n                       alora_target_idx=-1,"
             "\n                       skip_next_role_marker=false"
             "\n                       )"

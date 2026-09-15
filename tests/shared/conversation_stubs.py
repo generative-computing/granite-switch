@@ -25,6 +25,7 @@ _TESTS_DIR = os.path.dirname(os.path.dirname(__file__))
 _FIXTURES = os.path.join(_TESTS_DIR, "composer", "fixtures")
 _SPECIAL_RE = re.compile(r"<\|[^|>]*\|>")
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
+_IDS_TARGET = "granite_switch.composer.tokenizer_setup._load_alora_invocation_token_ids"
 
 # Ids are arbitrary but must be stable and disjoint: specials from 900 up,
 # ordinary text hashed into [1000, 1999].
@@ -135,13 +136,31 @@ def make_stub_tokenizer(adapters, chatml=False):
     with open(os.path.join(_FIXTURES, name)) as f:
         template = f.read()
 
-    holder = type("H", (), {"chat_template": template})()
+    # A StubTokenizer, not a bare attribute holder: configure_chat_template now
+    # computes each aLoRA's Pass-2 tail with alora_invocation_tail, which needs a
+    # tokenizer that can tokenize (there is deliberately no character-rule
+    # fallback -- see generative-computing/granite-switch#108). The adapter
+    # control tokens are not in this instance's special list yet, but the
+    # invocation texts do not contain any, so their tokenization is unaffected;
+    # the configured template is re-read below to build the final stub.
+    specials = [f"<|{n}|>" for n, _t, _i in adapters]
+    holder = StubTokenizer(
+        template, specials + sorted(set(_SPECIAL_RE.findall(template)) - set(specials))
+    )
     invocations = [inv for _n, tech, inv in adapters if tech == "alora"]
     discovered = [(f"/path/{n}", n, tech, None) for n, tech, _inv in adapters]
-    with patch(_PATCH_TARGET, side_effect=invocations):
+    # Two seams, not one: configure_chat_template reads each aLoRA's decoded TEXT
+    # (Pass 1 matches on it) and its recorded TOKEN IDS (the substitute and the
+    # Pass-2 tail come from them). These adapter paths do not exist on disk, so both
+    # have to be faked. The ids are this stub's own split of the text, which is the
+    # honest default here: the stub is standing in for the trainer's tokenizer too.
+    ids_by_text = {inv: holder(inv)["input_ids"] for inv in invocations}
+    with (
+        patch(_PATCH_TARGET, side_effect=invocations),
+        patch(_IDS_TARGET, side_effect=[ids_by_text[inv] for inv in invocations]),
+    ):
         configure_chat_template(holder, discovered)
 
-    specials = [f"<|{n}|>" for n, _t, _i in adapters]
     # Role markers etc. must also be atomic; collect every <|...|> the template
     # can emit so the stub treats them as single tokens.
     specials += sorted(set(_SPECIAL_RE.findall(holder.chat_template)) - set(specials))
