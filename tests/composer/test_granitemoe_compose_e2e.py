@@ -466,7 +466,7 @@ class TestGraniteMoeSR:
 
         Shared routing needs a seam between routing and expert application that
         upstream does not expose, so ``_apply_experts`` duplicates the second half
-        of ``GraniteMoeHybridMoE.forward``.  This is the test that makes that
+        of ``GraniteMoeSharedMoE.forward``.  This is the test that makes that
         duplication safe across the supported ``transformers`` range: if the
         upstream expert path ever changes, it fails here instead of drifting an
         eval score by a fraction of a point.

@@ -7,7 +7,7 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 
 import torch
 
-from ..config import SWITCH_CACHE_LAYERS
+from ..config import ATTENTION_LAYER_TYPE, SWITCH_CACHE_LAYERS
 from .adapter_loader import (
     _extract_modules_from_weights,
     detect_lora_config,
@@ -188,20 +188,22 @@ class GraniteSwitchComposer:
         for field_name, default in arch.optional_config_fields.items():
             config_kwargs[field_name] = getattr(base_config, field_name, default)
 
-        # For Granite 3.x whose arch descriptor doesn't include
-        # shared_intermediate_size, default it to intermediate_size.
-        # GraniteMoeHybridConfig defaults it to 1024 (not None), so
-        # GraniteSwitchConfig's fallback logic doesn't trigger.
+        # For a dense Granite base whose arch descriptor doesn't include
+        # shared_intermediate_size, supply it explicitly from intermediate_size:
+        # a dense Granite layer always has a shared MLP of that width. This makes
+        # the composer the source of truth and does not rely on any parent-class
+        # default (GraniteMoeShared defaults it to 0, which is the "no shared MLP"
+        # sentinel — GraniteSwitchConfig would keep that 0 verbatim if passed).
         if "shared_intermediate_size" not in config_kwargs:
             config_kwargs["shared_intermediate_size"] = config_kwargs[
                 "intermediate_size"
             ]
 
-        # Normalize layer_types: map everything to "attention" (only attention
-        # layers are supported).
+        # Normalize layer_types: map everything to the attention layer type
+        # (only attention layers are supported).
         lt = config_kwargs.get("layer_types")
         if lt is not None:
-            config_kwargs["layer_types"] = ["attention" for _ in lt]
+            config_kwargs["layer_types"] = [ATTENTION_LAYER_TYPE for _ in lt]
 
         # When adapters are present, reserve the switch's cache slots at the
         # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
@@ -213,7 +215,7 @@ class GraniteSwitchComposer:
             )
             if config_kwargs.get("layer_types") is not None:
                 config_kwargs["layer_types"] = [
-                    *(["attention"] * SWITCH_CACHE_LAYERS),
+                    *([ATTENTION_LAYER_TYPE] * SWITCH_CACHE_LAYERS),
                     *list(config_kwargs["layer_types"]),
                 ]
 
