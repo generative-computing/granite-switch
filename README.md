@@ -47,7 +47,7 @@ Other install options depending on your use case:
 ```bash
 pip install "granite-switch[compose]"   # Compose modular models
 pip install "granite-switch[hf]"        # HuggingFace inference
-pip install "granite-switch[vllm20]"    # newer vLLM line (0.27.x)
+pip install "granite-switch[vllm27]"    # newer vLLM line (0.27.x)
 pip install "granite-switch[dev]"       # Everything
 ```
 
@@ -55,7 +55,7 @@ Requires Python 3.11+ and PyTorch 2.11+.
 
 > **vLLM version note:** This project requires `transformers>=5.16`, so it pins vLLM to the
 > `0.26.x` line (the earliest vLLM whose model code handles the transformers-5.13+
-> `full_attention` layer-type rename) via the default `[vllm]` extra. `[vllm20]` selects the
+> `full_attention` layer-type rename) via the default `[vllm]` extra. `[vllm27]` selects the
 > newer `0.27.x` line. Both require PyTorch 2.11+ (CUDA 13+).
 
 ### Compose a Model
