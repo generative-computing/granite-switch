@@ -304,9 +304,9 @@ class ShadowResidualDecoderLayer(nn.Module):
             # top-k selection AND the renormalized gate scalars from them itself
             # (renormalize=True == HF's softmax-over-top-k). So sharing the RAW
             # logits is exactly equivalent to HF sharing its post-softmax
-            # (batch_index, batch_gates, expert_size) partition — one duplicate
-            # of the base half's logits routes the whole [2M, H] stack in a
-            # single expert call. Bypass GraniteMoeMoE.forward to inject them.
+            # (top_k_index, top_k_weights) routing — one duplicate of the base
+            # half's logits routes the whole [2M, H] stack in a single expert
+            # call. Bypass GraniteMoeMoE.forward to inject them.
             logits, _ = self.block_sparse_moe.gate(normed[:m])  # [M, E]
             logits = torch.cat([logits, logits], dim=0)  # [2M, E]
             # FusedMoE modifies its input in place.

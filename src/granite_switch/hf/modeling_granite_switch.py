@@ -118,12 +118,14 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         and apply the result to both streams.
 
         Returns:
-            ``(batch_index, batch_gates, expert_size)`` — the token-to-expert
-            partition *and* the gate scalars.
+            ``(top_k_index, top_k_weights)`` — the per-token top-k expert indices
+            and their softmaxed gate weights, matching the transformers-5.16
+            ``GraniteMoeSharedTopKRouter`` output (which drops the router logits
+            as its unused third element).
         """
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        _, batch_index, batch_gates, expert_size, _ = self.block_sparse_moe.router(flat)
-        return batch_index, batch_gates, expert_size
+        top_k_index, top_k_weights, _ = self.block_sparse_moe.router(flat)
+        return top_k_index, top_k_weights
 
     def _apply_experts(
         self, hidden_states: torch.Tensor, routing: tuple
@@ -135,27 +137,18 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         ``test_route_apply_matches_upstream_moe`` pins it bit-exactly against
         ``block_sparse_moe(x)`` so a change anywhere in the supported
         ``transformers`` range fails there rather than as a drifted eval score.
+
+        transformers 5.16 folded the per-expert gather/gate-up/down loop into a
+        single ``experts(hidden, top_k_index, top_k_weights)`` call, so the routed
+        application is just that call plus the shape round-trip.
         """
-        batch_index, batch_gates, expert_size = routing
+        top_k_index, top_k_weights = routing
         moe = self.block_sparse_moe
-        bsz, length, _ = hidden_states.shape
-        emb_size = moe.input_size
+        bsz, length, emb_size = hidden_states.shape
 
-        expert_inputs = hidden_states.reshape(-1, emb_size)[batch_index]
-        h = moe.input_linear(expert_inputs, expert_size)
-        chunked = h.chunk(2, dim=-1)
-        h = moe.activation(chunked[0]) * chunked[1]
-        expert_outputs = moe.output_linear(h, expert_size)
-        expert_outputs = expert_outputs * batch_gates[:, None]
-
-        zeros = torch.zeros(
-            (bsz * length, emb_size),
-            dtype=expert_outputs.dtype,
-            device=expert_outputs.device,
-        )
-        return zeros.index_add(0, batch_index, expert_outputs).view(
-            bsz, length, emb_size
-        )
+        flat = hidden_states.reshape(-1, emb_size)
+        expert_outputs = moe.experts(flat, top_k_index, top_k_weights)
+        return expert_outputs.view(bsz, length, moe.input_size)
 
     def _mlp_block(
         self,
