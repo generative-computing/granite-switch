@@ -186,13 +186,13 @@ def _hf_moe_weights(config, *, num_decoder_layers=NUM_DECODER_LAYERS):
     out = {}
     for i in range(num_decoder_layers):
         moe = f"model.layers.{i}.block_sparse_moe"
-        out[f"{moe}.input_linear.weight"] = torch.randn(
+        out[f"{moe}.experts.gate_up_proj"] = torch.randn(
             NUM_EXPERTS, 2 * EXPERT_INTERMEDIATE, config.hidden_size
         )
-        out[f"{moe}.output_linear.weight"] = torch.randn(
+        out[f"{moe}.experts.down_proj"] = torch.randn(
             NUM_EXPERTS, config.hidden_size, EXPERT_INTERMEDIATE
         )
-        out[f"{moe}.router.layer.weight"] = torch.randn(NUM_EXPERTS, config.hidden_size)
+        out[f"{moe}.router.weight"] = torch.randn(NUM_EXPERTS, config.hidden_size)
     return out
 
 
@@ -225,7 +225,7 @@ def _full_checkpoint(model, config):
     vocab_rows = _unpadded_vocab_rows(model)
     weights = {}
     for name, param in model.named_parameters():
-        if ".experts.w13_weight" in name or ".experts.w2_weight" in name:
+        if name.endswith(".w13_weight") or name.endswith(".w2_weight"):
             continue
         if ".block_sparse_moe.gate.weight" in name:
             continue
@@ -377,10 +377,12 @@ class _WeightLoadBase:
         """
         for i, layer in enumerate(_decoder_layers(model)):
             moe = f"model.layers.{i}.block_sparse_moe"
-            experts = layer.block_sparse_moe.experts
-            src_in = weights[f"{moe}.input_linear.weight"]
-            src_out = weights[f"{moe}.output_linear.weight"]
-            src_gate = weights[f"{moe}.router.layer.weight"]
+            # vLLM (>=0.26) wraps the packed expert tensors in a routed_experts
+            # submodule (FusedMoEFactory); w13_weight/w2_weight live there.
+            experts = layer.block_sparse_moe.experts.routed_experts
+            src_in = weights[f"{moe}.experts.gate_up_proj"]
+            src_out = weights[f"{moe}.experts.down_proj"]
+            src_gate = weights[f"{moe}.router.weight"]
 
             for e in range(NUM_EXPERTS):
                 w1, w3 = src_in[e].chunk(2, dim=0)
@@ -432,7 +434,7 @@ class TestLoRAMoEWeightLoad(_WeightLoadBase):
             weights = {
                 k: v
                 for k, v in _full_checkpoint(model, config).items()
-                if not k.endswith(".block_sparse_moe.input_linear.weight")
+                if not k.endswith(".block_sparse_moe.experts.gate_up_proj")
             }
             with pytest.raises(ValueError, match="UNINITIALIZED"):
                 model.load_weights(list(weights.items()))
@@ -464,7 +466,7 @@ class TestSRMoEWeightLoad(_WeightLoadBase):
         """The SR loader had no ``block_sparse_moe`` handling whatsoever.
 
         A composed SR checkpoint is saved from the HF SR model, whose layer holds
-        the same ``GraniteMoeHybridMoE``, so the tensor names and stacked shapes
+        the same ``GraniteMoeMoE``, so the tensor names and stacked shapes
         are identical to the LoRA case — hence one shared remap helper rather than
         two copies that can drift.
         """
@@ -482,7 +484,7 @@ class TestSRMoEWeightLoad(_WeightLoadBase):
             weights = {
                 k: v
                 for k, v in _full_checkpoint(model, config).items()
-                if not k.endswith(".block_sparse_moe.output_linear.weight")
+                if not k.endswith(".block_sparse_moe.experts.down_proj")
             }
             with pytest.raises(ValueError, match="UNINITIALIZED"):
                 model.load_weights(list(weights.items()))

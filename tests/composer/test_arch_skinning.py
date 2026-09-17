@@ -10,7 +10,7 @@ from granite_switch.composer.arch import (
     ModuleDescriptor,
     granite_dense_arch,
     granite_moe_arch,
-    granite_moe_hybrid_arch,
+    granite_moe_shared_arch,
     granite_moe_sr_arch,
 )
 from granite_switch.composer.weight_transfer import _classify_base_weights
@@ -207,9 +207,9 @@ def _make_granitemoe_base_state_dict(num_layers=1, num_experts=4):
         d[f"{prefix}.self_attn.v_proj.weight"] = torch.zeros(32, 128)
         d[f"{prefix}.self_attn.o_proj.weight"] = torch.zeros(128, 128)
         moe = f"{prefix}.block_sparse_moe"
-        d[f"{moe}.input_linear.weight"] = torch.zeros(num_experts, 512, 128)
-        d[f"{moe}.output_linear.weight"] = torch.zeros(num_experts, 128, 256)
-        d[f"{moe}.router.layer.weight"] = torch.zeros(num_experts, 128)
+        d[f"{moe}.experts.gate_up_proj"] = torch.zeros(num_experts, 512, 128)
+        d[f"{moe}.experts.down_proj"] = torch.zeros(num_experts, 128, 256)
+        d[f"{moe}.router.weight"] = torch.zeros(num_experts, 128)
         d[f"{prefix}.input_layernorm.weight"] = torch.zeros(128)
         d[f"{prefix}.post_attention_layernorm.weight"] = torch.zeros(128)
 
@@ -227,8 +227,8 @@ class TestBaseWeightClassificationGraniteMoe:
             base_sd, granite_moe_arch(), self.LORA_TARGETS
         )
 
-        for suffix in ("input_linear", "output_linear", "router.layer"):
-            name = f"model.layers.0.block_sparse_moe.{suffix}.weight"
+        for suffix in ("experts.gate_up_proj", "experts.down_proj", "router.weight"):
+            name = f"model.layers.0.block_sparse_moe.{suffix}"
             assert name in direct, f"{name} not in direct mappings"
             assert direct[name] == name, f"{name} was remapped to {direct[name]}"
 
@@ -285,9 +285,19 @@ class TestArchRegistries:
         assert "granitemoe" in _ARCH_REGISTRY
         assert "granitemoe" in _SR_ARCH_REGISTRY
 
-    def test_hybrid_optional_fields_unchanged_by_field_split(self):
-        """Splitting the MoE field bundle must not perturb the hybrid arch."""
-        opt = granite_moe_hybrid_arch().optional_config_fields
+    def test_granitemoeshared_registered(self):
+        assert "granitemoeshared" in _ARCH_REGISTRY
+        assert "granitemoeshared" in _SR_ARCH_REGISTRY
+
+    def test_granitemoehybrid_key_retained(self):
+        # Real Granite 4.x dense checkpoints are still typed granitemoehybrid
+        # upstream; the key must resolve to the shared-expert descriptor.
+        assert "granitemoehybrid" in _ARCH_REGISTRY
+        assert _ARCH_REGISTRY["granitemoehybrid"] is granite_moe_shared_arch
+
+    def test_shared_optional_fields_unchanged_by_field_split(self):
+        """Splitting the MoE field bundle must not perturb the shared arch."""
+        opt = granite_moe_shared_arch().optional_config_fields
         assert opt["shared_intermediate_size"] is None
         assert opt["num_local_experts"] == 0
         assert opt["num_experts_per_tok"] == 1

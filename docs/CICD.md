@@ -221,7 +221,7 @@ the full test suite was run to confirm the mechanical changes introduced no
 regressions.
 
 **How:** Submitted to the Vela GPU cluster (namespace `security`, 4 GPUs,
-`vllm19` dependency group) via a job config derived from `tests_on_uv_vllm19.yaml`,
+`vllm26` dependency group) via a job config derived from `tests_on_uv_vllm26.yaml`,
 pointed at the formatted branch. It runs a ruff sanity check followed by all five
 suites with `pytest -n 4`.
 
@@ -259,7 +259,7 @@ very unlikely to stem from PR 1 because:
    integration `test_forward_logit_equivalence`.
 
 **Follow-up:** Confirm the same test also flips a position on unmodified `main`
-(e.g. an integration-only run from `tests_on_uv_vllm19.yaml`). If so, treat it as
+(e.g. an integration-only run from `tests_on_uv_vllm26.yaml`). If so, treat it as
 a flaky near-tie test to be addressed separately (tolerance/top-k handling), and
 consider PR 1 cleared.
 
