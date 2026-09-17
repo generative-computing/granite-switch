@@ -225,7 +225,7 @@ def _full_checkpoint(model, config):
     vocab_rows = _unpadded_vocab_rows(model)
     weights = {}
     for name, param in model.named_parameters():
-        if ".experts.w13_weight" in name or ".experts.w2_weight" in name:
+        if name.endswith(".w13_weight") or name.endswith(".w2_weight"):
             continue
         if ".block_sparse_moe.gate.weight" in name:
             continue
@@ -377,7 +377,9 @@ class _WeightLoadBase:
         """
         for i, layer in enumerate(_decoder_layers(model)):
             moe = f"model.layers.{i}.block_sparse_moe"
-            experts = layer.block_sparse_moe.experts
+            # vLLM (>=0.26) wraps the packed expert tensors in a routed_experts
+            # submodule (FusedMoEFactory); w13_weight/w2_weight live there.
+            experts = layer.block_sparse_moe.experts.routed_experts
             src_in = weights[f"{moe}.experts.gate_up_proj"]
             src_out = weights[f"{moe}.experts.down_proj"]
             src_gate = weights[f"{moe}.router.weight"]

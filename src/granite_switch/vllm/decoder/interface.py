@@ -133,15 +133,18 @@ def _audit_loaded(params_dict, loaded_params, model, *, label: str) -> None:
 # HF keeps the expert bank in three stacked tensors; vLLM's FusedMoE wants
 # packed per-expert shards addressed by (shard_id, expert_id):
 #
-#   block_sparse_moe.experts.gate_up_proj [E, 2I, H] -> experts.w13_weight (w1|w3)
-#   block_sparse_moe.experts.down_proj    [E, H, I]  -> experts.w2_weight  (w2)
+#   block_sparse_moe.experts.gate_up_proj [E, 2I, H] -> experts.routed_experts.w13_weight (w1|w3)
+#   block_sparse_moe.experts.down_proj    [E, H, I]  -> experts.routed_experts.w2_weight  (w2)
 #   block_sparse_moe.router.weight        [E, H]     -> block_sparse_moe.gate.weight
 #
-# transformers 5.16 renamed these from the older input_linear/output_linear/
-# router.layer layout; the stacked shapes are unchanged, so only the source
-# tensor names moved. Shared by BOTH adaptations: a composed SR checkpoint is
-# written by the HF SR model, whose layer holds the same GraniteMoeSharedMoE,
-# so the tensor names and stacked shapes are identical to the LoRA case.
+# transformers 5.16 renamed the SOURCE (HF checkpoint) tensors from the older
+# input_linear/output_linear/router.layer layout; the stacked shapes are
+# unchanged. The TARGET (vLLM FusedMoE) params carry a ``routed_experts.``
+# segment because vLLM (>=0.26) builds the bank via FusedMoEFactory
+# (``experts.routed_experts.w13_weight``) — verified against both the 0.26 and
+# 0.27 lines. Shared by BOTH adaptations: a composed SR checkpoint is written by
+# the HF SR model, whose layer holds the same GraniteMoeSharedMoE, so the tensor
+# names and stacked shapes are identical to the LoRA case.
 # --------------------------------------------------------------------------- #
 _MOE_INPUT_SUFFIX = ".block_sparse_moe.experts.gate_up_proj"
 _MOE_OUTPUT_SUFFIX = ".block_sparse_moe.experts.down_proj"
@@ -172,7 +175,9 @@ def _try_load_stacked_moe(name, loaded_weight, params_dict, loaded_params, model
 
     if name.endswith(_MOE_INPUT_SUFFIX):
         # gate|up are concatenated on dim 0 of each expert: w1 = gate, w3 = up.
-        w13_param = name.replace(".experts.gate_up_proj", ".experts.w13_weight")
+        w13_param = name.replace(
+            ".experts.gate_up_proj", ".experts.routed_experts.w13_weight"
+        )
         for e in range(loaded_weight.size(0)):
             w1, w3 = loaded_weight[e].chunk(2, dim=0)
             for shard, shard_id in ((w1, "w1"), (w3, "w3")):
@@ -189,7 +194,9 @@ def _try_load_stacked_moe(name, loaded_weight, params_dict, loaded_params, model
         return True
 
     if name.endswith(_MOE_OUTPUT_SUFFIX):
-        w2_param = name.replace(".experts.down_proj", ".experts.w2_weight")
+        w2_param = name.replace(
+            ".experts.down_proj", ".experts.routed_experts.w2_weight"
+        )
         for e in range(loaded_weight.size(0)):
             _load_expert(
                 w2_param,
@@ -336,11 +343,12 @@ class LoRADecoderInterface(DecoderInterface):
            use a stacked format that must be split into per-expert tensors for
            vLLM's FusedMoE layer.
 
-           HF format → vLLM format (names are transformers-5.16 layout):
+           HF format → vLLM format (source names are the transformers-5.16
+           layout; target params carry vLLM's FusedMoE ``routed_experts.``):
            - block_sparse_moe.experts.gate_up_proj [E, 2*I, H]
-             → experts.w13_weight via weight_loader(shard_id="w1"/"w3", expert_id=e)
+             → experts.routed_experts.w13_weight via weight_loader(shard_id="w1"/"w3", expert_id=e)
            - block_sparse_moe.experts.down_proj [E, H, I]
-             → experts.w2_weight via weight_loader(shard_id="w2", expert_id=e)
+             → experts.routed_experts.w2_weight via weight_loader(shard_id="w2", expert_id=e)
            - block_sparse_moe.router.weight [E, H]
              → block_sparse_moe.gate.weight (direct rename)
         """
