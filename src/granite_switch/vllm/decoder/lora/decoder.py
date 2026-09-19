@@ -283,11 +283,8 @@ class GraniteSwitchDecoderLayer(nn.Module):
         # MLP section
         self.has_experts = getattr(config, "num_local_experts", 0) > 0
         if self.has_experts:
-            from granite_switch.vllm.decoder._upstream_layers import (
-                get_granite_moe_moe,
-            )
+            from vllm.model_executor.models.granitemoe import GraniteMoeMoE
 
-            GraniteMoeMoE = get_granite_moe_moe()
             self.block_sparse_moe = GraniteMoeMoE(
                 num_experts=config.num_local_experts,
                 top_k=config.num_experts_per_tok,
@@ -307,11 +304,10 @@ class GraniteSwitchDecoderLayer(nn.Module):
         # (hf/modeling_granite_switch.py).
         self.has_shared_mlp = getattr(config, "shared_intermediate_size", 0) > 0
         if self.has_shared_mlp:
-            from granite_switch.vllm.decoder._upstream_layers import (
-                get_granite_moe_shared_mlp,
+            from vllm.model_executor.models.granitemoeshared import (
+                GraniteMoeSharedMLP,
             )
 
-            GraniteMoeSharedMLP = get_granite_moe_shared_mlp()
             self.shared_mlp = GraniteMoeSharedMLP(
                 config=config,
                 quant_config=vllm_config.quant_config,
