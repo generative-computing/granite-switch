@@ -160,7 +160,6 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
 
     Returns a new dict suitable for GraniteSwitchConfig(**result) that has:
     - num_hidden_layers += 2 (2 cache slots for MultiSwitch)
-    - layer_types prepended with two "full_attention" (the switch cache slots)
     - LoRA adapter config fields
     - adapter_token_ids (rewritten to substitute ids by the switch)
     - adapter_substitute_token_ids (token-exchange substitutes)
@@ -168,16 +167,14 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     """
     cfg = dict(cfg_dict)
 
-    # Prepend placeholder entries for the switch cache slots. MultiSwitch (the
-    # only engine) owns 2 slots (counting + memory), so +2 keeps every base
-    # decoder layer -- these callers pass no control tokens, so the skinned
-    # model stays bit-exact with upstream.
+    # Reserve the switch cache slots. MultiSwitch (the only engine) owns 2 slots
+    # (counting + memory), so +2 keeps every base decoder layer -- these callers
+    # pass no control tokens, so the skinned model stays bit-exact with upstream.
+    # The switch is attention-only; DynamicCache derives the per-layer layout
+    # from num_hidden_layers, so no layer_types is threaded through.
     cfg["num_hidden_layers"] = cfg["num_hidden_layers"] + 2
-    cfg["layer_types"] = [
-        "full_attention",
-        "full_attention",
-        *list(cfg["layer_types"]),
-    ]
+    cfg.pop("layer_types", None)
+    cfg.pop("position_embedding_type", None)
 
     # Adapter configuration
     cfg["num_adapters"] = num_adapters

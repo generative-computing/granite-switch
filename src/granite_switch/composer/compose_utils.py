@@ -7,7 +7,7 @@ Delegates to :mod:`arch`, :mod:`adapter_loader`, :mod:`weight_transfer`, and
 
 import torch
 
-from ..config import ATTENTION_LAYER_TYPE, SWITCH_CACHE_LAYERS
+from ..config import SWITCH_CACHE_LAYERS
 from .adapter_loader import (
     _extract_modules_from_weights,
     detect_lora_config,
@@ -168,7 +168,7 @@ class GraniteSwitchComposer:
                 lora_rank = built_in_lora_rank
                 adapter_ranks = [built_in_lora_rank] * num_built_in
                 adapter_alphas = {}
-                # Auto-detect lora_target_modules from layer_types
+                # Auto-detect lora_target_modules (attention-only switch model)
                 lora_target_modules = None
                 source_analysis = {}
             else:
@@ -199,25 +199,17 @@ class GraniteSwitchComposer:
                 "intermediate_size"
             ]
 
-        # Normalize layer_types: map everything to the attention layer type
-        # (only attention layers are supported).
-        lt = config_kwargs.get("layer_types")
-        if lt is not None:
-            config_kwargs["layer_types"] = [ATTENTION_LAYER_TYPE for _ in lt]
-
         # When adapters are present, reserve the switch's cache slots at the
         # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
         # memory heads). The model subtracts the same count in
         # modeling_granite_switch.py to recover the physical decoder layers.
+        # The switch is attention-only, so no ``layer_types`` is carried:
+        # ``DynamicCache`` derives an all-``full_attention`` layout from the
+        # (inflated) ``num_hidden_layers``.
         if num_total > 0:
             config_kwargs["num_hidden_layers"] = (
                 config_kwargs["num_hidden_layers"] + SWITCH_CACHE_LAYERS
             )
-            if config_kwargs.get("layer_types") is not None:
-                config_kwargs["layer_types"] = [
-                    *([ATTENTION_LAYER_TYPE] * SWITCH_CACHE_LAYERS),
-                    *list(config_kwargs["layer_types"]),
-                ]
 
         # Switch-specific parameters
         config_kwargs.update(

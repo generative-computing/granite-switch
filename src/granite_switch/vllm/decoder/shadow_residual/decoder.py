@@ -124,14 +124,12 @@ class ShadowResidualAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        if getattr(config, "position_embedding_type", "rope") == "rope":
-            self.rotary_emb = get_rope(
-                self.head_dim,
-                max_position=config.max_position_embeddings,
-                rope_parameters=config.rope_parameters,
-            )
-        else:
-            self.rotary_emb = None
+        # Rotary embeddings (the switch model is always RoPE).
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+        )
 
         # Doubled query heads (base + adapter interleaved) against base-only K/V.
         self.attn = Attention(

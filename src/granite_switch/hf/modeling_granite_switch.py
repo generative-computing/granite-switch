@@ -355,10 +355,7 @@ class GraniteSwitchPreTrainedModel(GraniteMoeSharedPreTrainedModel):
 
 
 class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
-    """Granite model with switch-controlled LoRA adapters.
-
-    RoPE is only applied when position_embedding_type == "rope".
-    """
+    """Granite model with switch-controlled LoRA adapters."""
 
     def __init__(self, config: GraniteSwitchConfig):
         super().__init__(config)
@@ -442,12 +439,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Final norm
         self.norm = GraniteMoeSharedRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Rotary embeddings (only if position_embedding_type == "rope")
-        self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type == "rope":
-            self.rotary_emb = GraniteMoeSharedRotaryEmbedding(config=config)
-        else:
-            self.rotary_emb = None
+        # Rotary embeddings (the switch model is always RoPE).
+        self.rotary_emb = GraniteMoeSharedRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
 
@@ -597,11 +590,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Expose adapter_indices for tests and debugging.
         self._last_adapter_indices = adapter_indices
 
-        position_embeddings = None
-        if self.rotary_emb is not None:
-            position_embeddings = self.rotary_emb(
-                inputs_embeds, position_ids=position_ids
-            )
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
 
         # Decoder layers.  In a Shadow Residual checkpoint every layer is an
         # SRSwitchDecoderLayer and runs two streams that both start from the

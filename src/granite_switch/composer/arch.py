@@ -326,16 +326,6 @@ _MOE_OPTIONAL_FIELDS: dict[str, Any] = {
     "shared_intermediate_size": None,
 }
 
-# Layer-type / positional fields. The switch model is attention-only, but it
-# still reads ``layer_types`` (lora_target_modules auto-detection) and
-# ``position_embedding_type`` (RoPE gating), so these are propagated from the
-# base config when present. ``GraniteSwitchConfig`` owns them as its own
-# attributes (the GraniteMoeShared parent does not declare them).
-_LAYER_TYPE_OPTIONAL_FIELDS: dict[str, Any] = {
-    "layer_types": None,
-    "position_embedding_type": "rope",
-}
-
 
 # ---------------------------------------------------------------------------
 # Architecture factory functions
@@ -354,7 +344,6 @@ def granite_moe_shared_arch(base_config=None) -> ArchDescriptor:
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
-    optional_fields.update(_LAYER_TYPE_OPTIONAL_FIELDS)
 
     return ArchDescriptor(
         groups=list(_common_attn_groups()) + list(_moe_shared_mlp_groups()),
@@ -378,9 +367,6 @@ def granite_moe_arch(base_config=None) -> ArchDescriptor:
     ``shared_intermediate_size`` is pinned to ``0``, which is upstream's own
     encoding for "no shared MLP"
     (``granitemoeshared``: ``shared_mlp = None if shared_intermediate_size == 0``).
-    ``position_embedding_type`` is deliberately not propagated:
-    ``GraniteSwitchConfig`` already defaults it to ``"rope"``, which is what
-    granitemoe uses.
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)

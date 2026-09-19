@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Additional config edge case tests for GraniteSwitchConfig."""
 
+from transformers.cache_utils import DynamicCache
+
 from granite_switch.config import GraniteSwitchConfig
 
 
@@ -85,25 +87,35 @@ class TestSharedIntermediateSize:
         assert reloaded.shared_intermediate_size == 128
 
 
-class TestLayerTypesDefault:
-    """layer_types defaults to all-full_attention with length == num_hidden_layers.
-
-    The value must be ``full_attention`` (a key in transformers'
-    DYNAMIC_LAYER_TYPE_MAPPING), not the bare ``attention`` shorthand — otherwise
-    ``DynamicCache(config=...)`` raises KeyError when it dispatches per-layer.
+class TestNoLayerTypesOrPositionEmbeddingType:
+    """The switch model is attention-only with unconditional RoPE, so it carries
+    neither ``layer_types`` nor ``position_embedding_type``. ``DynamicCache``
+    derives an all-``full_attention`` per-layer layout from ``num_hidden_layers``.
     """
 
-    def test_default_layer_types_when_omitted(self):
-        cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=4)
-        assert cfg.layer_types == ["full_attention"] * 4
+    def test_config_does_not_carry_layer_types(self):
+        cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=40)
+        # The parent (GraniteMoeSharedConfig) does not declare it either.
+        assert getattr(cfg, "layer_types", None) is None
 
-    def test_explicit_layer_types_preserved(self):
-        cfg = GraniteSwitchConfig(
-            num_adapters=0,
-            num_hidden_layers=3,
-            layer_types=["full_attention", "full_attention", "full_attention"],
-        )
-        assert cfg.layer_types == ["full_attention", "full_attention", "full_attention"]
+    def test_config_does_not_carry_position_embedding_type(self):
+        cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=40)
+        assert getattr(cfg, "position_embedding_type", None) is None
+
+    def test_dynamic_cache_derives_layout_from_num_hidden_layers(self):
+        # 40 layers, not the old hardcoded 32 fallback — a config with no
+        # layer_types must still yield exactly one cache layer per hidden layer.
+        cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=40)
+        cache = DynamicCache(config=cfg)
+        assert len(cache.layers) == cfg.num_hidden_layers
+
+    def test_dynamic_cache_layout_after_from_dict_roundtrip(self):
+        # A checkpoint config serialized without layer_types must reload and
+        # still build the correct per-layer cache (the "loading from config" path).
+        cfg = GraniteSwitchConfig(num_adapters=0, num_hidden_layers=40)
+        reloaded = GraniteSwitchConfig.from_dict(cfg.to_dict())
+        assert getattr(reloaded, "layer_types", None) is None
+        assert len(DynamicCache(config=reloaded).layers) == 40
 
 
 class TestLoraTargetModulesDefault:

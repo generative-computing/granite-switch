@@ -14,14 +14,6 @@ ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 # physical decoder-layer count.
 SWITCH_CACHE_LAYERS = 2
 
-# Layer-type string stored in ``config.layer_types``. The switch model is
-# attention-only, so every entry is this value. It must be a key in
-# transformers' ``DYNAMIC_LAYER_TYPE_MAPPING`` (``full_attention``), because
-# ``DynamicCache(config=...)`` dispatches on it to pre-allocate per-layer caches.
-# (An internal shorthand like "attention" is not a valid mapping key and raises
-# KeyError at cache init on transformers >= 5.10.)
-ATTENTION_LAYER_TYPE = "full_attention"
-
 
 class GraniteSwitchConfig(GraniteMoeSharedConfig):
     """Configuration class for GraniteSwitch model.
@@ -183,8 +175,6 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
         num_local_experts: int = 0,
-        position_embedding_type: str = "rope",
-        layer_types: list[str] | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -192,19 +182,11 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
             **kwargs,
         )
 
-        # layer_types and position_embedding_type are switch-owned attributes.
-        # The GraniteMoeShared parent (unlike the old GraniteMoeHybrid one) does
-        # not declare them, but internal readers still depend on them: the
-        # lora_target_modules auto-detection below reads ``self.layer_types``, and
-        # the decoders gate RoPE on ``position_embedding_type``.  The switch model
-        # is attention-only, so layer_types is always all-``full_attention``; its
-        # length must equal num_hidden_layers so DynamicCache pre-allocation
-        # matches the global layer indices used by decoder layers.
-        if layer_types is None:
-            num_hidden_layers = kwargs.get("num_hidden_layers", 32)
-            layer_types = [ATTENTION_LAYER_TYPE] * num_hidden_layers
-        self.layer_types = layer_types
-        self.position_embedding_type = position_embedding_type
+        # The switch model is attention-only with RoPE. It carries neither
+        # ``layer_types`` nor ``position_embedding_type``: RoPE is unconditional,
+        # and ``DynamicCache(config=self)`` derives an all-``full_attention``
+        # per-layer layout from ``num_hidden_layers`` when ``layer_types`` is
+        # absent (transformers has no sliding-window signal on this config).
 
         # Resolve shared_intermediate_size independently of the parent default.
         # The GraniteMoeShared parent defaults it to 0, which is ALSO the explicit
@@ -383,14 +365,14 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
             lora_target_modules = []
 
             if self.num_adapters > 0:
-                # Attention modules (present in all attention layers)
-                if any(lt == ATTENTION_LAYER_TYPE for lt in self.layer_types):
-                    lora_target_modules.extend(
-                        [
-                            "qkv_proj",  # Q/K/V fused
-                            "o_proj",  # O projection
-                        ]
-                    )
+                # Attention modules: the switch model is attention-only, so
+                # every layer has them.
+                lora_target_modules.extend(
+                    [
+                        "qkv_proj",  # Q/K/V fused
+                        "o_proj",  # O projection
+                    ]
+                )
 
                 # MLP modules: only where a shared_mlp exists to hold them.
                 # Pure sparse MoE bases have none, and asking for the groups

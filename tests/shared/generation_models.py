@@ -20,7 +20,6 @@ DENSE_CFG = dict(
     num_key_value_heads=1,
     intermediate_size=192,
     shared_intermediate_size=192,
-    layer_types=["full_attention", "full_attention", "full_attention"],
     max_position_embeddings=2048,
     attention_bias=False,
     mlp_bias=False,
@@ -44,25 +43,24 @@ ADAPTER_RANK = 8
 
 # ── Switch override dicts ─────────────────────────────────────────
 # Merged with a base config (HYBRID_CFG or DENSE_CFG) via
-# {**base, **overrides}.  Each override includes layer_types and
-# num_hidden_layers that prepend the switch layer(s) to the base.
+# {**base, **overrides}.  Each override grows num_hidden_layers to prepend
+# the switch cache slot(s) to the base.
 
 
 def switch_overrides(base_cfg):
     """MultiSwitch overrides for the given base config (token exchange).
 
-    The coded switch owns 2 cache slots (counting + memory), so 2 attention
-    layers are prepended and ``num_hidden_layers`` grows by 2.
+    The coded switch owns 2 cache slots (counting + memory), so
+    ``num_hidden_layers`` grows by 2. The switch model is attention-only, so
+    DynamicCache derives the per-layer layout from num_hidden_layers.
     """
-    base_layers = base_cfg["layer_types"]
     return {
         "num_adapters": NUM_ADAPTERS,
         "adapter_ranks": [ADAPTER_RANK] * NUM_ADAPTERS,
         "adapter_token_ids": [250, 251],
         "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
-        "num_hidden_layers": len(base_layers) + 2,
-        "layer_types": ["full_attention", "full_attention", *base_layers],
+        "num_hidden_layers": base_cfg["num_hidden_layers"] + 2,
     }
 
 

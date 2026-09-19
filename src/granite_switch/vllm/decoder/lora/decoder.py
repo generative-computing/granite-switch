@@ -132,15 +132,12 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Rotary embeddings (only for models with positional encoding)
-        if getattr(config, "position_embedding_type", "rope") == "rope":
-            self.rotary_emb = get_rope(
-                self.head_dim,
-                max_position=config.max_position_embeddings,
-                rope_parameters=config.rope_parameters,
-            )
-        else:
-            self.rotary_emb = None
+        # Rotary embeddings (the switch model is always RoPE).
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            max_position=config.max_position_embeddings,
+            rope_parameters=config.rope_parameters,
+        )
 
         # Attention layer — head_dim is the native projection_head_dim.
         self.attn = Attention(
