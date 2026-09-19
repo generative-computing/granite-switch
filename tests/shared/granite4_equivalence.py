@@ -252,9 +252,15 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
 
     Error sources:
 
-    1. **No adapters**: GraniteSwitch with num_adapters=0 is bit-exact vs
-       upstream Granite. Fused QKV matmul is bit-identical to separate
-       Q/K/V matmuls in float32.
+    1. **No adapters**: GraniteSwitch with num_adapters=0 is numerically
+       equivalent to upstream Granite to within ~1 bf16 ULP. It used to be
+       bit-exact when GraniteSwitch inherited GraniteMoeHybrid (the same
+       computation graph as the reference). After the de-hybridization
+       (GraniteMoeShared base), the inert forward runs a different-but-
+       equivalent vLLM path whose float-reduction order differs, so on the
+       SAME transferred weights the logprobs drift by one ULP
+       (measured max_abs_diff 4.77e-7 == 2^-21, mean ~3e-8 across 4.0-mini
+       {1b,350m,micro}). Not bit-exact, but far below model noise.
 
     2. **Token-exchange embedding divergence**: With adapters and a control
        token in the input, the switch embeds the substitute id at that
@@ -269,11 +275,15 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
             now means "control tokens get substituted").
 
     Returns:
-        (atol, rtol) tuple, or None if bit-exact match expected.
+        (atol, rtol) tuple. Never None: even the inert base-model path is only
+        ULP-equivalent (not bit-exact) post-de-hybridization.
     """
     if not has_kv_hidden:
-        # Pure base-model path: bit-exact (fused QKV numerically identical).
-        return None
+        # Pure base-model (inert) path: ULP-equivalent, not bit-exact. 1e-5 is
+        # ~20x the measured 4.77e-7 worst case (comfortable margin) yet ~1000x
+        # tighter than the adapter-path tolerance, so a real logit regression
+        # still trips it.
+        return (1e-5, 1e-5)
     else:
         # Substitute-embedding propagates through attention to visible
         # positions. Worst observed: ~5.0e-2 (multi 1b, seed-dependent).
