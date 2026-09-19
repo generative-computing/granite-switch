@@ -124,3 +124,46 @@ class TestLoraTargetModulesDefault:
     def test_explicit_target_modules_preserved(self):
         cfg = GraniteSwitchConfig(**_valid_kwargs(lora_target_modules=["qkv_proj"]))
         assert cfg.lora_target_modules == ["qkv_proj"]
+
+    def test_pure_moe_excludes_shared_mlp_targets(self):
+        # Pure sparse MoE (shared_intermediate_size resolves to 0) must NOT list
+        # the shared_mlp pair even with adapters present. Targeting an absent
+        # shared MLP would build zero-width [0, H] / [H, 0] LoRA projections that
+        # no checkpoint ships (config.py shared_intermediate_size > 0 gate).
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(num_local_experts=4, num_experts_per_tok=2)
+        )
+        assert cfg.shared_intermediate_size == 0
+        assert "qkv_proj" in cfg.lora_target_modules
+        assert "o_proj" in cfg.lora_target_modules
+        assert "shared_input_linear" not in cfg.lora_target_modules
+        assert "shared_output_linear" not in cfg.lora_target_modules
+
+
+class TestNoMlpPathRejection:
+    """A decoder needs at least one MLP path: experts, a shared MLP, or both.
+
+    The rejection of the degenerate ``num_local_experts == 0 and
+    shared_intermediate_size == 0`` layer lives in the three decoder
+    constructors (hf/modeling_granite_switch.py, vllm/decoder/lora/decoder.py,
+    vllm/decoder/shadow_residual/decoder.py), NOT in the config -- constructing
+    such a config succeeds. This test pins that boundary so a future change
+    doesn't silently relocate the guard (or assume the config already enforces
+    it). The decoder-level raise itself is exercised by the GPU vLLM/HF suites.
+    """
+
+    _DIMS = dict(
+        vocab_size=300,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+    )
+
+    def test_config_permits_no_mlp_path(self):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0, shared_intermediate_size=0, **self._DIMS
+        )
+        assert cfg.shared_intermediate_size == 0
+        assert getattr(cfg, "num_local_experts", 0) == 0
