@@ -64,9 +64,9 @@ class TestGranite4FamilyEquivalence:
             **_eager_kwargs_if_needed(model_name),
         )
 
-        # ULP-equivalent, not bit-exact: post-de-hybridization the inert switch
-        # runs an equivalent-but-different-reduction-order vLLM path (see
-        # get_tolerances). tol is never None now.
+        # ULP-equivalent, not bit-exact: the inert switch runs its projections
+        # through the fused SWITCH kernel, whose reduction order differs from
+        # vLLM's native linear (see get_tolerances). tol is never None now.
         tol = get_tolerances(layer_types, long_sequence=False)
         assert_close(
             switch,
@@ -119,9 +119,9 @@ class TestZeroAdapterNoHiding:
         )
 
         # Skinned + no control token = inert switch. ULP-equivalent to upstream,
-        # not bit-exact: the de-hybridized (GraniteMoeShared) forward reduces in
-        # a different order than the GraniteMoeHybrid reference on the same
-        # transferred weights (~1 bf16 ULP; see get_tolerances).
+        # not bit-exact: the fused SWITCH kernel reduces in a different order than
+        # the GraniteMoeHybrid reference's native linear on the same transferred
+        # weights (~1 bf16 ULP; see get_tolerances).
         tol = get_tolerances(layer_types, has_kv_hidden=False)
         assert_close(
             switch,

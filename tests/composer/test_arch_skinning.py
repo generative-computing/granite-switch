@@ -10,7 +10,7 @@ from granite_switch.composer.arch import (
     ModuleDescriptor,
     granite_dense_arch,
     granite_moe_arch,
-    granite_moe_shared_arch,
+    granite_moe_hybrid_arch,
     granite_moe_sr_arch,
 )
 from granite_switch.composer.weight_transfer import _classify_base_weights
@@ -290,14 +290,14 @@ class TestArchRegistries:
         assert "granitemoeshared" in _SR_ARCH_REGISTRY
 
     def test_granitemoehybrid_key_retained(self):
-        # Real Granite 4.x dense checkpoints are still typed granitemoehybrid
+        # Real Granite 4.x dense checkpoints are typed granitemoehybrid
         # upstream; the key must resolve to the shared-expert descriptor.
         assert "granitemoehybrid" in _ARCH_REGISTRY
-        assert _ARCH_REGISTRY["granitemoehybrid"] is granite_moe_shared_arch
+        assert _ARCH_REGISTRY["granitemoehybrid"] is granite_moe_hybrid_arch
 
     def test_shared_optional_fields_unchanged_by_field_split(self):
         """Splitting the MoE field bundle must not perturb the shared arch."""
-        opt = granite_moe_shared_arch().optional_config_fields
+        opt = granite_moe_hybrid_arch().optional_config_fields
         assert opt["shared_intermediate_size"] is None
         assert opt["num_local_experts"] == 0
         assert opt["num_experts_per_tok"] == 1

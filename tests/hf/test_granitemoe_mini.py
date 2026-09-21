@@ -164,7 +164,7 @@ class TestGraniteMoeNoSharedMLP:
         transformers 5.16 restructured the MoE block from separate
         ``input_linear`` / ``output_linear`` / ``router.layer`` submodules to a
         single ``experts`` module (``gate_up_proj`` / ``down_proj``) plus a flat
-        ``router``. Both the switch's GraniteMoeShared block and upstream use the
+        ``router``. Both the switch's GraniteMoeHybrid block and upstream use the
         new layout, so identity transfer still holds — under the new names.
         """
         _name, upstream, switch = model_pair

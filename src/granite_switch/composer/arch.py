@@ -315,7 +315,7 @@ _GRANITE_OPTIONAL_FIELDS: dict[str, Any] = {
     "embedding_multiplier": 1.0,
     "logits_scaling": 1.0,
     "attention_multiplier": 1.0,
-    # Granite/GraniteMoeShared vLLM classes use separate add-then-norm.
+    # Granite/GraniteMoeHybrid vLLM classes use separate add-then-norm.
     "fused_add_norm": False,
 }
 
@@ -332,15 +332,15 @@ _MOE_OPTIONAL_FIELDS: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
-def granite_moe_shared_arch(base_config=None) -> ArchDescriptor:
-    """GraniteMoeShared architecture (model_type ``granitemoeshared`` /
-    ``granitemoehybrid``).
+def granite_moe_hybrid_arch(base_config=None) -> ArchDescriptor:
+    """GraniteMoeHybrid architecture (model_type ``granitemoehybrid`` /
+    ``granitemoeshared``).
 
     Granite 4 MoE-with-shared-expert models use ``shared_mlp`` module naming
     (``shared_input_linear``, ``shared_output_linear``), even dense layers
-    with ``num_local_experts=0``. Real Granite 4.x dense checkpoints are still
-    typed ``granitemoehybrid`` upstream (they carry no mamba layers), so this
-    same descriptor serves both model_type strings.
+    with ``num_local_experts=0``. Real Granite 4.x dense checkpoints are typed
+    ``granitemoehybrid`` upstream (they carry no mamba layers), so this same
+    descriptor serves both model_type strings.
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
@@ -357,7 +357,7 @@ def granite_moe_arch(base_config=None) -> ArchDescriptor:
 
     Pure sparse MoE: every layer has an expert bank and **no** dense
     ``shared_mlp``.  The descriptor is therefore ``_common_attn_groups()`` and
-    nothing else — a strict subset of :func:`granite_moe_shared_arch`.
+    nothing else — a strict subset of :func:`granite_moe_hybrid_arch`.
 
     The frozen expert tensors (``block_sparse_moe.experts.gate_up_proj`` /
     ``experts.down_proj`` / ``router.weight`` in the transformers-5.16 layout)
@@ -366,7 +366,7 @@ def granite_moe_arch(base_config=None) -> ArchDescriptor:
 
     ``shared_intermediate_size`` is pinned to ``0``, which is upstream's own
     encoding for "no shared MLP"
-    (``granitemoeshared``: ``shared_mlp = None if shared_intermediate_size == 0``).
+    (``granitemoehybrid``: ``shared_mlp = None if shared_intermediate_size == 0``).
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
@@ -403,13 +403,13 @@ _SR_BUFFER_KEYWORDS: list[str] = [
 ]
 
 
-def granite_moe_shared_sr_arch(base_config=None) -> ArchDescriptor:
-    """GraniteMoeShared Shadow Residual architecture.
+def granite_moe_hybrid_sr_arch(base_config=None) -> ArchDescriptor:
+    """GraniteMoeHybrid Shadow Residual architecture.
 
-    Identical to :func:`granite_moe_shared_arch` (fused projections) plus the
+    Identical to :func:`granite_moe_hybrid_arch` (fused projections) plus the
     layer-level ``cross_stream`` injection site.
     """
-    arch = granite_moe_shared_arch(base_config=base_config)
+    arch = granite_moe_hybrid_arch(base_config=base_config)
     arch.groups = arch.groups + _cross_stream_groups()
     arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
     return arch
@@ -438,12 +438,12 @@ def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
 _ARCH_REGISTRY = {
     "granite": granite_dense_arch,
     "granitemoe": granite_moe_arch,
-    # granitemoeshared is the de-hybridized base family. The granitemoehybrid
-    # key is retained because real Granite 4.x dense checkpoints are still typed
-    # granitemoehybrid upstream (they carry no mamba layers); both resolve to the
-    # same shared-expert descriptor.
-    "granitemoeshared": granite_moe_shared_arch,
-    "granitemoehybrid": granite_moe_shared_arch,
+    # Real Granite 4.x dense/MoE-with-shared-expert checkpoints are typed
+    # granitemoehybrid upstream (they carry no mamba layers). A granitemoeshared
+    # key is kept alongside for bases typed that way; both resolve to the same
+    # shared-expert descriptor.
+    "granitemoehybrid": granite_moe_hybrid_arch,
+    "granitemoeshared": granite_moe_hybrid_arch,
 }
 
 # Must stay key-for-key in step with _ARCH_REGISTRY: a model_type registered in
@@ -452,8 +452,8 @@ _ARCH_REGISTRY = {
 _SR_ARCH_REGISTRY = {
     "granite": granite_dense_sr_arch,
     "granitemoe": granite_moe_sr_arch,
-    "granitemoeshared": granite_moe_shared_sr_arch,
-    "granitemoehybrid": granite_moe_shared_sr_arch,
+    "granitemoehybrid": granite_moe_hybrid_sr_arch,
+    "granitemoeshared": granite_moe_hybrid_sr_arch,
 }
 
 

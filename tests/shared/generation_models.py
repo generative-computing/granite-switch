@@ -68,6 +68,21 @@ def switch_overrides(base_cfg):
 basic_overrides = switch_overrides
 
 
+def _merge_switch_cfg(base_cfg, cfg_overrides):
+    """Merge base + switch overrides into GraniteSwitchConfig kwargs.
+
+    The switch model is attention-only and derives its per-layer cache layout
+    from num_hidden_layers, so it carries neither layer_types nor
+    position_embedding_type. A base config dict may still declare them; strip
+    them here, otherwise transformers' validate_layer_type rejects the config
+    when the switch bumps num_hidden_layers past the base layer_types length.
+    """
+    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict.pop("layer_types", None)
+    cfg_dict.pop("position_embedding_type", None)
+    return cfg_dict
+
+
 # ── Model builder ─────────────────────────────────────────────────
 
 
@@ -79,7 +94,7 @@ def save_switch_model(base_cfg, cfg_overrides, tmpdir):
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM as HFSwitch
 
-    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict = _merge_switch_cfg(base_cfg, cfg_overrides)
 
     switch_cfg = GraniteSwitchConfig(**cfg_dict)
     torch.manual_seed(0)
@@ -100,7 +115,7 @@ def make_switch_model(base_cfg, cfg_overrides, seed=0):
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM as HFSwitch
 
-    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict = _merge_switch_cfg(base_cfg, cfg_overrides)
 
     switch_cfg = GraniteSwitchConfig(**cfg_dict)
     torch.manual_seed(seed)

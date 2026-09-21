@@ -192,8 +192,9 @@ class GraniteSwitchComposer:
         # shared_intermediate_size, supply it explicitly from intermediate_size:
         # a dense Granite layer always has a shared MLP of that width. This makes
         # the composer the source of truth and does not rely on any parent-class
-        # default (GraniteMoeShared defaults it to 0, which is the "no shared MLP"
-        # sentinel — GraniteSwitchConfig would keep that 0 verbatim if passed).
+        # default (GraniteMoeHybrid defaults it to a fixed 1024, the wrong width
+        # for dense bases — GraniteSwitchConfig resolves it from intermediate_size
+        # instead when left unset).
         if "shared_intermediate_size" not in config_kwargs:
             config_kwargs["shared_intermediate_size"] = config_kwargs[
                 "intermediate_size"
@@ -203,9 +204,9 @@ class GraniteSwitchComposer:
         # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
         # memory heads). The model subtracts the same count in
         # modeling_granite_switch.py to recover the physical decoder layers.
-        # The switch is attention-only, so no ``layer_types`` is carried:
-        # ``DynamicCache`` derives an all-``full_attention`` layout from the
-        # (inflated) ``num_hidden_layers``.
+        # No base ``layer_types`` is carried into config_kwargs (the arch
+        # descriptors do not propagate it); GraniteSwitchConfig synthesizes an
+        # all-``full_attention`` layout sized to this inflated ``num_hidden_layers``.
         if num_total > 0:
             config_kwargs["num_hidden_layers"] = (
                 config_kwargs["num_hidden_layers"] + SWITCH_CACHE_LAYERS

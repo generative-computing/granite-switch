@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Configuration for Granite model with adapter switching."""
 
-from transformers import GraniteMoeSharedConfig
+from transformers import GraniteMoeHybridConfig
 
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
@@ -15,7 +15,7 @@ ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 SWITCH_CACHE_LAYERS = 2
 
 
-class GraniteSwitchConfig(GraniteMoeSharedConfig):
+class GraniteSwitchConfig(GraniteMoeHybridConfig):
     """Configuration class for GraniteSwitch model.
 
     Extends the Granite base config with parameters for adapter switching.
@@ -175,27 +175,40 @@ class GraniteSwitchConfig(GraniteMoeSharedConfig):
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
         num_local_experts: int = 0,
+        position_embedding_type: str = "rope",
+        layer_types: list[str] | None = None,
         **kwargs,
     ):
+        # The switch model is attention-only with RoPE, but its parent
+        # ``GraniteMoeHybridConfig`` is a mamba/attention hybrid whose
+        # ``__post_init__`` fills an *unset* ``layer_types`` with
+        # ``["linear_attention"] * num_hidden_layers`` — i.e. all mamba, which
+        # would make ``DynamicCache`` allocate the wrong per-layer cache. So the
+        # switch config must pin ``layer_types`` to all-attention itself. The
+        # length must equal ``num_hidden_layers`` (already inflated by the
+        # composer's cache slots, which are attention too) or the parent's
+        # ``validate_layer_type`` length check rejects the config. ``"attention"``
+        # is remapped to the canonical ``"full_attention"`` by transformers 5.16.
+        if layer_types is None:
+            num_hidden_layers = kwargs.get("num_hidden_layers", 32)
+            layer_types = ["full_attention"] * num_hidden_layers
+
         super().__init__(
             num_local_experts=num_local_experts,
+            position_embedding_type=position_embedding_type,
+            layer_types=layer_types,
             **kwargs,
         )
 
-        # The switch model is attention-only with RoPE. It carries neither
-        # ``layer_types`` nor ``position_embedding_type``: RoPE is unconditional,
-        # and ``DynamicCache(config=self)`` derives an all-``full_attention``
-        # per-layer layout from ``num_hidden_layers`` when ``layer_types`` is
-        # absent (transformers has no sliding-window signal on this config).
-
         # Resolve shared_intermediate_size independently of the parent default.
-        # The GraniteMoeShared parent defaults it to 0, which is ALSO the explicit
-        # "no shared MLP" sentinel used by pure sparse-MoE bases (granitemoe).  So
-        # the switch config must decide it itself rather than inherit a magic
-        # default: an explicitly-supplied value (including 0) is honored verbatim;
-        # only when it is left unset do we resolve it — dense (no experts) gets a
-        # shared MLP sized to intermediate_size, pure MoE keeps the 0 sentinel.
-        # This is a compose-time decision that is then frozen into config.json.
+        # The GraniteMoeHybrid parent defaults it to a fixed 1024, which is the
+        # wrong width for dense bases and does not encode the "no shared MLP"
+        # sentinel (0) that pure sparse-MoE bases (granitemoe) rely on.  So the
+        # switch config must decide it itself rather than inherit a magic default:
+        # an explicitly-supplied value (including 0) is honored verbatim; only when
+        # it is left unset do we resolve it — dense (no experts) gets a shared MLP
+        # sized to intermediate_size, pure MoE keeps the 0 sentinel.  This is a
+        # compose-time decision that is then frozen into config.json.
         if kwargs.get("shared_intermediate_size") is None:
             self.shared_intermediate_size = (
                 0 if num_local_experts > 0 else self.intermediate_size

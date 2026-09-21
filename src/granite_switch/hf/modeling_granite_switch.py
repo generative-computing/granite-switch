@@ -18,12 +18,12 @@ from transformers.modeling_outputs import (
     BaseModelOutputWithPast,
     CausalLMOutputWithPast,
 )
-from transformers.models.granitemoeshared.modeling_granitemoeshared import (
-    GraniteMoeSharedMLP,
-    GraniteMoeSharedMoE,
-    GraniteMoeSharedPreTrainedModel,
-    GraniteMoeSharedRMSNorm,
-    GraniteMoeSharedRotaryEmbedding,
+from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
+    GraniteMoeHybridMLP,
+    GraniteMoeHybridMoE,
+    GraniteMoeHybridPreTrainedModel,
+    GraniteMoeHybridRMSNorm,
+    GraniteMoeHybridRotaryEmbedding,
 )
 from transformers.utils import logging
 
@@ -70,7 +70,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         self.has_experts = config.num_local_experts > 0
         if self.has_experts:
             # MoE: frozen router + frozen expert weights (no LoRA)
-            self.block_sparse_moe = GraniteMoeSharedMoE(config)
+            self.block_sparse_moe = GraniteMoeHybridMoE(config)
 
         # Shared MLP: upstream module with LoRA projections replaced in-place.
         # Absent entirely on pure sparse MoE bases (granitemoe), which upstream
@@ -79,7 +79,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         # which would then be demanded of the base checkpoint.
         self.has_shared_mlp = config.shared_intermediate_size > 0
         if self.has_shared_mlp:
-            self.shared_mlp = GraniteMoeSharedMLP(config)
+            self.shared_mlp = GraniteMoeHybridMLP(config)
             self._has_shared_input_lora, self._has_shared_output_lora = (
                 replace_shared_mlp_projections_with_lora(self.shared_mlp, config)
             )
@@ -94,10 +94,10 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
             self._has_shared_output_lora = False
 
         # Layer norms
-        self.input_layernorm = GraniteMoeSharedRMSNorm(
+        self.input_layernorm = GraniteMoeHybridRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
-        self.post_attention_layernorm = GraniteMoeSharedRMSNorm(
+        self.post_attention_layernorm = GraniteMoeHybridRMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
 
@@ -120,7 +120,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         Returns:
             ``(top_k_index, top_k_weights)`` — the per-token top-k expert indices
             and their softmaxed gate weights, matching the transformers-5.16
-            ``GraniteMoeSharedTopKRouter`` output (which drops the router logits
+            ``GraniteMoeHybridTopKRouter`` output (which drops the router logits
             as its unused third element).
         """
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
@@ -132,7 +132,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         """Expert bank under a routing decision made elsewhere.
 
-        This is the second half of ``GraniteMoeSharedMoE.forward``, duplicated
+        This is the second half of ``GraniteMoeHybridMoE.forward``, duplicated
         because upstream exposes no seam between routing and expert application.
         ``test_route_apply_matches_upstream_moe`` pins it bit-exactly against
         ``block_sparse_moe(x)`` so a change anywhere in the supported
@@ -165,7 +165,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         """
         moe_output = None
         if self.has_experts:
-            # GraniteMoeSharedMoE returns the summed expert output alone; the
+            # GraniteMoeHybridMoE returns the summed expert output alone; the
             # router logits stay inside it (no aux-loss path at inference).
             moe_output = (
                 self._apply_experts(hidden_states, routing)
@@ -338,10 +338,10 @@ class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
         return outputs
 
 
-class GraniteSwitchPreTrainedModel(GraniteMoeSharedPreTrainedModel):
+class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
     """PreTrainedModel base class for GraniteSwitch.
 
-    Inherits from GraniteMoeSharedPreTrainedModel to get weight init for
+    Inherits from GraniteMoeHybridPreTrainedModel to get weight init for
     all standard PreTrainedModel capabilities.
     """
 
@@ -437,10 +437,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         self.layers = nn.ModuleList(layers)
 
         # Final norm
-        self.norm = GraniteMoeSharedRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = GraniteMoeHybridRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
         # Rotary embeddings (the switch model is always RoPE).
-        self.rotary_emb = GraniteMoeSharedRotaryEmbedding(config=config)
+        self.rotary_emb = GraniteMoeHybridRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
 

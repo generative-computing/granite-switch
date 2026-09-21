@@ -10,8 +10,8 @@ import torch
 import torch.nn as nn
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
-from transformers.models.granitemoeshared.modeling_granitemoeshared import (
-    GraniteMoeSharedMLP,
+from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
+    GraniteMoeHybridMLP,
     apply_rotary_pos_emb,
     eager_attention_forward,
     rotate_half,
@@ -659,7 +659,7 @@ def _apply_rotary_pos_emb_q_only(
 
 
 def replace_shared_mlp_projections_with_lora(
-    mlp: "GraniteMoeSharedMLP",
+    mlp: "GraniteMoeHybridMLP",
     config: "GraniteSwitchConfig",
 ) -> tuple:
     """Replace shared MLP input_linear/output_linear with LoRA in-place.

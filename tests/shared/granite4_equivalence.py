@@ -250,14 +250,14 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
     Error sources:
 
     1. **No adapters**: GraniteSwitch with num_adapters=0 is numerically
-       equivalent to upstream Granite to within ~1 bf16 ULP. It used to be
-       bit-exact when GraniteSwitch inherited GraniteMoeHybrid (the same
-       computation graph as the reference). After the de-hybridization
-       (GraniteMoeShared base), the inert forward runs a different-but-
-       equivalent vLLM path whose float-reduction order differs, so on the
-       SAME transferred weights the logprobs drift by one ULP
-       (measured max_abs_diff 4.77e-7 == 2^-21, mean ~3e-8 across 4.0-mini
-       {1b,350m,micro}). Not bit-exact, but far below model noise.
+       equivalent to upstream Granite to within ~1 bf16 ULP. GraniteSwitch
+       inherits GraniteMoeHybrid (the same computation graph as the reference),
+       but its projections run through the fused SWITCH kernel whose
+       float-reduction order differs from vLLM's native linear even at zero
+       adapter (submodule CLAUDE.md Gotcha #9), so on the SAME transferred
+       weights the logprobs can drift by one ULP (measured max_abs_diff
+       4.77e-7 == 2^-21, mean ~3e-8 across 4.0-mini {1b,350m,micro}). Not
+       bit-exact, but far below model noise.
 
     2. **Token-exchange embedding divergence**: With adapters and a control
        token in the input, the switch embeds the substitute id at that
@@ -273,7 +273,8 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
 
     Returns:
         (atol, rtol) tuple. Never None: even the inert base-model path is only
-        ULP-equivalent (not bit-exact) post-de-hybridization.
+        ULP-equivalent (not bit-exact) because of the fused-kernel reduction
+        order (submodule CLAUDE.md Gotcha #9).
     """
     if not has_kv_hidden:
         # Pure base-model (inert) path: ULP-equivalent, not bit-exact. 1e-5 is
