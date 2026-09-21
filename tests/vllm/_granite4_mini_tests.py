@@ -64,23 +64,17 @@ class TestGranite4FamilyEquivalence:
             **_eager_kwargs_if_needed(model_name),
         )
 
+        # ULP-equivalent, not bit-exact: the inert switch runs its projections
+        # through the fused SWITCH kernel, whose reduction order differs from
+        # vLLM's native linear (see get_tolerances). tol is never None now.
         tol = get_tolerances(layer_types, long_sequence=False)
-        if tol is None:
-            torch.testing.assert_close(
-                switch,
-                upstream,
-                atol=0.0,
-                rtol=0.0,
-                msg=f"{model_name}: logprobs should be bit-exact",
-            )
-        else:
-            assert_close(
-                switch,
-                upstream,
-                atol=tol[0],
-                rtol=tol[1],
-                msg=f"{model_name}: short sequence logprobs diverge",
-            )
+        assert_close(
+            switch,
+            upstream,
+            atol=tol[0],
+            rtol=tol[1],
+            msg=f"{model_name}: short sequence logprobs diverge",
+        )
 
     @pytest.mark.parametrize("model_name", _MODEL_NAMES)
     def test_logits_long(self, model_name, tmp_path):
@@ -96,23 +90,15 @@ class TestGranite4FamilyEquivalence:
             **_eager_kwargs_if_needed(model_name),
         )
 
+        # ULP-equivalent, not bit-exact (see get_tolerances / test_logits_short).
         tol = get_tolerances(layer_types, long_sequence=True)
-        if tol is None:
-            torch.testing.assert_close(
-                switch,
-                upstream,
-                atol=0.0,
-                rtol=0.0,
-                msg=f"{model_name}: logprobs should be bit-exact",
-            )
-        else:
-            assert_close(
-                switch,
-                upstream,
-                atol=tol[0],
-                rtol=tol[1],
-                msg=f"{model_name}: long sequence logprobs diverge",
-            )
+        assert_close(
+            switch,
+            upstream,
+            atol=tol[0],
+            rtol=tol[1],
+            msg=f"{model_name}: long sequence logprobs diverge",
+        )
 
 
 class TestZeroAdapterNoHiding:
@@ -123,6 +109,7 @@ class TestZeroAdapterNoHiding:
         from tests.shared.vllm_equivalence import run_zero_adapter_no_hiding_equivalence
 
         cfg = GRANITE4_MINI[model_name]
+        layer_types = cfg.get("layer_types", [])
         upstream, switch = run_zero_adapter_no_hiding_equivalence(
             cfg,
             use_control_tokens=False,
@@ -131,13 +118,17 @@ class TestZeroAdapterNoHiding:
             **_eager_kwargs_if_needed(model_name),
         )
 
-        # Skinned: bit-exact -- the switch is inert with no control token
-        torch.testing.assert_close(
+        # Skinned + no control token = inert switch. ULP-equivalent to upstream,
+        # not bit-exact: the fused SWITCH kernel reduces in a different order than
+        # the GraniteMoeHybrid reference's native linear on the same transferred
+        # weights (~1 bf16 ULP; see get_tolerances).
+        tol = get_tolerances(layer_types, has_kv_hidden=False)
+        assert_close(
             switch,
             upstream,
-            atol=0.0,
-            rtol=0.0,
-            msg=f"{model_name}: should be bit-exact with no control tokens",
+            atol=tol[0],
+            rtol=tol[1],
+            msg=f"{model_name}: inert switch (no control token) logprobs diverge",
         )
 
 

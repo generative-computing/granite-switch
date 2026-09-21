@@ -33,8 +33,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces import (
-    HasInnerState,
-    IsHybrid,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -177,8 +175,7 @@ class GraniteSwitchModel(nn.Module):
         # slot and a memory slot). These placeholders exist for HF DynamicCache
         # sizing; vLLM auto-discovers its Attention layers and doesn't need them.
         # We subtract the switch's cache slot count to recover the true number of
-        # decoder layers, and use it as an offset into layer_types (whose first
-        # entry is an "attention" placeholder for the switch).
+        # decoder layers.
         if config.num_adapters > 0:
             layer_offset = self.switch.num_cache_layers
             num_decoder_layers = config.num_hidden_layers - layer_offset
@@ -410,11 +407,9 @@ class GraniteSwitchModel(nn.Module):
 )
 class GraniteSwitchForCausalLM(
     nn.Module,
-    HasInnerState,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    IsHybrid,
 ):
     """
     Granite model with switch for causal language modeling.

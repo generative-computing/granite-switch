@@ -220,7 +220,7 @@ def _dense_mlp_to_shared_groups() -> list[ModuleDescriptor]:
     Used for dense Granite models whose base uses ``mlp.gate_proj`` /
     ``mlp.up_proj`` / ``mlp.down_proj`` but whose switch model uses
     ``shared_mlp.input_linear`` / ``shared_mlp.output_linear``
-    (the ``GraniteMoeHybridMLP`` layout).
+    (the ``GraniteMoeSharedMLP`` layout).
     """
     return [
         ModuleDescriptor(
@@ -326,12 +326,6 @@ _MOE_OPTIONAL_FIELDS: dict[str, Any] = {
     "shared_intermediate_size": None,
 }
 
-# Layer type fields (propagated for hybrid models)
-_HYBRID_OPTIONAL_FIELDS: dict[str, Any] = {
-    "layer_types": None,
-    "position_embedding_type": "rope",
-}
-
 
 # ---------------------------------------------------------------------------
 # Architecture factory functions
@@ -339,15 +333,17 @@ _HYBRID_OPTIONAL_FIELDS: dict[str, Any] = {
 
 
 def granite_moe_hybrid_arch(base_config=None) -> ArchDescriptor:
-    """GraniteMoeHybrid architecture (model_type ``granitemoehybrid``).
+    """GraniteMoeHybrid architecture (model_type ``granitemoehybrid`` /
+    ``granitemoeshared``).
 
-    GraniteMoeHybrid models use ``shared_mlp`` module naming
+    Granite 4 MoE-with-shared-expert models use ``shared_mlp`` module naming
     (``shared_input_linear``, ``shared_output_linear``), even dense layers
-    with ``num_local_experts=0``.
+    with ``num_local_experts=0``. Real Granite 4.x dense checkpoints are typed
+    ``granitemoehybrid`` upstream (they carry no mamba layers), so this same
+    descriptor serves both model_type strings.
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
-    optional_fields.update(_HYBRID_OPTIONAL_FIELDS)
 
     return ArchDescriptor(
         groups=list(_common_attn_groups()) + list(_moe_shared_mlp_groups()),
@@ -363,16 +359,14 @@ def granite_moe_arch(base_config=None) -> ArchDescriptor:
     ``shared_mlp``.  The descriptor is therefore ``_common_attn_groups()`` and
     nothing else — a strict subset of :func:`granite_moe_hybrid_arch`.
 
-    The frozen expert tensors (``block_sparse_moe.input_linear`` /
-    ``output_linear`` / ``router.layer``) are named identically in the switch
-    model, so with no shared-MLP group to shadow them they transfer by identity.
+    The frozen expert tensors (``block_sparse_moe.experts.gate_up_proj`` /
+    ``experts.down_proj`` / ``router.weight`` in the transformers-5.16 layout)
+    are named identically in the switch model, so with no shared-MLP group to
+    shadow them they transfer by identity.
 
     ``shared_intermediate_size`` is pinned to ``0``, which is upstream's own
     encoding for "no shared MLP"
-    (``granitemoeshared``: ``shared_mlp = None if shared_intermediate_size == 0``).
-    ``position_embedding_type`` is deliberately not propagated:
-    ``GraniteSwitchConfig`` already defaults it to ``"rope"``, which is what
-    granitemoe uses.
+    (``granitemoehybrid``: ``shared_mlp = None if shared_intermediate_size == 0``).
     """
     optional_fields = dict(_GRANITE_OPTIONAL_FIELDS)
     optional_fields.update(_MOE_OPTIONAL_FIELDS)
@@ -444,7 +438,12 @@ def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
 _ARCH_REGISTRY = {
     "granite": granite_dense_arch,
     "granitemoe": granite_moe_arch,
+    # Real Granite 4.x dense/MoE-with-shared-expert checkpoints are typed
+    # granitemoehybrid upstream (they carry no mamba layers). A granitemoeshared
+    # key is kept alongside for bases typed that way; both resolve to the same
+    # shared-expert descriptor.
     "granitemoehybrid": granite_moe_hybrid_arch,
+    "granitemoeshared": granite_moe_hybrid_arch,
 }
 
 # Must stay key-for-key in step with _ARCH_REGISTRY: a model_type registered in
@@ -454,6 +453,7 @@ _SR_ARCH_REGISTRY = {
     "granite": granite_dense_sr_arch,
     "granitemoe": granite_moe_sr_arch,
     "granitemoehybrid": granite_moe_hybrid_sr_arch,
+    "granitemoeshared": granite_moe_hybrid_sr_arch,
 }
 
 

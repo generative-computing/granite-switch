@@ -50,7 +50,7 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
 
     The MLP section is whichever of the two paths the base has: a frozen expert
     bank when ``num_local_experts > 0``, a dense ``shared_mlp`` when
-    ``shared_intermediate_size > 0``, or both (Granite 4 hybrid).
+    ``shared_intermediate_size > 0``, or both (Granite 4 MoE + shared expert).
 
     This is the layer for plain LoRA / aLoRA checkpoints.  Shadow Residual
     checkpoints use :class:`SRSwitchDecoderLayer`, which subclasses this one and
@@ -118,12 +118,14 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         and apply the result to both streams.
 
         Returns:
-            ``(batch_index, batch_gates, expert_size)`` — the token-to-expert
-            partition *and* the gate scalars.
+            ``(top_k_index, top_k_weights)`` — the per-token top-k expert indices
+            and their softmaxed gate weights, matching the transformers-5.16
+            ``GraniteMoeHybridTopKRouter`` output (which drops the router logits
+            as its unused third element).
         """
         flat = hidden_states.reshape(-1, hidden_states.shape[-1])
-        _, batch_index, batch_gates, expert_size, _ = self.block_sparse_moe.router(flat)
-        return batch_index, batch_gates, expert_size
+        top_k_index, top_k_weights, _ = self.block_sparse_moe.router(flat)
+        return top_k_index, top_k_weights
 
     def _apply_experts(
         self, hidden_states: torch.Tensor, routing: tuple
@@ -135,27 +137,18 @@ class GraniteSwitchAttentionDecoderLayer(nn.Module):
         ``test_route_apply_matches_upstream_moe`` pins it bit-exactly against
         ``block_sparse_moe(x)`` so a change anywhere in the supported
         ``transformers`` range fails there rather than as a drifted eval score.
+
+        transformers 5.16 folded the per-expert gather/gate-up/down loop into a
+        single ``experts(hidden, top_k_index, top_k_weights)`` call, so the routed
+        application is just that call plus the shape round-trip.
         """
-        batch_index, batch_gates, expert_size = routing
+        top_k_index, top_k_weights = routing
         moe = self.block_sparse_moe
-        bsz, length, _ = hidden_states.shape
-        emb_size = moe.input_size
+        bsz, length, emb_size = hidden_states.shape
 
-        expert_inputs = hidden_states.reshape(-1, emb_size)[batch_index]
-        h = moe.input_linear(expert_inputs, expert_size)
-        chunked = h.chunk(2, dim=-1)
-        h = moe.activation(chunked[0]) * chunked[1]
-        expert_outputs = moe.output_linear(h, expert_size)
-        expert_outputs = expert_outputs * batch_gates[:, None]
-
-        zeros = torch.zeros(
-            (bsz * length, emb_size),
-            dtype=expert_outputs.dtype,
-            device=expert_outputs.device,
-        )
-        return zeros.index_add(0, batch_index, expert_outputs).view(
-            bsz, length, emb_size
-        )
+        flat = hidden_states.reshape(-1, emb_size)
+        expert_outputs = moe.experts(flat, top_k_index, top_k_weights)
+        return expert_outputs.view(bsz, length, moe.input_size)
 
     def _mlp_block(
         self,
@@ -362,10 +355,7 @@ class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
 
 
 class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
-    """Granite model with switch-controlled LoRA adapters.
-
-    RoPE is only applied when position_embedding_type == "rope".
-    """
+    """Granite model with switch-controlled LoRA adapters."""
 
     def __init__(self, config: GraniteSwitchConfig):
         super().__init__(config)
@@ -449,12 +439,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Final norm
         self.norm = GraniteMoeHybridRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Rotary embeddings (only if position_embedding_type == "rope")
-        self.position_embedding_type = config.position_embedding_type
-        if self.position_embedding_type == "rope":
-            self.rotary_emb = GraniteMoeHybridRotaryEmbedding(config=config)
-        else:
-            self.rotary_emb = None
+        # Rotary embeddings (the switch model is always RoPE).
+        self.rotary_emb = GraniteMoeHybridRotaryEmbedding(config=config)
 
         self.gradient_checkpointing = False
 
@@ -604,11 +590,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # Expose adapter_indices for tests and debugging.
         self._last_adapter_indices = adapter_indices
 
-        position_embeddings = None
-        if self.rotary_emb is not None:
-            position_embeddings = self.rotary_emb(
-                inputs_embeds, position_ids=position_ids
-            )
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids=position_ids)
 
         # Decoder layers.  In a Shadow Residual checkpoint every layer is an
         # SRSwitchDecoderLayer and runs two streams that both start from the

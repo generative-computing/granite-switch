@@ -106,17 +106,18 @@ jobs:
     # this is evaluated before any step runs.
     name: GPU Tests (${{ matrix.label }} · ${{ inputs.suite || 'full' }})
     # granite-switch supports two mutually-exclusive vLLM lines and both must be
-    # tested. They cannot share a venv (pyproject declares vllm19/vllm20 as
+    # tested. They cannot share a venv (pyproject declares vllm26/vllm27 as
     # conflicting groups), so each gets its own cluster pod. Only the dev* groups
-    # used because the bare vllm19/vllm20 groups omit pytest.
+    # used because the bare vllm26/vllm27 groups omit pytest. The label encodes
+    # the vLLM minor the leg installs (the GPU harness asserts it matches).
     strategy:
-      fail-fast: false   # a vllm19 failure must not hide the vllm20 result
+      fail-fast: false   # a vllm26 failure must not hide the vllm27 result
       matrix:
         include:
-          - label: vllm19
+          - label: vllm26
             dep_group: dev
-          - label: vllm20
-            dep_group: dev-vllm20
+          - label: vllm27
+            dep_group: dev-vllm27
     runs-on: [self-hosted, gpu]
 
     # MUST be set explicitly. GitHub's default is 360 minutes, which is exactly the

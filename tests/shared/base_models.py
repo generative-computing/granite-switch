@@ -125,7 +125,7 @@ def write_tiny_granite_base(
             "num_local_experts": 0,
             "num_experts_per_tok": 0,
             "shared_intermediate_size": intermediate,
-            "layer_types": ["attention"] * num_layers,
+            "layer_types": ["full_attention"] * num_layers,
             "position_embedding_type": "rope",
         }
     (path / "config.json").write_text(json.dumps(config))

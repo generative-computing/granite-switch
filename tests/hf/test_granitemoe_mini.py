@@ -159,16 +159,26 @@ class TestGraniteMoeNoSharedMLP:
             )
 
     def test_expert_weights_match_upstream(self, model_pair):
-        """Expert tensors are named identically, so they transfer by identity."""
+        """Expert tensors are named identically, so they transfer by identity.
+
+        transformers 5.16 restructured the MoE block from separate
+        ``input_linear`` / ``output_linear`` / ``router.layer`` submodules to a
+        single ``experts`` module (``gate_up_proj`` / ``down_proj``) plus a flat
+        ``router``. Both the switch's GraniteMoeHybrid block and upstream use the
+        new layout, so identity transfer still holds — under the new names.
+        """
         _name, upstream, switch = model_pair
         upstream_sd = upstream.state_dict()
 
         for i, layer in enumerate(switch.model.layers):
             src = f"model.layers.{i}.block_sparse_moe"
             for attr, key in (
-                (layer.block_sparse_moe.input_linear.weight, "input_linear.weight"),
-                (layer.block_sparse_moe.output_linear.weight, "output_linear.weight"),
-                (layer.block_sparse_moe.router.layer.weight, "router.layer.weight"),
+                (
+                    layer.block_sparse_moe.experts.gate_up_proj,
+                    "experts.gate_up_proj",
+                ),
+                (layer.block_sparse_moe.experts.down_proj, "experts.down_proj"),
+                (layer.block_sparse_moe.router.weight, "router.weight"),
             ):
                 torch.testing.assert_close(attr, upstream_sd[f"{src}.{key}"])
 

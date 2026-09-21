@@ -1,5 +1,5 @@
 {
   "peft_type": "ALORA",
   "r": 8,
-  "alora_invocation_tokens": [27]
+  "alora_invocation_tokens": [27, 9998]
 }
