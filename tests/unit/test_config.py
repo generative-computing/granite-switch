@@ -106,7 +106,7 @@ class TestAudioConfig:
         cfg = GraniteSwitchConfig(num_adapters=0)
         assert cfg.asr_enabled is False
         assert cfg.asr_model_id is None
-        assert cfg.asr_device == "cpu"
+        assert cfg.asr_device == "cuda"
         assert cfg.asr_dtype is None
         assert cfg.asr_pipeline_kwargs is None
         assert cfg.asr_generate_kwargs is None
@@ -125,9 +125,11 @@ class TestAudioConfig:
     def test_longaudio_defaults(self):
         cfg = GraniteSwitchConfig(num_adapters=0)
         assert cfg.asr_max_audio_clips == 32
-        assert cfg.asr_chunk_length_s == 30.0
+        assert cfg.asr_chunk_length_s == 120.0
         assert cfg.asr_chunk_overlap_s == 5.0
-        assert cfg.asr_self_chunks is True
+        # The default backend is CTC: it does not self-chunk, so long clips go
+        # through our chunker at a 120s window.
+        assert cfg.asr_self_chunks is False
 
     def test_longaudio_round_trip(self, tmp_path):
         cfg = GraniteSwitchConfig(
