@@ -17,11 +17,13 @@ extra, which the `audio` extra here pulls in (as `vllm[audio]`). A plain
 `uv sync --extra vllm` omits them, so it gives you a checkpoint that fails on any
 non-16 kHz input.
 
-The `audio` extra also requires **transformers >= 5.16**, the release that added
-`granite_speech5_ctc` — the architecture of the default ASR model. On an older
-transformers the first transcription raises an `ImportError` naming the fix
-(the rest of the package still works on an older release, which is why the
-requirement sits on the extra rather than the core dependency).
+The default ASR model needs **transformers >= 5.16**, the release that added
+`granite_speech5_ctc` — its architecture. **That version is not pinned yet**: the
+package currently caps transformers below it, and raising the cap is tracked
+separately (issue #84). Until that lands, the first transcription on the default
+model raises an `ImportError` naming the fix, and the cascade works today only
+with an `--asr-model` your installed transformers supports (for example
+`openai/whisper-small`).
 
 ```bash
 # Serving an audio-enabled checkpoint

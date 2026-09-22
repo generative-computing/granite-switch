@@ -3,14 +3,6 @@
 
 from transformers import GraniteMoeHybridConfig
 
-# Layer-type names that mean "a full attention layer". transformers renamed
-# "attention" to "full_attention" in 5.16 and rewrites the value inside
-# PreTrainedConfig.__init__, so a config built with either spelling — or loaded
-# from a checkpoint written by either version — must be recognized. Comparing
-# against the bare string silently dropped the attention LoRA target groups on
-# 5.16, leaving adapters with MLP targets only.
-ATTENTION_LAYER_TYPES = frozenset({"attention", "full_attention"})
-
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 
@@ -385,7 +377,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
             if self.num_adapters > 0:
                 # Attention modules (present in all attention layers)
-                if any(lt in ATTENTION_LAYER_TYPES for lt in self.layer_types):
+                if any(lt == "attention" for lt in self.layer_types):
                     lora_target_modules.extend(
                         [
                             "qkv_proj",  # Q/K/V fused
