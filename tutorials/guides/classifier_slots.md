@@ -204,11 +204,27 @@ Classifier slots:
   faithfulness → labels ['good', 'bad', 'neutral'] → token ids [19045, 14176, 60668]
 ```
 
-The resulting `config.json` carries the per-slot classifier metadata
-(`classifier_num_labels_per_slot`, `max_classifier_labels`, `classifier_label_names`,
-`classifier_label_token_ids`, `classifier_slot_indices`) — all plain lists/ints, so it round-trips
-through `save_pretrained`/`from_pretrained` with no custom code, and both the HF and vLLM backends
-read it identically.
+The resulting `config.json` carries the per-slot classifier metadata as plain lists/ints, so it
+round-trips through `save_pretrained`/`from_pretrained` with no custom code, and both the HF and
+vLLM backends read it identically. Two fields are the stored contract:
+
+| Field | Meaning |
+|-------|---------|
+| `adapter_kinds` | per-slot `"lora"` / `"classifier"`, one entry per adapter — what marks a slot a classifier |
+| `classifier_label_token_ids` | per-slot list of label token ids, `null` on LoRA slots |
+
+The rest are **derived** from those in `GraniteSwitchConfig.__init__`, so they appear on the config
+object but are not independent inputs:
+
+| Derived field | From |
+|---------------|------|
+| `classifier_num_labels_per_slot` | `len()` of each slot's label token ids (`0` on LoRA slots) |
+| `max_classifier_labels` | `max()` of the above — the padded width the head bank is built with |
+| `classifier_control_token_ids` | the control-token ids of the classifier slots; both backends match these in `input_ids` to locate a verdict's read point |
+
+Note that the label *words* are not stored — only their token ids. Compose resolves and prints the
+words, but `config.json` keeps ids, so recovering the words means decoding them with the
+checkpoint's tokenizer.
 
 ## Step 4: Serve and send a detection request
 
