@@ -15,6 +15,11 @@ from tqdm import tqdm
 
 from .arch import ArchDescriptor
 
+# Filename + keys of a trained classifier-head artifact inside a classifier
+# adapter directory.
+CLASSIFIER_HEAD_FILE = "classifier_head.safetensors"
+CLASSIFIER_HEAD_KEYS = ("weight", "bias")
+
 # ---------------------------------------------------------------------------
 # Base weight loading
 # ---------------------------------------------------------------------------
@@ -823,4 +828,147 @@ def validate_untied_lm_head_saved(output_path, expected_vocab_size, hidden_size)
     print(
         f"  Untied LM head validated: lm_head.weight present, shape "
         f"[{expected_vocab_size}, {hidden_size}]"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Classifier head transfer
+# ---------------------------------------------------------------------------
+
+
+def transfer_classifier_weights(
+    classifier_paths: list[str],
+    slot_indices: list[int],
+    model,
+    num_labels_per_slot: list[int],
+    hidden_size: int,
+    return_mapping: bool = True,
+) -> dict | None:
+    """Load trained classifier heads and transfer them into the switch model.
+
+    A classifier slot is the classifier-head analog of a LoRA adapter: it shares
+    the same control-token / adapter-index space, so its head lives in bank row
+    ``slot = adapter_index - 1`` of ``model.model.classifier_head``. Each
+    classifier directory holds a ``classifier_head.safetensors`` with a
+    ``weight`` ``[n_i, hidden]`` and a ``bias`` ``[n_i]`` where ``n_i`` is this
+    slot's own label count. The head bank is padded to ``max_classifier_labels``.
+
+    Args:
+        classifier_paths: Directories of the classifier slots (classifier-only).
+        slot_indices: Global bank row for each path (``adapter_index - 1``),
+            aligned with *classifier_paths*. Classifiers are the non-zero-based
+            ``k+1..n`` suffix, so these are not ``range(len)`` and must be passed.
+        model: GraniteSwitch model whose ``classifier_head`` is filled in place.
+        num_labels_per_slot: Full-width per-slot label counts
+            (``config.classifier_num_labels_per_slot``, indexed by
+            ``adapter_index - 1``).
+        hidden_size: Expected hidden size (``config.hidden_size``).
+        return_mapping: If True, return detailed mapping information.
+
+    Returns:
+        Mapping record dict, or None if *return_mapping* is False.
+    """
+    from safetensors.torch import load_file
+
+    head = getattr(model.model, "classifier_head", None)
+    if head is None:
+        raise ValueError(
+            "transfer_classifier_weights was given classifier paths "
+            f"{classifier_paths} but the model built no classifier_head. This "
+            "means adapter_kinds never reached the config (no slot is "
+            "kind=classifier). Pass adapter_kinds with a 'classifier' entry so "
+            "the head is constructed before loading trained weights."
+        )
+
+    _validate_classifier_transfer(model, slot_indices)
+
+    mapping_record = {"source_params": [], "target_params": [], "mappings": []}
+
+    print(f"Loading {len(classifier_paths)} trained classifier head(s)...")
+    with torch.no_grad():
+        for path, slot in zip(classifier_paths, slot_indices):
+            n_labels = num_labels_per_slot[slot]
+            head_file = Path(path) / CLASSIFIER_HEAD_FILE
+            if not head_file.exists():
+                raise FileNotFoundError(
+                    f"Classifier slot '{path}' is missing its trained head "
+                    f"'{CLASSIFIER_HEAD_FILE}'. A classifier directory must "
+                    f"contain {CLASSIFIER_HEAD_FILE} with keys "
+                    f"{CLASSIFIER_HEAD_KEYS} (weight [n_labels, hidden], "
+                    f"bias [n_labels]); it has no adapter_model.safetensors."
+                )
+
+            sd = load_file(str(head_file))
+            keys = set(sd.keys())
+            if keys != set(CLASSIFIER_HEAD_KEYS):
+                raise ValueError(
+                    f"{head_file} must contain exactly keys "
+                    f"{set(CLASSIFIER_HEAD_KEYS)}, got {keys}."
+                )
+
+            weight, bias = sd["weight"], sd["bias"]
+            if tuple(weight.shape) != (n_labels, hidden_size):
+                raise ValueError(
+                    f"{head_file}: weight shape {tuple(weight.shape)} does not "
+                    f"match this slot's expected (n_labels, hidden) = "
+                    f"({n_labels}, {hidden_size}). Check the head's label count "
+                    f"against classifier_num_labels_per_slot[{slot}]={n_labels}."
+                )
+            if tuple(bias.shape) != (n_labels,):
+                raise ValueError(
+                    f"{head_file}: bias shape {tuple(bias.shape)} does not "
+                    f"match this slot's expected (n_labels,) = ({n_labels},)."
+                )
+
+            # Copy into the top n_labels rows of the padded bank row; the rest
+            # stay zero.
+            dst_w = head.weight[slot]
+            head.weight[slot, :n_labels, :].copy_(
+                weight.to(dtype=dst_w.dtype, device=dst_w.device)
+            )
+            head.bias[slot, :n_labels].copy_(
+                bias.to(dtype=dst_w.dtype, device=dst_w.device)
+            )
+
+            print(f"  Classifier: {path} -> classifier_head[{slot}, :{n_labels}]")
+            mapping_record["source_params"].append(f"{path}::weight")
+            mapping_record["source_params"].append(f"{path}::bias")
+            mapping_record["mappings"].append(
+                {
+                    "source": [f"{path}::weight", f"{path}::bias"],
+                    "target": f"model.classifier_head[{slot}]",
+                    "type": "classifier",
+                }
+            )
+
+    mapping_record["target_params"] = [
+        f"model.classifier_head.weight[{s}]" for s in slot_indices
+    ] + [f"model.classifier_head.bias[{s}]" for s in slot_indices]
+
+    print(f"Loaded {len(classifier_paths)} classifier head(s)")
+    return mapping_record if return_mapping else None
+
+
+def _validate_classifier_transfer(model, slot_indices: list[int]):
+    """Sanity-check the classifier slots before transfer.
+
+    Guards against two silent-corruption modes: two directories claiming the
+    same bank row, and a slot index outside the head's ``[num_adapters, ...]``
+    bank.
+    """
+    if len(slot_indices) != len(set(slot_indices)):
+        raise ValueError(
+            f"Duplicate classifier slot indices {slot_indices}; each classifier "
+            "must map to a distinct bank row."
+        )
+    num_rows = model.model.classifier_head.weight.shape[0]
+    for slot in slot_indices:
+        if not (0 <= slot < num_rows):
+            raise ValueError(
+                f"Classifier slot {slot} is out of range for a classifier bank "
+                f"of {num_rows} rows (num_adapters)."
+            )
+    print(
+        f"Classifier transfer: {len(slot_indices)} slot(s) "
+        f"{sorted(slot_indices)} into a {num_rows}-row bank"
     )

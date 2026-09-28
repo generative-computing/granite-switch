@@ -108,17 +108,36 @@ def discover_adapters(
 
 def discover_adapters_from_yaml(
     manifest_path: str,
-) -> list[tuple[str, str, str, str | None]]:
+) -> tuple[list[tuple[str, str, str, str | None]], dict[str, dict]]:
     """Discover adapters from a YAML manifest file.
 
     Reads a YAML manifest that maps adapter names to their paths and types.
+    An entry can also mark itself a **classifier** slot with two extra keys:
+
+    .. code-block:: yaml
+
+        hallucination:
+          path: /path/to/head
+          type: lora                # lora/alora technology (token placement)
+          kind: classifier          # default "lora" when omitted
+          labels: [faithful, hallucinated]
+
+    ``type`` and ``kind`` are independent axes: ``type`` is the LoRA technology
+    (lora vs alora, which drives token placement), ``kind`` is whether the slot
+    is a real LoRA or a classifier head. ``kind`` and ``labels`` are optional;
+    without them an entry is a plain LoRA adapter. The label words become token
+    ids at compose time (see :func:`tokenizer_setup.resolve_label_token_ids`).
 
     Args:
         manifest_path: Path to the YAML manifest file.
 
     Returns:
+        ``(found, classifier_meta)``. ``found`` is:
         List of ``(adapter_path, adapter_name, technology, source)`` tuples.
         The source is set to the manifest path for traceability.
+        ``classifier_meta`` maps name ->
+        ``{"kind", "labels"}`` for each entry that set ``kind``/``labels``;
+        names not in it are plain LoRA slots.
     """
     import yaml
 
@@ -126,6 +145,7 @@ def discover_adapters_from_yaml(
     print(f"  Loading adapters manifest: {path.name}")
 
     found = []
+    classifier_meta: dict[str, dict] = {}
     if path.is_file() and path.suffix in (".yaml", ".yml"):
         with open(path) as f:
             adapters_config = yaml.safe_load(f)
@@ -137,7 +157,16 @@ def discover_adapters_from_yaml(
                 # Use manifest path as source for traceability
                 found.append((adapter_path, name, tech, manifest_path))
 
-    return found
+                # Optional classifier slots.
+                kind = info.get("kind")
+                labels = info.get("labels")
+                if kind is not None or labels is not None:
+                    classifier_meta[name] = {
+                        "kind": kind or "lora",
+                        "labels": labels,
+                    }
+
+    return found, classifier_meta
 
 
 def _report_module_contributions(
