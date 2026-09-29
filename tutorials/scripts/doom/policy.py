@@ -90,6 +90,45 @@ TALK_INSTRUCTION = (
     'Examples: "Got him!" "Ouch, I need a medikit." "Dammit, low on ammo, let\'s '
     'grab some." "Two on the left, BFG time." Do not repeat your last line.'
 )
+# The chat layout: the history is real turns. A user turn is the game log since
+# the player last spoke; when the harness gives it the floor, the turn closes
+# with a brief of what just happened, what the person watching said (if
+# anything) and the state, and the assistant turn is what the player says.
+# Every tic's decision still branches off the end of the open user turn.
+CHAT_SYSTEM_PROMPT = (
+    "You are a Doom marine playing deathmatch against bots, and you talk as you play. "
+    "Each user turn is the game log since you last spoke, one line per 0.2 s: match "
+    "time, health, heading in degrees, the enemies in view, your main action, and "
+    "events. It may add what just happened in plain words and what the person "
+    "watching you says (Player: ...). It ends with the current state: health, armor, "
+    "the selected weapon and its ammo, owned weapon slots with ammo; objects on "
+    "screen as name, bearing in degrees (negative is left) and distance; wall "
+    "clearance left, front, right and behind in metres; damage taken in the last "
+    "second; where an enemy was last seen; your last two actions. Your turns are "
+    "what you say out loud: one short line, at most 15 words, in character. React "
+    "with feeling to what just happened or say what you will do next, and when the "
+    "player talks to you, answer them directly. Doom has no reloading. When asked for "
+    "a decision instead, reply with one action ("
+    + " ".join(ACTIONS)
+    + "), a weapon slot (1-7), or the danger of being hit soon (low mid high)."
+)
+LAYOUTS = {"log": "SYSTEM_PROMPT", "chat": "CHAT_SYSTEM_PROMPT"}
+
+
+def closing_text(state: str, extra: str = "") -> str:
+    """Chat layout: what closes the open user turn when the player gets to
+    speak (``extra``: a brief, the watcher's words), then the assistant header."""
+    return f"{extra}{state}{_EOT}\n{_SOR}assistant{_EOR}"
+
+
+def spoken_entry(state: str, line: str, extra: str = "") -> str:
+    """Chat layout: a spoken line as one history entry. It closes the user
+    turn, adds the assistant turn and opens the next user turn, so the history
+    only grows at the end."""
+    line = " ".join(line.split())
+    return closing_text(state, extra) + f"{line}{_EOT}\n{_SOR}user{_EOR}"
+
+
 ROUTER_SYSTEM_PROMPT = (
     "Pick the Doom deathmatch play style that best follows the player's instruction: "
     "fighter (hunt and frag the bots), cautious (avoid damage, fight only up close, "
@@ -271,6 +310,15 @@ class PromptBuilder:
             )
         return self.head[None] + self._body(history_ids, state) + suffix
 
+    def turn_ids(
+        self, history_ids: list[int], state: str, extra: str = ""
+    ) -> list[int]:
+        """Chat layout: the base model's turn to speak. The open user turn
+        closes with ``extra`` and the state, and the assistant turn opens; after
+        the line is generated, :func:`spoken_entry` is what the history
+        appends."""
+        return self.head[None] + history_ids + self._enc(closing_text(state, extra))
+
     def _body(self, history_ids: list[int], state: str) -> list[int]:
         n_head = len(self.head[None])  # every head has the same length
         pre = history_ids + self._pad(n_head + len(history_ids))
@@ -311,10 +359,19 @@ def adapter_placement(tokenizer) -> str:
     return "alora"
 
 
-def check_template(model_dir: str, games: list[tuple[str, str]], routes: list[str]):
+def check_template(
+    model_dir: str,
+    games: list[tuple[str, str]],
+    routes: list[str],
+    layout: str = "log",
+):
     """Assert direct id assembly == ``apply_chat_template`` for every adapter.
 
-    ``games`` holds (history text, state text) pairs from real play.
+    ``games`` holds (history text, state text) pairs from real play. With the
+    chat layout each becomes a conversation: the first half of the log, a
+    closed turn (a brief, the watcher's words, the state), a spoken line, and
+    the rest of the log as the open turn. Checked there: every adapter's
+    decision prompt, and the base model's next turn to speak.
     """
     from transformers import AutoTokenizer
 
@@ -324,27 +381,53 @@ def check_template(model_dir: str, games: list[tuple[str, str]], routes: list[st
     game_names = (*GAME_ADAPTERS, None) if composed else (None,)
     route_names = (ROUTER, None) if composed else (None,)
     adapters = ADAPTERS if composed else ()
-    pb = PromptBuilder(tok, SYSTEM_PROMPT, adapters, placement=placement, align=False)
+    system = system_prompt(layout)
+    pb = PromptBuilder(tok, system, adapters, placement=placement, align=False)
     rb = PromptBuilder(
         tok, ROUTER_SYSTEM_PROMPT, adapters, placement=placement, align=False
     )
 
-    def rendered_ids(system: str, user: str, a: str | None) -> tuple[list[int], str]:
-        msgs = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+    def render(msgs: list[tuple[str, str]], a: str | None) -> tuple[list[int], str]:
         kw = {"adapter_name": a} if a else {}
         r = tok.apply_chat_template(
-            msgs, add_generation_prompt=True, tokenize=False, **kw
+            [{"role": role, "content": c} for role, c in msgs],
+            add_generation_prompt=True,
+            tokenize=False,
+            **kw,
         )
         return tok(r, add_special_tokens=False).input_ids, r
 
-    for hist_text, state in games:
+    def rendered_ids(system: str, user: str, a: str | None) -> tuple[list[int], str]:
+        return render([("system", system), ("user", user)], a)
+
+    if layout == "chat":
+        line = "Got him, heading for the medikit."
+        extra = "Just now: you fragged a bot.\nPlayer: how is it going?\n"
+        for hist_text, state in games:
+            ents = hist_text.splitlines(keepends=True)
+            if len(ents) < 2:
+                continue
+            k = len(ents) // 2
+            h1, h2 = "".join(ents[:k]), "".join(ents[k:])
+            conv = [*ents[:k], spoken_entry(state, line, extra), *ents[k:]]
+            hist_ids = History.replay(conv, tok, window_s=1e9).ids
+            msgs = [
+                ("system", system),
+                ("user", h1 + extra + state),
+                ("assistant", line),
+                ("user", h2 + state),
+            ]
+            got = pb.game_ids(hist_ids, state, list(game_names))
+            for a, g in zip(game_names, got):
+                ref, r = render(msgs, a)
+                assert g == ref, f"chat, adapter={a}\n got={g}\n ref={ref}\n{r!r}"
+            ref, r = render([*msgs[:3], ("user", h2 + extra + state)], None)
+            assert pb.turn_ids(hist_ids, state, extra) == ref, f"chat turn\n{r!r}"
+    for hist_text, state in games if layout == "log" else ():
         hist_ids = tok.encode(hist_text, add_special_tokens=False)
         got = pb.game_ids(hist_ids, state, list(game_names))
         for a, g in zip(game_names, got):
-            ref, r = rendered_ids(SYSTEM_PROMPT, hist_text + state, a)
+            ref, r = rendered_ids(system, hist_text + state, a)
             assert g == ref, f"adapter={a}\n got={g}\n ref={ref}\n{r!r}"
     for text in routes:
         for a in route_names:
@@ -355,7 +438,7 @@ def check_template(model_dir: str, games: list[tuple[str, str]], routes: list[st
     what = f"{kind} adapters {', '.join(ADAPTERS)} and base" if composed else "base"
     print(
         f"OK: prompt ids match apply_chat_template for {what} on {len(games)} "
-        f"history+state prompts and {len(routes)} instructions."
+        f"history+state prompts ({layout} layout) and {len(routes)} instructions."
     )
 
 
@@ -513,8 +596,20 @@ class PromptKit:
     sp: dict  # adapter -> SamplingParams
 
 
+def system_prompt(layout: str) -> str:
+    """The game system prompt for a prompt layout (``log`` or ``chat``)."""
+    if layout not in LAYOUTS:
+        raise ValueError(f"layout must be one of {sorted(LAYOUTS)}")
+    return globals()[LAYOUTS[layout]]
+
+
 def prompt_kit(
-    tok, *, base_model: bool = False, align: bool = True, temperature: float = 0.0
+    tok,
+    *,
+    base_model: bool = False,
+    align: bool = True,
+    temperature: float = 0.0,
+    layout: str = "log",
 ) -> PromptKit:
     from vllm import SamplingParams
 
@@ -522,10 +617,11 @@ def prompt_kit(
     adapters = () if base_model else ADAPTERS
     place = "alora" if base_model else placement
     vocab = {a: vocab_ids(tok, a) for a in ADAPTERS}
+    system = system_prompt(layout)
     return PromptKit(
         placement=placement,
         lora=placement == "lora",
-        pb=PromptBuilder(tok, SYSTEM_PROMPT, adapters, placement=place, align=align),
+        pb=PromptBuilder(tok, system, adapters, placement=place, align=align),
         rb=PromptBuilder(
             tok, ROUTER_SYSTEM_PROMPT, adapters, placement=place, align=False
         ),
@@ -584,6 +680,9 @@ class VLLMPolicy:
             ahead-of-time schedule is sized from the model's head count, so
             under vLLM 0.19.1 it raises in eager mode and returns wrong
             outputs under CUDA graphs.
+        layout: ``log`` (one user turn: history, state) or ``chat`` (real
+            turns: the player's spoken lines are assistant turns). Must match
+            the layout the adapters were trained on.
     """
 
     name = "vllm"
@@ -608,6 +707,7 @@ class VLLMPolicy:
         log_stats: bool = False,
         temperature: float = 0.0,
         attention: dict | None = None,
+        layout: str = "log",
     ):
         os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         from vllm import LLM
@@ -630,8 +730,13 @@ class VLLMPolicy:
         self.tok = self.llm.get_tokenizer()
         self.base_model = base_model
         kit = prompt_kit(
-            self.tok, base_model=base_model, align=align, temperature=temperature
+            self.tok,
+            base_model=base_model,
+            align=align,
+            temperature=temperature,
+            layout=layout,
         )
+        self.layout = layout
         self.placement, self.lora = kit.placement, kit.lora
         self.pb, self.rb = kit.pb, kit.rb
         self.vocab, self.words, self.sp = kit.vocab, kit.words, kit.sp
@@ -738,15 +843,23 @@ class VLLMPolicy:
         """
         from vllm import SamplingParams
 
-        opts = {"stop": ["\n"], **kw}
+        opts = {"stop": ["\n", "Player:"], **kw}  # it would write the watcher next
         return SamplingParams(max_tokens=max_tokens, temperature=temperature, **opts)
 
     def talk(
         self, games: list[tuple[list[int], str]], briefs: list[str] | None = None, **kw
     ) -> list[str]:
-        """One spoken line per game (history ids, state text), in one engine call."""
+        """One spoken line per game (history ids, state text), in one engine call.
+        Chat layout: the player's turn (``briefs`` close the user turn); log
+        layout: an extra user turn asking for a line."""
         briefs = briefs or [""] * len(games)
-        prompts = [self.pb.talk_ids(h, s, b) for (h, s), b in zip(games, briefs)]
+        if self.layout == "chat":
+            prompts = [
+                self.pb.turn_ids(h, s, f"{b}\n" if b else "")
+                for (h, s), b in zip(games, briefs)
+            ]
+        else:
+            prompts = [self.pb.talk_ids(h, s, b) for (h, s), b in zip(games, briefs)]
         outs = self.run(prompts, [self.talk_params(**kw)] * len(prompts))
         return [o.outputs[0].text.strip().split("\n")[0] for o in outs]
 
@@ -786,6 +899,7 @@ def main() -> None:
     ap.add_argument(
         "--seconds", type=float, default=40.0, help="Seconds of play to check"
     )
+    ap.add_argument("--layout", default="log", choices=sorted(LAYOUTS))
     args = ap.parse_args()
 
     from doom_env import TIC_HZ, DoomEnv
@@ -804,7 +918,7 @@ def main() -> None:
         obs = env.step(a, weapon=w)
     env.close()
     routes = ["go kill everything", "stay alive, grab health", "collect all the loot"]
-    check_template(args.check_template, games[::5], routes)
+    check_template(args.check_template, games[::5], routes, args.layout)
 
 
 if __name__ == "__main__":

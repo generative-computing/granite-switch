@@ -44,6 +44,7 @@ row), which ``build_model.py verify`` compares against the composed checkpoint.
 from __future__ import annotations
 
 import argparse
+import bisect
 import contextlib
 import json
 import math
@@ -65,15 +66,18 @@ from policy import (
     ARMS,
     CRITIC,
     DANGER_LEVELS,
+    LAYOUTS,
     OUTPUTS,
     ROUTER,
     ROUTER_SYSTEM_PROMPT,
-    SYSTEM_PROMPT,
     PromptBuilder,
     alora_invocation_ids,
     output_token_ids,
     route_token_ids,
+    spoken_entry,
+    system_prompt,
 )
+from talk import brief
 
 PROBE = "probe"
 DEFAULT_TARGETS = "q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj"
@@ -119,30 +123,50 @@ def row_target(r: dict, adapter: str) -> dict[str, float] | None:
 class TalkAug:
     """Spoken lines to insert into training histories (see :func:`with_talk`)."""
 
-    lines: list[str]  # the player's own (``me:``)
-    user_lines: list[str]  # instructions (``user:``); may be empty
+    lines: list[str]  # the player's own
+    user_lines: list[str]  # the watcher's words; may be empty
     rate: float  # lines per history entry in a talking match (0.07: ~one per 3 s)
     frac: float  # share of matches that talk
     seed: int = 0
+    layout: str = "log"  # "log": me:/user: entries; "chat": real turns
 
 
-def with_talk(entries: list[str], aug: TalkAug, key) -> tuple[list[str], list[int]]:
+def with_talk(
+    entries: list[str], aug: TalkAug, key, states: list[tuple[int, str]] = ()
+) -> tuple[list[str], list[int]]:
     """A match's history with spoken lines inserted between entries, as the live
-    game appends them (``history.said_entry``). Returns the new entries and, for
-    every original prefix length n, the new prefix length, so a row keeps its
-    moment. Seeded per match: the same match talks the same way every run."""
+    game appends them. Log layout: ``me:``/``user:`` entries
+    (``history.said_entry``). Chat layout: closed turns (``policy.spoken_entry``:
+    a brief, sometimes the watcher's words, the state at that tick from
+    ``states``, then the line as an assistant turn). Returns the new entries and,
+    for every original prefix length n, the new prefix length, so a row keeps
+    its moment. Seeded per match: the same match talks the same way every run."""
     rng = random.Random(zlib.crc32(repr((key, aug.seed)).encode()))
     if rng.random() >= aug.frac:
         return entries, list(range(len(entries) + 1))
     rate = aug.rate * rng.uniform(0.5, 1.5)
+    ticks = [t for t, _ in states]
     out, where = [], [0]
-    for e in entries:
+    for i, e in enumerate(entries):
         out.append(e)
         if rng.random() < rate:
             tick = round(float(e.split()[0][1:]) * TIC_HZ)
-            user = bool(aug.user_lines) and rng.random() < 0.15
-            pool = aug.user_lines if user else aug.lines
-            out.append(said_entry(tick, "user" if user else "me", rng.choice(pool)))
+            user = bool(aug.user_lines) and rng.random() < (
+                0.2 if aug.layout == "chat" else 0.15
+            )
+            if aug.layout == "chat":
+                j = bisect.bisect_right(ticks, tick) - 1
+                if j < 0 or tick - ticks[j] > TIC_HZ:
+                    where.append(len(out))
+                    continue  # no recorded state near this tick
+                state = states[j][1]
+                extra = brief(entries[: i + 1], state) + "\n"
+                if user:
+                    extra += f"Player: {rng.choice(aug.user_lines)}\n"
+                out.append(spoken_entry(state, rng.choice(aug.lines), extra))
+            else:
+                pool = aug.user_lines if user else aug.lines
+                out.append(said_entry(tick, "user" if user else "me", rng.choice(pool)))
         where.append(len(out))
     return out, where
 
@@ -163,15 +187,23 @@ def load_game_rows(
             hp, rp = d / f"{style}_history.jsonl", d / f"{style}.jsonl"
             if not rp.exists():
                 continue
+            rows = [json.loads(line) for line in open(rp)]
+            states: dict = {}  # per match: (tick, state) for the chat layout's turns
+            if talk is not None and talk.layout == "chat":
+                for r in rows:
+                    states.setdefault(r["ep"], []).append((r["t"], r["state"]))
+                for v in states.values():
+                    v.sort()
             for line in open(hp):
                 h = json.loads(line)
                 key = (str(d), style, h["ep"])
                 entries = h["entries"]
                 if talk is not None:
-                    entries, where[key] = with_talk(entries, talk, key)
+                    entries, where[key] = with_talk(
+                        entries, talk, key, states.get(h["ep"], [])
+                    )
                 streams[key] = Stream(entries, tok)
-            for line in open(rp):
-                r = json.loads(line)
+            for r in rows:
                 if r["t"] % every:
                     continue
                 target = row_target(r, adapter)
@@ -343,6 +375,13 @@ def main() -> None:
         help="Instructions (JSON rows with 'text', e.g. the router data) for "
         "'user:' entries",
     )
+    ap.add_argument(
+        "--layout",
+        default="log",
+        choices=sorted(LAYOUTS),
+        help="Game prompt layout: log (one user turn) or chat (spoken lines are "
+        "assistant turns; the engine must use the same)",
+    )
     ap.add_argument("--talk-rate", type=float, default=0.07, help="Lines per entry")
     ap.add_argument("--talk-frac", type=float, default=0.7, help="Matches that talk")
     ap.add_argument(
@@ -376,7 +415,7 @@ def main() -> None:
         val_rows = load_router_rows(args.eval_data) if args.eval_data else None
     else:
         label_ids = output_token_ids(tok, VOCAB[a])
-        pb = PromptBuilder(tok, SYSTEM_PROMPT)
+        pb = PromptBuilder(tok, system_prompt(args.layout))
         styles = args.styles or (
             [a]
             if a in OUTPUTS and OUTPUTS[a] == OUTPUTS["fighter"]
@@ -392,6 +431,7 @@ def main() -> None:
                 rate=args.talk_rate,
                 frac=args.talk_frac,
                 seed=args.seed,
+                layout=args.layout,
             )
         rows = load_game_rows(args.data, a, styles, tok, args.every, talk)
         val_rows = (

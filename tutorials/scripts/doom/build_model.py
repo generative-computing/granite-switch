@@ -151,12 +151,14 @@ def make_standins(
     return written
 
 
-def verify(runs: Path, model: str, router_runs: Path | None, limit: int) -> dict:
+def verify(
+    runs: Path, model: str, router_runs: Path | None, limit: int, layout: str = "log"
+) -> dict:
     """Argmax agreement: composed checkpoint in vLLM vs the PEFT adapter, on the
     held-out rows each adapter's training run wrote (history ids + state)."""
     from policy import ROUTER, VLLMPolicy
 
-    pol = VLLMPolicy(model, warmup=5, max_num_seqs=64)
+    pol = VLLMPolicy(model, warmup=5, max_num_seqs=64, layout=layout)
     report = {}
     for name in ADAPTERS:
         root = router_runs if (name == ROUTER and router_runs) else runs
@@ -249,11 +251,12 @@ def main() -> None:
     v.add_argument("--router-runs", type=Path)
     v.add_argument("--model", required=True)
     v.add_argument("--limit", type=int, default=5000)
+    v.add_argument("--layout", default="log", help="The adapters' prompt layout")
     v.add_argument("--json", type=Path)
     args = ap.parse_args()
 
     if args.cmd == "verify":
-        rep = verify(args.runs, args.model, args.router_runs, args.limit)
+        rep = verify(args.runs, args.model, args.router_runs, args.limit, args.layout)
         if args.json:
             args.json.write_text(json.dumps(rep, indent=1))
         return

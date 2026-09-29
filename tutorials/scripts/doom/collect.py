@@ -463,6 +463,9 @@ def main() -> None:
     )
     ap.add_argument("--model", help="Composed checkpoint (for --policy vllm)")
     ap.add_argument(
+        "--layout", default="log", help="The student's prompt layout: log or chat"
+    )
+    ap.add_argument(
         "--temperature", type=float, default=0.0, help="Student sampling (vllm)"
     )
     ap.add_argument(
@@ -609,6 +612,7 @@ def main() -> None:
                 max_num_seqs=max(16, 2 * args.workers),
                 warmup=5,
                 temperature=args.temperature,
+                layout=args.layout,
             )
             batch = _StudentBatch(pol)
         else:

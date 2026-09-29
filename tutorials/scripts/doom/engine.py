@@ -46,9 +46,11 @@ from history import History, said_entry
 from policy import (
     ARMS,
     CRITIC,
+    LAYOUTS,
     engine_kwargs,
     output_dist,
     prompt_kit,
+    spoken_entry,
     state_text,
 )
 from talk import brief
@@ -117,7 +119,15 @@ class AsyncPolicy:
     """The composed checkpoint behind a vLLM AsyncLLM, with the same prompts,
     vocabularies and engine settings as :class:`policy.VLLMPolicy`."""
 
-    def __init__(self, model: str, *, max_num_seqs: int, gpu_mem: float, temperature):
+    def __init__(
+        self,
+        model: str,
+        *,
+        max_num_seqs: int,
+        gpu_mem: float,
+        temperature: float,
+        layout: str = "log",
+    ):
         from transformers import AutoTokenizer
         from vllm import AsyncEngineArgs, SamplingParams
         from vllm.config import CompilationConfig
@@ -129,10 +139,14 @@ class AsyncPolicy:
         kw["compilation_config"] = CompilationConfig(**kw["compilation_config"])
         self.engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kw))
         self.tok = AutoTokenizer.from_pretrained(model)
-        self.kit = prompt_kit(self.tok, temperature=temperature)
+        self.kit = prompt_kit(self.tok, temperature=temperature, layout=layout)
+        self.layout = layout
         # Temperature only (top-p autotunes a FlashInfer kernel on first use).
         self.talk_sp = SamplingParams(
-            max_tokens=24, temperature=0.8, stop=["\n"], bad_words=["reload"]
+            max_tokens=32,  # ~15 words; the system prompt asks for one short line
+            temperature=0.8,
+            stop=["\n", "Player:"],
+            bad_words=["reload"],
         )
 
     async def _one(self, ids: list[int], sp):
@@ -156,11 +170,22 @@ class AsyncPolicy:
             res[a] = (words[o.outputs[0].token_ids[0]], dict(output_dist(o, words)))
         return res
 
-    async def talk(self, hist_ids, state: str, brief_text: str) -> str:
-        o = await self._one(
-            self.kit.pb.talk_ids(hist_ids, state, brief_text), self.talk_sp
-        )
-        return o.outputs[0].text.strip().strip('"').split("\n")[0]
+    async def talk(
+        self, hist_ids, state: str, brief_text: str, player: str | None = None
+    ) -> tuple[str, str]:
+        """One spoken line, and the text that closed the user turn before it
+        (chat layout; "" for the log layout). ``player``: what the person
+        watching just said, which the line answers."""
+        if self.layout == "chat":
+            extra = f"{brief_text}\n" if brief_text else ""
+            if player:
+                extra += f"Player: {player}\n"
+            ids = self.kit.pb.turn_ids(hist_ids, state, extra)
+        else:
+            extra = ""
+            ids = self.kit.pb.talk_ids(hist_ids, state, brief_text)
+        o = await self._one(ids, self.talk_sp)
+        return o.outputs[0].text.strip().strip('"').split("\n")[0], extra
 
     async def warmup(self) -> None:
         state = (
@@ -228,6 +253,10 @@ class Game:
         self.next_talk = time.perf_counter() + random.uniform(1, max(1.0, talk_every))
         self.stats: dict = {}
         self.lags: list[int] = []
+        self.player_queue: list[str] = []  # what the watcher said, not yet answered
+        self.state: str | None = None  # the latest live state, and its tick
+        self.tick = 0
+        self.done = False
         self._tasks: set[asyncio.Task] = set()  # keep running tasks referenced
 
     def _spawn(self, coro) -> None:
@@ -244,12 +273,14 @@ class Game:
                 msg = await inbox.get()
                 if msg[0] == "done":
                     _, self.stats, self.lags = msg
+                    self.done = True
                     return
                 _, tick, state, entry, events = msg
                 if entry is not None:
                     self.hist.append(entry)
                 if state is None:
                     continue
+                self.state, self.tick = state, tick
                 if self.inflight:
                     self.skipped += 1
                 else:
@@ -281,18 +312,52 @@ class Game:
             pass  # the match just ended
         self.inflight = False
 
+    def player_said(self, text: str) -> None:
+        """The person watching spoke: the player answers as soon as it can (after
+        the line it may be saying now)."""
+        self.player_queue.append(text)
+        if not self.talking and self.state is not None:
+            self.talking = True
+            self._spawn(self._talk(self.tick, self.state))
+
     async def _talk(self, tick: int, state: str) -> None:
+        player = self.player_queue.pop(0) if self.player_queue else None
         t0 = time.perf_counter()
-        line = await self.pol.talk(
-            self.hist.ids, state, brief(self.hist.entries, state)
+        line, extra = await self.pol.talk(
+            self.hist.ids, state, brief(self.hist.entries, state), player
         )
         ms = int((time.perf_counter() - t0) * 1000)
         if line:
-            self.hist.append(said_entry(tick, "me", line))
-            self.lines.append((round(tick / TIC_HZ, 1), line, ms))
+            if self.pol.layout == "chat":
+                self.hist.append(spoken_entry(state, line, extra))
+            else:
+                if player:
+                    self.hist.append(said_entry(tick, "user", player))
+                self.hist.append(said_entry(tick, "me", line))
+            self.lines.append((round(tick / TIC_HZ, 1), line, ms, player))
         self.last_talk = time.perf_counter()
         self.next_talk = self.last_talk + self.talk_every
-        self.talking = False
+        if self.player_queue and self.state is not None:
+            self._spawn(self._talk(self.tick, self.state))  # answer what came in
+        else:
+            self.talking = False
+
+
+async def scripted_player(game: Game, args) -> None:
+    """Stand-in for a person talking to one game: a line from --player-lines
+    every --player-every seconds (jittered), until the match ends."""
+    if not args.player_lines or not args.player_every:
+        return
+    lines = [
+        (json.loads(x)["text"] if x.lstrip().startswith("{") else x.strip())
+        for x in open(args.player_lines)
+        if x.strip()
+    ]
+    rng = random.Random(game.gid)
+    while not game.done:
+        await asyncio.sleep(args.player_every * rng.uniform(0.6, 1.4))
+        if not game.done and game.state is not None:
+            game.player_said(rng.choice(lines))
 
 
 def pct(xs, q) -> float:
@@ -337,6 +402,7 @@ async def serve(args) -> dict:
         max_num_seqs=max(16, 5 * args.games),
         gpu_mem=args.gpu_mem,
         temperature=args.temperature,
+        layout=args.layout,
     )
     await pol.warmup()
     print(f"engine ready in {time.time() - t0:.0f}s ({pol.kit.placement})", flush=True)
@@ -366,7 +432,9 @@ async def serve(args) -> dict:
             games.append(Game(i, match_spec(args, i), pol, talk))
         for g in games:
             g.proc.start()
-    await asyncio.gather(*(g.run() for g in games))
+    await asyncio.gather(
+        *(g.run() for g in games), *(scripted_player(g, args) for g in games)
+    )
     pol.engine.shutdown()
 
     rows = []
@@ -439,6 +507,15 @@ def main() -> None:
         p.add_argument("--temperature", type=float, default=1.0, help="Style, planner")
         p.add_argument("--gpu-mem", type=float, default=0.5)
         p.add_argument("--json", type=Path)
+        p.add_argument(
+            "--layout", default="log", choices=sorted(LAYOUTS), help="Prompt layout"
+        )
+        p.add_argument(
+            "--player-lines",
+            type=Path,
+            help="A scripted watcher's lines (text, or JSON rows with 'text')",
+        )
+        p.add_argument("--player-every", type=float, default=0.0, help="Seconds")
     for p in (serve_p, play_p):
         p.add_argument(
             "--addr-file", type=Path, required=True, help="Shared file: host port"
@@ -458,8 +535,9 @@ def main() -> None:
             f"| {len(r['lines'])} lines",
             flush=True,
         )
-        for t, line, ms in r["lines"][:4]:
-            print(f"    t{t} ({ms} ms): {line}")
+        for t, line, ms, player in r["lines"][:6]:
+            said = f"[Player: {player}] " if player else ""
+            print(f"    t{t} ({ms} ms): {said}{line}")
     print("SUMMARY", json.dumps(res["summary"]))
     if args.json:
         args.json.parent.mkdir(parents=True, exist_ok=True)
