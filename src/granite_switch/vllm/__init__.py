@@ -43,6 +43,12 @@ def register():
     """
     from vllm import ModelRegistry
 
+    # FA3's ahead-of-time schedule must be sized for the switch heads and SR's
+    # doubled-query attention, not the model config (see fa3_schedule).
+    from .fa3_schedule import patch_flash_attn_schedule
+
+    patch_flash_attn_schedule()
+
     # Register config with transformers AutoConfig
     try:
         from transformers import AutoConfig
