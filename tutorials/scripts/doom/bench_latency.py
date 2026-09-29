@@ -24,6 +24,9 @@ token sits at position 0 so each adapter has its own KV. Scenarios:
 * ``games``: N games deciding in the same engine step, each with its history.
 * ``router``: one-token instruction routing.
 * ``live``: turbo play with fighter + critic + planner, env in the loop.
+* ``talk`` / ``notalk``: N games in real time (a tic every 28.6 ms each), with
+  and without each game's base model speaking a line every ``--talk-every`` s.
+  How late decisions land against their tic, and how many tics go undecided.
 
 Examples::
 
@@ -50,7 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from doom_env import TIC_HZ, TIC_MS, DoomEnv
 from expert import BEHAVIORS, PLAN_EVERY_TICS, Expert
-from history import History
+from history import History, said_entry
 from policy import ARMS, CRITIC, GAME_ADAPTERS, VLLMPolicy, state_text
 
 INSTRUCTIONS = [
@@ -294,6 +297,136 @@ def bench_games(pol: VLLMPolicy, trace, sizes: list[int], reps: int) -> dict:
     return out
 
 
+def bench_talk(
+    pol: VLLMPolicy,
+    trace,
+    sizes: list[int],
+    seconds: float,
+    talk_every_s: float,
+    talk_tokens: int,
+    warm_s: float = 2.0,
+) -> dict:
+    """N games in real time, several of them talking.
+
+    Each game runs its own tic clock (every game's clock offset within the tic)
+    and replays the trace from its own starting point. On every tic it asks the
+    fighter and critic, and the planner on its cadence. If that tic's decisions
+    are not back by the next tic, the game moves on without a new decision
+    (it plays a stale one). Every ``talk_every_s`` seconds (0: never) its base
+    model speaks ``talk_tokens`` tokens, and the line becomes a history entry, so
+    the shared context grows as it would in the live demo. One engine step at a
+    time, as vLLM runs anyway.
+
+    Reports, after ``warm_s`` seconds: decision latency from the tic's start,
+    the share of decisions later than one tic, the share of tics skipped
+    because the last decision was still pending, and how long a spoken line takes.
+    """
+    from vllm.inputs import TokensPrompt
+
+    engine = pol.llm.llm_engine
+    tic_s = 1.0 / TIC_HZ
+    rng = random.Random(0)
+    out = {}
+    for n in sizes:
+        pol.llm.reset_prefix_cache()
+        t_start = time.perf_counter() + 0.2
+        t_warm, t_end = t_start + warm_s, t_start + warm_s + seconds
+        games = []
+        for i in range(n):
+            nxt = t_start + rng.uniform(0, talk_every_s) if talk_every_s else math.inf
+            games.append(
+                {
+                    "off": rng.randrange(len(trace)),
+                    "k": 0,
+                    "phase": t_start + i * tic_s / n,
+                    "hist": History(pol.tok),
+                    "state": None,
+                    "busy": set(),
+                    "talk": None,
+                    "next_talk": nxt,
+                }
+            )
+        pending: dict[str, tuple] = {}
+        lat, talk_ms, skipped, decided, seq = [], [], 0, 0, 0
+        while True:
+            now = time.perf_counter()
+            if now >= t_end and not pending:
+                break
+            for gi, g in enumerate(games):
+                if now >= t_end:
+                    break
+                due = g["phase"] + g["k"] * tic_s
+                if now < due:
+                    continue
+                t = trace[(g["off"] + g["k"]) % len(trace)]
+                g["k"] += 1
+                if t["state"] is not None:
+                    g["state"] = t["state"]
+                    if g["busy"]:
+                        skipped += now >= t_warm
+                    else:
+                        want = [FIGHTER, CRITIC]
+                        if t["tick"] % PLAN_EVERY_TICS == 0:
+                            want.append(ARMS)
+                        ids = pol.pb.game_ids(g["hist"].ids, t["state"], want)
+                        for a, p in zip(want, ids):
+                            rid = f"r{seq}"
+                            seq += 1
+                            engine.add_request(
+                                rid, TokensPrompt(prompt_token_ids=p), pol.sp[a]
+                            )
+                            pending[rid] = ("reflex", gi, due)
+                            g["busy"].add(rid)
+                        decided += now >= t_warm
+                if t["entry"] is not None:
+                    g["hist"].append(t["entry"])
+                if g["talk"] is None and now >= g["next_talk"] and g["state"]:
+                    rid = f"t{seq}"
+                    seq += 1
+                    sp = pol.talk_params(
+                        max_tokens=talk_tokens, ignore_eos=True, stop=None
+                    )
+                    p = pol.pb.talk_ids(g["hist"].ids, g["state"])
+                    engine.add_request(rid, TokensPrompt(prompt_token_ids=p), sp)
+                    pending[rid] = ("talk", gi, now)
+                    g["talk"], g["talk_tick"] = rid, t["tick"]
+                    g["next_talk"] += talk_every_s
+            if not pending:
+                nxt = min(g["phase"] + g["k"] * tic_s for g in games)
+                time.sleep(max(0.0, nxt - time.perf_counter()))
+                continue
+            for o in engine.step():
+                if not o.finished:
+                    continue
+                what, gi, t0 = pending.pop(o.request_id)
+                done = time.perf_counter()
+                g = games[gi]
+                if what == "reflex":
+                    g["busy"].discard(o.request_id)
+                    if t0 >= t_warm:
+                        lat.append((done - t0) * 1000)
+                else:
+                    g["talk"] = None
+                    g["hist"].append(
+                        said_entry(g["talk_tick"], "me", o.outputs[0].text)
+                    )
+                    if t0 >= t_warm:
+                        talk_ms.append((done - t0) * 1000)
+        st = pct(lat)
+        st["late_share"] = round(float(np.mean([x > TIC_MS for x in lat])), 4)
+        st["skipped_tics"] = round(skipped / max(1, skipped + decided), 4)
+        st["talk_ms"] = pct(talk_ms)
+        out[str(n)] = st
+        print(
+            f"  {n:>3} games{' talking' if talk_every_s else ''}: decision p50 "
+            f"{st['p50']:6.2f} ms  p99 {st['p99']:6.2f} ms  later than a tic "
+            f"{100 * st['late_share']:5.1f}%  skipped tics {100 * st['skipped_tics']:5.1f}%"
+            + (f"  line p50 {st['talk_ms'].get('p50', 0):6.0f} ms" if talk_ms else ""),
+            flush=True,
+        )
+    return out
+
+
 def bench_router(pol: VLLMPolicy, n: int) -> dict:
     routes = [pol.route(INSTRUCTIONS[i % len(INSTRUCTIONS)]) for i in range(n)]
     return {"route_ms": pct([r.ms for r in routes])}
@@ -397,6 +530,10 @@ def main() -> None:
     ap.add_argument("--switch-every", type=float, default=10.0)
     ap.add_argument("--game-sizes", default="1,2,4,8,16")
     ap.add_argument("--live-seconds", type=float, default=20.0)
+    ap.add_argument("--talk-sizes", default="1,2,4,8,12,16", help="Games (talk)")
+    ap.add_argument("--talk-seconds", type=float, default=20.0)
+    ap.add_argument("--talk-every", type=float, default=4.0, help="Seconds per line")
+    ap.add_argument("--talk-tokens", type=int, default=20)
     ap.add_argument(
         "--scenarios",
         default="reflex,multi,nadapters,switch,inbatch,kv,games,router,live",
@@ -412,6 +549,7 @@ def main() -> None:
         raise SystemExit("--model is required")
     scen = set(args.scenarios.split(","))
     sizes = [int(x) for x in args.game_sizes.split(",")]
+    talk_sizes = [int(x) for x in args.talk_sizes.split(",")]
     t0 = time.time()
     trace = make_trace(args.seconds, args.seed)
     n_live = sum(t["state"] is not None for t in trace)
@@ -425,7 +563,8 @@ def main() -> None:
         engine_loop=args.engine_loop,
         prefix_caching=not args.no_prefix_cache,
         align=not args.no_align,
-        max_num_seqs=max(16, max(sizes) * 2, len(GAME_ADAPTERS)),
+        # A talking game can hold four requests at once (three adapters, one line).
+        max_num_seqs=max(16, max(sizes) * 2, max(talk_sizes) * 4, len(GAME_ADAPTERS)),
         enforce_eager=args.enforce_eager,
         cudagraph_mode=args.cudagraph_mode,
         base_model=args.plain_base,
@@ -463,6 +602,21 @@ def main() -> None:
         ("kv", lambda: bench_kv(pol, trace)),
         ("games", lambda: bench_games(pol, trace, sizes, reps=300)),
         ("router", lambda: bench_router(pol, 200)),
+        (
+            "notalk",
+            lambda: bench_talk(pol, trace, talk_sizes, args.talk_seconds, 0, 0),
+        ),
+        (
+            "talk",
+            lambda: bench_talk(
+                pol,
+                trace,
+                talk_sizes,
+                args.talk_seconds,
+                args.talk_every,
+                args.talk_tokens,
+            ),
+        ),
         ("live", lambda: bench_live(pol, args.live_seconds, args.seed + 99)),
     ]
     gct = GCTimer()

@@ -81,6 +81,15 @@ SYSTEM_PROMPT = (
     + " ".join(ACTIONS)
     + "), a weapon slot (1-7), or the danger of being hit soon (low mid high)."
 )
+# The base model's spoken line: a user turn after the shared game context, so a
+# talk request reuses the prefix every game adapter has just prefilled.
+TALK_INSTRUCTION = (
+    "You are this player: a cocky Doom marine talking to yourself as you play. Say "
+    "one short line out loud, at most 12 words. React with feeling to what just "
+    "happened, or tell yourself what to do next and why. Doom has no reloading. "
+    'Examples: "Got him!" "Ouch, I need a medikit." "Dammit, low on ammo, let\'s '
+    'grab some." "Two on the left, BFG time." Do not repeat your last line.'
+)
 ROUTER_SYSTEM_PROMPT = (
     "Pick the Doom deathmatch play style that best follows the player's instruction: "
     "fighter (hunt and frag the bots), cautious (avoid damage, fight only up close, "
@@ -226,6 +235,9 @@ class PromptBuilder:
             else:
                 self.head[a] = self.head[None]
                 self.suffix[a] = self._enc(f"{_EOT}\n{control_token(a)}assistant{_EOR}")
+        self.talk_suffix = self._enc(
+            f"{_EOT}\n{_SOR}user{_EOR}{TALK_INSTRUCTION}{_EOT}\n{_SOR}assistant{_EOR}"
+        )
         self.system = system
 
     def _enc(self, s: str) -> list[int]:
@@ -242,11 +254,28 @@ class PromptBuilder:
         self, history_ids: list[int], state: str, adapters: list[str | None]
     ) -> list[list[int]]:
         """One game prompt per adapter, sharing everything before the suffix."""
+        body = self._body(history_ids, state)
+        return [self.head[a] + body + self.suffix[a] for a in adapters]
+
+    def talk_ids(
+        self, history_ids: list[int], state: str, brief: str = ""
+    ) -> list[int]:
+        """The base model's talk prompt: the base game prompt up to its suffix,
+        then a user turn asking for one spoken line, after ``brief`` (what just
+        happened, in plain words: :func:`talk.brief`)."""
+        suffix = self.talk_suffix
+        if brief:
+            suffix = self._enc(
+                f"{_EOT}\n{_SOR}user{_EOR}{brief}\n{TALK_INSTRUCTION}{_EOT}\n"
+                f"{_SOR}assistant{_EOR}"
+            )
+        return self.head[None] + self._body(history_ids, state) + suffix
+
+    def _body(self, history_ids: list[int], state: str) -> list[int]:
         n_head = len(self.head[None])  # every head has the same length
         pre = history_ids + self._pad(n_head + len(history_ids))
         body = pre + self._enc(state)
-        body = body + self._pad(n_head + len(body))
-        return [self.head[a] + body + self.suffix[a] for a in adapters]
+        return body + self._pad(n_head + len(body))
 
     def n_fixed(self) -> int:
         return len(self.head[None])
@@ -637,6 +666,26 @@ class VLLMPolicy:
             best, probs.get(best, 0.0), (time.perf_counter() - t0) * 1000, probs
         )
 
+    def talk_params(self, max_tokens: int = 24, temperature: float = 0.8, **kw):
+        """Sampling for one spoken line from the base model (no adapter).
+
+        Temperature only: top-p sends sampling to a FlashInfer kernel that
+        autotunes on first use per shape, a multi-second stall mid-match.
+        """
+        from vllm import SamplingParams
+
+        opts = {"stop": ["\n"], **kw}
+        return SamplingParams(max_tokens=max_tokens, temperature=temperature, **opts)
+
+    def talk(
+        self, games: list[tuple[list[int], str]], briefs: list[str] | None = None, **kw
+    ) -> list[str]:
+        """One spoken line per game (history ids, state text), in one engine call."""
+        briefs = briefs or [""] * len(games)
+        prompts = [self.pb.talk_ids(h, s, b) for (h, s), b in zip(games, briefs)]
+        outs = self.run(prompts, [self.talk_params(**kw)] * len(prompts))
+        return [o.outputs[0].text.strip().split("\n")[0] for o in outs]
+
     def _warmup(self, n: int) -> None:
         state = (
             "now t1.0 | hp 100 armor 0 | pistol 50 | arms 2:50 | see bot -12 8m, "
@@ -648,6 +697,8 @@ class VLLMPolicy:
             hist = hist + self.tok.encode(entry, add_special_tokens=False)
             self.decide_games([(hist, state)], [list(GAME_ADAPTERS[: 1 + i % 5])])
         self.route("go kill everything")
+        for n_games in (1, 4, 16):  # the talk path, at a few batch sizes
+            self.talk([(hist, state)] * n_games, max_tokens=4)
 
 
 def make_policy(kind: str, model: str | None = None, **kw):

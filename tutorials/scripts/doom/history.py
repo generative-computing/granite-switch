@@ -63,6 +63,13 @@ def entry_text(tick: int, obs: Observation, actions: list[str], events: list[str
     return f"{_t(tick)} hp {obs.hp} face {obs.face} | {see} | did {did}{ev}\n"
 
 
+def said_entry(tick: int, who: str, text: str) -> str:
+    """A spoken line as a history entry: ``me`` (the player's own talk) or
+    ``user``. Newlines and quotes are dropped so it stays one entry."""
+    line = " ".join(text.replace('"', "").split())
+    return f'{_t(tick)} {who}: "{line}"\n'
+
+
 @dataclass
 class History:
     """Per-game history. Feed every tic with :meth:`observe`; read :attr:`ids`.

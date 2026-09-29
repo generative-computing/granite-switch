@@ -85,7 +85,13 @@ def stage(
     return dst
 
 
-def compose(paths: list[Path], base: str, out: Path) -> None:
+def compose(
+    paths: list[Path],
+    base: str,
+    out: Path,
+    asr_model: str | None = None,
+    asr_device="cpu",
+) -> None:
     cmd = [
         sys.executable,
         "-m",
@@ -97,6 +103,11 @@ def compose(paths: list[Path], base: str, out: Path) -> None:
         "--output",
         str(out),
     ]
+    if asr_model:
+        # Speech in through the checkpoint's own ASR cascade (docs/AUDIO.md). A
+        # conformer's BatchNorm cannot run in float16, so the ASR stays float32.
+        cmd += ["--enable-audio", "--asr-model", asr_model, "--asr-dtype", "float32"]
+        cmd += ["--asr-device", asr_device]
     print("+", " ".join(cmd), flush=True)
     subprocess.run(cmd, check=True)
 
@@ -218,6 +229,12 @@ def main() -> None:
     c.add_argument(
         "--router-runs", type=Path, help="Where the router adapter lives if elsewhere"
     )
+    c.add_argument(
+        "--asr-model",
+        help="Enable audio input with this HF speech-recognition model, e.g. "
+        "ibm-granite/granite-speech-5.0-470m-turboctc",
+    )
+    c.add_argument("--asr-device", default="cpu", help="cpu or cuda:0")
     s.add_argument("--kind", choices=KINDS, default="alora")
     # The composer reads Shadow Residual from the weights (a cross_stream LoRA),
     # not from the staging directory, so SR adapters are staged under lora/.
@@ -265,7 +282,13 @@ def main() -> None:
                 raise SystemExit(f"missing trained adapter: {adapters[name]}")
     kind = "lora" if args.kind == "sr" else args.kind
     paths = [stage(d, n, stage_root, target_model, kind) for n, d in adapters.items()]
-    compose(paths, args.base, args.out)
+    compose(
+        paths,
+        args.base,
+        args.out,
+        getattr(args, "asr_model", None),
+        getattr(args, "asr_device", "cpu"),
+    )
     print(f"\ncomposed {len(paths)} adapters ({', '.join(adapters)}) -> {args.out}")
 
 
