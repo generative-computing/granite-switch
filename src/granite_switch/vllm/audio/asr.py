@@ -134,7 +134,19 @@ class ASRTranscriber:
             }
             # pipeline_kwargs last: a checkpoint may override any default above.
             kwargs.update(self.pipeline_kwargs)
-            self._pipeline = pipeline(**kwargs)
+            pipe = pipeline(**kwargs)
+            # Inside vLLM, torch.distributed is initialized (even on one GPU),
+            # and transformers' pipeline then discards `device` for the device
+            # the model loaded on, the CPU: asr_device="cuda:0" silently ran on
+            # the CPU, 10x slower. Put the model where the checkpoint asked.
+            if str(self.device) != "cpu":
+                import torch
+
+                want = torch.device(self.device)
+                if pipe.device != want:
+                    pipe.model.to(want)
+                    pipe.device = want
+            self._pipeline = pipe
 
     def transcribe(
         self,
