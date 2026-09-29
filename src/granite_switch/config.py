@@ -193,6 +193,15 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             layer_types=layer_types,
             **kwargs,
         )
+        # transformers >= 5.16 remaps legacy layer types in the parent init
+        # ("attention" -> "full_attention"). Every Granite Switch layer is
+        # attention, and both this package and vLLM 0.19's is_hybrid check
+        # (all layers == "attention" means not hybrid) test for the legacy
+        # name; without it vLLM builds Mamba state for a pure-attention model.
+        if self.layer_types is not None:
+            self.layer_types = [
+                "attention" if lt == "full_attention" else lt for lt in self.layer_types
+            ]
 
         # Default shared_intermediate_size from intermediate_size.  Granite 4
         # models all have a shared_mlp; for dense ones its width equals
