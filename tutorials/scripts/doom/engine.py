@@ -31,6 +31,7 @@ os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "1"
 
 import argparse
 import asyncio
+import contextlib
 import json
 import multiprocessing as mp
 import random
@@ -65,7 +66,10 @@ def game_worker(conn, spec: dict) -> None:
     """Play one match in real time. Messages to the server:
     ``("obs", tick, state | None, entry | None, events)`` every tic (``entry`` is
     the history entry the previous tic produced), then ``("done", stats, lags)``.
-    From the server: ``("act", tick, action, slot | None)``."""
+    From the server: ``("act", tick, action, slot | None)``. The clock starts
+    only when the server says so (after ``("ready",)``), and the socket closes
+    only after the server's ``("bye",)``: closing with unread decisions in the
+    buffer sends a TCP reset that can destroy the final message."""
     isolate_workdir()
     env = DoomEnv(
         seed=spec["seed"],
@@ -79,6 +83,9 @@ def game_worker(conn, spec: dict) -> None:
     action, fresh_of, slot, entry = "wait", -1, None, None
     lags: list[int] = []  # per live tic: ticks between the state and the action played
     overruns, step_ms = 0, 5.0
+    conn.send(("ready",))
+    while conn.recv()[0] != "start":
+        pass
     t_tic = time.perf_counter()
     while not obs.done:
         state = None if obs.dead else state_text(obs)
@@ -112,6 +119,13 @@ def game_worker(conn, spec: dict) -> None:
     stats["overrun_tics"] = overruns
     env.close()
     conn.send(("done", stats, lags))
+    t_end = time.perf_counter() + 10
+    while time.perf_counter() < t_end:  # drain late decisions until the server's bye
+        try:
+            if conn.poll(0.5) and conn.recv()[0] == "bye":
+                break
+        except (EOFError, OSError):
+            break
 
 
 # ── Server side ────────────────────────────────────────────────────────────────
@@ -218,9 +232,12 @@ def nodelay(conn) -> None:
 
 def remote_worker(addr: tuple[str, int], spec: dict) -> None:
     """A game on another node: connect to ``engine.py serve`` and play."""
+    import socket
     from multiprocessing.connection import Client
 
+    socket.setdefaulttimeout(30)  # fail loudly if the server is unreachable
     conn = Client(addr, authkey=AUTHKEY)
+    socket.setdefaulttimeout(None)
     nodelay(conn)
     conn.send(("hello", spec))
     game_worker(conn, spec)
@@ -256,7 +273,7 @@ class Game:
         self.player_queue: list[str] = []  # what the watcher said, not yet answered
         self.state: str | None = None  # the latest live state, and its tick
         self.tick = 0
-        self.done = False
+        self.done = self.lost = False
         self._tasks: set[asyncio.Task] = set()  # keep running tasks referenced
 
     def _spawn(self, coro) -> None:
@@ -267,13 +284,31 @@ class Game:
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
         inbox: asyncio.Queue = asyncio.Queue()
-        loop.add_reader(self.conn.fileno(), lambda: inbox.put_nowait(self.conn.recv()))
+        fd = self.conn.fileno()
+
+        def readable() -> None:
+            try:
+                inbox.put_nowait(self.conn.recv())
+            except (EOFError, OSError) as e:  # the game's side is gone
+                loop.remove_reader(fd)
+                inbox.put_nowait(("lost", f"{type(e).__name__}: {e}"))
+
+        loop.add_reader(fd, readable)
         try:
             while True:
                 msg = await inbox.get()
+                if msg[0] == "lost":
+                    print(f"game {self.gid}: connection lost ({msg[1]})", flush=True)
+                    self.lost = self.done = True
+                    return
+                if msg[0] == "ready":
+                    self.conn.send(("start",))
+                    continue
                 if msg[0] == "done":
                     _, self.stats, self.lags = msg
                     self.done = True
+                    with contextlib.suppress(OSError):
+                        self.conn.send(("bye",))
                     return
                 _, tick, state, entry, events = msg
                 if entry is not None:
@@ -298,7 +333,7 @@ class Game:
                     self.talking = True
                     self._spawn(self._talk(tick, state))
         finally:
-            loop.remove_reader(self.conn.fileno())
+            loop.remove_reader(fd)
 
     async def _decide(self, tick: int, state: str) -> None:
         t0 = time.perf_counter()
@@ -360,6 +395,15 @@ async def scripted_player(game: Game, args) -> None:
             game.player_said(rng.choice(lines))
 
 
+async def heartbeat(games: list[Game], every_s: float = 30.0) -> None:
+    """Every game's current tic, so a stuck or lost game shows at once."""
+    t0 = time.perf_counter()
+    while True:
+        await asyncio.sleep(every_s)
+        ticks = ["lost" if g.lost else ("done" if g.done else g.tick) for g in games]
+        print(f"[{time.perf_counter() - t0:5.0f}s] tics {ticks}", flush=True)
+
+
 def pct(xs, q) -> float:
     return round(float(np.percentile(xs, q)), 2) if len(xs) else float("nan")
 
@@ -392,7 +436,16 @@ def play(args) -> None:
         p.start()
     for p in procs:
         p.join()
-    print(f"{args.games} games done in {time.time() - t0:.0f}s", flush=True)
+    bad = [i for i, p in enumerate(procs) if p.exitcode]
+    print(
+        f"{args.games} games done in {time.time() - t0:.0f}s"
+        + (
+            f"; games {bad} FAILED (exit codes {[procs[i].exitcode for i in bad]})"
+            if bad
+            else ""
+        ),
+        flush=True,
+    )
 
 
 async def serve(args) -> dict:
@@ -407,12 +460,24 @@ async def serve(args) -> dict:
     await pol.warmup()
     print(f"engine ready in {time.time() - t0:.0f}s ({pol.kit.placement})", flush=True)
     talk = 0 if args.no_talk else args.talk_every
-    games = []
+    games: list[Game] = []
+    tasks: list[asyncio.Task] = []
+
+    def launch(g: Game) -> None:
+        """Serve a game from the moment it exists: its clock waits for our start."""
+        games.append(g)
+        tasks.append(asyncio.create_task(g.run()))
+        tasks.append(asyncio.create_task(scripted_player(g, args)))
+
+    beat = asyncio.create_task(heartbeat(games))
     if args.cmd == "serve":
         import socket
         from multiprocessing.connection import Listener
 
-        listener = Listener(("0.0.0.0", args.port), authkey=AUTHKEY)
+        # The default backlog of 1 drops simultaneous connection attempts.
+        listener = Listener(
+            ("0.0.0.0", args.port), authkey=AUTHKEY, backlog=max(16, 2 * args.games)
+        )
         host = socket.getfqdn()
         args.addr_file.parent.mkdir(parents=True, exist_ok=True)
         args.addr_file.write_text(f"{host} {listener.address[1]}\n")
@@ -421,24 +486,46 @@ async def serve(args) -> dict:
             flush=True,
         )
         loop = asyncio.get_running_loop()
-        for i in range(args.games):
-            conn = await loop.run_in_executor(None, listener.accept)
-            nodelay(conn)
-            _, spec = await loop.run_in_executor(None, conn.recv)
-            games.append(Game(i, spec, pol, talk, conn))
+        deadline = None  # set by the first game: stragglers get connect_s
+        while len(games) < args.games:
+            left = (
+                None if deadline is None else max(0.0, deadline - time.perf_counter())
+            )
+            try:
+                conn = await asyncio.wait_for(
+                    loop.run_in_executor(None, listener.accept), left
+                )
+                nodelay(conn)
+                _, spec = await loop.run_in_executor(None, conn.recv)
+            except TimeoutError:
+                print(
+                    f"only {len(games)} of {args.games} games connected within "
+                    f"{args.connect_s:.0f} s of the first; playing those",
+                    flush=True,
+                )
+                break
+            except (EOFError, OSError, ValueError, mp.AuthenticationError) as e:
+                print(f"rejected a connection: {type(e).__name__}: {e}", flush=True)
+                continue
+            launch(Game(len(games), spec, pol, talk, conn))
+            print(f"game {len(games) - 1} connected (seed {spec['seed']})", flush=True)
+            if deadline is None:
+                deadline = time.perf_counter() + args.connect_s
         listener.close()
     else:
         for i in range(args.games):
-            games.append(Game(i, match_spec(args, i), pol, talk))
+            launch(Game(i, match_spec(args, i), pol, talk))
         for g in games:
             g.proc.start()
-    await asyncio.gather(
-        *(g.run() for g in games), *(scripted_player(g, args) for g in games)
-    )
+    await asyncio.gather(*tasks)
+    beat.cancel()
     pol.engine.shutdown()
 
     rows = []
+    lost = [g.gid for g in games if g.lost]
     for g in games:
+        if g.lost:
+            continue
         lags = Counter(g.lags)
         n = max(1, len(g.lags))
         s = g.stats
@@ -475,6 +562,7 @@ async def serve(args) -> dict:
         for k in keys
     }
     summary["top_share"] = round(float(np.mean([r["rank"] == 1 for r in rows])), 3)
+    summary["games_lost"] = lost
     summary["lines_per_min"] = round(
         sum(len(r["lines"]) for r in rows) / (args.games * args.seconds / 60), 2
     )
@@ -521,6 +609,9 @@ def main() -> None:
             "--addr-file", type=Path, required=True, help="Shared file: host port"
         )
     serve_p.add_argument("--port", type=int, default=0, help="0: any free port")
+    serve_p.add_argument(
+        "--connect-s", type=float, default=180.0, help="Wait for stragglers this long"
+    )
     play_p.add_argument("--wait-s", type=float, default=1800.0)
     args = ap.parse_args()
     if args.cmd == "play":
