@@ -51,12 +51,15 @@ import os
 import random
 import sys
 import time
+import zlib
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from history import PROBE_WORDS, History
+from doom_env import TIC_HZ
+from history import PROBE_WORDS, History, said_entry
 from policy import (
     _EOR,
     ARMS,
@@ -112,10 +115,49 @@ def row_target(r: dict, adapter: str) -> dict[str, float] | None:
     return r.get("soft") or {r["expert"]: 1.0}
 
 
-def load_game_rows(dirs: list[Path], adapter: str, styles: list[str], tok, every: int):
+@dataclass
+class TalkAug:
+    """Spoken lines to insert into training histories (see :func:`with_talk`)."""
+
+    lines: list[str]  # the player's own (``me:``)
+    user_lines: list[str]  # instructions (``user:``); may be empty
+    rate: float  # lines per history entry in a talking match (0.07: ~one per 3 s)
+    frac: float  # share of matches that talk
+    seed: int = 0
+
+
+def with_talk(entries: list[str], aug: TalkAug, key) -> tuple[list[str], list[int]]:
+    """A match's history with spoken lines inserted between entries, as the live
+    game appends them (``history.said_entry``). Returns the new entries and, for
+    every original prefix length n, the new prefix length, so a row keeps its
+    moment. Seeded per match: the same match talks the same way every run."""
+    rng = random.Random(zlib.crc32(repr((key, aug.seed)).encode()))
+    if rng.random() >= aug.frac:
+        return entries, list(range(len(entries) + 1))
+    rate = aug.rate * rng.uniform(0.5, 1.5)
+    out, where = [], [0]
+    for e in entries:
+        out.append(e)
+        if rng.random() < rate:
+            tick = round(float(e.split()[0][1:]) * TIC_HZ)
+            user = bool(aug.user_lines) and rng.random() < 0.15
+            pool = aug.user_lines if user else aug.lines
+            out.append(said_entry(tick, "user" if user else "me", rng.choice(pool)))
+        where.append(len(out))
+    return out, where
+
+
+def load_game_rows(
+    dirs: list[Path],
+    adapter: str,
+    styles: list[str],
+    tok,
+    every: int,
+    talk: TalkAug | None = None,
+):
     """Rows as (stream, hist_n, state, target, episode key); history streams are
-    tokenized once per match."""
-    out, streams = [], {}
+    tokenized once per match. With ``talk``, histories carry spoken lines."""
+    out, streams, where = [], {}, {}
     for d in dirs:
         for style in styles:
             hp, rp = d / f"{style}_history.jsonl", d / f"{style}.jsonl"
@@ -123,7 +165,11 @@ def load_game_rows(dirs: list[Path], adapter: str, styles: list[str], tok, every
                 continue
             for line in open(hp):
                 h = json.loads(line)
-                streams[(str(d), style, h["ep"])] = Stream(h["entries"], tok)
+                key = (str(d), style, h["ep"])
+                entries = h["entries"]
+                if talk is not None:
+                    entries, where[key] = with_talk(entries, talk, key)
+                streams[key] = Stream(entries, tok)
             for line in open(rp):
                 r = json.loads(line)
                 if r["t"] % every:
@@ -132,7 +178,8 @@ def load_game_rows(dirs: list[Path], adapter: str, styles: list[str], tok, every
                 if target is None:
                     continue
                 key = (str(d), style, r["ep"])
-                out.append((streams[key], r["hist_n"], r["state"], target, key))
+                n = where[key][r["hist_n"]] if key in where else r["hist_n"]
+                out.append((streams[key], n, r["state"], target, key))
     return out
 
 
@@ -284,6 +331,23 @@ def main() -> None:
     )
     ap.add_argument("--grad-ckpt", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--talk-lines",
+        type=Path,
+        help="Spoken lines (talk.py output, one JSON with 'line' per row) to "
+        "insert into training histories as 'me:' entries",
+    )
+    ap.add_argument(
+        "--talk-user-lines",
+        type=Path,
+        help="Instructions (JSON rows with 'text', e.g. the router data) for "
+        "'user:' entries",
+    )
+    ap.add_argument("--talk-rate", type=float, default=0.07, help="Lines per entry")
+    ap.add_argument("--talk-frac", type=float, default=0.7, help="Matches that talk")
+    ap.add_argument(
+        "--talk-eval", action="store_true", help="Held-out histories talk too"
+    )
     args = ap.parse_args()
 
     import torch
@@ -318,9 +382,27 @@ def main() -> None:
             if a in OUTPUTS and OUTPUTS[a] == OUTPUTS["fighter"]
             else ["fighter", "cautious", "collector"]
         )
-        rows = load_game_rows(args.data, a, styles, tok, args.every)
+        talk = None
+        if args.talk_lines:
+            talk = TalkAug(
+                lines=[json.loads(x)["line"] for x in open(args.talk_lines)],
+                user_lines=[json.loads(x)["text"] for x in open(args.talk_user_lines)]
+                if args.talk_user_lines
+                else [],
+                rate=args.talk_rate,
+                frac=args.talk_frac,
+                seed=args.seed,
+            )
+        rows = load_game_rows(args.data, a, styles, tok, args.every, talk)
         val_rows = (
-            load_game_rows(args.eval_data, a, styles, tok, args.every)
+            load_game_rows(
+                args.eval_data,
+                a,
+                styles,
+                tok,
+                args.every,
+                talk if args.talk_eval else None,
+            )
             if args.eval_data
             else None
         )

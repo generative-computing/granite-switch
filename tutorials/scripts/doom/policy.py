@@ -454,6 +454,103 @@ class ExpertPolicy:
         return keyword_route(instruction)
 
 
+def engine_kwargs(
+    model: str,
+    *,
+    prefix_caching: bool = True,
+    max_num_seqs: int = 16,
+    gpu_memory_utilization: float = 0.5,
+    max_model_len: int = 4096,
+    logprobs_mode: str = "processed_logprobs",
+    enforce_eager: bool = False,
+    cudagraph_mode: str = "FULL",
+    async_scheduling: bool | None = None,
+    log_stats: bool = False,
+    attention: dict | None = None,
+) -> dict:
+    """vLLM engine settings shared by :class:`VLLMPolicy` (``LLM``) and the
+    real-time engine (``AsyncLLM``, :mod:`engine`). See VLLMPolicy for each."""
+    if attention is None and is_dual_stream(model):
+        attention = {"flash_attn_version": 2}
+    kw = dict(
+        model=model,
+        dtype="bfloat16",
+        max_model_len=max_model_len,
+        enable_prefix_caching=prefix_caching,
+        max_num_seqs=max_num_seqs,
+        # Every step fits a captured graph; larger prefills (the LoRA baseline
+        # re-prefilling whole prompts) are chunked across steps. Eager steps
+        # above the largest capture size also fail in vLLM 0.19.1
+        # ("scheduler_metadata must have shape (metadata_size)").
+        max_num_batched_tokens=max(CAPTURE_SIZES),
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_logprobs=len(ACTIONS),
+        logprobs_mode=logprobs_mode,
+        enforce_eager=enforce_eager,
+        disable_log_stats=not log_stats,
+        compilation_config={
+            "cudagraph_capture_sizes": CAPTURE_SIZES,
+            "cudagraph_mode": cudagraph_mode,
+        },
+    )
+    if async_scheduling is not None:
+        kw["async_scheduling"] = async_scheduling
+    if attention is not None:
+        kw["attention_config"] = attention
+    return kw
+
+
+@dataclass
+class PromptKit:
+    """Prompt builders, output vocabularies and sampling for one checkpoint."""
+
+    placement: str
+    lora: bool
+    pb: PromptBuilder  # game prompts
+    rb: PromptBuilder  # router prompts
+    vocab: dict[str, dict[str, int]]
+    words: dict[str, dict[int, str]]
+    sp: dict  # adapter -> SamplingParams
+
+
+def prompt_kit(
+    tok, *, base_model: bool = False, align: bool = True, temperature: float = 0.0
+) -> PromptKit:
+    from vllm import SamplingParams
+
+    placement = "base" if base_model else adapter_placement(tok)
+    adapters = () if base_model else ADAPTERS
+    place = "alora" if base_model else placement
+    vocab = {a: vocab_ids(tok, a) for a in ADAPTERS}
+    return PromptKit(
+        placement=placement,
+        lora=placement == "lora",
+        pb=PromptBuilder(tok, SYSTEM_PROMPT, adapters, placement=place, align=align),
+        rb=PromptBuilder(
+            tok, ROUTER_SYSTEM_PROMPT, adapters, placement=place, align=False
+        ),
+        vocab=vocab,
+        words={a: {i: w for w, i in v.items()} for a, v in vocab.items()},
+        sp={
+            a: SamplingParams(
+                max_tokens=1,
+                temperature=temperature if a in (*BEHAVIORS, ARMS) else 0.0,
+                allowed_token_ids=list(v.values()),
+                logprobs=len(v),  # the full distribution, for the heatmap
+            )
+            for a, v in vocab.items()
+        },
+    )
+
+
+def output_dist(out, words: dict[int, str]) -> list[tuple[str, float]]:
+    """An adapter's distribution over its words, most likely first."""
+    lp = out.outputs[0].logprobs[0]
+    pairs = [(words[i], math.exp(v.logprob)) for i, v in lp.items() if i in words]
+    pairs.sort(key=lambda p: -p[1])
+    return pairs
+
+
 class VLLMPolicy:
     """Composed Granite Switch checkpoint served in-process by vLLM.
 
@@ -513,61 +610,32 @@ class VLLMPolicy:
         attention: dict | None = None,
     ):
         os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-        from vllm import LLM, SamplingParams
+        from vllm import LLM
 
-        if attention is None and is_dual_stream(model):
-            attention = {"flash_attn_version": 2}
         self.llm = LLM(
-            model=model,
-            dtype="bfloat16",
-            max_model_len=max_model_len,
-            enable_prefix_caching=prefix_caching,
-            max_num_seqs=max_num_seqs,
-            # Every step fits a captured graph; larger prefills (the LoRA
-            # baseline re-prefilling whole prompts) are chunked across steps.
-            # Eager steps above the largest capture size also fail in vLLM
-            # 0.19.1 ("scheduler_metadata must have shape (metadata_size)").
-            max_num_batched_tokens=max(CAPTURE_SIZES),
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_logprobs=len(ACTIONS),
-            logprobs_mode=logprobs_mode,
-            enforce_eager=enforce_eager,
-            disable_log_stats=not log_stats,
-            compilation_config={
-                "cudagraph_capture_sizes": CAPTURE_SIZES,
-                "cudagraph_mode": cudagraph_mode,
-            },
-            **(
-                {}
-                if async_scheduling is None
-                else {"async_scheduling": async_scheduling}
-            ),
-            **({} if attention is None else {"attention_config": attention}),
+            **engine_kwargs(
+                model,
+                prefix_caching=prefix_caching,
+                max_num_seqs=max_num_seqs,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                logprobs_mode=logprobs_mode,
+                enforce_eager=enforce_eager,
+                cudagraph_mode=cudagraph_mode,
+                async_scheduling=async_scheduling,
+                log_stats=log_stats,
+                attention=attention,
+            )
         )
         self.tok = self.llm.get_tokenizer()
         self.base_model = base_model
-        self.placement = "base" if base_model else adapter_placement(self.tok)
-        self.lora = self.placement == "lora"
-        adapters = () if base_model else ADAPTERS
-        place = "alora" if base_model else self.placement
-        self.pb = PromptBuilder(
-            self.tok, SYSTEM_PROMPT, adapters, placement=place, align=align
+        kit = prompt_kit(
+            self.tok, base_model=base_model, align=align, temperature=temperature
         )
-        self.rb = PromptBuilder(
-            self.tok, ROUTER_SYSTEM_PROMPT, adapters, placement=place, align=False
-        )
-        self.vocab = {a: vocab_ids(self.tok, a) for a in ADAPTERS}
-        self.words = {a: {i: w for w, i in v.items()} for a, v in self.vocab.items()}
+        self.placement, self.lora = kit.placement, kit.lora
+        self.pb, self.rb = kit.pb, kit.rb
+        self.vocab, self.words, self.sp = kit.vocab, kit.words, kit.sp
         self.temperature = temperature
-        self.sp = {
-            a: SamplingParams(
-                max_tokens=1,
-                temperature=temperature if a in (*BEHAVIORS, ARMS) else 0.0,
-                allowed_token_ids=list(v.values()),
-                logprobs=len(v),  # the full distribution, for the heatmap
-            )
-            for a, v in self.vocab.items()
-        }
         self.engine_loop = engine_loop
         self._warmup(warmup)
         if gc_freeze:
@@ -601,11 +669,7 @@ class VLLMPolicy:
         return None if self.base_model else adapter
 
     def _dist(self, out, adapter: str) -> list[tuple[str, float]]:
-        words = self.words[adapter]
-        lp = out.outputs[0].logprobs[0]
-        pairs = [(words[i], math.exp(v.logprob)) for i, v in lp.items() if i in words]
-        pairs.sort(key=lambda p: -p[1])
-        return pairs
+        return output_dist(out, self.words[adapter])
 
     def _decision(self, out, adapter: str, t0: float, t1: float, t2: float):
         dist = self._dist(out, adapter)

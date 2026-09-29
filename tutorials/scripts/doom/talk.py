@@ -84,3 +84,55 @@ def brief(entries: list[str], state: str) -> str:
         parts.append("Just now: " + "; ".join(news) + ".")
     parts.append("Right now: " + "; ".join(now) + ".")
     return " ".join(parts)
+
+
+def main() -> None:
+    """Generate a pool of spoken lines from recorded moments, for training the
+    game adapters on histories that contain talk (train_alora.py --talk-lines)."""
+    import argparse
+    import json
+    import random
+    from pathlib import Path
+
+    from history import History
+    from policy import VLLMPolicy
+
+    ap = argparse.ArgumentParser(description=main.__doc__.split("\n")[0])
+    ap.add_argument(
+        "--model", required=True, help="Any composed checkpoint (base path)"
+    )
+    ap.add_argument("--data", type=Path, required=True, help="A collect.py dir")
+    ap.add_argument("--n", type=int, default=3000)
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    streams = {}
+    for line in open(args.data / "fighter_history.jsonl"):
+        h = json.loads(line)
+        streams[h["ep"]] = h["entries"]
+    rows = [json.loads(x) for x in open(args.data / "fighter.jsonl")]
+    rows = [r for r in rows if r["hist_n"] >= 10]
+    random.Random(0).shuffle(rows)
+    rows = rows[: args.n]
+    pol = VLLMPolicy(args.model, max_num_seqs=128, warmup=2)
+    games, briefs = [], []
+    for r in rows:
+        entries = streams[r["ep"]][: r["hist_n"]]
+        games.append((History.replay(entries, pol.tok).ids, r["state"]))
+        briefs.append(brief(entries, r["state"]))
+    lines = []
+    for i in range(0, len(games), 256):
+        lines += pol.talk(games[i : i + 256], briefs[i : i + 256], temperature=0.9)
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    with open(args.out, "w") as f:
+        for r, b, t in zip(rows, briefs, lines):
+            if t.strip():
+                f.write(
+                    json.dumps({"ep": r["ep"], "t": r["t"], "brief": b, "line": t})
+                    + "\n"
+                )
+    print(f"{sum(1 for t in lines if t.strip())} lines -> {args.out}")
+
+
+if __name__ == "__main__":
+    main()
