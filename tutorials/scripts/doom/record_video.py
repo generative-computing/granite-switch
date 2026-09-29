@@ -380,6 +380,11 @@ def main() -> None:
         "--temperature", type=float, default=1.0, help="Style and planner sampling"
     )
     ap.add_argument("--layout", default="log", help="The adapters' prompt layout")
+    ap.add_argument("--no-hud", action="store_true", help="No status bar (as collect)")
+    ap.add_argument("--no-critic", action="store_true", help="Do not ask the critic")
+    ap.add_argument("--eager", action="store_true", help="No CUDA graphs")
+    ap.add_argument("--cudagraph-mode", default="FULL")
+    ap.add_argument("--fa2", action="store_true", help="FlashAttention 2, not 3")
     ap.add_argument(
         "--talk-every", type=float, default=0.0, help="Seconds between spoken lines"
     )
@@ -404,11 +409,16 @@ def main() -> None:
             warmup=100,
             temperature=args.temperature,
             layout=args.layout,
+            enforce_eager=args.eager,
+            cudagraph_mode=args.cudagraph_mode,
+            attention={"flash_attn_version": 2} if args.fa2 else None,
         )
     else:
         where = "scripted teacher, no model"
         pol = make_policy("expert")
-    env = DoomEnv(seed=args.seed, resolution="640X480", hud=True, timeout_tics=10**7)
+    env = DoomEnv(
+        seed=args.seed, resolution="640X480", hud=not args.no_hud, timeout_tics=10**7
+    )
     obs = env.reset(seed=args.seed)
     hist = History(getattr(pol, "tok", None))
     panel = Panel()
@@ -425,6 +435,7 @@ def main() -> None:
     )
     caps: list[tuple[float, str, str]] = []  # (video s, who, text)
     frame_i, last_talk, last_reply = 0, -1e9, -1e9
+    live, fist = 0, 0  # tics alive, and of those holding the fist
     kind = KINDS.get(getattr(pol, "placement", "base"), "")
     for what, secs in args.segment:
         info: dict = {"instruction": None}
@@ -446,12 +457,13 @@ def main() -> None:
             if obs.dead:  # respawning: nothing to decide
                 heat.push({}, adapter, False, critic)
             else:
-                want = [adapter, CRITIC]
+                want = [adapter] if args.no_critic else [adapter, CRITIC]
                 if obs.tick % PLAN_EVERY_TICS == 0:
                     want.append(ARMS)
                 decs = pol.decide_many(obs, tuple(want), hist)
                 d = decs[adapter]
-                action, critic = d.action, decs[CRITIC].probs
+                action = d.action
+                critic = decs[CRITIC].probs if CRITIC in decs else {}
                 if ARMS in decs:
                     weapon = int(decs[ARMS].action)
                     plan = {"slot": weapon, "probs": decs[ARMS].probs}
@@ -487,6 +499,9 @@ def main() -> None:
                     )
             frame = env.frame()
             text, hud = obs.text, (obs.hp, obs.armor, obs.weapon)
+            if not obs.dead:
+                live += 1
+                fist += obs.weapon == "fist"
             hist.observe(obs, action)
             obs = env.step(action, weapon=weapon)
             if obs.done:
@@ -528,6 +543,11 @@ def main() -> None:
             json.dumps({"fps": TIC_HZ, "frames": frame_i, "lines": talk}, indent=1)
         )
     a = np.asarray(all_ms)
+    st = env.stats.as_dict()
+    print(
+        f"match: frags {st['frags']} deaths {st['deaths']} rank {st['rank']}; "
+        f"holding the fist {100 * fist / max(1, live):.0f}% of live tics"
+    )
     print(
         f"wrote {args.out}: {a.size} decisions, p50 {np.percentile(a, 50):.2f} ms, "
         f"p99 {np.percentile(a, 99):.2f} ms, max {a.max():.2f} ms"

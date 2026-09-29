@@ -151,14 +151,77 @@ def make_standins(
     return written
 
 
+def live_check(pol, seconds: float = 20.0, seed: int = 5) -> dict:
+    """Decisions in the live regime against the same prompts sent cold.
+
+    Live: one game, a warm prefix cache, one small engine step per tic, as the
+    demo serves it. Cold: the cache cleared, the same prompts in batches of 32,
+    the regime the PEFT comparison covers. The two must agree; a serving fault
+    that shows only in small cached steps (FA3's ahead-of-time schedule sized for
+    the wrong heads, fixed in granite_switch.vllm.fa3_schedule) fails here and
+    nowhere else. The scripted player drives, so the states are real.
+    """
+    from doom_env import TIC_HZ, DoomEnv
+    from expert import BEHAVIORS, PLAN_EVERY_TICS, Expert
+    from history import History
+    from policy import ARMS, CRITIC, state_text
+
+    style = BEHAVIORS[0]
+    env = DoomEnv(seed=seed, resolution="640X480", timeout_tics=int(seconds * TIC_HZ))
+    ex, hist = Expert(), History(pol.tok)
+    obs = env.reset(seed=seed)
+    games, asks, live = [], [], []
+    while not obs.done:
+        act = ex.act(obs, style)
+        plan = obs.tick % PLAN_EVERY_TICS == 0
+        if not obs.dead:
+            want = [style, CRITIC] + ([ARMS] if plan else [])
+            g = (list(hist.ids), state_text(obs))
+            live.append(pol.decide_games([g], [want])[0])
+            games.append(g)
+            asks.append(want)
+        hist.observe(obs, act)
+        obs = env.step(act, weapon=ex.weapon(obs) if plan else None)
+    env.close()
+    pol.llm.reset_prefix_cache()
+    cold = []
+    for i in range(0, len(games), 32):
+        cold += pol.decide_games(games[i : i + 32], asks[i : i + 32])
+    rep = {}
+    for a in (style, CRITIC, ARMS):
+        pairs = [(lv[a], cd[a]) for lv, cd in zip(live, cold) if a in lv]
+        tv = [
+            0.5 * sum(abs(x.probs.get(k, 0) - y.probs.get(k, 0)) for k in x.probs)
+            for x, y in pairs
+        ]
+        agree = sum(x.action == y.action for x, y in pairs) / max(1, len(pairs))
+        mean_tv = sum(tv) / max(1, len(tv))
+        rep[a] = {
+            "n": len(pairs),
+            "mean_tv": round(mean_tv, 4),
+            "agree": round(agree, 4),
+            "pass": mean_tv < 0.02 and agree >= 0.97,
+        }
+        print(
+            f"live one-game steps vs cold batches  {a:<8} n={len(pairs):>4}  "
+            f"mean TV {mean_tv:.4f}  same argmax {100 * agree:5.1f}%  "
+            f"{'PASS' if rep[a]['pass'] else 'FAIL'}",
+            flush=True,
+        )
+    return rep
+
+
 def verify(
     runs: Path, model: str, router_runs: Path | None, limit: int, layout: str = "log"
 ) -> dict:
     """Argmax agreement: composed checkpoint in vLLM vs the PEFT adapter, on the
-    held-out rows each adapter's training run wrote (history ids + state)."""
+    held-out rows each adapter's training run wrote (history ids + state); then
+    the live regime against cold batches (:func:`live_check`)."""
     from policy import ROUTER, VLLMPolicy
 
-    pol = VLLMPolicy(model, warmup=5, max_num_seqs=64, layout=layout)
+    # The demo's own engine settings: the FA3 schedule fault showed only with
+    # the default max_num_seqs (16), not with 64.
+    pol = VLLMPolicy(model, warmup=5, layout=layout)
     report = {}
     for name in ADAPTERS:
         root = router_runs if (name == ROUTER and router_runs) else runs
@@ -214,6 +277,7 @@ def verify(
             + extra,
             flush=True,
         )
+    report["live"] = live_check(pol)
     return report
 
 
