@@ -12,6 +12,7 @@ from granite_switch.composer.tokenizer_setup import (
     add_control_tokens,
     build_substitute_token_ids,
     configure_chat_template,
+    resolve_label_token_ids,
 )
 
 _PATCH_TARGET = "granite_switch.composer.tokenizer_setup._decode_alora_invocation_text"
@@ -601,3 +602,46 @@ class TestShadowResidualAnchorMode:
 
         with pytest.raises(ValueError, match="encodes to 3 tokens"):
             configure_chat_template(tokenizer, [(path, "answerability", "sr")])
+
+
+class _LabelTokenizer:
+    """Minimal tokenizer stub for resolve_label_token_ids.
+
+    ``single_token`` maps a word -> its single id; any word not present is
+    treated as multi-token (splits into one id per character) so the multi-token
+    failure path can be exercised deterministically.
+    """
+
+    def __init__(self, single_token: dict[str, int]):
+        self._single = single_token
+
+    def encode(self, text, add_special_tokens=False):
+        if text in self._single:
+            return [self._single[text]]
+        # Deterministic multi-token split: one synthetic id per character.
+        return [1000 + i for i, _ in enumerate(text)]
+
+    def convert_ids_to_tokens(self, ids):
+        return [f"<tok{i}>" for i in ids]
+
+
+class TestResolveLabelTokenIds:
+    """Tests for resolve_label_token_ids (classifier label word -> token id)."""
+
+    def test_single_token_labels_resolve_in_order(self):
+        tok = _LabelTokenizer({"safe": 19193, "unsafe": 39257})
+        assert resolve_label_token_ids(tok, ["safe", "unsafe"]) == [19193, 39257]
+
+    def test_order_is_preserved(self):
+        tok = _LabelTokenizer({"yes": 9891, "no": 2201})
+        assert resolve_label_token_ids(tok, ["no", "yes"]) == [2201, 9891]
+
+    def test_multi_token_label_fails_loud(self):
+        tok = _LabelTokenizer({"safe": 19193})  # "unsafe" absent -> multi-token
+        with pytest.raises(ValueError, match="single token"):
+            resolve_label_token_ids(tok, ["safe", "unsafe"])
+
+    def test_error_names_the_offending_word(self):
+        tok = _LabelTokenizer({"safe": 1})
+        with pytest.raises(ValueError, match="Ambiguous"):
+            resolve_label_token_ids(tok, ["Ambiguous"])

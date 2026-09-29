@@ -171,6 +171,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Shadow Residual (SR) parameters
         cross_stream_rank: int | None = None,
         dual_stream: bool = False,
+        # Classifier substitution parameters
+        adapter_kinds: list[str] | None = None,
+        classifier_label_token_ids: list[list[int] | None] | None = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -358,6 +361,81 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
         self.max_lora_rank = max_lora_rank
         self.adapter_ranks = adapter_ranks
+
+        # Each adapter slot is either a LoRA adapter ("lora", the default) or
+        # a classifier head ("classifier"). A classifier slot still uses a
+        # control token and an adapter index; the switch routes its token to
+        # that index like lora adapter, but the index is tagged as a classifier
+        # so the LoRA path no-ops there and the classifier head runs instead.
+        _VALID_KINDS = ("lora", "classifier")
+        if adapter_kinds is None:
+            adapter_kinds = ["lora"] * num_adapters
+        else:
+            if len(adapter_kinds) != num_adapters:
+                raise ValueError(
+                    f"adapter_kinds length ({len(adapter_kinds)}) must equal "
+                    f"num_adapters ({num_adapters})."
+                )
+            invalid = [k for k in adapter_kinds if k not in _VALID_KINDS]
+            if invalid:
+                raise ValueError(
+                    f"adapter_kinds values must be one of {_VALID_KINDS}; "
+                    f"got invalid entries {invalid}"
+                )
+        self.adapter_kinds = adapter_kinds
+
+        # Classifier metadata resolved at compose time.
+        if classifier_label_token_ids is not None:
+            if len(classifier_label_token_ids) != num_adapters:
+                raise ValueError(
+                    f"classifier_label_token_ids length "
+                    f"({len(classifier_label_token_ids)}) must equal num_adapters "
+                    f"({num_adapters}); it is indexed by adapter_index - 1, with "
+                    f"None on non-classifier slots."
+                )
+            for i, (kind, ids) in enumerate(
+                zip(adapter_kinds, classifier_label_token_ids)
+            ):
+                if kind == "classifier":
+                    if not ids:
+                        raise ValueError(
+                            f"classifier slot {i} must declare its label token ids; "
+                            f"got {ids!r}."
+                        )
+                    if any(tid < 0 for tid in ids):
+                        raise ValueError(
+                            f"classifier_label_token_ids[{i}] must all be >= 0 "
+                            f"(real token ids); got {ids}"
+                        )
+                elif ids:
+                    raise ValueError(
+                        f"non-classifier slot {i} must have no label token ids; "
+                        f"got {ids!r}."
+                    )
+        elif any(k == "classifier" for k in adapter_kinds):
+            raise ValueError(
+                "adapter_kinds declares a classifier slot but "
+                "classifier_label_token_ids is unset. The classifier exit emits its "
+                "verdict as a label word, so the per-label token ids are required. "
+                "Re-compose so config.json carries classifier_label_token_ids."
+            )
+        self.classifier_label_token_ids = classifier_label_token_ids
+
+        # Derived: per-slot label counts (0 on LoRA slots) and the padded bank
+        # width the classifier head is built with.
+        self.classifier_num_labels_per_slot = [
+            len(ids) if ids else 0 for ids in (classifier_label_token_ids or [])
+        ] or [0] * num_adapters
+        self.max_classifier_labels = max(self.classifier_num_labels_per_slot, default=0)
+
+        # Derived: the control-token ids that mark a classifier slot. Both backends
+        # locate a verdict's read point by matching these in the original input_ids,
+        # so the id set is defined once here.
+        self.classifier_control_token_ids = [
+            tid
+            for tid, kind in zip(adapter_token_ids or [], adapter_kinds)
+            if kind == "classifier"
+        ]
 
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.

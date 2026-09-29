@@ -170,6 +170,23 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
+        # Classifier heads: optional alternative for LoRA adapters. A classifier
+        # slot shares the adapter index/token machinery, but its index is tagged
+        # as "classifier" (via the switch's adapter_kind_lut). The switch's
+        # split_indices() routes those positions out of the LoRA stream (so LoRA
+        # no-ops there) and into a classifier stream, which this head consumes
+        # from the final post-norm hidden state.
+        if "classifier" in getattr(config, "adapter_kinds", []):
+            from .core import SwitchedClassifierHead
+
+            self.classifier_head = SwitchedClassifierHead(
+                hidden_size=config.hidden_size,
+                num_classifier_slots=config.num_adapters,
+                max_num_labels=config.max_classifier_labels,
+            )
+        else:
+            self.classifier_head = None
+
         # 3. Base transformer layers with custom LoRA
         #
         # When adapters are present, config.num_hidden_layers includes placeholder
@@ -320,13 +337,30 @@ class GraniteSwitchModel(nn.Module):
                 )
                 modified_input_ids = input_ids
 
-            # Prepare kernel metadata ONCE for all decoder layers (adaptation-specific).
+            # Split the single adapter_indices stream into a LoRA stream and a
+            # classifier stream. Classifier positions are zeroed in lora_indices
+            # (so the LoRA path no-ops there); the classifier head reads them on
+            # the last rank via classifier_indices.
+            if self.switch is not None:
+                lora_indices, classifier_indices = self.switch.split_indices(
+                    adapter_indices
+                )
+            else:
+                lora_indices = adapter_indices
+                classifier_indices = torch.zeros_like(adapter_indices)
+
+            # Prepare kernel metadata ONCE for all decoder layers
+            # (adaptation-specific). The LoRA stream (classifier positions zeroed)
+            # is what the fused kernel routes on, so classifier tokens no-op the
+            # LoRA path.
             if self.lora_meta is not None and self.lora_ctx is not None:
                 self.decoder_interface.prepare_kernel_meta(
-                    self.lora_meta, adapter_indices, self.lora_ctx
+                    self.lora_meta, lora_indices, self.lora_ctx
                 )
 
             # Store metadata in intermediate_tensors for pipeline parallelism.
+            # Only adapter_indices is propagated; classifier_indices is derived
+            # from it on the last rank via split_indices (no new PP tensor).
             if intermediate_tensors is None:
                 intermediate_tensors = IntermediateTensors({})
             intermediate_tensors["adapter_indices"] = adapter_indices
@@ -335,9 +369,21 @@ class GraniteSwitchModel(nn.Module):
             # token-leading adapter_indices received through PP.
             if intermediate_tensors is not None:
                 adapter_indices = intermediate_tensors["adapter_indices"]
+                # Recompute the split from the PP-propagated stream so this
+                # rank's Punica metadata sees classifier positions as base.
+                if self.switch is not None:
+                    lora_indices, classifier_indices = self.switch.split_indices(
+                        adapter_indices
+                    )
+                else:
+                    lora_indices = adapter_indices
+                    classifier_indices = torch.zeros_like(adapter_indices)
+
                 if self.lora_ctx is not None:
+                    # Route on the LoRA stream (classifier positions zeroed) so
+                    # classifier tokens no-op the LoRA path on this PP rank too.
                     self.decoder_interface.prepare_kernel_meta(
-                        self.lora_meta, adapter_indices, self.lora_ctx
+                        self.lora_meta, lora_indices, self.lora_ctx
                     )
             else:
                 # Fallback: no metadata available (should not happen in normal operation)
@@ -353,6 +399,7 @@ class GraniteSwitchModel(nn.Module):
                     dtype=torch.long,
                     device=fallback_device,
                 )
+                classifier_indices = torch.zeros_like(adapter_indices)
 
         # ═══════════════════════════════════════════════════════════════
         # Get embeddings (or hidden states from previous pipeline stage)
@@ -387,10 +434,17 @@ class GraniteSwitchModel(nn.Module):
         if get_pp_group().is_last_rank:
             # Adaptation-specific finalize: LoRA folds the last residual via
             # rms_norm_select (fused/separate convention); SR does the per-token
-            # where-merge of its two streams then a plain norm.
-            return self.decoder_interface.exit_decoder_stack(
+            # where-merge of its two streams then a plain norm. The returned
+            # [M, H] tensor is the final post-norm hidden state (what the LM head
+            # consumes).
+            hidden_states = self.decoder_interface.exit_decoder_stack(
                 state, adapter_indices, self.norm, self.config
             )
+
+            if self.lora_ctx is not None:
+                self.lora_ctx.classifier_indices = classifier_indices
+
+            return hidden_states
         else:
             # Non-last rank: ship two token-leading [M,H] tensors so vLLM's
             # per-token IntermediateTensors slice stays correct. LoRA sends
@@ -401,6 +455,145 @@ class GraniteSwitchModel(nn.Module):
             intermediate_tensors["hidden_states"] = h_out
             intermediate_tensors["residual"] = r_out
             return intermediate_tensors
+
+    def _classifier_read_points(
+        self,
+        classifier_indices: torch.Tensor,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Per-request (hidden_state, slot_index) for the classifier verdict.
+
+        The verdict is read at the LAST CONTENT TOKEN, which the classifier
+        control token (marker) locates: the chat template emits the marker
+        immediately after the last content token, so the read point is
+        ``marker - 1``.
+
+        The marker is the LAST classifier control token in a request's slice,
+        matched by id in ``input_ids``; ``classifier_indices`` is nonzero from any
+        classifier marker onward, so the index alone does not say which slot a
+        position belongs to. The read point is ``marker - 1`` and the slot id is
+        read AT the marker (``marker - 1`` carries index 0).
+
+        Per request slice ``[start, end)``, three states:
+
+        * marker present with a predecessor in this pass -- the common case.
+        * marker opens the slice: its predecessor ended the previous pass, so each
+          pass stashes its final hidden row for a single-token look-back.
+        * no marker: either still mid-prefill, or the marker was in an earlier
+          chunk and that pass's resolved verdict is carried forward, since vLLM
+          consumes the verdict only on the pass it samples.
+
+        Returns ``None`` when there is no request metadata (e.g. the startup
+        profiling forward), so the caller emits no verdict.
+        """
+        from vllm.forward_context import get_forward_context
+
+        attn_metadata = get_forward_context().attn_metadata
+        # v1 keys this by layer name (a dict), or a list of such dicts under
+        # microbatching. They all share query_start_loc, so grab any one.
+        if isinstance(attn_metadata, list):
+            attn_metadata = attn_metadata[0] if attn_metadata else None
+        if isinstance(attn_metadata, dict):
+            attn_metadata = next(iter(attn_metadata.values()), None)
+        query_start_loc = getattr(attn_metadata, "query_start_loc", None)
+        if query_start_loc is None:
+            return None
+
+        qsl = query_start_loc.tolist()
+        seq_lens = attn_metadata.seq_lens.tolist()
+
+        # A request's marker is the LAST classifier control token in its slice:
+        # ``classifier_indices`` is nonzero from any classifier marker onward, so
+        # with several classifier slots the index alone does not say which slot's
+        # marker a position belongs to.
+        if input_ids is None:
+            raise RuntimeError(
+                "A classifier request needs input_ids to locate its control token, "
+                "but only inputs_embeds was provided. Classifier slots classify a "
+                "text prompt; pass input_ids."
+            )
+        marker_ids = torch.tensor(
+            self.config.classifier_control_token_ids,
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
+        is_marker = torch.isin(input_ids, marker_ids)  # [total_tokens]
+
+        stash = getattr(self, "_classifier_prev_pass_tail", None) or {}
+        resolved = getattr(self, "_classifier_resolved_verdict", None) or {}
+        req_hidden_rows = []
+        req_slots = []
+        new_stash: dict[int, torch.Tensor] = {}
+        new_resolved: dict[int, tuple[torch.Tensor, int]] = {}
+        for i in range(len(qsl) - 1):
+            start, end = qsl[i], qsl[i + 1]
+            hits = is_marker[start:end].nonzero(as_tuple=True)[0]
+            if hits.numel() == 0:
+                # No marker in this slice, which is either of two states:
+                #
+                #  * the marker is still ahead (mid-prefill): keep this slice's final
+                #    row, keyed by its global end position, in case the marker opens
+                #    the next chunk.
+                #  * the marker was in an earlier chunk (a rendered prompt continues
+                #    past it with the generation prompt): carry that pass's resolved
+                #    (row, slot) forward. vLLM consumes the verdict only on the pass
+                #    where it samples, which is the final chunk.
+                carried = resolved.get(seq_lens[i] - (end - start))
+                if carried is not None:
+                    row, slot = carried
+                    new_resolved[seq_lens[i]] = (row, slot)
+                    req_hidden_rows.append(row)
+                    req_slots.append(slot)
+                    continue
+                new_stash[seq_lens[i]] = hidden_states[end - 1]
+                req_hidden_rows.append(hidden_states[end - 1])
+                req_slots.append(0)
+                continue
+
+            # One verdict per request: the exit rewrites a single logit row, so a
+            # request naming two different classifier slots has no way to report
+            # both. Repeated markers of the SAME slot are fine (a multi-turn prompt
+            # carries them from earlier turns); the last one wins.
+            distinct = torch.unique(input_ids[start:end][hits])
+            if distinct.numel() > 1:
+                raise RuntimeError(
+                    "A classifier request may name only one classifier slot; "
+                    f"request {i} carries control tokens "
+                    f"{sorted(int(t) for t in distinct)}. The verdict exit rewrites "
+                    "one logit row, so only one slot can report."
+                )
+
+            marker = start + int(hits[-1])  # last id match: this slice's marker
+            slot = int(classifier_indices[marker])
+            req_slots.append(slot)
+            if marker > start:
+                # Common case: predecessor is in this pass.
+                row = hidden_states[marker - 1]
+                new_resolved[seq_lens[i]] = (row, slot)
+                req_hidden_rows.append(row)
+                continue
+
+            # Edge case: marker is the first token of its slice
+            marker_global = seq_lens[i] - (end - start)
+            prev = stash.get(marker_global)
+            if prev is None:
+                raise RuntimeError(
+                    "Classifier verdict cannot locate its read point: the marker "
+                    f"is the first token of request {i}'s chunk (global position "
+                    f"{marker_global}), so the last content token (marker - 1) was "
+                    "computed in the previous pass, and no stashed hidden row is "
+                    "available for it."
+                )
+            new_resolved[seq_lens[i]] = (prev, slot)
+            req_hidden_rows.append(prev)
+
+        self._classifier_prev_pass_tail = new_stash
+        self._classifier_resolved_verdict = new_resolved
+        return (
+            torch.stack(req_hidden_rows, dim=0),
+            torch.tensor(req_slots, dtype=torch.long, device=hidden_states.device),
+        )
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -580,6 +773,23 @@ class GraniteSwitchForCausalLM(
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
+        self._pending_verdict = None
+        classifier_head = getattr(self.model, "classifier_head", None)
+        if classifier_head is not None and isinstance(hidden_states, torch.Tensor):
+            classifier_indices = getattr(
+                self.model.lora_ctx, "classifier_indices", None
+            )
+            if classifier_indices is not None:
+                read = self.model._classifier_read_points(
+                    classifier_indices, hidden_states, input_ids
+                )
+                if read is not None:
+                    req_hidden, req_classifier_indices = read
+                    verdict = classifier_head(
+                        req_hidden, req_classifier_indices
+                    )  # [num_reqs, num_labels]
+                    self._pending_verdict = (verdict, req_classifier_indices)
+
         return hidden_states
 
     def compute_logits(
@@ -596,8 +806,51 @@ class GraniteSwitchForCausalLM(
         per-token adapter_indices computed in forward(). Any suppression would
         have to act where adapter_indices and hidden_states still share the
         same token dimension.
+
+        Classifier exit: the classifier request reports its verdict as a generated
+        token, like a guardian LoRA. For each classifier request we rewrite its logit
+        row: set the whole vocab to -inf, then place the per-label scores on each
+        label word's token id (``classifier_label_token_ids``) so the sampler
+        emits that word. Non-classifier rows keep their normal LM logits.
         """
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        return self._apply_classifier_verdict(logits)
+
+    def _apply_classifier_verdict(
+        self,
+        logits: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Rewrite classifier requests' logit rows to emit their label word."""
+        pending = getattr(self, "_pending_verdict", None)
+        if logits is None or pending is None:
+            return logits
+        # Consume it so a same-step prompt_logprobs pass re-applies nothing.
+        self._pending_verdict = None
+        verdict, req_indices = pending
+
+        per_slot_label_ids = self.config.classifier_label_token_ids
+
+        if verdict.shape[0] != logits.shape[0]:
+            raise RuntimeError(
+                f"classifier verdict rows ({verdict.shape[0]}) do not match "
+                f"logits rows ({logits.shape[0]}); per-request alignment broke."
+            )
+
+        is_classifier = req_indices > 0  # [num_reqs]
+        if not bool(is_classifier.any()):
+            return logits
+
+        # Each request writes only its own slot's label ids and only that slot's
+        # real label count (verdict[:, :n]); padded columns are never read.
+        rows = is_classifier.nonzero(as_tuple=True)[0]  # [num_classifier_reqs]
+        logits[rows] = float("-inf")
+        for r in rows.tolist():
+            slot = int(req_indices[r])
+            ids = per_slot_label_ids[slot - 1]
+            n = len(ids)
+            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
+            logits[r, label_ids] = verdict[r, :n].to(logits.dtype)
+        return logits
 
     def sample(
         self,

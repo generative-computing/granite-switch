@@ -145,6 +145,10 @@ ANCHOR_MODE_ALORA = "alora"
 #: the end of the generation prompt (Shadow Residual, ``last_context_token``).
 ANCHOR_MODE_SR = "sr"
 
+#: Placement mode where the control token is emitted *after* the last content
+#: token of the last user turn (classifier slot, manifest ``kind``).
+ANCHOR_MODE_CLASSIFIER = "classifier"
+
 
 def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
     """Load alora_invocation_tokens from adapter_config.json.
@@ -843,6 +847,30 @@ def build_substitute_token_ids(
     return substitute_ids
 
 
+def resolve_label_token_ids(tokenizer, label_names: list[str]) -> list[int]:
+    """Turn each classifier label word into its single token id."""
+    token_ids: list[int] = []
+    non_atomic: list[str] = []
+    for word in label_names:
+        # Same encode as the control-token check: bare word, no special tokens.
+        encoded = tokenizer.encode(word, add_special_tokens=False)
+        if len(encoded) != 1:
+            sub_tokens = tokenizer.convert_ids_to_tokens(encoded)
+            non_atomic.append(f"{word!r} → {len(encoded)} tokens: {sub_tokens}")
+        else:
+            token_ids.append(encoded[0])
+
+    if non_atomic:
+        raise ValueError(
+            f"{len(non_atomic)} classifier label word(s) do not encode to a "
+            f"single token, but the vLLM classifier exit writes the verdict at "
+            f"one token id per label. Choose a single-token synonym for each:\n  "
+            + "\n  ".join(non_atomic)
+        )
+
+    return token_ids
+
+
 def configure_chat_template(
     tokenizer,
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
@@ -914,6 +942,11 @@ def configure_chat_template(
     # still costing compute. Callers therefore classify SR from the checkpoint
     # weights (``is_shadow_residual_adapter``) and pass ``sr`` here, rather than
     # trusting a directory label that no SR training run produces.
+    # A classifier slot arrives as technology ``classifier``, like SR arrives as
+    # ``sr``: the caller derives the placement mode (SR from the checkpoint
+    # weights, classifier from the manifest's ``kind``) and passes it in
+    # the discovered tuple. ``technology`` is the placement axis this function
+    # dispatches on; a classifier is a fourth mode alongside lora / alora / sr.
     adapter_mapping: dict[str, dict[str, str]] = {}
     sr_anchors: set[str] = set()
     for adapter_info in discovered_adapters:
@@ -951,6 +984,9 @@ def configure_chat_template(
 
     mapping_entries = []
     for adapter_name, info in adapter_mapping.items():
+        # ``type`` is the placement mode: lora (sequence start) / alora (before
+        # the invocation text) / sr (replaces the generation-prompt anchor) /
+        # classifier (end-locator after the last content token).
         if "invocation_text" in info:
             mapping_entries.append(
                 f"    '{adapter_name}': {{'token': '{info['token']}', "
@@ -1104,6 +1140,31 @@ def configure_chat_template(
 {%- endif %}
 """
 
+    # Classifier placement: the marker goes after the last user turn's content and
+    # before that turn's closing marker (``<|end_of_text|>`` / ``<|im_end|>``), so
+    # the read point ``marker - 1`` is the position the head was trained on.
+    classifier_scan = (
+        """{#- Classifier scan: find the last user message (the turn being classified). -#}
+{%- if ns.adapter_token and ns.adapter_type == 'classifier' %}
+    {%- for _msg in """
+        + fmt.loop_var_source
+        + """ %}
+        {%- if _msg.role == 'user' %}
+            {%- set ns.classifier_target_idx = loop.index0 %}
+        {%- endif %}
+    {%- endfor %}
+{%- endif %}
+"""
+    )
+    # In-loop emit: at the target user message, emit the marker right before the
+    # turn-closing marker. ``{{- ns.adapter_token }}`` prints the control token;
+    # the surrounding content and turn-close are emitted by the base template.
+    classifier_emit = (
+        "{%- if ns.adapter_token and ns.adapter_type == 'classifier' "
+        "and loop.index0 == ns.classifier_target_idx %}"
+        "{{- ns.adapter_token }}{%- endif %}"
+    )
+
     # Build the modified template
     modified_chat_template = adapter_map_def + adapter_lookup + base_chat_template
 
@@ -1127,6 +1188,7 @@ def configure_chat_template(
             "\n                       adapter_type=adapter_type,"
             "\n                       adapter_invocation_text=adapter_invocation_text,"
             "\n                       alora_target_idx=-1,"
+            "\n                       classifier_target_idx=-1,"
             "\n                       skip_next_role_marker=false"
             "\n                       )"
         )
@@ -1213,6 +1275,7 @@ def configure_chat_template(
         modified_chat_template = (
             modified_chat_template[:insertion_point]
             + alora_pass1
+            + classifier_scan
             + modified_chat_template[insertion_point:]
         )
 
@@ -1243,6 +1306,58 @@ def configure_chat_template(
                 + alora_pass2
                 + modified_chat_template[insertion_point:]
             )
+
+    # Inject the classifier emit at the end of the last user turn, before that
+    # turn's closing marker. Format-specific because the two families emit the
+    # turn boundary differently (granite_format fuses content and the close in
+    # one emission; chatml emits the close as a standalone statement).
+    classifier_names = sorted(
+        n for n, i in adapter_mapping.items() if i["type"] == ANCHOR_MODE_CLASSIFIER
+    )
+    if classifier_names and fmt.name == "chatml":
+        # Emit right before the user/system branch's standalone
+        # ``{{- '<|im_end|>\n' }}``. That close follows the low-effort if/else,
+        # so anchor on ``{%- endif %}\n<ws>{{- '<|im_end|>\n' }}`` scoped to the
+        # user branch: the FIRST ``<|im_end|>`` emission that is preceded by an
+        # ``{%- endif %}`` is the user/system one (assistant/tool closes are not
+        # preceded by an if/else over content).
+        chatml_user_close_re = re.compile(
+            r"(\{%-\s*endif\s*%\}\s*)(\{\{-\s*'<\|im_end\|>\\n'\s*\}\})"
+        )
+        m = chatml_user_close_re.search(modified_chat_template)
+        if m:
+            insertion_point = m.start(2)
+            modified_chat_template = (
+                modified_chat_template[:insertion_point]
+                + classifier_emit
+                + modified_chat_template[insertion_point:]
+            )
+    elif classifier_names:
+        # granite_format: split the fused user emission so the marker prints
+        # after ``content.val`` and before ``'<|end_of_text|>\n'``. Rewrite
+        # ``... + content.val + '<|end_of_text|>\n' }}`` into
+        # ``... + content.val }}<emit>{{- '<|end_of_text|>\n' }}``.
+        gf_user_emit = (
+            "'<|start_of_role|>' + message.role + '<|end_of_role|>' "
+            "+ content.val + '<|end_of_text|>\\n'"
+        )
+        gf_user_emit_split = (
+            "'<|start_of_role|>' + message.role + '<|end_of_role|>' "
+            "+ content.val }}" + classifier_emit + "{{- '<|end_of_text|>\\n'"
+        )
+        if gf_user_emit in modified_chat_template:
+            modified_chat_template = modified_chat_template.replace(
+                gf_user_emit, gf_user_emit_split, 1
+            )
+
+    if classifier_names and classifier_emit not in modified_chat_template:
+        raise ValueError(
+            f"Classifier slot(s) {classifier_names} were requested, but the "
+            f"classifier control-token emit could not be injected into the "
+            f"{fmt.name} chat template: the user-turn closing anchor was not found. "
+            f"Update the anchor in configure_chat_template to match this base's "
+            f"template."
+        )
 
     # Insert alora fallback before generation prompt
     gen_prompt_pattern = r"(\{%- if add_generation_prompt %\})"
@@ -1347,7 +1462,9 @@ def configure_chat_template(
     tokenizer.chat_template = modified_chat_template
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")
     for adapter_name, info in adapter_mapping.items():
-        if info["type"] == ANCHOR_MODE_SR:
+        if info["type"] == ANCHOR_MODE_CLASSIFIER:
+            placement = "at the end of the last user turn (end-locator; read point = marker - 1)"
+        elif info["type"] == ANCHOR_MODE_SR:
             placement = f"replacing '{sr_site}' in the generation prompt"
             anchor = next(iter(sr_anchors))
             if sr_site != anchor:

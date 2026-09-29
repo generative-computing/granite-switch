@@ -154,3 +154,47 @@ def apply_token_exchange(
     sub_id_per_pos = lut[input_ids]
     is_control = sub_id_per_pos >= 0
     return torch.where(is_control, sub_id_per_pos, input_ids)
+
+
+def build_adapter_kind_lut(config) -> torch.Tensor | None:
+    """Bool LUT over adapter indices marking which slots are classifiers.
+
+    ``[num_adapters + 1]``, indexed by ADAPTER INDEX: entry ``i`` is True when
+    adapter index ``i`` is a classifier slot (index 0, base, is always False).
+    ``None`` when no slot is a classifier, which lets the switch skip the split
+    entirely. Built from ``config.adapter_kinds``, so both backends' switches
+    agree on the table by construction.
+    """
+    kinds = getattr(config, "adapter_kinds", None) if config is not None else None
+    if kinds is None or not any(k == "classifier" for k in kinds):
+        return None
+    lut = torch.zeros(len(kinds) + 1, dtype=torch.bool)
+    for slot, kind in enumerate(kinds):  # slot is the 0-based adapter position
+        if kind == "classifier":
+            lut[slot + 1] = True  # adapter index is slot + 1
+    return lut
+
+
+def split_adapter_indices(
+    kind_lut: torch.Tensor | None, adapter_indices: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a per-token index stream into LoRA and classifier streams.
+
+    Shapes are preserved (``[batch, seq_len]`` on HF, ``[total_tokens]`` on
+    vLLM), so this serves both backends:
+
+      - ``lora_indices``: classifier positions zeroed, so the LoRA path no-ops
+        there.
+      - ``classifier_indices``: the adapter index at classifier positions, else 0.
+
+    With ``kind_lut`` None (no classifier slots) the LoRA stream passes through
+    and the classifier stream is all zeros.
+    """
+    if kind_lut is None:
+        return adapter_indices, torch.zeros_like(adapter_indices)
+    is_classifier = kind_lut[adapter_indices]
+    zeros = torch.zeros_like(adapter_indices)
+    return (
+        torch.where(is_classifier, zeros, adapter_indices),
+        torch.where(is_classifier, adapter_indices, zeros),
+    )
