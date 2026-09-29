@@ -26,6 +26,7 @@ distribution is one-hot), which is how the layout is checked on a laptop.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections import deque
@@ -46,8 +47,17 @@ from doom_env import (
     DoomEnv,
 )
 from expert import BEHAVIORS, PLAN_EVERY_TICS
-from history import History
-from policy import ARMS, CRITIC, DANGER_LEVELS, make_policy
+from history import History, said_entry
+from policy import (
+    ARMS,
+    CRITIC,
+    DANGER_LEVELS,
+    make_policy,
+    spoken_entry,
+    state_text,
+    talk_extra,
+)
+from talk import brief
 
 W_GAME, H = 640, 480
 W_PANEL = 360
@@ -110,7 +120,12 @@ class Panel:
         d.rounded_rectangle([x, y, x + 150, y + 28], radius=14, fill=LAYER2)
         d.ellipse([x + 12, y + 10, x + 20, y + 18], fill=c)
         d.text((x + 28, y + 5), t["adapter"], font=self.f, fill=TEXT)
-        d.text((x + 162, y + 6), "aLoRA adapter", font=self.f_small, fill=HELP)
+        d.text(
+            (x + 162, y + 6),
+            f"{t.get('kind', 'aLoRA')} adapter",
+            font=self.f_small,
+            fill=HELP,
+        )
         y += 38
         if t.get("instruction"):
             d.text((x, y), f"“{t['instruction'][:40]}”", font=self.f_small, fill=TEXT2)
@@ -320,6 +335,34 @@ class Heatmap:
             d.text((px - 6, yb + 11), f"{p:g}", font=self.f_small, fill=HELP)
 
 
+CAPTION_S = 5.0  # how long a spoken line stays on screen
+KINDS = {"alora": "aLoRA", "lora": "LoRA", "sr": "Shadow Residual", "base": "no"}
+
+
+def draw_captions(img: Image.Image, caps: list[tuple[float, str, str]], now: float):
+    """The latest line from the watcher and from the player, over the game view."""
+    f = font(16)
+    shown = [(who, text) for t, who, text in caps if now - t < CAPTION_S][-2:]
+    if not shown:
+        return
+    rows = []
+    for who, text in shown:
+        words, line = f"{'YOU' if who == 'player' else 'GRANITE'}: {text}".split(), ""
+        for w in words:
+            if len(line) + len(w) + 1 > 66:
+                rows.append((who, line))
+                line = w
+            else:
+                line = f"{line} {w}".strip()
+        rows.append((who, line))
+    d = ImageDraw.Draw(img)
+    y = H - 14 - 22 * len(rows)
+    d.rectangle([0, y - 8, W_GAME, H], fill=(10, 12, 16))
+    for who, row in rows:
+        d.text((14, y), row, font=f, fill=AMBER if who == "player" else TEAL)
+        y += 22
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--policy", choices=("vllm", "expert"), default="vllm")
@@ -336,6 +379,17 @@ def main() -> None:
     ap.add_argument(
         "--temperature", type=float, default=1.0, help="Style and planner sampling"
     )
+    ap.add_argument("--layout", default="log", help="The adapters' prompt layout")
+    ap.add_argument(
+        "--talk-every", type=float, default=0.0, help="Seconds between spoken lines"
+    )
+    ap.add_argument(
+        "--player",
+        action="append",
+        default=[],
+        metavar="SECONDS:TEXT",
+        help="What the watcher says, and when (video seconds); repeatable",
+    )
     args = ap.parse_args()
 
     import imageio.v2 as imageio
@@ -344,7 +398,13 @@ def main() -> None:
         import torch
 
         where = torch.cuda.get_device_name(0).replace("NVIDIA ", "")
-        pol = make_policy("vllm", args.model, warmup=100, temperature=args.temperature)
+        pol = make_policy(
+            "vllm",
+            args.model,
+            warmup=100,
+            temperature=args.temperature,
+            layout=args.layout,
+        )
     else:
         where = "scripted teacher, no model"
         pol = make_policy("expert")
@@ -360,6 +420,12 @@ def main() -> None:
     lat: deque[float] = deque(maxlen=1000)
     last_second: deque[float] = deque(maxlen=TIC_HZ)
     all_ms = []
+    script = sorted(
+        (float(t), text) for t, text in (x.split(":", 1) for x in args.player)
+    )
+    caps: list[tuple[float, str, str]] = []  # (video s, who, text)
+    frame_i, last_talk, last_reply = 0, -1e9, -1e9
+    kind = KINDS.get(getattr(pol, "placement", "base"), "")
     for what, secs in args.segment:
         info: dict = {"instruction": None}
         if what in BEHAVIORS:
@@ -393,6 +459,32 @@ def main() -> None:
                 last_second.append(d.ms)
                 lat.append(d.ms)
                 all_ms.append(d.ms)
+                now = frame_i / TIC_HZ
+                player = script.pop(0)[1] if script and script[0][0] <= now else None
+                narrate = (
+                    args.talk_every
+                    and now - last_talk >= args.talk_every
+                    and now - last_reply >= 3.0
+                )
+                if hasattr(pol, "talk") and (player or narrate):
+                    state = state_text(obs)
+                    b = brief(hist.entries, state)
+                    last = next((x for _, w, x in reversed(caps) if w == "bot"), None)
+                    line = pol.talk([(hist.ids, state)], [b], [player], [last])[0]
+                    if args.layout == "chat":
+                        hist.append(spoken_entry(state, line, talk_extra(b, player)))
+                    else:
+                        if player:
+                            hist.append(said_entry(obs.tick, "user", player))
+                        hist.append(said_entry(obs.tick, "me", line))
+                    if player:
+                        caps.append((now, "player", player))
+                        last_reply = now
+                    caps.append((now, "bot", line))
+                    last_talk = now
+                    print(
+                        f"t{now:5.1f}  {'[' + player + '] ' if player else ''}-> {line}"
+                    )
             frame = env.frame()
             text, hud = obs.text, (obs.hp, obs.armor, obs.weapon)
             hist.observe(obs, action)
@@ -408,6 +500,7 @@ def main() -> None:
                 {
                     **info,
                     "adapter": adapter,
+                    "kind": kind,
                     "ms": float(np.median(last_second)),
                     "p50": float(np.percentile(a, 50)),
                     "p99": float(np.percentile(a, 99)),
@@ -423,10 +516,17 @@ def main() -> None:
                     "gpu": where,
                 },
             )
+            draw_captions(img, caps, frame_i / TIC_HZ)
             heat.draw(img, H)
             writer.append_data(np.asarray(img))
+            frame_i += 1
     writer.close()
     env.close()
+    if caps:
+        talk = [{"t": round(t, 3), "who": who, "text": text} for t, who, text in caps]
+        args.out.with_suffix(".talk.json").write_text(
+            json.dumps({"fps": TIC_HZ, "frames": frame_i, "lines": talk}, indent=1)
+        )
     a = np.asarray(all_ms)
     print(
         f"wrote {args.out}: {a.size} decisions, p50 {np.percentile(a, 50):.2f} ms, "

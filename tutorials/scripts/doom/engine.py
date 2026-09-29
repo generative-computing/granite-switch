@@ -53,6 +53,7 @@ from policy import (
     prompt_kit,
     spoken_entry,
     state_text,
+    talk_extra,
 )
 from talk import brief
 
@@ -191,13 +192,11 @@ class AsyncPolicy:
         (chat layout; "" for the log layout). ``player``: what the person
         watching just said, which the line answers."""
         if self.layout == "chat":
-            extra = f"{brief_text}\n" if brief_text else ""
-            if player:
-                extra += f"Player: {player}\n"
+            extra = talk_extra(brief_text, player)
             ids = self.kit.pb.turn_ids(hist_ids, state, extra)
         else:
             extra = ""
-            ids = self.kit.pb.talk_ids(hist_ids, state, brief_text)
+            ids = self.kit.pb.talk_ids(hist_ids, state, brief_text, player)
         o = await self._one(ids, self.talk_sp)
         return o.outputs[0].text.strip().strip('"').split("\n")[0], extra
 

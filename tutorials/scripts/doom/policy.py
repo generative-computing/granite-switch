@@ -115,6 +115,13 @@ CHAT_SYSTEM_PROMPT = (
 LAYOUTS = {"log": "SYSTEM_PROMPT", "chat": "CHAT_SYSTEM_PROMPT"}
 
 
+def talk_extra(brief: str = "", player: str | None = None) -> str:
+    """Chat layout: what the harness adds to the user turn it closes, before the
+    state: the brief, then the watcher's words."""
+    extra = f"{brief}\n" if brief else ""
+    return extra + (f"Player: {player}\n" if player else "")
+
+
 def closing_text(state: str, extra: str = "") -> str:
     """Chat layout: what closes the open user turn when the player gets to
     speak (``extra``: a brief, the watcher's words), then the assistant header."""
@@ -297,15 +304,33 @@ class PromptBuilder:
         return [self.head[a] + body + self.suffix[a] for a in adapters]
 
     def talk_ids(
-        self, history_ids: list[int], state: str, brief: str = ""
+        self,
+        history_ids: list[int],
+        state: str,
+        brief: str = "",
+        player: str | None = None,
+        last: str | None = None,
     ) -> list[int]:
-        """The base model's talk prompt: the base game prompt up to its suffix,
-        then a user turn asking for one spoken line, after ``brief`` (what just
-        happened, in plain words: :func:`talk.brief`)."""
+        """Log layout: the base model's talk prompt. The base game prompt up to
+        its suffix, then a user turn asking for one spoken line, after ``brief``
+        (what just happened, in plain words: :func:`talk.brief`), what the
+        person watching just said (answered), and the player's own last line,
+        quoted because a line left only in the history gets copied."""
         suffix = self.talk_suffix
-        if brief:
+        if brief or player or last:
+            said = (
+                f'The person watching you just said: "{player}". Answer them '
+                "directly, in character.\n"
+                if player
+                else ""
+            )
+            if last:
+                said += (
+                    f'You just said: "{last}". Say something new, and do not start '
+                    'with "Time".\n'
+                )
             suffix = self._enc(
-                f"{_EOT}\n{_SOR}user{_EOR}{brief}\n{TALK_INSTRUCTION}{_EOT}\n"
+                f"{_EOT}\n{_SOR}user{_EOR}{brief}\n{said}{TALK_INSTRUCTION}{_EOT}\n"
                 f"{_SOR}assistant{_EOR}"
             )
         return self.head[None] + self._body(history_ids, state) + suffix
@@ -847,19 +872,30 @@ class VLLMPolicy:
         return SamplingParams(max_tokens=max_tokens, temperature=temperature, **opts)
 
     def talk(
-        self, games: list[tuple[list[int], str]], briefs: list[str] | None = None, **kw
+        self,
+        games: list[tuple[list[int], str]],
+        briefs: list[str] | None = None,
+        players: list[str | None] | None = None,
+        lasts: list[str | None] | None = None,
+        **kw,
     ) -> list[str]:
         """One spoken line per game (history ids, state text), in one engine call.
-        Chat layout: the player's turn (``briefs`` close the user turn); log
-        layout: an extra user turn asking for a line."""
+        ``players``: what the person watching just said to each game, answered.
+        Chat layout: the player's turn (the brief and the words close the user
+        turn); log layout: an extra user turn asking for a line."""
         briefs = briefs or [""] * len(games)
+        players = players or [None] * len(games)
+        lasts = lasts or [None] * len(games)
         if self.layout == "chat":
             prompts = [
-                self.pb.turn_ids(h, s, f"{b}\n" if b else "")
-                for (h, s), b in zip(games, briefs)
+                self.pb.turn_ids(h, s, talk_extra(b, w))
+                for (h, s), b, w in zip(games, briefs, players)
             ]
         else:
-            prompts = [self.pb.talk_ids(h, s, b) for (h, s), b in zip(games, briefs)]
+            prompts = [
+                self.pb.talk_ids(h, s, b, w, last)
+                for (h, s), b, w, last in zip(games, briefs, players, lasts)
+            ]
         outs = self.run(prompts, [self.talk_params(**kw)] * len(prompts))
         return [o.outputs[0].text.strip().split("\n")[0] for o in outs]
 
