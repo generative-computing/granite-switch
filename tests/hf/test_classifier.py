@@ -4,8 +4,7 @@
 A classifier slot is an alternative to a LoRA adapter: it shares the adapter
 index/control-token machinery, the switch splits classifier positions out of
 the LoRA stream, and the classifier head reads the final hidden state to emit
-ONE verdict per request. The control token is placed after the last content
-token, and the verdict is read at ``marker - 1`` (the last content token).
+ONE verdict per request. The verdict is read at the control token's own position.
 
 The verdict exits as a GENERATED LABEL WORD, matching the vLLM backend: the LM
 head rewrites the classifier request's last logit row so the vocab is -inf
@@ -71,9 +70,9 @@ def test_classifier_rewrites_last_logit_row_to_label_word():
     _set_adapter_token_ids(model, config.adapter_token_ids)
     model.eval()
 
-    # Marker (251) at the end (end-locator layout); this test checks the label-word
-    # rewrite of the emitted row. The read position is pinned in
-    # test_classifier_reads_marker_minus_one_hidden_state.
+    # Marker (251) at the end; this test checks the label-word rewrite of the
+    # emitted row. The read position is pinned in
+    # test_classifier_reads_marker_hidden_state.
     input_ids = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 251]])
     with torch.no_grad():
         out = model(input_ids=input_ids)
@@ -240,17 +239,19 @@ def test_lora_generation_on_mixed_model_decodes():
     assert model.model._last_classifier_logits is None
 
 
-def test_classifier_reads_marker_minus_one_hidden_state():
-    """The verdict is read at ``marker - 1`` (the last content token), not at the
-    marker itself or the sequence's last token.
+def test_classifier_reads_marker_hidden_state():
+    """The verdict is read at the marker.
 
-    End-locator layout: the classifier control token is placed after the last content
-    token, so ``classifier_indices`` is nonzero only from the marker onward (the switch
-    forward-fills the index causally), and the read point is ``marker - 1``. The exact
-    position is pinned by capturing (a) the final post-norm hidden states via a hook on
-    ``model.norm`` and (b) the hidden state the classifier head actually receives, then
-    asserting the head's input equals the post-norm hidden at
-    ``marker - 1`` — and differs from the marker's and the last token's.
+    Reading the marker's own row is what makes the read point independent of where
+    the chat template puts the token. The exact position is pinned by capturing (a)
+    the final post-norm hidden states via a hook on ``model.norm`` and (b) the
+    hidden state the classifier head actually receives, then asserting the head's
+    input equals the post-norm hidden at the marker -- and differs from
+    ``marker - 1``, the position this replaced.
+
+    The marker is placed INTERIOR (not last) so that "at the marker" is
+    distinguishable from "at the sequence's last row": a marker-last layout would
+    make the two coincide and the assertion would not pin the read point.
     """
     config = _classifier_config(["lora", "classifier"], label_token_ids=(100, 200))
     model = GraniteSwitchForCausalLM(config)
@@ -261,10 +262,12 @@ def test_classifier_reads_marker_minus_one_hidden_state():
         model.model.classifier_head.weight[1].normal_(0.0, 0.3)
     model.eval()
 
-    # Marker (251) at the LAST position -> read point = marker - 1 = position 4.
-    input_ids = torch.tensor([[10, 20, 30, 40, 60, 251]])
+    # Marker (251) INTERIOR, with content after it, so the read point is distinct
+    # from both marker - 1 and the sequence's last row.
+    input_ids = torch.tensor([[10, 20, 30, 40, 60, 251, 70, 80]])
     marker_pos = 5
-    read_pos = marker_pos - 1  # 4, the last content token
+    prev_pos = marker_pos - 1  # 4, the old read point
+    last_pos = input_ids.shape[1] - 1  # 7, the sequence's final row
 
     captured = {}
 
@@ -295,18 +298,21 @@ def test_classifier_reads_marker_minus_one_hidden_state():
     head_x = captured["head_x"]  # [batch, hidden] (gathered read-point state)
     assert head_x.shape == (1, config.hidden_size)
 
-    # The head was handed the post-norm hidden at marker - 1, not marker or last token.
-    assert torch.allclose(head_x[0], normed[read_pos], atol=1e-5), (
-        "classifier head did not read the last content token (marker - 1)"
+    # The head was handed the post-norm hidden AT the marker.
+    assert torch.allclose(head_x[0], normed[marker_pos], atol=1e-5), (
+        "classifier head did not read the marker's own hidden state"
     )
-    assert not torch.allclose(head_x[0], normed[marker_pos], atol=1e-5), (
-        "classifier head read the marker itself, not marker - 1"
+    # Not its predecessor (the read point this replaced) ...
+    assert not torch.allclose(head_x[0], normed[prev_pos], atol=1e-5), (
+        "classifier head read marker - 1, not the marker"
     )
-    # marker_pos is also the sequence's last position, so this pins that the read
-    # is NOT the last token.
-    assert read_pos != marker_pos
+    # ... and not the sequence's last row, which the marker is deliberately not.
+    assert not torch.allclose(head_x[0], normed[last_pos], atol=1e-5), (
+        "classifier head read the sequence's last row, not the marker"
+    )
+    assert marker_pos not in (prev_pos, last_pos)
 
-    # The slot id is read AT the marker (marker - 1 carries index 0).
+    # The slot id is read at the marker, which is also the read point.
     assert int(captured["head_slot"][0]) == 2, (
         "classifier slot id must be read at the marker (adapter index 2)"
     )
@@ -370,6 +376,10 @@ def test_repeated_marker_for_one_slot_reads_the_last():
         hook.remove()
 
     normed = captured["normed"][0]
-    assert torch.allclose(captured["x"][0], normed[marker_pos - 1], atol=1e-5), (
-        "verdict was not read at the last marker's predecessor"
+    # Read at the LAST marker's own position, not the first marker's (position 0).
+    assert torch.allclose(captured["x"][0], normed[marker_pos], atol=1e-5), (
+        "verdict was not read at the last marker"
+    )
+    assert not torch.allclose(captured["x"][0], normed[0], atol=1e-5), (
+        "verdict was read at the first marker, not the last"
     )

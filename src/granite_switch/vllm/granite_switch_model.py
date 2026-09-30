@@ -461,25 +461,21 @@ class GraniteSwitchModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor] | None:
         """Per-request (hidden_state, slot_index) for the classifier verdict.
 
-        The verdict is read at the LAST CONTENT TOKEN, which the classifier
-        control token (marker) locates: the chat template emits the marker
-        immediately after the last content token, so the read point is
-        ``marker - 1``.
+        The chat template emits the marker immediately after the last content
+        token, so the read point is ``marker``.
 
         The marker is the LAST classifier control token in a request's slice,
         matched by id in ``input_ids``; ``classifier_indices`` is nonzero from any
         classifier marker onward, so the index alone does not say which slot a
-        position belongs to. The read point is ``marker - 1`` and the slot id is
-        read AT the marker (``marker - 1`` carries index 0).
+        position belongs to. Read point and slot id both come from that position.
 
-        Per request slice ``[start, end)``, three states:
+        Per request slice ``[start, end)``, two states:
 
-        * marker present with a predecessor in this pass -- the common case.
-        * marker opens the slice: its predecessor ended the previous pass, so each
-          pass stashes its final hidden row for a single-token look-back.
-        * no marker: either still mid-prefill, or the marker was in an earlier
-          chunk and that pass's resolved verdict is carried forward, since vLLM
-          consumes the verdict only on the pass it samples.
+        * marker present: read its row.
+        * no marker: the marker was in an earlier chunk, so that pass's resolved
+          verdict is carried forward (vLLM consumes the verdict only on the pass it
+          samples); or there is none at all and the request gets slot 0, whose zero
+          verdict the exit's ``is_classifier`` gate discards.
 
         Returns ``None`` when there is no request metadata (e.g. the startup
         profiling forward), so the caller emits no verdict.
@@ -517,25 +513,15 @@ class GraniteSwitchModel(nn.Module):
         )
         is_marker = torch.isin(input_ids, marker_ids)  # [total_tokens]
 
-        stash = getattr(self, "_classifier_prev_pass_tail", None) or {}
         resolved = getattr(self, "_classifier_resolved_verdict", None) or {}
         req_hidden_rows = []
         req_slots = []
-        new_stash: dict[int, torch.Tensor] = {}
         new_resolved: dict[int, tuple[torch.Tensor, int]] = {}
         for i in range(len(qsl) - 1):
             start, end = qsl[i], qsl[i + 1]
             hits = is_marker[start:end].nonzero(as_tuple=True)[0]
             if hits.numel() == 0:
-                # No marker in this slice, which is either of two states:
-                #
-                #  * the marker is still ahead (mid-prefill): keep this slice's final
-                #    row, keyed by its global end position, in case the marker opens
-                #    the next chunk.
-                #  * the marker was in an earlier chunk (a rendered prompt continues
-                #    past it with the generation prompt): carry that pass's resolved
-                #    (row, slot) forward. vLLM consumes the verdict only on the pass
-                #    where it samples, which is the final chunk.
+                # No marker in this slice
                 carried = resolved.get(seq_lens[i] - (end - start))
                 if carried is not None:
                     row, slot = carried
@@ -543,7 +529,6 @@ class GraniteSwitchModel(nn.Module):
                     req_hidden_rows.append(row)
                     req_slots.append(slot)
                     continue
-                new_stash[seq_lens[i]] = hidden_states[end - 1]
                 req_hidden_rows.append(hidden_states[end - 1])
                 req_slots.append(0)
                 continue
@@ -563,29 +548,11 @@ class GraniteSwitchModel(nn.Module):
 
             marker = start + int(hits[-1])  # last id match: this slice's marker
             slot = int(classifier_indices[marker])
+            row = hidden_states[marker]
+            new_resolved[seq_lens[i]] = (row, slot)
             req_slots.append(slot)
-            if marker > start:
-                # Common case: predecessor is in this pass.
-                row = hidden_states[marker - 1]
-                new_resolved[seq_lens[i]] = (row, slot)
-                req_hidden_rows.append(row)
-                continue
+            req_hidden_rows.append(row)
 
-            # Edge case: marker is the first token of its slice
-            marker_global = seq_lens[i] - (end - start)
-            prev = stash.get(marker_global)
-            if prev is None:
-                raise RuntimeError(
-                    "Classifier verdict cannot locate its read point: the marker "
-                    f"is the first token of request {i}'s chunk (global position "
-                    f"{marker_global}), so the last content token (marker - 1) was "
-                    "computed in the previous pass, and no stashed hidden row is "
-                    "available for it."
-                )
-            new_resolved[seq_lens[i]] = (prev, slot)
-            req_hidden_rows.append(prev)
-
-        self._classifier_prev_pass_tail = new_stash
         self._classifier_resolved_verdict = new_resolved
         return (
             torch.stack(req_hidden_rows, dim=0),

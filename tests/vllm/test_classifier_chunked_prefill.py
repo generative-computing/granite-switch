@@ -4,23 +4,22 @@
 Every other vLLM classifier path is HF-only and single-pass, yet
 ``enable_chunked_prefill`` is on by default in serving. Two tests here:
 
-The prompt places the classifier control token immediately after the last
-content token (marker at position ``n-1``), and the verdict is read at
-``marker - 1`` (the last content token, ``n-2``) inside
+The prompt places the classifier control token last (marker at position ``n-1``),
+and the verdict is read AT THE MARKER inside
 ``GraniteSwitchModel._classifier_read_points``.
 
 1. ``test_classifier_token_stable_across_chunk_budgets`` — the same prompt served at
-   ``max_num_batched_tokens`` in {unchunked, 512, 256, 128, 101, 64, 48, n_prompt-1}
-   emits the same verdict token, and each budget's consumed verdict is read from
-   ``marker - 1``. ``_classifier_read_points`` locates the marker per pass and reads
-   its predecessor; when a chunk boundary splits the marker from its predecessor, a
-   single-token cross-pass stash supplies the previous pass's last hidden row. The
-   ``n_prompt - 1`` budget is the arm that forces that split (marker alone in the
-   final chunk) — the only budget here that exercises the look-back at all.
+   ``max_num_batched_tokens`` in {unchunked, 256, 101, 48} emits the same verdict
+   token, read from the marker at every budget. Since the read point is the marker's
+   own row, no chunk split can separate it from the pass that computes it.
 
 2. ``test_wrong_read_corrupts_position_and_often_verdict`` — the inverse: forcing the
    read to wrong positions lands at a wrong global position (asserted) and usually
    flips the label (reported; see that test).
+
+3. ``test_verdict_carries_when_marker_is_not_in_the_sampling_chunk`` — the one
+   cross-pass path left: a rendered prompt continues past the marker, so a budget can
+   close the prompt after it and the sampling pass holds no marker.
 
 Not asserted: logprob or hidden-state equality across budgets. Chunked and unchunked
 serving differ by bf16 reduction order in the attention/KV path (a magnitude that is
@@ -52,27 +51,10 @@ WORKER = os.path.join(
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(WORKER)))
 BASE_MODEL = os.environ.get("CLS_TEST_BASE", "ibm-granite/granite-4.1-3b")
 
-# One budget per distinct final-chunk shape, which is what the read point depends on:
-# ``None`` disables chunked prefill (single pass); 256 leaves a wide final chunk; 48
-# splits into many passes with a narrow one; 101 leaves exactly two tokens, so the
-# marker and its read point are the last pair in the chunk. The lone-marker budget
-# (final chunk of one) is derived per prompt and appended by the test below. Budgets
-# differing only in pass count exercise no additional path.
+# One budget per distinct final-chunk shape: ``None`` disables chunked prefill
+# (single pass); 256 leaves a wide final chunk; 101 a narrow one; 48 splits into many
+# passes. Budgets differing only in pass count exercise no additional path.
 BUDGETS = [None, 256, 101, 48]
-
-
-def _lone_marker_budget(n_prompt: int) -> int:
-    """Budget that puts the marker ALONE in the final chunk.
-
-    The marker is the prompt's last token, so it is the first (and only) token of
-    the final chunk exactly when ``n_prompt % budget == 1`` -- i.e. budget
-    ``n_prompt - 1``, which splits the prompt into [0, n-2] then [n-1]. That is
-    the one layout where the read point (``marker - 1``) lands in the *previous*
-    pass, exercising the cross-pass look-back in
-    ``GraniteSwitchModel._classifier_read_points``. Computed from ``n_prompt`` so a
-    tokenizer change that shifts it cannot silently stop testing this case.
-    """
-    return n_prompt - 1
 
 
 def _env():
@@ -168,31 +150,16 @@ def _run_fault_sweep(composed):
 
 
 def test_classifier_token_stable_across_chunk_budgets(composed):
-    """Emitted verdict token identical across chunk budgets; every budget's
-    consumed verdict is read from ``marker - 1`` (the last content token).
+    """Emitted verdict token identical across chunk budgets, read AT THE MARKER.
 
-    The prompt is ``[*body, control_id]`` (marker at ``n_prompt - 1``), so the
-    correct read point is ``marker - 1 == n_prompt - 2``.
-
-    Budgets include ``n_prompt - 1``, the one budget that leaves the marker ALONE
-    in the final chunk (``n_prompt % budget == 1``). There the read point sits in
-    the *previous* pass, so this arm is what exercises the cross-pass look-back;
-    every other budget keeps marker and read point in the same chunk."""
+    The prompt is ``[*body, control_id]``, so the marker at ``n_prompt - 1`` is also
+    the read point. Being the marker's own row, it is computed in whichever pass
+    holds the marker, for any chunk shape."""
     n_prompt = len(composed["prompt_ids"])
-    read_point = n_prompt - 2  # marker is at n_prompt - 1; read point = marker - 1
+    read_point = n_prompt - 1  # the marker itself
     label_ids = set(composed["label_token_ids"])
 
-    # The lone-marker budget (n_prompt % budget == 1) is the only layout that
-    # splits the marker from its read point across a chunk boundary, so it is the
-    # one arm that exercises the cross-pass look-back. Derived from n_prompt.
-    lone = _lone_marker_budget(n_prompt)
-    budgets = [*BUDGETS, lone]
-    assert n_prompt % lone == 1, (
-        f"budget {lone} does not leave the marker alone in the final chunk for "
-        f"n_prompt={n_prompt} (n_prompt % budget == {n_prompt % lone}, want 1)"
-    )
-
-    results = {b: _run(composed, b) for b in budgets}
+    results = {b: _run(composed, b) for b in BUDGETS}
 
     ref = results[None]
     assert ref["token_id"] in label_ids, (
@@ -200,11 +167,11 @@ def test_classifier_token_stable_across_chunk_budgets(composed):
         f"the classifier exit did not fire"
     )
 
-    # Consumed verdict reads the last content token (marker - 1), for every budget.
+    # Consumed verdict reads the marker's own row, for every budget.
     for b, r in results.items():
         assert r["global_read_idx"] == read_point, (
             f"budget={b}: consumed verdict read from global index "
-            f"{r['global_read_idx']}, expected {read_point} (marker-1) "
+            f"{r['global_read_idx']}, expected {read_point} (the marker) "
             f"(passes={r['n_passes']})"
         )
 
@@ -225,10 +192,9 @@ def test_wrong_read_corrupts_position_and_often_verdict(composed):
     """A wrong read position corrupts the verdict.
 
     Forces the verdict to read positions strided across the prompt and records the
-    emitted token at each, against a correct run reading ``marker - 1`` (the last
-    content token).
+    emitted token at each, against a correct run reading the marker itself.
     Asserts a wrong read always lands at a wrong global position (the correct run
-    reads ``n_prompt - 2``; every forced read reports a different position).
+    reads ``n_prompt - 1``; every forced read reports a different position).
 
     The label-flip rate is reported, not asserted: a head can map two hidden states to
     the same argmax label, so some wrong reads produce the correct label by chance, and
@@ -236,7 +202,7 @@ def test_wrong_read_corrupts_position_and_often_verdict(composed):
     position-sensitive so most wrong reads do flip the label in practice.
     """
     n_prompt = len(composed["prompt_ids"])
-    read_point = n_prompt - 2  # marker at n_prompt - 1; correct read = marker - 1
+    read_point = n_prompt - 1  # the marker itself
     label_ids = set(composed["label_token_ids"])
 
     sweep = _run_fault_sweep(composed)
@@ -244,8 +210,8 @@ def test_wrong_read_corrupts_position_and_often_verdict(composed):
     faulted = sweep["faulted"]
 
     assert correct["pos"] == read_point, (
-        f"correct run read global pos {correct['pos']}, expected last content token "
-        f"{read_point} (marker - 1)"
+        f"correct run read global pos {correct['pos']}, expected the marker "
+        f"{read_point}"
     )
     assert correct["token_id"] in label_ids, (
         f"correct verdict {correct['token_id']} is not a label token {label_ids}; "
@@ -290,12 +256,12 @@ def test_verdict_carries_when_marker_is_not_in_the_sampling_chunk(composed):
     was resolved one pass earlier and has to be carried forward.
 
     The prompt is ``[*body, marker, *tail]``, so the marker sits at ``n_tail`` tokens
-    from the end and its read point is ``marker - 1``.
+    from the end and is itself the read point.
     """
     n_prompt = len(composed["prompt_ids_trailing"])
     n_tail = composed["n_tail"]
     marker_pos = n_prompt - n_tail - 1
-    read_point = marker_pos - 1
+    read_point = marker_pos
     label_ids = set(composed["label_token_ids"])
     assert n_tail > 0, "the trailing variant must continue past the marker"
 

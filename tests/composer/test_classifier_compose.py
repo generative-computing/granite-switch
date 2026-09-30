@@ -126,9 +126,7 @@ def _classifier_prompt_ids(tokenizer, control_token_id):
     """`<some prompt><control>` as a batch of input ids for a detect forward.
 
     End-locator layout, matching what the chat template emits: the control token
-    (marker) goes AFTER the last content token, so the verdict is read at
-    ``marker - 1`` -- the position the head is trained on. A marker at position 0
-    has no content token before it and is rejected by the backend.
+    (marker) goes AFTER the last content token, and is itself the read point.
     """
     body = tokenizer.encode("Is this text safe?", add_special_tokens=False)
     ids = [*body, control_token_id]

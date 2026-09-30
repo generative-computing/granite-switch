@@ -1178,8 +1178,7 @@ def configure_chat_template(
 """
 
     # Classifier placement: the marker goes after the last user turn's content and
-    # before that turn's closing marker (``<|end_of_text|>`` / ``<|im_end|>``), so
-    # the read point ``marker - 1`` is the position the head was trained on.
+    # before that turn's closing marker (``<|end_of_text|>`` / ``<|im_end|>``).
     classifier_scan = (
         """{#- Classifier scan: find the last user message (the turn being classified). -#}
 {%- if ns.adapter_token and ns.adapter_type == 'classifier' %}
@@ -1501,7 +1500,9 @@ def configure_chat_template(
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")
     for adapter_name, info in adapter_mapping.items():
         if info["type"] == ANCHOR_MODE_CLASSIFIER:
-            placement = "at the end of the last user turn (end-locator; read point = marker - 1)"
+            placement = (
+                "at the end of the last user turn (end-locator; read point = marker)"
+            )
         elif info["type"] == ANCHOR_MODE_SR:
             placement = f"replacing '{sr_site}' in the generation prompt"
             anchor = next(iter(sr_anchors))

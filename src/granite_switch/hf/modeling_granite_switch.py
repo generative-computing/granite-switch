@@ -713,7 +713,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 dtype=input_ids.dtype,
             )
             is_marker = torch.isin(input_ids, marker_ids)  # [batch, seq_len]
-            has_marker = is_marker.any(dim=1)
             # One verdict per request: the exit rewrites a single logit row, so a
             # request naming two different classifier slots has no way to report
             # both. Repeated markers of the SAME slot are fine -- a multi-turn
@@ -731,19 +730,11 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                     )
             pos = torch.arange(seq_length, device=input_ids.device)
             marker_idx = torch.where(is_marker, pos, -1).max(dim=1).values.clamp(min=0)
-            if bool((has_marker & (marker_idx == 0)).any()):
-                raise RuntimeError(
-                    "Classifier marker is at position 0, so there is no last "
-                    "content token to read (the verdict is read at marker - 1). "
-                    "The chat template emits the marker after the last token."
-                )
-            # A row with a marker reads its predecessor. A row without one (a plain
-            # LM request in a mixed batch) has no read point at all; it is parked on
-            # index 0 to keep the gather in range and carries slot 0, so the exit's
-            # is_classifier gate discards its zero verdict.
-            read_idx = torch.where(has_marker, marker_idx - 1, 0)
+            # A row without one (a plain LM request in a mixed batch) has no read
+            # point; the clamp parks it on index 0 and it carries slot 0, so the
+            # exit's is_classifier gate discards its zero verdict.
             batch_ar = torch.arange(batch_size, device=hidden_states.device)
-            req_hidden = hidden_states[batch_ar, read_idx, :]  # [batch, hidden]
+            req_hidden = hidden_states[batch_ar, marker_idx, :]  # [batch, hidden]
             req_slot = classifier_indices[batch_ar, marker_idx]  # [batch]
             self._last_classifier_logits = self.classifier_head(req_hidden, req_slot)
             self._last_req_classifier_indices = req_slot

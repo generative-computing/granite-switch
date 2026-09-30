@@ -13,7 +13,7 @@ The engine core runs in-process (the driver sets ``VLLM_ENABLE_V1_MULTIPROCESSIN
 so the hooks installed here land on the model the engine actually runs.
 
 The read-index hook records, per forward pass, the global position the verdict read.
-``_classifier_read_points`` reads at ``marker - 1`` (a flat within-pass index); the hook
+``_classifier_read_points`` reads at the marker (a flat within-pass index); the hook
 maps that index through ``positions``, vLLM's own per-token coordinate, so the recorded
 position reflects the token actually read.
 """
@@ -33,9 +33,8 @@ def _install_read_index_hook():
     read.
 
     Wraps ``GraniteSwitchModel._classifier_read_points`` to capture, per request, the
-    flat within-pass index it read (``marker - 1``, or a sentinel ``-1`` when the read
-    came from the cross-pass stash because the marker sat at the slice start). The
-    ``forward`` wrapper maps that index through ``positions`` to a global position.
+    flat within-pass index it read (the marker). The ``forward`` wrapper maps that
+    index through ``positions`` to a global position.
     """
     from granite_switch.vllm.granite_switch_model import (
         GraniteSwitchForCausalLM,
@@ -47,13 +46,10 @@ def _install_read_index_hook():
     orig_read = GraniteSwitchModel._classifier_read_points
 
     # Per-pass scratch for request 0 (these tests use a single request):
-    #   flat_read_idx -- within-pass flat index the verdict read (marker-1), or None.
-    #   stash_global   -- when the read came from the previous-pass stash (marker at
-    #                     the slice start), the global position of that stashed token
-    #                     (== num_computed - 1, with num_computed derived as
-    #                     seq_lens - query_len); this pass's ``positions`` cannot show
-    #                     it, so it is carried here directly.
-    scratch = {"flat_read_idx": None, "stash_global": None}
+    #   flat_read_idx -- within-pass flat index the verdict read (the marker), a
+    #                    sentinel -1 when this pass merely carried a verdict resolved
+    #                    earlier, or None.
+    scratch = {"flat_read_idx": None}
 
     def read_points(self, classifier_indices, hidden_states, input_ids):
         # Snapshot before the call: it replaces _classifier_resolved_verdict with
@@ -83,9 +79,9 @@ def _install_read_index_hook():
                 hits = _t.isin(input_ids[start:end], mids).nonzero(as_tuple=True)[0]
                 if hits.numel() == 0:
                     # No marker in this slice. If a verdict was resolved in an
-                    # earlier pass it is carried forward, and the position it was
-                    # read at is not addressable by this pass's ``positions``; report
-                    # it directly. Otherwise this request is still mid-prefill.
+                    # earlier pass it is carried forward, and that position is not
+                    # addressable by this pass's ``positions``; report it directly.
+                    # Otherwise this request is still mid-prefill.
                     sql = getattr(am, "seq_lens", None)
                     pre = (
                         int(sql.tolist()[0]) - (end - start)
@@ -94,42 +90,26 @@ def _install_read_index_hook():
                     )
                     if pre is not None and pre in carried_before:
                         scratch["flat_read_idx"] = -1
-                        scratch["stash_global"] = scratch.get("carried_global")
                     else:
                         scratch["flat_read_idx"] = end - 1
                 else:
+                    # The marker is its own read point, always in this pass.
                     marker = start + int(hits[-1])
-                    if marker > start:
-                        # Common case: predecessor (marker-1) is in this pass.
-                        scratch["flat_read_idx"] = marker - 1
-                        scratch["resolving_flat"] = marker - 1
-                    else:
-                        # Edge case: marker at slice start; the read came from the
-                        # previous-pass stash. Its global position is
-                        # num_computed - 1, where num_computed (tokens computed
-                        # BEFORE this pass) is seq_lens - query_len.
-                        sql = getattr(am, "seq_lens", None)
-                        nc0 = (
-                            int(sql.tolist()[0]) - (end - start)
-                            if sql is not None
-                            else None
-                        )
-                        scratch["flat_read_idx"] = -1
-                        scratch["stash_global"] = nc0 - 1 if nc0 is not None else None
+                    scratch["flat_read_idx"] = marker
+                    scratch["resolving_flat"] = marker
         except Exception:  # a hook must never break a forward
             scratch["flat_read_idx"] = None
         return res
 
     def fwd(self, input_ids, positions, *args, **kwargs):
         scratch["flat_read_idx"] = None
-        scratch["stash_global"] = None
         out = orig_fwd(self, input_ids, positions, *args, **kwargs)
         try:
             has_cls = getattr(self.model, "classifier_head", None) is not None
             flat = scratch["flat_read_idx"]
             if has_cls and positions is not None and flat is not None:
                 if flat == -1:
-                    read_pos = scratch["stash_global"]  # from previous pass
+                    read_pos = scratch.get("carried_global")  # resolved earlier
                 else:
                     read_pos = int(positions[flat].item())
                 if scratch.get("resolving_flat") is not None:
@@ -246,7 +226,7 @@ def compose(base, outdir, control_offset=5, num_labels=6, scale=0.5):
     )
     body = tok.encode(f"Is this text safe? {words}", add_special_tokens=False)
     # End-locator layout, matching the chat template: the marker follows the last
-    # content token, and the verdict is read at marker - 1.
+    # content token, and is itself the read point.
     prompt_ids = [*body, control_id]
     # Same layout, but continuing past the marker the way a rendered chat prompt
     # does (turn close + generation prompt). The marker is then interior, so a
@@ -312,7 +292,7 @@ def run_fault_sweep(ckpt, prompt_ids, out_path):
     """Force the classifier verdict to read positions swept across the whole prompt
     and record the resulting token at each.
 
-    The correct read point is ``marker - 1`` (the last content token), located inside
+    The correct read point is the marker itself, located inside
     ``_classifier_read_points``. To sweep wrong reads, that method is replaced with a
     forcing version: it takes the real per-request slice but reads
     ``hidden_states[start + forced[0]]`` and reports slot 1 (the classifier slot) so the
@@ -332,7 +312,7 @@ def run_fault_sweep(ckpt, prompt_ids, out_path):
 
     n = len(prompt_ids)
 
-    forced = [None]  # None => real method (marker-1); int => forced within-slice index
+    forced = [None]  # None => real method (the marker); int => forced slice index
     read_global = [None]  # global position the forced read landed on
     orig_read = GraniteSwitchModel._classifier_read_points
 
@@ -378,7 +358,7 @@ def run_fault_sweep(ckpt, prompt_ids, out_path):
             passes.clear()
             o = llm.generate([pt], sp)[0].outputs[0]
             if forced_idx is None:
-                # Correct run: read position comes from the hook (marker - 1).
+                # Correct run: read position comes from the hook (the marker).
                 last = passes[-1] if passes else None
                 rp = last["read_global_pos"] if last else None
                 pos = int(rp) if rp is not None else None
@@ -387,7 +367,7 @@ def run_fault_sweep(ckpt, prompt_ids, out_path):
                 pos = read_global[0]
             return {"pos": pos, "token_id": int(o.token_ids[0]), "text": o.text}
 
-        # Correct run: reads marker - 1 (global pos n-2, marker is at n-1).
+        # Correct run: reads the marker (global pos n-1).
         correct = one(None)
 
         # Faulted sweep at a fixed stride over the prompt, excluding the correct
