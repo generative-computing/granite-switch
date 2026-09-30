@@ -51,6 +51,7 @@ from vizdoom import Button, GameVariable
 
 TIC_HZ = 35
 TIC_MS = 1000.0 / TIC_HZ
+AUDIO_HZ = 22050  # the game's sound, with DoomEnv(audio=True)
 UNITS_PER_M = 32.0  # Doomguy is 56 units tall, about 1.75 m
 MATCH_TICS = 10 * 60 * TIC_HZ  # a 10-minute deathmatch
 
@@ -537,6 +538,8 @@ class DoomEnv:
         timeout_tics: Match length; :data:`MATCH_TICS` is 10 minutes.
         respawn_s: Seconds a death keeps the player out (:data:`RESPAWN_S`).
         item_rules: A key of :data:`ITEM_RULES`.
+        audio: Keep the game's sound, as the player hears it: :meth:`audio`
+            returns each tic's :data:`AUDIO_HZ` stereo samples (for videos).
     """
 
     def __init__(
@@ -550,6 +553,7 @@ class DoomEnv:
         n_bots: int = 7,
         respawn_s: int = RESPAWN_S,
         item_rules: str = "standard",
+        audio: bool = False,
     ):
         if item_rules not in ITEM_RULES:
             raise ValueError(f"item_rules must be one of {sorted(ITEM_RULES)}")
@@ -571,7 +575,12 @@ class DoomEnv:
         g.set_render_crosshair(hud)
         g.set_render_weapon(True)
         g.set_window_visible(False)
-        g.set_sound_enabled(False)
+        g.set_sound_enabled(audio)  # the audio buffer is silent without it
+        if audio:  # rendered to a buffer (OpenAL loopback): no sound device needed
+            g.set_audio_buffer_enabled(True)
+            g.set_audio_sampling_rate(vzd.SamplingRate.SR_22050)
+            g.set_audio_buffer_size(1)  # one tic: each step's own sound
+        self._audio: np.ndarray | None = None
         g.set_episode_timeout(timeout_tics)
         if seed is not None:
             g.set_seed(seed)
@@ -674,6 +683,10 @@ class DoomEnv:
     def frame(self) -> np.ndarray | None:
         """Latest RGB frame (H, W, 3), or None before the first reset."""
         return self._frame
+
+    def audio(self) -> np.ndarray | None:
+        """The last tic's sound, (AUDIO_HZ / TIC_HZ, 2) int16, with ``audio=True``."""
+        return self._audio
 
     def close(self) -> None:
         self.game.close()
@@ -792,6 +805,7 @@ class DoomEnv:
         gv = st.game_variables
         self._gv = gv
         self._frame = st.screen_buffer
+        self._audio = st.audio_buffer
         dead = bool(gv[_V[GameVariable.DEAD]]) or self.game.is_player_dead()
         hp = max(0, int(gv[_V[GameVariable.HEALTH]]))
         armor = int(gv[_V[GameVariable.ARMOR]])

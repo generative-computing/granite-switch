@@ -27,10 +27,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import re
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
@@ -41,6 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from doom_env import (
     ACTION_LABELS,
+    AUDIO_HZ,
     DISPLAY_ORDER,
     SHORT_LABELS,
     TIC_HZ,
@@ -54,12 +57,14 @@ from policy import (
     ARMS,
     CRITIC,
     DANGER_LEVELS,
+    NARRATOR,
+    ROUTER,
     make_policy,
     spoken_entry,
     state_text,
     talk_extra,
 )
-from talk import brief, sound_tag
+from talk import SALIENT_EVENTS, brief, sound_tag
 
 W_GAME, H = 640, 480
 W_PANEL = 360
@@ -337,6 +342,85 @@ class Heatmap:
             d.text((px - 6, yb + 11), f"{p:g}", font=self.f_small, fill=HELP)
 
 
+ACT_ROW = 12  # pixels per model row in the activity map
+PURPLE = (165, 110, 255)
+MODEL_COLORS = {
+    "base": TEXT2,
+    **COLORS,
+    ARMS: BLUE,
+    CRITIC: PURPLE,
+    ROUTER: GREEN,
+    NARRATOR: TEAL,
+}
+MODEL_LABELS = {
+    "base": "base model",
+    ARMS: "weapon plan",
+    CRITIC: "critic",
+    ROUTER: "router",
+    NARRATOR: "narrator",
+}
+
+
+class Activity:
+    """Which model runs on each tic: the base model and every adapter in the
+    checkpoint, one row each, a column per tic, newest at the right; the labels
+    light up while their model runs."""
+
+    def __init__(self, width: int, models: list[str]):
+        self.models = models
+        self.win = (width - HEAT_GUTTER - 18) // HEAT_PX
+        self.buf = np.empty((len(models), self.win, 3), np.uint8)
+        self.buf[:] = BG
+        self.count = 0
+        self.now: set[str] = set()
+        self.f = font(10, mono=True)
+        self.f_small = font(11)
+
+    @property
+    def height(self) -> int:
+        h = 52 + ACT_ROW * len(self.models)
+        return h + h % 2  # the video codec wants an even frame height
+
+    def push(self, active: set[str]) -> None:
+        col = np.array(
+            [MODEL_COLORS[m] if m in active else LAYER for m in self.models], np.uint8
+        )
+        if self.count < self.win:
+            self.buf[:, self.count] = col
+        else:
+            self.buf[:, :-1] = self.buf[:, 1:]
+            self.buf[:, -1] = col
+        self.count += 1
+        self.now = active
+
+    def draw(self, img: Image.Image, y0: int) -> None:
+        d = ImageDraw.Draw(img)
+        d.text((18, y0 + 8), "WHICH MODEL RUNS", font=self.f_small, fill=HELP)
+        d.text(
+            (170, y0 + 8),
+            "one column per tic, newest at the right  ·  every adapter reads the base "
+            "model's one shared KV cache (aLoRA)",
+            font=self.f_small,
+            fill=HELP,
+        )
+        rows = np.repeat(self.buf, ACT_ROW, axis=0)
+        rows[ACT_ROW - 2 :: ACT_ROW] = BG  # a thin gap between rows
+        arr = np.repeat(rows, HEAT_PX, axis=1)
+        top = y0 + 28
+        img.paste(Image.fromarray(arr), (HEAT_GUTTER, top))
+        for i, m in enumerate(self.models):
+            on = m in self.now
+            y = top + ACT_ROW * i - 1
+            if on:
+                d.rectangle([10, y + 2, 14, y + 8], fill=MODEL_COLORS[m])
+            d.text(
+                (18, y),
+                MODEL_LABELS.get(m, m),
+                font=self.f,
+                fill=MODEL_COLORS[m] if on else HELP,
+            )
+
+
 CAPTION_S = 5.0  # how long a spoken line stays on screen
 KINDS = {"alora": "aLoRA", "lora": "LoRA", "sr": "Shadow Residual", "base": "no"}
 
@@ -402,6 +486,11 @@ def main() -> None:
         metavar="SECONDS:TEXT",
         help="What the watcher says, and when (video seconds); repeatable",
     )
+    ap.add_argument(
+        "--sfx",
+        action="store_true",
+        help="Keep the game's sound (<out>.sfx.wav; voice_video.py mixes it in)",
+    )
     args = ap.parse_args()
 
     import imageio.v2 as imageio
@@ -425,12 +514,23 @@ def main() -> None:
         where = "scripted teacher, no model"
         pol = make_policy("expert")
     env = DoomEnv(
-        seed=args.seed, resolution="640X480", hud=not args.no_hud, timeout_tics=10**7
+        seed=args.seed,
+        resolution="640X480",
+        hud=not args.no_hud,
+        timeout_tics=10**7,
+        audio=args.sfx,
     )
+    sfx: list[np.ndarray] = []  # the game's sound, one tic per frame
+    silent_tic = np.zeros((AUDIO_HZ // TIC_HZ, 2), np.int16)
     obs = env.reset(seed=args.seed)
     hist = History(getattr(pol, "tok", None))
     panel = Panel()
     heat = Heatmap(W_GAME + W_PANEL)
+    # Who writes spoken lines: the narrator adapter, or the base model without one.
+    talker = getattr(pol, "talker", None) or "base"
+    models = ["base", *BEHAVIORS, ARMS, CRITIC, ROUTER]
+    act = Activity(W_GAME + W_PANEL, models + ([NARRATOR] if talker != "base" else []))
+    talk_until, routed = -1, False  # the frame the line writer runs through
     args.out.parent.mkdir(parents=True, exist_ok=True)
     writer = imageio.get_writer(
         str(args.out), fps=TIC_HZ, codec="libx264", quality=8, macro_block_size=1
@@ -443,6 +543,7 @@ def main() -> None:
     )
     caps: list[tuple[float, str, str]] = []  # (video s, who, text)
     frame_i, last_talk, last_reply = 0, -1e9, -1e9
+    tally = [0, 0]  # frags, deaths this match: the brief's score
     tag_rng = random.Random(args.seed)
     live, fist = 0, 0  # tics alive, and of those holding the fist
     kind = KINDS.get(getattr(pol, "placement", "base"), "")
@@ -453,6 +554,7 @@ def main() -> None:
         else:
             r = pol.route(what)
             adapter = r.adapter
+            routed = True
             info = {
                 "instruction": what,
                 "routed": r.adapter,
@@ -463,12 +565,16 @@ def main() -> None:
         action, critic, plan = "wait", {}, None
         for _ in range(int(float(secs) * TIC_HZ)):
             weapon = None
+            active: set[str] = {ROUTER} if routed else set()  # models run this tic
+            routed = False
             if obs.dead:  # respawning: nothing to decide
                 heat.push({}, adapter, False, critic)
             else:
                 want = [adapter] if args.no_critic else [adapter, CRITIC]
                 if obs.tick % PLAN_EVERY_TICS == 0:
                     want.append(ARMS)
+                # The base model prefills the new state; each adapter reads its KV.
+                active |= {"base", *want}
                 decs = pol.decide_many(obs, tuple(want), hist)
                 d = decs[adapter]
                 action = d.action
@@ -482,21 +588,35 @@ def main() -> None:
                 all_ms.append(d.ms)
                 now = frame_i / TIC_HZ
                 player = script.pop(0)[1] if script and script[0][0] <= now else None
+                # Every --talk-every seconds, or soon after a frag, a death or a
+                # new weapon, as the engine (and the narrator's data) does.
+                salient = any(e in SALIENT_EVENTS for e in obs.events)
                 narrate = (
                     args.talk_every
-                    and now - last_talk >= args.talk_every
                     and now - last_reply >= 3.0
+                    and (
+                        now - last_talk >= args.talk_every
+                        or (salient and now - last_talk >= 2.5)
+                    )
                 )
                 if hasattr(pol, "talk") and (player or narrate):
                     state = state_text(obs)
-                    b = brief(hist.entries, state)
+                    b = brief(
+                        hist.entries,
+                        state,
+                        tuple(tally) if args.layout == "chat" else None,
+                    )
                     mine = [
                         re.sub(r"\[[^\]]*\]\s*", "", x)
                         for _, w, x in caps
                         if w == "bot"
                     ][-3:]
                     last = " / ".join(f'"{x}"' for x in mine) or None
+                    t_talk = time.perf_counter()
                     line = pol.talk([(hist.ids, state)], [b], [player], [last])[0]
+                    # Shown as running for as many tics as writing the line took.
+                    talk_ms = (time.perf_counter() - t_talk) * 1000
+                    talk_until = frame_i + max(1, math.ceil(talk_ms / TIC_MS)) - 1
                     voiced = (
                         sound_tag(b, tag_rng) + line
                     )  # tags: voiced, not in history
@@ -514,6 +634,9 @@ def main() -> None:
                     print(
                         f"t{now:5.1f}  {'[' + player + '] ' if player else ''}-> {line}"
                     )
+            if frame_i <= talk_until:
+                active.add(talker)
+            act.push(active)
             frame = env.frame()
             text, hud = obs.text, (obs.hp, obs.armor, obs.weapon)
             if not obs.dead:
@@ -521,10 +644,13 @@ def main() -> None:
                 fist += obs.weapon == "fist"
             hist.observe(obs, action)
             obs = env.step(action, weapon=weapon)
+            tally[0] += obs.events.count("frag")
+            tally[1] += obs.events.count("died")
             if obs.done:
                 obs = env.reset()
                 hist.reset()
-            img = Image.new("RGB", (W_GAME + W_PANEL, H + H_HEAT), BG)
+                tally = [0, 0]
+            img = Image.new("RGB", (W_GAME + W_PANEL, H + act.height + H_HEAT), BG)
             img.paste(Image.fromarray(frame), (0, 0))
             a = np.fromiter(lat, dtype=np.float64)
             panel.draw(
@@ -549,11 +675,23 @@ def main() -> None:
                 },
             )
             draw_captions(img, caps, frame_i / TIC_HZ)
-            heat.draw(img, H)
+            act.draw(img, H)
+            heat.draw(img, H + act.height)
             writer.append_data(np.asarray(img))
+            if args.sfx:  # this frame's tic of game sound
+                sound = env.audio() if env.audio() is not None else silent_tic
+                sfx.append(np.asarray(sound, np.int16).reshape(-1, 2))
             frame_i += 1
     writer.close()
     env.close()
+    if args.sfx:
+        import wave
+
+        with wave.open(str(args.out.with_suffix(".sfx.wav")), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(AUDIO_HZ)
+            w.writeframes(np.concatenate(sfx).tobytes())
     if caps:
         talk = [{"t": round(t, 3), "who": who, "text": text} for t, who, text in caps]
         args.out.with_suffix(".talk.json").write_text(
