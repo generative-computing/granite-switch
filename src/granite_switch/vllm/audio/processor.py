@@ -89,7 +89,7 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
 
     def _asr_device(self) -> str:
         cfg = self.get_hf_config()
-        return getattr(cfg, "asr_device", "cpu") or "cpu"
+        return getattr(cfg, "asr_device", "cuda") or "cuda"
 
     def _asr_dtype(self) -> str | None:
         cfg = self.get_hf_config()
@@ -109,11 +109,11 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
 
     def _asr_self_chunks(self) -> bool:
         cfg = self.get_hf_config()
-        return bool(getattr(cfg, "asr_self_chunks", True))
+        return bool(getattr(cfg, "asr_self_chunks", False))
 
     def _asr_chunk_length_s(self) -> float:
         cfg = self.get_hf_config()
-        return float(getattr(cfg, "asr_chunk_length_s", 30.0) or 30.0)
+        return float(getattr(cfg, "asr_chunk_length_s", 120.0) or 120.0)
 
     def _asr_chunk_overlap_s(self) -> float:
         cfg = self.get_hf_config()
