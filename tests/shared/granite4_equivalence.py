@@ -160,7 +160,6 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
 
     Returns a new dict suitable for GraniteSwitchConfig(**result) that has:
     - num_hidden_layers += 2 (2 cache slots for MultiSwitch)
-    - layer_types prepended with two "attention" (the switch cache slots)
     - LoRA adapter config fields
     - adapter_token_ids (rewritten to substitute ids by the switch)
     - adapter_substitute_token_ids (token-exchange substitutes)
@@ -168,12 +167,14 @@ def augment_cfg_with_adapters(cfg_dict, num_adapters=2, rank=8):
     """
     cfg = dict(cfg_dict)
 
-    # Prepend placeholder entries for the switch cache slots. MultiSwitch (the
-    # only engine) owns 2 slots (counting + memory), so +2 keeps every base
-    # decoder layer -- these callers pass no control tokens, so the skinned
-    # model stays bit-exact with upstream.
+    # Reserve the switch cache slots. MultiSwitch (the only engine) owns 2 slots
+    # (counting + memory), so +2 keeps every base decoder layer -- these callers
+    # pass no control tokens, so the skinned model stays bit-exact with upstream.
+    # The switch is attention-only; DynamicCache derives the per-layer layout
+    # from num_hidden_layers, so no layer_types is threaded through.
     cfg["num_hidden_layers"] = cfg["num_hidden_layers"] + 2
-    cfg["layer_types"] = ["attention", "attention", *list(cfg["layer_types"])]
+    cfg.pop("layer_types", None)
+    cfg.pop("position_embedding_type", None)
 
     # Adapter configuration
     cfg["num_adapters"] = num_adapters
@@ -248,9 +249,15 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
 
     Error sources:
 
-    1. **No adapters**: GraniteSwitch with num_adapters=0 is bit-exact vs
-       upstream Granite. Fused QKV matmul is bit-identical to separate
-       Q/K/V matmuls in float32.
+    1. **No adapters**: GraniteSwitch with num_adapters=0 is numerically
+       equivalent to upstream Granite to within ~1 bf16 ULP. GraniteSwitch
+       inherits GraniteMoeHybrid (the same computation graph as the reference),
+       but its projections run through the fused SWITCH kernel whose
+       float-reduction order differs from vLLM's native linear even at zero
+       adapter (submodule CLAUDE.md Gotcha #9), so on the SAME transferred
+       weights the logprobs can drift by one ULP (measured max_abs_diff
+       4.77e-7 == 2^-21, mean ~3e-8 across 4.0-mini {1b,350m,micro}). Not
+       bit-exact, but far below model noise.
 
     2. **Token-exchange embedding divergence**: With adapters and a control
        token in the input, the switch embeds the substitute id at that
@@ -258,18 +265,23 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
        positions attending to the control position pick up that delta.
 
     Args:
-        layer_types: list of "attention" strings
+        layer_types: list of "full_attention" strings
         long_sequence: unused (kept for API compatibility)
         has_kv_hidden: True when adapters are active and control tokens
             are present (kept name for API compatibility — the parameter
             now means "control tokens get substituted").
 
     Returns:
-        (atol, rtol) tuple, or None if bit-exact match expected.
+        (atol, rtol) tuple. Never None: even the inert base-model path is only
+        ULP-equivalent (not bit-exact) because of the fused-kernel reduction
+        order (submodule CLAUDE.md Gotcha #9).
     """
     if not has_kv_hidden:
-        # Pure base-model path: bit-exact (fused QKV numerically identical).
-        return None
+        # Pure base-model (inert) path: ULP-equivalent, not bit-exact. 1e-5 is
+        # ~20x the measured 4.77e-7 worst case (comfortable margin) yet ~1000x
+        # tighter than the adapter-path tolerance, so a real logit regression
+        # still trips it.
+        return (1e-5, 1e-5)
     else:
         # Substitute-embedding propagates through attention to visible
         # positions. Worst observed: ~5.0e-2 (multi 1b, seed-dependent).
@@ -304,7 +316,7 @@ GRANITE4_MINI = {
         "shared_intermediate_size": 512,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 4,
+        "layer_types": ["full_attention"] * 4,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.263,
@@ -322,7 +334,7 @@ GRANITE4_MINI = {
         "shared_intermediate_size": 1024,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 4,
+        "layer_types": ["full_attention"] * 4,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.22,
@@ -340,7 +352,7 @@ GRANITE4_MINI = {
         "shared_intermediate_size": 640,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 4,
+        "layer_types": ["full_attention"] * 4,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.22,
@@ -378,7 +390,7 @@ GRANITEMOE_MINI = {
         "shared_intermediate_size": 0,  # pure sparse: no dense shared MLP
         "num_local_experts": 8,
         "num_experts_per_tok": 2,
-        "layer_types": ["attention"] * 4,
+        "layer_types": ["full_attention"] * 4,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.22,
@@ -409,7 +421,7 @@ GRANITE4_FULLSIZE = {
         "shared_intermediate_size": 2048,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 28,
+        "layer_types": ["full_attention"] * 28,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.263,
@@ -426,7 +438,7 @@ GRANITE4_FULLSIZE = {
         "shared_intermediate_size": 4096,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 40,
+        "layer_types": ["full_attention"] * 40,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.22,
@@ -443,7 +455,7 @@ GRANITE4_FULLSIZE = {
         "shared_intermediate_size": 8192,
         "num_local_experts": 0,
         "num_experts_per_tok": 0,
-        "layer_types": ["attention"] * 40,
+        "layer_types": ["full_attention"] * 40,
         "position_embedding_type": "rope",
         "embedding_multiplier": 12.0,
         "residual_multiplier": 0.22,

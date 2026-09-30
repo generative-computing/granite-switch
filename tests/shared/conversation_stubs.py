@@ -70,6 +70,9 @@ class StubTokenizer:
     def __call__(self, text, add_special_tokens=False):
         return {"input_ids": self._encode(text)}
 
+    def encode(self, text, add_special_tokens=False):
+        return self._encode(text)
+
     def convert_ids_to_tokens(self, tid):
         """Real tokenizers have this, and Conversation's diagnostics use it.
 
@@ -135,17 +138,28 @@ def make_stub_tokenizer(adapters, chatml=False):
     with open(os.path.join(_FIXTURES, name)) as f:
         template = f.read()
 
-    holder = type("H", (), {"chat_template": template})()
+    # Build the tokenizer up front so configure_chat_template can encode/decode
+    # through it (the ALoRA Pass-2 drop-char sizing re-encodes each invocation
+    # text). Seed its special tokens from the adapter tokens plus every <|...|>
+    # the base template already emits; extend with any new specials the injected
+    # template adds afterward. configure_chat_template mutates chat_template in
+    # place, so the same instance carries the final template out.
+    specials = [f"<|{n}|>" for n, _t, _i in adapters]
+    specials += sorted(set(_SPECIAL_RE.findall(template)) - set(specials))
+    tokenizer = StubTokenizer(template, specials)
+
     invocations = [inv for _n, tech, inv in adapters if tech == "alora"]
     discovered = [(f"/path/{n}", n, tech, None) for n, tech, _inv in adapters]
     with patch(_PATCH_TARGET, side_effect=invocations):
-        configure_chat_template(holder, discovered)
+        configure_chat_template(tokenizer, discovered)
 
-    specials = [f"<|{n}|>" for n, _t, _i in adapters]
-    # Role markers etc. must also be atomic; collect every <|...|> the template
-    # can emit so the stub treats them as single tokens.
-    specials += sorted(set(_SPECIAL_RE.findall(holder.chat_template)) - set(specials))
-    return StubTokenizer(holder.chat_template, specials)
+    # Any <|...|> introduced by injection must also tokenize atomically.
+    new_specials = sorted(
+        set(_SPECIAL_RE.findall(tokenizer.chat_template)) - set(specials)
+    )
+    if new_specials:
+        tokenizer = StubTokenizer(tokenizer.chat_template, specials + new_specials)
+    return tokenizer
 
 
 class StubConfig:

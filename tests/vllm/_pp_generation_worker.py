@@ -50,7 +50,7 @@ def _build_model(tmpdir, arch):
     base_cfg = {
         **_ARCH_CFGS[arch],
         "num_hidden_layers": DECODER_LAYERS,
-        "layer_types": ["attention"] * DECODER_LAYERS,
+        "layer_types": ["full_attention"] * DECODER_LAYERS,
     }
     return save_switch_model(
         base_cfg,

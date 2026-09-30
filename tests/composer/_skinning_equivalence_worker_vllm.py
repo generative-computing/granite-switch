@@ -16,7 +16,8 @@ skin via ``GraniteSwitchComposer.from_base_and_adapters()``, saves to
 **run**: Loads inputs from ``--inputs`` JSON, loads model in vLLM, extracts
 top-K logprobs per position, saves to ``--output`` as JSON.
 
-**compare**: Loads two JSON logprob files, checks bit-exact match, exits 0 on
+**compare**: Loads two JSON logprob files, checks per-value agreement within
+``LOGPROB_ATOL`` (fused-vs-native reduction order is not bit-exact), exits 0 on
 match, 1 on diff.
 """
 
@@ -31,6 +32,12 @@ from transformers import AutoConfig
 FAST_LENGTHS = [64]  # Single medium-length request for quick regression checks.
 FULL_LENGTHS = [3, 7, 16, 32, 64, 128, 192, 256]  # Thorough: short to long.
 TOP_K = 100  # Compare top-100 logprobs per position (sufficient to detect divergence).
+
+# Skinned (fused SWITCH Triton kernel) vs original (vLLM native linear) differ in
+# float-reduction order even at zero adapter, so logprobs are close but not bit-exact.
+# The noise floor is a few ULP (max observed 2^-19 ~= 1.9e-6 under vLLM 0.26); 1e-5 sits
+# ~5x above it yet far below any real logit/weight regression. See CLAUDE.md Gotcha #9.
+LOGPROB_ATOL = 1e-5
 
 
 def _native_dtype(config):
@@ -228,9 +235,10 @@ def _compare_logprobs(reference, switch, label):
             continue
         for tid in ref_d:
             d = abs(ref_d[tid] - sw_d[tid])
-            if d > 0:
+            # true max incl. tolerated ULP noise, so drift toward the gate stays visible
+            max_diff = max(max_diff, d)
+            if d > LOGPROB_ATOL:
                 mismatched_values += 1
-                max_diff = max(max_diff, d)
 
     positions = len(reference)
     print(f"  [{label}] positions: {positions}, entries: {total_entries}")
@@ -241,10 +249,13 @@ def _compare_logprobs(reference, switch, label):
         return 1
     if mismatched_values > 0:
         print(
-            f"  [{label}] FAIL: {mismatched_values} logprob values differ, max |diff| = {max_diff:.6e}"
+            f"  [{label}] FAIL: {mismatched_values} logprob values differ by > {LOGPROB_ATOL:.0e}, "
+            f"max |diff| = {max_diff:.6e}"
         )
         return 1
-    print(f"  [{label}] OK: bit-exact")
+    print(
+        f"  [{label}] OK: within tolerance (atol={LOGPROB_ATOL:.0e}, max |diff| = {max_diff:.6e})"
+    )
     return 0
 
 

@@ -19,11 +19,11 @@ non-16 kHz input:
 
 ```bash
 # Serving an audio-enabled checkpoint
-uv sync --extra vllm --extra audio     # or --extra vllm20 --extra audio
+uv sync --extra vllm --extra audio     # or --extra vllm27 --extra audio
 
 # Development / running the test suite (the dev groups include audio already)
-uv sync --group dev                    # vLLM 0.19.x
-uv sync --group dev-vllm20             # vLLM 0.20.x
+uv sync --group dev                    # vLLM 0.26.x
+uv sync --group dev-vllm27             # vLLM 0.27.x
 ```
 
 ## Building an audio-enabled checkpoint

@@ -20,7 +20,6 @@ DENSE_CFG = dict(
     num_key_value_heads=1,
     intermediate_size=192,
     shared_intermediate_size=192,
-    layer_types=["attention", "attention", "attention"],
     max_position_embeddings=2048,
     attention_bias=False,
     mlp_bias=False,
@@ -44,30 +43,44 @@ ADAPTER_RANK = 8
 
 # ── Switch override dicts ─────────────────────────────────────────
 # Merged with a base config (HYBRID_CFG or DENSE_CFG) via
-# {**base, **overrides}.  Each override includes layer_types and
-# num_hidden_layers that prepend the switch layer(s) to the base.
+# {**base, **overrides}.  Each override grows num_hidden_layers to prepend
+# the switch cache slot(s) to the base.
 
 
 def switch_overrides(base_cfg):
     """MultiSwitch overrides for the given base config (token exchange).
 
-    The coded switch owns 2 cache slots (counting + memory), so 2 attention
-    layers are prepended and ``num_hidden_layers`` grows by 2.
+    The coded switch owns 2 cache slots (counting + memory), so
+    ``num_hidden_layers`` grows by 2. The switch model is attention-only, so
+    DynamicCache derives the per-layer layout from num_hidden_layers.
     """
-    base_layers = base_cfg["layer_types"]
     return {
         "num_adapters": NUM_ADAPTERS,
         "adapter_ranks": [ADAPTER_RANK] * NUM_ADAPTERS,
         "adapter_token_ids": [250, 251],
         "adapter_substitute_token_ids": [1, 1],
         "adapter_names": ["adapter_0", "adapter_1"],
-        "num_hidden_layers": len(base_layers) + 2,
-        "layer_types": ["attention", "attention", *base_layers],
+        "num_hidden_layers": base_cfg["num_hidden_layers"] + 2,
     }
 
 
 # Backward compatibility alias
 basic_overrides = switch_overrides
+
+
+def _merge_switch_cfg(base_cfg, cfg_overrides):
+    """Merge base + switch overrides into GraniteSwitchConfig kwargs.
+
+    The switch model is attention-only and derives its per-layer cache layout
+    from num_hidden_layers, so it carries neither layer_types nor
+    position_embedding_type. A base config dict may still declare them; strip
+    them here, otherwise transformers' validate_layer_type rejects the config
+    when the switch bumps num_hidden_layers past the base layer_types length.
+    """
+    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict.pop("layer_types", None)
+    cfg_dict.pop("position_embedding_type", None)
+    return cfg_dict
 
 
 # ── Model builder ─────────────────────────────────────────────────
@@ -81,7 +94,7 @@ def save_switch_model(base_cfg, cfg_overrides, tmpdir):
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM as HFSwitch
 
-    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict = _merge_switch_cfg(base_cfg, cfg_overrides)
 
     switch_cfg = GraniteSwitchConfig(**cfg_dict)
     torch.manual_seed(0)
@@ -102,7 +115,7 @@ def make_switch_model(base_cfg, cfg_overrides, seed=0):
     from granite_switch.config import GraniteSwitchConfig
     from granite_switch.hf import GraniteSwitchForCausalLM as HFSwitch
 
-    cfg_dict = {**base_cfg, **cfg_overrides}
+    cfg_dict = _merge_switch_cfg(base_cfg, cfg_overrides)
 
     switch_cfg = GraniteSwitchConfig(**cfg_dict)
     torch.manual_seed(seed)

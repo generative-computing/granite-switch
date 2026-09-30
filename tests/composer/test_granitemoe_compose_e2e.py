@@ -251,19 +251,24 @@ class TestGraniteMoeLoRACompose:
             )
 
     def test_expert_weights_transfer_by_identity(self, lora_build):
-        """Frozen expert tensors are named identically, so they map 1:1."""
+        """Frozen expert tensors are named identically, so they map 1:1.
+
+        transformers 5.16 collapsed the expert bank into a single ``experts``
+        module (``gate_up_proj`` / ``down_proj``) with a flat ``router``, so the
+        identity check uses those names.
+        """
         base_sd = load_file(str(lora_build.base_path / "model.safetensors"))
 
         for i, layer in enumerate(lora_build.model.model.layers):
             moe, src = layer.block_sparse_moe, f"model.layers.{i}.block_sparse_moe"
             torch.testing.assert_close(
-                moe.input_linear.weight, base_sd[f"{src}.input_linear.weight"]
+                moe.experts.gate_up_proj, base_sd[f"{src}.experts.gate_up_proj"]
             )
             torch.testing.assert_close(
-                moe.output_linear.weight, base_sd[f"{src}.output_linear.weight"]
+                moe.experts.down_proj, base_sd[f"{src}.experts.down_proj"]
             )
             torch.testing.assert_close(
-                moe.router.layer.weight, base_sd[f"{src}.router.layer.weight"]
+                moe.router.weight, base_sd[f"{src}.router.weight"]
             )
 
     def test_switch_layer_reserved_at_front(self, lora_build):

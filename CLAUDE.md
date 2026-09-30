@@ -446,6 +446,21 @@ config keys, an old unfused checkpoint would otherwise load into a fused model a
 mismatch keys, so `GraniteSwitchConfig` rejects `unfused_qkv=True` with a re-compose error.
 See [docs/SR_ARCHITECTURE.md](docs/SR_ARCHITECTURE.md) for details.
 
+### 13. `shared_intermediate_size == 0` Means Skip the Shared MLP, Not Build a Zero-Width One
+
+A pure sparse-MoE base (`granitemoe`) has no dense shared MLP; upstream encodes this as
+`shared_intermediate_size == 0`. `GraniteMoeSharedMLP.__init__` sets `self.hidden_size =
+config.shared_intermediate_size`, so constructing it at 0 would register `[0, H]`/`[H, 0]` weights
+that no checkpoint ships and then add their output into the MoE result. All three decoders (`hf`,
+`vllm/decoder/lora`, `vllm/decoder/shadow_residual`) therefore gate on `shared_intermediate_size >
+0`, set `shared_mlp = None` otherwise, and `config.py` correspondingly drops the
+`shared_input_linear`/`shared_output_linear` LoRA targets so no zero-width LoRA is built either.
+A layer with neither experts nor a shared MLP is invalid: the three decoders raise `ValueError`,
+but **the config itself does not** — the guard is decoder-level. This is why the vLLM-LoRA forward's
+`not has_experts → shared_mlp(x)` branch is safe only because that `ValueError` upstream rules out
+the no-MLP case; protect it if you refactor the gate. Config-level coverage:
+`tests/unit/test_config_edge_cases.py`.
+
 ## Pre-commit
 
 **See [docs/CICD.md](docs/CICD.md) for the full CI/CD setup — pre-commit hook list, setup steps, and what runs on every commit vs. in CI.**

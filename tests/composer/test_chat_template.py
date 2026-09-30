@@ -45,8 +45,34 @@ with open(os.path.join(_FIXTURES, "granite_chatml_template.jinja")) as _f:
     _CHATML_TEMPLATE = _f.read()
 
 
+class _MarkerTokenizer(SimpleNamespace):
+    """Minimal tokenizer for the mock-patched template tests. The canned
+    invocations these tests use all begin with a standalone-tokenizing marker
+    ('<' for granite_format, '<|im_start|>' for ChatML). ``encode`` returns that
+    marker's stable id as token 0 and ``decode`` maps it back, so the compose
+    path can size the Pass-2 first-token drop (len(marker)) without a full
+    tokenizer. Longer markers are checked first so '<|im_start|>' wins over '<'.
+    """
+
+    # Stable id <-> marker table (ids well outside any real vocab range used here).
+    _ID_TO_MARKER = {900001: "<|im_start|>", 900002: "<"}
+
+    def encode(self, text, add_special_tokens=False):
+        for marker_id, marker in self._ID_TO_MARKER.items():
+            if text.startswith(marker):
+                # marker id, then a single lumped id (1) for the remainder.
+                return [marker_id] if text == marker else [marker_id, 1]
+        return [1]
+
+    def decode(self, token_ids, skip_special_tokens=False):
+        ids = list(token_ids)
+        if len(ids) == 1 and ids[0] in self._ID_TO_MARKER:
+            return self._ID_TO_MARKER[ids[0]]
+        raise KeyError(tuple(ids))
+
+
 def _make_tokenizer():
-    return SimpleNamespace(chat_template=_GRANITE_TEMPLATE)
+    return _MarkerTokenizer(chat_template=_GRANITE_TEMPLATE)
 
 
 def _render(tokenizer, **kwargs):
@@ -242,12 +268,18 @@ class TestConfigureChatTemplate:
 
 
 class TestInvocationFirstCharDropProperty:
-    """Standalone property test on a real Granite tokenizer: dropping the first
-    character of an ALoRA invocation text yields the same tail-token sequence
-    as tokenizing the full invocation text and dropping its first token. This
-    is the BPE-level invariant the Pass-2 edit relies on — if a future
-    tokenizer change breaks it, the template-level drop would silently corrupt
-    the tail of the invocation.
+    """Standalone property test on a real Granite tokenizer for the invariant
+    the Pass-2 edit relies on: dropping the first *token's worth of characters*
+    from an ALoRA invocation text yields the same tail-token sequence as
+    tokenizing the full invocation text and dropping its first token.
+
+    Pass 2 slices the invocation *string* by a per-adapter character count
+    (``invocation_drop_chars`` == ``len(decode(first_token))``, computed at
+    compose time by ``get_alora_invocation_drop_chars``). This test confirms
+    that character-level slice reconstructs a clean first-token drop even when
+    the first token spans multiple characters (e.g. ``<context>`` ->
+    ``<context`` under tokenizers >= 0.23.1). If a future tokenizer change made
+    the tail retokenize differently after the split, this would catch it.
     """
 
     _INVOCATIONS = [
@@ -255,6 +287,8 @@ class TestInvocationFirstCharDropProperty:
         "<certainty>",
         "<guardian>",
         "<context>",
+        "<citation>",
+        "<hallucination>",
     ]
 
     def _get_tokenizer(self):
@@ -267,40 +301,63 @@ class TestInvocationFirstCharDropProperty:
 
             pytest.skip(f"could not fetch Granite tokenizer: {e}")
 
-    def test_first_char_drop_equals_first_token_drop(self):
+    def test_token_char_drop_equals_first_token_drop(self):
+        """Dropping ``len(decode(first_token))`` characters from the string must
+        equal dropping the first token from the id sequence."""
         tok = self._get_tokenizer()
         for invocation in self._INVOCATIONS:
             full_ids = tok(invocation, add_special_tokens=False).input_ids
-            dropped_ids = tok(invocation[1:], add_special_tokens=False).input_ids
+            drop_chars = len(tok.decode([full_ids[0]], skip_special_tokens=False))
+            dropped_ids = tok(
+                invocation[drop_chars:], add_special_tokens=False
+            ).input_ids
             assert full_ids[1:] == dropped_ids, (
-                f"invocation {invocation!r}: dropping first char of the "
+                f"invocation {invocation!r}: dropping {drop_chars} char(s) of the "
                 f"string produced tokens {dropped_ids} but the tail of the "
                 f"full tokenization is {full_ids[1:]}"
             )
 
-    def test_first_token_is_single_character(self):
-        """Sanity: the first token of each invocation must be exactly one
-        character (the leading '<'). Otherwise dropping invocation_text[1:]
-        in Jinja would drop the wrong number of characters."""
+    def test_first_token_decodes_to_invocation_prefix(self):
+        """Sanity: the first token must decode to a prefix of the invocation
+        string, so the character-count drop lands on a token boundary."""
         tok = self._get_tokenizer()
         for invocation in self._INVOCATIONS:
             first_id = tok(invocation, add_special_tokens=False).input_ids[0]
-            first_str = tok.decode([first_id])
-            assert first_str == invocation[0], (
+            first_str = tok.decode([first_id], skip_special_tokens=False)
+            assert invocation.startswith(first_str), (
                 f"invocation {invocation!r}: first token decodes to "
-                f"{first_str!r}, expected {invocation[0]!r}"
+                f"{first_str!r}, which is not a prefix of the invocation"
             )
 
 
 class _FixtureTokenizer:
-    """Tokenizer with a decode map for fixture adapter token IDs."""
+    """Tokenizer with a decode map for fixture adapter token IDs.
+
+    ``decode_map`` maps an id-tuple to its text. ``decode`` looks up whole
+    tuples; single-id decodes (used to size the Pass-2 first-token drop) fall
+    back to a per-id map derived from the single-id entries. ``encode`` is the
+    reverse of the whole-tuple map, so the compose path can recover the first
+    invocation token id from the decoded invocation text.
+    """
 
     def __init__(self, chat_template, decode_map):
         self.chat_template = chat_template
         self._decode_map = decode_map
+        self._encode_map = {text: list(ids) for ids, text in decode_map.items()}
+        self._single_id_decode = {
+            ids[0]: text for ids, text in decode_map.items() if len(ids) == 1
+        }
 
     def decode(self, token_ids, skip_special_tokens=False):
-        return self._decode_map[tuple(token_ids)]
+        key = tuple(token_ids)
+        if key in self._decode_map:
+            return self._decode_map[key]
+        if len(key) == 1 and key[0] in self._single_id_decode:
+            return self._single_id_decode[key[0]]
+        raise KeyError(key)
+
+    def encode(self, text, add_special_tokens=False):
+        return list(self._encode_map[text])
 
 
 class TestEndToEndAdapterConfigToRender:
@@ -323,6 +380,8 @@ class TestEndToEndAdapterConfigToRender:
             {
                 # [100264, 78191, 100265] → assistant role sequence
                 (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
+                # First-token decode, used to size the (unused-on-fallback) drop.
+                (100264,): "<|start_of_role|>",
             }
         )
         configure_chat_template(
@@ -359,7 +418,7 @@ class TestEndToEndAdapterConfigToRender:
         inserting the control token, so "<context>" becomes
         "<|context_relevance|>context>" in the rendered output.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer({(27, 9998): "<context>", (27,): "<"})
         configure_chat_template(
             tokenizer,
             [
@@ -391,7 +450,7 @@ class TestEndToEndAdapterConfigToRender:
 
         Same first-character drop as the start-of-message case.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer({(27, 9998): "<context>", (27,): "<"})
         configure_chat_template(
             tokenizer,
             [
@@ -427,7 +486,7 @@ class TestEndToEndAdapterConfigToRender:
         land before the second <context>, not the first. First occurrence
         remains intact with its '<'; only the second has its '<' dropped.
         """
-        tokenizer = self._make_tokenizer({(27,): "<context>"})
+        tokenizer = self._make_tokenizer({(27, 9998): "<context>", (27,): "<"})
         configure_chat_template(
             tokenizer,
             [
@@ -483,7 +542,9 @@ class TestEndToEndAdapterConfigToRender:
         tokenizer = self._make_tokenizer(
             {
                 (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
-                (27,): "<context>",
+                (100264,): "<|start_of_role|>",
+                (27, 9998): "<context>",
+                (27,): "<",
             }
         )
         configure_chat_template(
@@ -546,7 +607,7 @@ class TestEndToEndAdapterConfigToRender:
 
 
 def _make_chatml_tokenizer():
-    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+    return _MarkerTokenizer(chat_template=_CHATML_TEMPLATE)
 
 
 class TestDetectTemplateFormat:
@@ -929,7 +990,7 @@ class TestAudioAndAdapterInjectionsCompose:
 
 
 def _make_chatml_audio_tokenizer():
-    return SimpleNamespace(chat_template=_CHATML_TEMPLATE)
+    return _MarkerTokenizer(chat_template=_CHATML_TEMPLATE)
 
 
 def _chatml_user_turn(rendered):

@@ -42,7 +42,12 @@ _COMMON_CONFIG = dict(
     num_key_value_heads=2,
     num_local_experts=0,
     num_experts_per_tok=0,
-    layer_types=["attention", "attention", "attention", "attention"],
+    layer_types=[
+        "full_attention",
+        "full_attention",
+        "full_attention",
+        "full_attention",
+    ],
     hidden_act="silu",
     max_position_embeddings=512,
     attention_bias=False,
@@ -58,7 +63,12 @@ class TestAttentionOnlyNoMoE:
     def test_logits_match(self, tmp_path):
         cfg = {
             **_COMMON_CONFIG,
-            "layer_types": ["attention", "attention", "attention", "attention"],
+            "layer_types": [
+                "full_attention",
+                "full_attention",
+                "full_attention",
+                "full_attention",
+            ],
             "num_local_experts": 0,
             "num_experts_per_tok": 0,
             "shared_intermediate_size": _COMMON_CONFIG["intermediate_size"],

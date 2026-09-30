@@ -168,7 +168,7 @@ class GraniteSwitchComposer:
                 lora_rank = built_in_lora_rank
                 adapter_ranks = [built_in_lora_rank] * num_built_in
                 adapter_alphas = {}
-                # Auto-detect lora_target_modules from layer_types
+                # Auto-detect lora_target_modules (attention-only switch model)
                 lora_target_modules = None
                 source_analysis = {}
             else:
@@ -188,34 +188,29 @@ class GraniteSwitchComposer:
         for field_name, default in arch.optional_config_fields.items():
             config_kwargs[field_name] = getattr(base_config, field_name, default)
 
-        # For Granite 3.x whose arch descriptor doesn't include
-        # shared_intermediate_size, default it to intermediate_size.
-        # GraniteMoeHybridConfig defaults it to 1024 (not None), so
-        # GraniteSwitchConfig's fallback logic doesn't trigger.
+        # For a dense Granite base whose arch descriptor doesn't include
+        # shared_intermediate_size, supply it explicitly from intermediate_size:
+        # a dense Granite layer always has a shared MLP of that width. This makes
+        # the composer the source of truth and does not rely on any parent-class
+        # default (GraniteMoeHybrid defaults it to a fixed 1024, the wrong width
+        # for dense bases — GraniteSwitchConfig resolves it from intermediate_size
+        # instead when left unset).
         if "shared_intermediate_size" not in config_kwargs:
             config_kwargs["shared_intermediate_size"] = config_kwargs[
                 "intermediate_size"
             ]
 
-        # Normalize layer_types: map everything to "attention" (only attention
-        # layers are supported).
-        lt = config_kwargs.get("layer_types")
-        if lt is not None:
-            config_kwargs["layer_types"] = ["attention" for _ in lt]
-
         # When adapters are present, reserve the switch's cache slots at the
         # front: MultiSwitch (coded) owns SWITCH_CACHE_LAYERS == 2 (counting +
         # memory heads). The model subtracts the same count in
         # modeling_granite_switch.py to recover the physical decoder layers.
+        # No base ``layer_types`` is carried into config_kwargs (the arch
+        # descriptors do not propagate it); GraniteSwitchConfig synthesizes an
+        # all-``full_attention`` layout sized to this inflated ``num_hidden_layers``.
         if num_total > 0:
             config_kwargs["num_hidden_layers"] = (
                 config_kwargs["num_hidden_layers"] + SWITCH_CACHE_LAYERS
             )
-            if config_kwargs.get("layer_types") is not None:
-                config_kwargs["layer_types"] = [
-                    *(["attention"] * SWITCH_CACHE_LAYERS),
-                    *list(config_kwargs["layer_types"]),
-                ]
 
         # Switch-specific parameters
         config_kwargs.update(

@@ -179,13 +179,19 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         layer_types: list[str] | None = None,
         **kwargs,
     ):
-        # Compute default layer_types before parent init.
-        # layer_types must have length == num_hidden_layers (includes switch layer at
-        # index 0 when adapters are present). This ensures DynamicCache pre-allocation
-        # matches the global layer indices used by decoder layers.
+        # The switch model is attention-only with RoPE, but its parent
+        # ``GraniteMoeHybridConfig`` is a mamba/attention hybrid whose
+        # ``__post_init__`` fills an *unset* ``layer_types`` with
+        # ``["linear_attention"] * num_hidden_layers`` — i.e. all mamba, which
+        # would make ``DynamicCache`` allocate the wrong per-layer cache. So the
+        # switch config must pin ``layer_types`` to all-attention itself. The
+        # length must equal ``num_hidden_layers`` (already inflated by the
+        # composer's cache slots, which are attention too) or the parent's
+        # ``validate_layer_type`` length check rejects the config. ``"attention"``
+        # is remapped to the canonical ``"full_attention"`` by transformers 5.16.
         if layer_types is None:
             num_hidden_layers = kwargs.get("num_hidden_layers", 32)
-            layer_types = ["attention"] * num_hidden_layers
+            layer_types = ["full_attention"] * num_hidden_layers
 
         super().__init__(
             num_local_experts=num_local_experts,
@@ -194,13 +200,19 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             **kwargs,
         )
 
-        # Default shared_intermediate_size from intermediate_size.  Granite 4
-        # models all have a shared_mlp; for dense ones its width equals
-        # intermediate_size.  The test MUST stay ``is None``: 0 is the explicit
-        # "no shared MLP" encoding used by pure sparse MoE bases (granitemoe),
-        # and a falsy test would silently resurrect the module.
-        if self.shared_intermediate_size is None:
-            self.shared_intermediate_size = self.intermediate_size
+        # Resolve shared_intermediate_size independently of the parent default.
+        # The GraniteMoeHybrid parent defaults it to a fixed 1024, which is the
+        # wrong width for dense bases and does not encode the "no shared MLP"
+        # sentinel (0) that pure sparse-MoE bases (granitemoe) rely on.  So the
+        # switch config must decide it itself rather than inherit a magic default:
+        # an explicitly-supplied value (including 0) is honored verbatim; only when
+        # it is left unset do we resolve it — dense (no experts) gets a shared MLP
+        # sized to intermediate_size, pure MoE keeps the 0 sentinel.  This is a
+        # compose-time decision that is then frozen into config.json.
+        if kwargs.get("shared_intermediate_size") is None:
+            self.shared_intermediate_size = (
+                0 if num_local_experts > 0 else self.intermediate_size
+            )
 
         # Validate num_adapters
         if num_adapters < 0:
@@ -366,14 +378,14 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             lora_target_modules = []
 
             if self.num_adapters > 0:
-                # Attention modules (present in all attention layers)
-                if any(lt == "attention" for lt in self.layer_types):
-                    lora_target_modules.extend(
-                        [
-                            "qkv_proj",  # Q/K/V fused
-                            "o_proj",  # O projection
-                        ]
-                    )
+                # Attention modules: the switch model is attention-only, so
+                # every layer has them.
+                lora_target_modules.extend(
+                    [
+                        "qkv_proj",  # Q/K/V fused
+                        "o_proj",  # O projection
+                    ]
+                )
 
                 # MLP modules: only where a shared_mlp exists to hold them.
                 # Pure sparse MoE bases have none, and asking for the groups

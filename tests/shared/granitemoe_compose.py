@@ -121,15 +121,18 @@ def create_base_model(path: Path, geometry: MoeGeometry = DEFAULT_GEOMETRY):
                 g.hidden, g.hidden
             )
         # Sparse expert bank: (E, 2*intermediate, hidden) / (E, hidden, intermediate)
-        # / (E, hidden), named identically in the switch model.
+        # / (E, hidden), named identically in the switch model. transformers 5.16
+        # collapsed these into a single ``experts`` module (gate_up_proj/down_proj)
+        # plus a flat ``router`` — the names a real granitemoe save_pretrained now
+        # writes, and what the composer's identity transfer maps 1:1.
         moe = f"{prefix}.block_sparse_moe"
-        state_dict[f"{moe}.input_linear.weight"] = torch.randn(
+        state_dict[f"{moe}.experts.gate_up_proj"] = torch.randn(
             g.num_experts, 2 * g.intermediate, g.hidden
         )
-        state_dict[f"{moe}.output_linear.weight"] = torch.randn(
+        state_dict[f"{moe}.experts.down_proj"] = torch.randn(
             g.num_experts, g.hidden, g.intermediate
         )
-        state_dict[f"{moe}.router.layer.weight"] = torch.randn(g.num_experts, g.hidden)
+        state_dict[f"{moe}.router.weight"] = torch.randn(g.num_experts, g.hidden)
         state_dict[f"{prefix}.input_layernorm.weight"] = torch.ones(g.hidden)
         state_dict[f"{prefix}.post_attention_layernorm.weight"] = torch.ones(g.hidden)
 

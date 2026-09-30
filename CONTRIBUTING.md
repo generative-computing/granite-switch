@@ -27,7 +27,7 @@ Or via pip: `pip install uv`
    > ```bash
    > uv sync --frozen --no-default-groups --extra hf --extra compose
    > ```
-   > `--no-default-groups` skips the default `vllm19` group; `--frozen` installs strictly from the
+   > `--no-default-groups` skips the default `vllm26` group; `--frozen` installs strictly from the
    > committed `uv.lock` without modifying it. (What fails on macOS is *installing* the vLLM/CUDA
    > wheels — resolving the lockfile with `uv lock` works fine, so the `uv-lock` pre-commit hook runs
    > locally too; the CPU subset above simply never installs those wheels.) To run the

@@ -33,8 +33,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
 from vllm.model_executor.models.interfaces import (
-    HasInnerState,
-    IsHybrid,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -177,8 +175,7 @@ class GraniteSwitchModel(nn.Module):
         # slot and a memory slot). These placeholders exist for HF DynamicCache
         # sizing; vLLM auto-discovers its Attention layers and doesn't need them.
         # We subtract the switch's cache slot count to recover the true number of
-        # decoder layers, and use it as an offset into layer_types (whose first
-        # entry is an "attention" placeholder for the switch).
+        # decoder layers.
         if config.num_adapters > 0:
             layer_offset = self.switch.num_cache_layers
             num_decoder_layers = config.num_hidden_layers - layer_offset
@@ -408,13 +405,25 @@ class GraniteSwitchModel(nn.Module):
     info=GraniteSwitchASRProcessingInfo,
     dummy_inputs=GraniteSwitchASRDummyInputsBuilder,
 )
+# ``IsHybrid``/``HasInnerState`` are deliberately NOT declared, even though the
+# config's parent is ``GraniteMoeHybridConfig``. Declaring them would make vLLM
+# size the KV cache for ZERO attention layers, because:
+#   1. transformers >=5.16 remaps the bare ``"attention"`` layer type to
+#      ``"full_attention"``, and no longer accepts ``"attention"`` at all, so
+#      ``layer_types`` is ``["full_attention"] * num_hidden_layers`` (config.py).
+#   2. ``ModelConfig.is_hybrid``'s granite-4.0-micro escape hatch compares against
+#      the *literal* ``"attention"``, so it no longer fires for us.
+#   3. ``GraniteMoeHybridConfig.attribute_map`` aliases ``layers_block_type`` to
+#      ``layer_types``, pointing vLLM straight at our all-``full_attention`` list.
+#   4. ``get_num_layers_by_block_type`` then counts ``t == "attention"`` and gets 0.
+# This worked on vLLM 0.19 + transformers 5.9 only because ``layer_types`` was
+# literally ``["attention"]`` back then. The switch model is attention-only with
+# no mamba state, so neither interface has anything to contribute anyway.
 class GraniteSwitchForCausalLM(
     nn.Module,
-    HasInnerState,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    IsHybrid,
 ):
     """
     Granite model with switch for causal language modeling.
