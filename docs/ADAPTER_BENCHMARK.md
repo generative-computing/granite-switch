@@ -128,7 +128,7 @@ page:
 
 ### What runs
 
-One job computes all of them: 6 intrinsics × 4 columns, 24 cells. No
+One job computes all of them: 5 intrinsics × 4 columns, 20 cells. No
 granite-switch commit is involved.
 
 ```
@@ -342,8 +342,8 @@ Commit the result the same way:
 git add docs/benchmarks && git commit -s -m "Adapter benchmark: reference"
 ```
 
-The full run can take hours. The longest cell (hallucination detection, up
-to 4096 new tokens per row) sets the pace.
+The largest eval sets (guardian-core and answerability, thousands of rows
+each) set the pace.
 
 ## Cache rules
 

@@ -559,7 +559,7 @@ def test_reference_run(tmp_path, monkeypatch, capsys):
     sr = make_adapter(
         staged.adapter_dir(bench, "answerability", "sr"), "sr", invocation=True
     )
-    (sr / staged.PROVENANCE_FILE).write_text(json.dumps({"shared_kv": True}))
+    write_provenance(sr, rank=32, shared_kv=True)
     jobs = {}
 
     def fake_run_jobs(job_list, gpus, python, harness_root):
@@ -601,6 +601,11 @@ def test_reference_run(tmp_path, monkeypatch, capsys):
     assert run["sr_invocation_dropped"] == ["answerability"]
     assert run["mlp_keys_renamed"] == ["answerability/lora"]
     assert (run["gpus"], run["gpu"], run["limit"]) == (2, "fake", None)
+    # Fingerprints come from the staged checkpoints, not the converted copies.
+    assert run["adapters"]["answerability/sr"]["rank"] == 32
+    assert run["adapters"]["answerability/lora"] == {}  # staged without provenance
+    assert "answerability/base" not in run["adapters"]
+    assert "/private/" not in json.dumps(run)
     # The block in the log is what was saved.
     log = capsys.readouterr().out
     block = common.extract_block(log, common.REFERENCE_BEGIN, common.REFERENCE_END)
@@ -1036,6 +1041,31 @@ def test_peft_sr_copy_drops_the_invocation_tokens(tmp_path):
     anchored = make_adapter(tmp_path / "anchored", "sr")
     assert staged.peft_sr_copy(anchored, tmp_path / "dest2") is None
     assert not (tmp_path / "dest2").exists()
+
+
+def write_provenance(adapter: Path, rank: int = 16, **extra) -> dict:
+    provenance = {
+        "source": "/private/runs/x/checkpoint",
+        "technology": "lora",
+        "rank": rank,
+        "cross_rank": None,
+        "files": {staged.WEIGHTS_FILE: "ab" * 32, staged.CONFIG_FILE: "cd" * 32},
+        "staged_at": "2026-09-29T10:00:00Z",
+        **extra,
+    }
+    (adapter / staged.PROVENANCE_FILE).write_text(json.dumps(provenance))
+    return provenance
+
+
+def test_fingerprint_publishes_no_source_path(tmp_path):
+    adapter = make_adapter(tmp_path / "a", "lora")
+    assert staged.fingerprint(adapter) == {}  # nothing staged
+    write_provenance(adapter)
+    assert staged.fingerprint(adapter) == {
+        "weights_sha256": "ab" * 32,
+        "rank": 16,
+        "staged_at": "2026-09-29T10:00:00Z",
+    }
 
 
 PEFT = "base_model.model.model.layers"

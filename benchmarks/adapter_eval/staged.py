@@ -248,6 +248,25 @@ def modules_missing_from_base(adapter_dir: Path, base_modules: set[str]) -> list
     )
 
 
+def fingerprint(adapter_dir: Path) -> dict:
+    """A staged checkpoint's public identity, from its provenance.
+
+    The checksum of its weights, its ranks and when it was staged. The source
+    path is private and left out. Empty when there is no provenance.
+    """
+    try:
+        provenance = json.loads((adapter_dir / PROVENANCE_FILE).read_text())
+    except (OSError, ValueError):
+        return {}
+    found = {
+        "weights_sha256": provenance.get("files", {}).get(WEIGHTS_FILE),
+        "rank": provenance.get("rank"),
+        "cross_rank": provenance.get("cross_rank"),
+        "staged_at": provenance.get("staged_at"),
+    }
+    return {k: v for k, v in found.items() if v is not None}
+
+
 def says_shared_kv(path: str) -> bool:
     """Whether a run's path names a shared-K/V configuration."""
     return bool(SHARED_KV.search(path.lower().replace("-", "_")))

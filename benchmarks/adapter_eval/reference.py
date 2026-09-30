@@ -29,7 +29,8 @@ Steps:
 3. Generate every cell in its own process on one GPU (``hf_generate.py``), as
    many at once as there are GPUs, the longest cells first.
 4. Score every cell and print the reference block (``common.py``) that
-   ``publish.py`` reads from the pod log.
+   ``publish.py`` reads from the pod log. It records each staged
+   checkpoint's fingerprint (``staged.fingerprint``) with the run.
 
 Everything the run produced (jobs, predictions, full score reports) is kept
 under ``--work-dir``.
@@ -273,12 +274,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[stage] {intrinsic.id}/{column}: {reason or 'ok'}")
 
     base_dir = base_model_dir(base_model) if runnable else None
-    run_meta: dict = {"sr_invocation_dropped": [], "mlp_keys_renamed": []}
+    run_meta: dict = {
+        "sr_invocation_dropped": [],
+        "mlp_keys_renamed": [],
+        "adapters": {},
+    }
     base_modules: set[str] | None = None
     jobs = []
     for intrinsic_id, column, adapter, ev in runnable:
         key = f"{intrinsic_id}/{column}"
         if adapter is not None:
+            run_meta["adapters"][key] = staged.fingerprint(adapter)
             dest = copies / intrinsic_id / column
             try:
                 if column == "sr":

@@ -42,6 +42,10 @@ technologies:
 # max_new_tokens comes from each intrinsic's training config.
 # headline is the metric the results page shows; it matches the internal
 # results page so numbers can be compared.
+#
+# Hallucination detection is left out: its scorer skips outputs it cannot
+# parse, so a model that rarely produces its format (the base model) is scored
+# on a handful of rows. Its scorer is kept for when that changes.
 intrinsics:
   - id: answerability
     name: Answerability
@@ -49,15 +53,6 @@ intrinsics:
     headline: accuracy
     headline_label: Accuracy
     max_new_tokens: 200
-  - id: hallucination_detection
-    name: Hallucination detection
-    scorer: hallucination_detection
-    # Response-level accuracy, averaged over datasets. The internal results
-    # store response-level macro F1 instead; every cell also has it, as
-    # response_macro_f1_mean.
-    headline: response_accuracy_mean
-    headline_label: Accuracy
-    max_new_tokens: 4096
   - id: query_rewrite
     name: Query rewrite
     scorer: query_rewrite
