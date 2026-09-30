@@ -233,7 +233,9 @@ if [[ "$MODEL" != "$DEFAULT_MODEL" ]]; then
             unset BASE_MODEL_PATH
         fi
     done
-    MODEL_TAG=-$(printf %s "$MODEL" | tr '.' '-')
+    # Job names may have at most 50 characters (a chart limit), so the tag
+    # leaves out a leading "granite-".
+    MODEL_TAG=-$(printf %s "${MODEL#granite-}" | tr '.' '-')
 else
     MODEL_TAG=""
 fi
@@ -275,6 +277,7 @@ else
     if [[ -n "$REPLACE" ]]; then render_args+=(--replace); fi
 fi
 JOB=$(echo "$JOB" | tr '[:upper:]_' '[:lower:]-')
+if ((${#JOB} > 50)); then die "job name $JOB is longer than the chart's 50 characters"; fi
 
 VALUES=$RENDERED/$JOB.values.yaml
 K8S=$RENDERED/$JOB.yaml
