@@ -46,6 +46,7 @@ import gc
 import json
 import math
 import os
+import random
 import re
 import time
 import uuid
@@ -81,15 +82,67 @@ SYSTEM_PROMPT = (
     + " ".join(ACTIONS)
     + "), a weapon slot (1-7), or the danger of being hit soon (low mid high)."
 )
+
+
 # The base model's spoken line: a user turn after the shared game context, so a
 # talk request reuses the prefix every game adapter has just prefilled.
-TALK_INSTRUCTION = (
-    "You are this player: a cocky Doom marine talking to yourself as you play. Say "
-    "one short line out loud, at most 12 words. React with feeling to what just "
-    "happened, or tell yourself what to do next and why. Doom has no reloading. "
-    'Examples: "Got him!" "Ouch, I need a medikit." "Dammit, low on ammo, let\'s '
-    'grab some." "Two on the left, BFG time." Do not repeat your last line.'
+@dataclass(frozen=True)
+class Persona:
+    """How the player talks (log layout). The last words before the reply are the
+    directive: a small model follows what it read last far more than a system
+    prompt, and examples drawn at random each call keep any one from becoming the
+    template (fixed examples were copied into nearly every line)."""
+
+    who: str
+    examples: tuple[str, ...]
+    directive: str
+
+    def text(self, rng: random.Random | None = None, k: int = 3) -> str:
+        pool = list(self.examples)
+        ex = pool[:k] if rng is None else rng.sample(pool, min(k, len(pool)))
+        shown = " ".join(f'"{e}"' for e in ex)
+        return f"{self.who} Examples of how you talk: {shown}\n{self.directive}"
+
+
+MARINE = Persona(
+    who="You are this player: a cocky Doom marine talking to yourself as you play. "
+    "Doom has no reloading.",
+    examples=(
+        "Got him!",
+        "Ouch, I need a medikit.",
+        "Dammit, low on ammo, let's grab some.",
+        "Two on the left, BFG time.",
+        "Come on, where are you hiding?",
+        "That one hurt. Back off and heal up.",
+        "Rocket launcher, finally!",
+        "Who's next?",
+    ),
+    directive="Now say your one line: at most 12 words, with feeling, about this "
+    'exact moment. Do not start with "Time".',
 )
+# A crime-film professional. Original lines in that register; none quoted.
+CRIME = Persona(
+    who="You are this player: a calm, deadpan professional out of a 1990s crime "
+    "movie, talking to yourself while you work. Mild language at most. Doom has "
+    "no reloading.",
+    examples=(
+        "Hold still. I do not chase anybody before breakfast.",
+        "Two on the left. I would call it a disagreement, but they started it.",
+        "Low on health. Funny how the body keeps the score.",
+        "Plasma rifle. Some call it overkill. I call it Tuesday.",
+        "That one had a bad plan and worse timing.",
+        "Quiet in here. Quiet makes me nervous.",
+        "Nobody asked him to walk into that room.",
+        "I have been polite long enough.",
+        "Keep your head down and your elbows in.",
+        "Nice of him to bring me his ammo.",
+    ),
+    directive="Now say your one line: at most 12 words, calm, dry and deadpan like a "
+    "1990s crime-movie professional, about this exact moment. Do not start with "
+    '"Another" or "Time".',
+)
+PERSONAS = {"marine": MARINE, "crime": CRIME}
+TALK_INSTRUCTION = MARINE.text()  # the fixed form, for a talk turn without a brief
 # The chat layout: the history is real turns. A user turn is the game log since
 # the player last spoke; when the harness gives it the floor, the turn closes
 # with a brief of what just happened, what the person watching said (if
@@ -260,8 +313,11 @@ class PromptBuilder:
         placement: str = "alora",
         align: bool = True,
         block: int = BLOCK,
+        persona: Persona = MARINE,
     ):
         self.tok = tokenizer
+        self.persona = persona
+        self.rng = random.Random(0)  # which examples a talk turn shows
         self.placement = placement
         self.lora = placement == "lora"
         self.block = block if align else 0
@@ -282,7 +338,7 @@ class PromptBuilder:
                 self.head[a] = self.head[None]
                 self.suffix[a] = self._enc(f"{_EOT}\n{control_token(a)}assistant{_EOR}")
         self.talk_suffix = self._enc(
-            f"{_EOT}\n{_SOR}user{_EOR}{TALK_INSTRUCTION}{_EOT}\n{_SOR}assistant{_EOR}"
+            f"{_EOT}\n{_SOR}user{_EOR}{persona.text()}{_EOT}\n{_SOR}assistant{_EOR}"
         )
         self.system = system
 
@@ -326,11 +382,12 @@ class PromptBuilder:
             )
             if last:
                 said += (
-                    f'You just said: "{last}". Say something new, and do not start '
-                    'with "Time".\n'
+                    f"You recently said: {last}. Say something new, in different "
+                    'words and a different shape; do not start with "Time".\n'
                 )
             suffix = self._enc(
-                f"{_EOT}\n{_SOR}user{_EOR}{brief}\n{said}{TALK_INSTRUCTION}{_EOT}\n"
+                f"{_EOT}\n{_SOR}user{_EOR}{brief}\n{said}{self.persona.text(self.rng)}"
+                f"{_EOT}\n"
                 f"{_SOR}assistant{_EOR}"
             )
         return self.head[None] + self._body(history_ids, state) + suffix
@@ -635,6 +692,7 @@ def prompt_kit(
     align: bool = True,
     temperature: float = 0.0,
     layout: str = "log",
+    persona: str = "marine",
 ) -> PromptKit:
     from vllm import SamplingParams
 
@@ -646,7 +704,14 @@ def prompt_kit(
     return PromptKit(
         placement=placement,
         lora=placement == "lora",
-        pb=PromptBuilder(tok, system, adapters, placement=place, align=align),
+        pb=PromptBuilder(
+            tok,
+            system,
+            adapters,
+            placement=place,
+            align=align,
+            persona=PERSONAS[persona],
+        ),
         rb=PromptBuilder(
             tok, ROUTER_SYSTEM_PROMPT, adapters, placement=place, align=False
         ),
@@ -708,6 +773,8 @@ class VLLMPolicy:
         layout: ``log`` (one user turn: history, state) or ``chat`` (real
             turns: the player's spoken lines are assistant turns). Must match
             the layout the adapters were trained on.
+        persona: how the player talks in the log layout (``PERSONAS``: the
+            ``marine`` or the ``crime``-film professional).
     """
 
     name = "vllm"
@@ -733,6 +800,7 @@ class VLLMPolicy:
         temperature: float = 0.0,
         attention: dict | None = None,
         layout: str = "log",
+        persona: str = "marine",
     ):
         os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
         from vllm import LLM
@@ -760,6 +828,7 @@ class VLLMPolicy:
             align=align,
             temperature=temperature,
             layout=layout,
+            persona=persona,
         )
         self.layout = layout
         self.placement, self.lora = kit.placement, kit.lora
@@ -860,7 +929,7 @@ class VLLMPolicy:
             best, probs.get(best, 0.0), (time.perf_counter() - t0) * 1000, probs
         )
 
-    def talk_params(self, max_tokens: int = 24, temperature: float = 0.8, **kw):
+    def talk_params(self, max_tokens: int = 40, temperature: float = 0.8, **kw):
         """Sampling for one spoken line from the base model (no adapter).
 
         Temperature only: top-p sends sampling to a FlashInfer kernel that
@@ -868,7 +937,8 @@ class VLLMPolicy:
         """
         from vllm import SamplingParams
 
-        opts = {"stop": ["\n", "Player:"], **kw}  # it would write the watcher next
+        # "Player:": it would write the watcher next. No reloading in Doom.
+        opts = {"stop": ["\n", "Player:"], "bad_words": ["reload", "Another"], **kw}
         return SamplingParams(max_tokens=max_tokens, temperature=temperature, **opts)
 
     def talk(
@@ -897,7 +967,11 @@ class VLLMPolicy:
                 for (h, s), b, w, last in zip(games, briefs, players, lasts)
             ]
         outs = self.run(prompts, [self.talk_params(**kw)] * len(prompts))
-        return [o.outputs[0].text.strip().split("\n")[0] for o in outs]
+        # Sound tags are chosen by the harness (talk.sound_tag), not the model.
+        return [
+            re.sub(r"\[[^\]]*\]\s*", "", o.outputs[0].text).strip().split("\n")[0]
+            for o in outs
+        ]
 
     def _warmup(self, n: int) -> None:
         state = (

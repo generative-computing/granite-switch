@@ -86,25 +86,110 @@ def brief(entries: list[str], state: str) -> str:
     return " ".join(parts)
 
 
+def sound_tag(brief_text: str, rng) -> str:
+    """A sound for Chatterbox-Turbo to voice before a line, chosen from what just
+    happened. Left to the model, one opened every line."""
+    if "you got killed" in brief_text:
+        return "[sigh] " if rng.random() < 0.6 else ""
+    if "you fragged" in brief_text:
+        return "[chuckle] " if rng.random() < 0.35 else ""
+    if "(low)" in brief_text:
+        return "[sigh] " if rng.random() < 0.3 else ""
+    return ""
+
+
+SALIENT = ("| frag", "| died", "| got weapon")  # as engine.SALIENT, in entry text
+
+
+def match_moments(
+    entries: list[str],
+    rows: list[dict],
+    every_s: float = 4.0,
+    gap_s: float = 2.5,
+    limit: int = 60,
+) -> list[dict]:
+    """The moments a live game would speak at, in order: every ``every_s``
+    seconds, or right after a frag, a death or a new weapon (at least ``gap_s``
+    apart), as the engine does. ``rows`` are one match's collect.py rows (tick,
+    history length, state); each moment carries its brief and last log lines."""
+    from doom_env import TIC_HZ
+
+    out, last = [], -1e9
+    for r in sorted(rows, key=lambda r: r["t"]):
+        now, n = r["t"] / TIC_HZ, r["hist_n"]
+        if n < 5 or now - last < gap_s:
+            continue
+        salient = any(k in "".join(entries[max(0, n - 3) : n]) for k in SALIENT)
+        if not (now - last >= every_s or salient):
+            continue
+        out.append(
+            {
+                "t": r["t"],
+                "hist_n": n,
+                "state": r["state"],
+                "brief": brief(entries[:n], r["state"]),
+                "recent": [e.strip() for e in entries[max(0, n - 3) : n]],
+            }
+        )
+        last = now
+        if len(out) >= limit:
+            break
+    return out
+
+
 def main() -> None:
-    """Generate a pool of spoken lines from recorded moments, for training the
-    game adapters on histories that contain talk (train_alora.py --talk-lines)."""
     import argparse
     import json
     import random
     from pathlib import Path
 
+    ap = argparse.ArgumentParser(description="Spoken-line tools for the Doom demo")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    pl = sub.add_parser("pool", help="Lines from the base model (augmentation pool)")
+    pl.add_argument("--model", required=True, help="Any composed checkpoint")
+    pl.add_argument("--data", type=Path, required=True, help="A collect.py dir")
+    pl.add_argument("--n", type=int, default=3000)
+    pl.add_argument("--out", type=Path, required=True)
+    mo = sub.add_parser("moments", help="Speaking moments of recorded matches")
+    mo.add_argument(
+        "--data", type=Path, nargs="+", required=True, help="collect.py dirs"
+    )
+    mo.add_argument("--style", default="fighter")
+    mo.add_argument("--matches", type=int, default=400)
+    mo.add_argument("--per-match", type=int, default=60)
+    mo.add_argument("--seed", type=int, default=0)
+    mo.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    if args.cmd == "moments":
+        matches = []
+        for d in args.data:
+            rows_by: dict = {}
+            for line in open(d / f"{args.style}.jsonl"):
+                r = json.loads(line)
+                rows_by.setdefault(r["ep"], []).append(r)
+            for line in open(d / f"{args.style}_history.jsonl"):
+                h = json.loads(line)
+                if h["ep"] in rows_by:
+                    matches.append((str(d), h["ep"], h["entries"], rows_by[h["ep"]]))
+        random.Random(args.seed).shuffle(matches)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        n = 0
+        with open(args.out, "w") as f:
+            for d, ep, entries, rows in matches[: args.matches]:
+                ms = match_moments(entries, rows, limit=args.per_match)
+                f.write(
+                    json.dumps(
+                        {"data": d, "style": args.style, "ep": ep, "moments": ms}
+                    )
+                    + "\n"
+                )
+                n += len(ms)
+        print(f"{min(len(matches), args.matches)} matches, {n} moments -> {args.out}")
+        return
+
     from history import History
     from policy import VLLMPolicy
-
-    ap = argparse.ArgumentParser(description=main.__doc__.split("\n")[0])
-    ap.add_argument(
-        "--model", required=True, help="Any composed checkpoint (base path)"
-    )
-    ap.add_argument("--data", type=Path, required=True, help="A collect.py dir")
-    ap.add_argument("--n", type=int, default=3000)
-    ap.add_argument("--out", type=Path, required=True)
-    args = ap.parse_args()
 
     streams = {}
     for line in open(args.data / "fighter_history.jsonl"):

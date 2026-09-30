@@ -28,6 +28,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import random
+import re
 import sys
 from collections import deque
 from pathlib import Path
@@ -57,7 +59,7 @@ from policy import (
     state_text,
     talk_extra,
 )
-from talk import brief
+from talk import brief, sound_tag
 
 W_GAME, H = 640, 480
 W_PANEL = 360
@@ -342,7 +344,11 @@ KINDS = {"alora": "aLoRA", "lora": "LoRA", "sr": "Shadow Residual", "base": "no"
 def draw_captions(img: Image.Image, caps: list[tuple[float, str, str]], now: float):
     """The latest line from the watcher and from the player, over the game view."""
     f = font(16)
-    shown = [(who, text) for t, who, text in caps if now - t < CAPTION_S][-2:]
+    shown = [
+        (who, re.sub(r"\[[a-z ]+\]\s*", "", text))  # sound tags are voiced, not shown
+        for t, who, text in caps
+        if now - t < CAPTION_S
+    ][-2:]
     if not shown:
         return
     rows = []
@@ -380,6 +386,7 @@ def main() -> None:
         "--temperature", type=float, default=1.0, help="Style and planner sampling"
     )
     ap.add_argument("--layout", default="log", help="The adapters' prompt layout")
+    ap.add_argument("--persona", default="marine", help="How it talks: marine, crime")
     ap.add_argument("--no-hud", action="store_true", help="No status bar (as collect)")
     ap.add_argument("--no-critic", action="store_true", help="Do not ask the critic")
     ap.add_argument("--eager", action="store_true", help="No CUDA graphs")
@@ -409,6 +416,7 @@ def main() -> None:
             warmup=100,
             temperature=args.temperature,
             layout=args.layout,
+            persona=args.persona,
             enforce_eager=args.eager,
             cudagraph_mode=args.cudagraph_mode,
             attention={"flash_attn_version": 2} if args.fa2 else None,
@@ -435,6 +443,7 @@ def main() -> None:
     )
     caps: list[tuple[float, str, str]] = []  # (video s, who, text)
     frame_i, last_talk, last_reply = 0, -1e9, -1e9
+    tag_rng = random.Random(args.seed)
     live, fist = 0, 0  # tics alive, and of those holding the fist
     kind = KINDS.get(getattr(pol, "placement", "base"), "")
     for what, secs in args.segment:
@@ -481,8 +490,16 @@ def main() -> None:
                 if hasattr(pol, "talk") and (player or narrate):
                     state = state_text(obs)
                     b = brief(hist.entries, state)
-                    last = next((x for _, w, x in reversed(caps) if w == "bot"), None)
+                    mine = [
+                        re.sub(r"\[[^\]]*\]\s*", "", x)
+                        for _, w, x in caps
+                        if w == "bot"
+                    ][-3:]
+                    last = " / ".join(f'"{x}"' for x in mine) or None
                     line = pol.talk([(hist.ids, state)], [b], [player], [last])[0]
+                    voiced = (
+                        sound_tag(b, tag_rng) + line
+                    )  # tags: voiced, not in history
                     if args.layout == "chat":
                         hist.append(spoken_entry(state, line, talk_extra(b, player)))
                     else:
@@ -492,7 +509,7 @@ def main() -> None:
                     if player:
                         caps.append((now, "player", player))
                         last_reply = now
-                    caps.append((now, "bot", line))
+                    caps.append((now, "bot", voiced))
                     last_talk = now
                     print(
                         f"t{now:5.1f}  {'[' + player + '] ' if player else ''}-> {line}"

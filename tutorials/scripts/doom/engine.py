@@ -35,6 +35,7 @@ import contextlib
 import json
 import multiprocessing as mp
 import random
+import re
 import time
 import uuid
 from collections import Counter
@@ -142,6 +143,7 @@ class AsyncPolicy:
         gpu_mem: float,
         temperature: float,
         layout: str = "log",
+        persona: str = "marine",
     ):
         from transformers import AutoTokenizer
         from vllm import AsyncEngineArgs, SamplingParams
@@ -154,14 +156,16 @@ class AsyncPolicy:
         kw["compilation_config"] = CompilationConfig(**kw["compilation_config"])
         self.engine = AsyncLLM.from_engine_args(AsyncEngineArgs(**kw))
         self.tok = AutoTokenizer.from_pretrained(model)
-        self.kit = prompt_kit(self.tok, temperature=temperature, layout=layout)
+        self.kit = prompt_kit(
+            self.tok, temperature=temperature, layout=layout, persona=persona
+        )
         self.layout = layout
         # Temperature only (top-p autotunes a FlashInfer kernel on first use).
         self.talk_sp = SamplingParams(
             max_tokens=32,  # ~15 words; the system prompt asks for one short line
             temperature=0.8,
             stop=["\n", "Player:"],
-            bad_words=["reload"],
+            bad_words=["reload", "Another"],
         )
 
     async def _one(self, ids: list[int], sp):
@@ -198,7 +202,8 @@ class AsyncPolicy:
             extra = ""
             ids = self.kit.pb.talk_ids(hist_ids, state, brief_text, player)
         o = await self._one(ids, self.talk_sp)
-        return o.outputs[0].text.strip().strip('"').split("\n")[0], extra
+        text = re.sub(r"\[[^\]]*\]\s*", "", o.outputs[0].text)  # tags: not the model's
+        return text.strip().strip('"').split("\n")[0], extra
 
     async def warmup(self) -> None:
         state = (
@@ -455,6 +460,7 @@ async def serve(args) -> dict:
         gpu_mem=args.gpu_mem,
         temperature=args.temperature,
         layout=args.layout,
+        persona=args.persona,
     )
     await pol.warmup()
     print(f"engine ready in {time.time() - t0:.0f}s ({pol.kit.placement})", flush=True)
@@ -596,6 +602,9 @@ def main() -> None:
         p.add_argument("--json", type=Path)
         p.add_argument(
             "--layout", default="log", choices=sorted(LAYOUTS), help="Prompt layout"
+        )
+        p.add_argument(
+            "--persona", default="marine", help="How it talks: marine, crime"
         )
         p.add_argument(
             "--player-lines",
