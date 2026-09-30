@@ -84,10 +84,23 @@ granite-switch/
 │   ├── regression/                      # Regression tests (hf/, vllm/, integration/, shared/, tools/)
 │   └── shared/                          # Shared test utilities and parametrized cases
 │
+├── benchmarks/                          # Benchmarks run against a commit (not part of the package)
+│   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
+│       ├── adapters.yaml                # Benchmark definition: intrinsics, technologies, bench_version
+│       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block
+│       ├── generate.py                  # vLLM generation for one composed checkpoint
+│       ├── staged.py                    # Staged adapter / eval-set layout and format checks
+│       ├── stage.py                     # Discover source checkpoints and stage the chosen ones
+│       ├── publish.py                   # Cache check, merge results into the page data, render the page
+│       ├── common.py                    # Spec loading, cell helpers, results-block format
+│       ├── scorers/                     # One scorer per intrinsic
+│       └── vela/                        # Vela job rendering + submit.sh (settings in gitignored local/)
+│
 ├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
 ├── .pre-commit-config.yaml              # Pre-commit hook configuration
 ├── scratch/                             # Throwaway debug/diagnostic scripts (gitignored)
 ├── docs/                                # Documentation
+│   └── benchmarks/                      # Adapter benchmark results page (index.html + data.json)
 ├── tutorials/                           # Tutorials and how-to guides
 ├── CLAUDE.md                            # This file
 └── README.md
@@ -457,6 +470,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
+- `docs/ADAPTER_BENCHMARK.md` - Adapter accuracy benchmark: running it, caching, adding adapters
 
 ## Git Workflow
 

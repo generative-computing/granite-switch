@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapter accuracy benchmark definition.
+#
+# Every (intrinsic, technology) pair is one results cell. A cell is run when
+# its staged checkpoint exists under the bench root:
+#
+#   <bench_root>/adapters/<intrinsic id>/<technology id>/
+#       adapter_config.json, adapter_model.safetensors, provenance.json
+#   <bench_root>/eval/<intrinsic id>/evaluation.jsonl
+#
+# and is shown as skipped otherwise. To add an intrinsic: add an entry here,
+# a scorer under scorers/ if none fits, and stage its folders.
+#
+# Bump bench_version when a change here or in the harness would change the
+# numbers (eval set, scorer, generation settings, adapter checkpoints). Rows
+# with an older version stay on the page but are not cache hits.
+
+bench_version: 1
+base_model: ibm-granite/granite-4.1-3b
+
+technologies:
+  - id: lora
+    label: LoRA
+    source: "LoRA (all-linear, r=16)"
+  - id: alora
+    label: aLoRA
+    source: "aLoRA (all-linear, r=32)"
+  - id: sr
+    label: SR
+    source: "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV; internal trainer)"
+
+# max_new_tokens comes from each intrinsic's training config.
+# headline is the metric the results page shows; it matches the internal
+# results page so numbers can be compared.
+intrinsics:
+  - id: answerability
+    name: Answerability
+    scorer: answerability
+    headline: accuracy
+    headline_label: Accuracy
+    max_new_tokens: 200
+  - id: hallucination_detection
+    name: Hallucination detection
+    scorer: hallucination_detection
+    # Response-level accuracy, averaged over datasets. The internal results
+    # store response-level macro F1 instead; every cell also has it, as
+    # response_macro_f1_mean.
+    headline: response_accuracy_mean
+    headline_label: Accuracy
+    max_new_tokens: 4096
+  - id: query_rewrite
+    name: Query rewrite
+    scorer: query_rewrite
+    headline: accuracy_over_valid
+    headline_label: Judge accuracy
+    max_new_tokens: 120
+  - id: query_clarification
+    name: Query clarification
+    scorer: query_clarification
+    headline: overall_accuracy
+    headline_label: Accuracy
+    max_new_tokens: 160
+  - id: guardian_core
+    name: Guardian-core
+    scorer: guardian
+    headline: accuracy
+    headline_label: Accuracy
+    max_new_tokens: 24
+  - id: requirement_check
+    name: Requirement check
+    scorer: requirements
+    headline: balanced_accuracy
+    headline_label: Balanced accuracy
+    max_new_tokens: 200

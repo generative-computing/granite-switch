@@ -63,3 +63,8 @@ docs/KV_CACHE_OVERHEAD_REMOVAL.md
 docs/KV_CACHE_OVERHEAD_REMOVAL.html
 docs/KV_CACHE_OVERHEAD_REMOVAL*.html
 docs/UNIFIED_SWITCH_FUSED_CANONICAL.md
+
+# Adapter benchmark: local cluster settings, logs and rendered jobs
+benchmarks/adapter_eval/vela/local/
+benchmarks/adapter_eval/vela/.rendered/
+local.env

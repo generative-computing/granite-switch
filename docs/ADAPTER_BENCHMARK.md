@@ -1,0 +1,316 @@
+# Adapter Accuracy Benchmark
+
+This page explains how to measure the accuracy of trained intrinsic adapters
+through one granite-switch commit, and how the results page is built.
+
+## Background
+
+Granite Switch embeds adapters into one checkpoint and serves them with vLLM.
+A change to the composer, the chat template or the vLLM backend can change
+what an adapter outputs, without any test failing.
+
+The benchmark catches this. For one commit it:
+
+1. composes already-trained adapters with that commit's composer,
+2. runs each adapter's eval set through that commit's vLLM backend,
+3. scores the outputs and adds one row to the results page.
+
+Nothing is trained. The adapters and eval sets are fixed ("staged") once, so
+two commits are always compared on the same inputs.
+
+Each adapter is measured in three forms:
+
+| Column | Technology | Configuration |
+|---|---|---|
+| LoRA | LoRA | all-linear, r=16 |
+| aLoRA | activated LoRA | all-linear, r=32 |
+| SR | Shadow Residual | q,o + MLP, r=32, cross-stream r=32, shared KV |
+
+The base model, the intrinsics and their headline metrics are listed in
+[adapters.yaml](../benchmarks/adapter_eval/adapters.yaml).
+
+## How one run works
+
+```
+local machine                          GPU pod (Vela)
+-------------                          --------------
+submit.sh bench main
+  cache check ── hit ──> stop
+  render + submit job  ───────────>    clone the commit, uv sync --frozen
+                                       find staged adapters, check formats
+                                       convert SR activation (if needed)
+                                       rename MLP weights (if needed)
+                                       check weight names against the base
+                                       compose #1: LoRA + aLoRA adapters
+                                       compose #2: SR adapters
+                                       generate (vLLM, greedy) per adapter
+                                       score, print the results block
+  follow the pod log   <───────────
+  extract results block
+  merge into data.json, render page
+```
+
+A few points matter:
+
+- **Two composes per commit.** A checkpoint runs either dual-stream (SR) or
+  single-stream (LoRA, aLoRA) decoders. The composer refuses to mix them.
+- **SR activation may be converted.** The internal trainer turns SR on at
+  the invocation tokens. Usually these are
+  `<|start_of_role|>assistant<|end_of_role|>`; for guardian they are
+  `<guardian>`, inside the user message. The composer turns SR on at one
+  anchor token instead: the last token of the generation prompt
+  (`<|end_of_role|>`). So before composing, the run gives each such
+  checkpoint that anchor. The generated output is the same, because SR takes
+  K/V from the base stream only: turning it on later in the prompt changes
+  nothing the model generates from. The staged checkpoint is not changed. The
+  run record lists the converted cells.
+- **MLP weight names may be converted.** The internal trainer saves MLP
+  weights one level up: `layers.0.gate_proj` instead of the base model's
+  `layers.0.mlp.gate_proj`. The composer maps only the names it knows and
+  leaves the rest out, without an error. Such an adapter would compose with
+  its attention part only. So before composing, the run renames these
+  weights in a per-run copy. Only the file header changes; the tensor bytes
+  are copied as they are. The run record lists the renamed cells.
+- **Every adapter weight must name a base weight.** After the renaming, the
+  run checks each LoRA weight against the base model's weight names. A
+  checkpoint with any unknown name becomes an error cell rather than being
+  composed with part of its weights missing. SR's cross-stream weights have
+  no base weight by design and are not checked.
+- **The harness is not the commit's.** The job ships the local copy of
+  `benchmarks/` inside itself. It runs with the commit's virtualenv. So every
+  commit is measured by the same harness, even commits older than it.
+- **Adapters are picked by name.** Each prompt is rendered with the chat
+  template's adapter name. The run checks that the adapter's control token is
+  in the prompt. An unknown name would otherwise fall back to the base model.
+- **Results travel through the log.** The pod prints one JSON block between
+  `=== ADAPTER_BENCH_RESULTS_BEGIN ===` and `=== ADAPTER_BENCH_RESULTS_END ===`.
+  Predictions and full score reports stay on the storage volume.
+
+### Results cells
+
+Each (intrinsic, technology) pair is one cell. A cell is one of:
+
+```json
+{"accuracy": 0.867, "n": 450}
+{"skipped": "adapter not staged"}
+{"error": "generation failed"}
+```
+
+Metrics are stored as fractions and shown as percentages (`86.7`). On the
+page:
+
+| Shown | Meaning |
+|---|---|
+| `86.7` | scored; hover for every metric. The best technology per intrinsic is bold. |
+| `—` | skipped: no adapter or eval set for this cell (reason on hover) |
+| `·` | not run for this commit (e.g. a new intrinsic, before an `--only` run) |
+| `error` | the run failed for this cell (reason on hover) |
+
+## One-time setup
+
+1. Copy the settings template and fill it in:
+
+   ```bash
+   cp benchmarks/adapter_eval/vela/local.env.example benchmarks/adapter_eval/vela/local/local.env
+   ```
+
+   `local/` is gitignored. It holds the cluster names, storage paths and
+   secret names. Never put a secret value in it; the judge key is read in the
+   pod from a Kubernetes secret, by name.
+
+2. Log in to the cluster with `oc login`, in the namespace set in
+   `local.env`.
+
+3. Add the Helm repository that provides the `mlbatch/pytorchjob-generator`
+   chart, and check that `helm template` can find it.
+
+The local side needs only `bash`, `oc`, `helm` and `uv` (or any Python with
+PyYAML, set as `LOCAL_PYTHON`).
+
+## Commands
+
+Everything goes through
+[submit.sh](../benchmarks/adapter_eval/vela/submit.sh).
+
+| Command | What it does |
+|---|---|
+| `submit.sh discover` | Lists adapter checkpoints and eval files under the source roots. Read-only. |
+| `submit.sh stage [--replace]` | Copies the picks in `local/selection.json` into the bench root. |
+| `submit.sh bench <ref> [flags]` | Benchmarks one commit and publishes its row. |
+| `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
+| `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
+
+Any command takes `--dry-run`: it renders the job and stops.
+
+`bench` flags:
+
+| Flag | Effect |
+|---|---|
+| `--limit N` | Only the first N rows of each eval set. For smoke runs; never published. |
+| `--only a,b` | Only these intrinsics. The results merge into the commit's existing row. |
+| `--no-cache` | Runs even if the commit already has a complete row. |
+| `--no-publish` | Keeps the results in `local/results/` without touching the page. |
+| `--extra-args "..."` | Passes flags to the in-pod driver, e.g. `--enforce-eager`. |
+
+A job that fails is kept for 24 hours, for its logs. A job that succeeds is
+deleted.
+
+### First-time flow
+
+Staging happens once, before the first benchmark:
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh discover
+```
+
+This writes `local/discovery.json` (all candidates) and
+`local/selection.draft.json` (a suggested pick per cell). Review the draft,
+then save it as `local/selection.json`.
+
+How the draft picks:
+
+- **Adapters, by their weights.** A checkpoint fits a cell when its rank,
+  adapted modules and base model match the cell, e.g. LoRA is r=16 on
+  q,k,v,o + MLP over `granite-4.1-3b`. Intermediate `checkpoint-N` folders
+  are not searched. Among fitting runs, a run named after the expected
+  configuration wins, then the newest.
+- **SR, only with shared K/V.** This backend always takes SR's K/V from the
+  base stream. A run trained with its own adapter K/V would compose without
+  error and give wrong outputs. The checkpoint does not record which kind it
+  is; only the run's name does. So an SR run is used only when its path says
+  `sharedkv`. The draft picks only such runs, `stage` refuses any other SR
+  pick, and a run skips an SR cell whose staged record does not say shared
+  K/V.
+- **Eval sets, from the runs.** A run's own predictions file holds exactly
+  the rows it was scored on, so the draft takes the eval set from there. The
+  model's outputs are removed at staging. A note flags an intrinsic whose
+  runs were scored on different rows.
+- **Intrinsic names.** An intrinsic is read from the run's path. A source
+  root written as `<intrinsic>=<dir>` in `local.env` names it for runs whose
+  path does not.
+
+The selection looks like this:
+
+```json
+{
+  "adapters": {"answerability": {"lora": "<checkpoint dir>", "alora": "<checkpoint dir>"}},
+  "eval": {"answerability": "<eval file>.jsonl"}
+}
+```
+
+Then copy the picks into place and run a short smoke test:
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh stage
+```
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh bench main --limit 20
+```
+
+Staging copies files rather than linking them, so retraining a source run
+cannot change the benchmark underneath it. Each staged folder records its
+source path and file checksums.
+
+### Benchmarking a commit
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh bench main
+```
+
+On success the page data and page are updated locally. Commit them to record
+the row:
+
+```bash
+git add docs/benchmarks && git commit -s -m "Adapter benchmark: <sha>"
+```
+
+## Cache rules
+
+A commit is a **cache hit** when its row has:
+
+- the current `bench_version` from `adapters.yaml`, and
+- every cell present, with no error cells. Skipped cells count as done.
+
+On a hit, `bench` prints the row and submits nothing. Some examples:
+
+| Stored row | Result |
+|---|---|
+| same version, all cells scored or skipped | hit |
+| same version, one cell is an error | miss, re-run |
+| older version | miss; the old row stays on the page, in grey |
+| no row | miss |
+
+Publishing refuses a `--limit` run and a run whose version differs from
+`adapters.yaml`. A failed run publishes nothing, so the next run retries.
+
+## Adding an intrinsic or an adapter
+
+1. Add an entry to
+   [adapters.yaml](../benchmarks/adapter_eval/adapters.yaml): id, name,
+   scorer, headline metric and `max_new_tokens`.
+2. If no scorer fits, add one under
+   [scorers/](../benchmarks/adapter_eval/scorers/__init__.py) and register it.
+3. Add the new picks to `local/selection.json` and run `submit.sh stage`.
+   Existing cells are kept; `--replace` overwrites them.
+4. Bump `bench_version` if the change alters existing numbers. That covers a
+   new eval set, a changed scorer, new generation settings, or a replaced
+   checkpoint. A pure addition does not need a bump: run the new intrinsic
+   with `--only`.
+
+## Local folder layout
+
+All under `benchmarks/adapter_eval/vela/`, all gitignored:
+
+```
+local/
+  local.env              cluster, storage and secret names
+  selection.json         the reviewed picks for `stage`
+  judge_prompt.txt       query-rewrite judge prompt (shipped at stage time)
+  discovery.json         output of `discover`
+  selection.draft.json   suggested picks from `discover`
+  jobs/<job>.env         what `fetch` needs to resume a job
+  logs/<job>.log         full pod logs
+  results/<job>.json     results blocks from bench runs
+  stage/<job>.json       stage reports
+.rendered/               rendered Helm values and job specs
+```
+
+## Public and private
+
+This repository is public. So:
+
+- **Public:** the harness, the page, and the page data. The page shows only
+  scores, commit metadata and generic skip reasons.
+- **Private (in `local/`):** namespace, image, volume and paths, secret
+  names, the judge endpoint and the judge prompt.
+
+## Tests
+
+The harness has CPU unit tests: cache rules, merging, page rendering, every
+scorer, checkpoint conversions, staging and job rendering.
+
+```bash
+pytest tests/unit/test_adapter_benchmark.py -v -s --tb=short -x
+```
+
+Composing and generating need a GPU and are only exercised by a real run.
+
+## Known gaps
+
+- **Numbers will not match internal results exactly.** Those evaluate with
+  plain HuggingFace + PEFT. This benchmark uses the composed model under vLLM.
+- **All adapters come from the internal trainer.** Their MLP weight names,
+  and SR's activation, are converted as described above. Moving to
+  shadow-residual trainer checkpoints for SR later replaces checkpoints, so
+  it needs a `bench_version` bump.
+- **Query rewrite needs its judge.** Without a judge endpoint and key, that
+  intrinsic is skipped.
+- **No throughput yet.** Cells are dictionaries, so more metrics can be added
+  without breaking old rows.
+
+## Later: PR-comment trigger
+
+A `/benchmark` PR comment, like `/gpu-test`, is planned. It needs the workflow
+files on `main` and support in the GPU runner. See [CICD.md](CICD.md) for the
+existing GPU-test flow.
