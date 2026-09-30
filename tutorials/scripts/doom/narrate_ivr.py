@@ -13,6 +13,12 @@ Runs in an environment with Mellea (``pip install mellea``), not the demo's::
 
     python narrate_ivr.py --moments data/narr/moments.jsonl --out data/narr/crime.jsonl \\
         --base-url http://HOST:PORT/v1 --model granite-4.2-30b
+
+``--judge`` scores lines written elsewhere (a trained narrator's, the base
+model's) with the same checks, once, without repair::
+
+    python narrate_ivr.py --judge runs/narr/narrator/heldout_gen.jsonl \\
+        --out runs/narr/narrator/judged.jsonl --base-url http://HOST:PORT/v1
 """
 
 from __future__ import annotations
@@ -93,9 +99,9 @@ def words(text: str) -> list[str]:
     return re.findall(r"[a-z']+", text.lower())
 
 
-def code_checks(prev: list[str]):
-    """Requirements checked in code; each returns (ok, reason for the repair)."""
-    from mellea.stdlib.requirements import req, simple_validate
+def code_fns(prev: list[str]):
+    """Requirements checked in code, as (description, fn); each fn returns
+    (ok, reason for the repair)."""
 
     def length(x):
         n = len(clean(x).split())
@@ -141,21 +147,26 @@ def code_checks(prev: list[str]):
         )
 
     return [
-        req("5 to 15 words", validation_fn=simple_validate(length)),
-        req("A varied form", validation_fn=simple_validate(varied)),
-        req("A varied opening", validation_fn=simple_validate(opening)),
-        req("Plain spoken text", validation_fn=simple_validate(plain)),
-        req("Mild language", validation_fn=simple_validate(clean_language)),
-        req("Original, not a film quote", validation_fn=simple_validate(original)),
-        req("Not a repeat of recent lines", validation_fn=simple_validate(fresh)),
+        ("5 to 15 words", length),
+        ("A varied form", varied),
+        ("A varied opening", opening),
+        ("Plain spoken text", plain),
+        ("Mild language", clean_language),
+        ("Original, not a film quote", original),
+        ("Not a repeat of recent lines", fresh),
     ]
 
 
-def judged_checks(judge, moment_text: str):
+def code_checks(prev: list[str]):
+    from mellea.stdlib.requirements import req, simple_validate
+
+    return [req(d, validation_fn=simple_validate(f)) for d, f in code_fns(prev)]
+
+
+def judge_fn(judge, moment_text: str):
     """The three model-judged requirements in one call (thinking off): the line
     passes only if every verdict is YES; the verdicts are the repair feedback."""
     from mellea.backends import ModelOption
-    from mellea.stdlib.requirements import req, simple_validate
 
     questions = "\n".join(f"{k}: {q}" for k, q in JUDGE.items())
 
@@ -182,7 +193,66 @@ def judged_checks(judge, moment_text: str):
         bad = [k for k, v in verdicts.items() if not v or v.group(1).upper() != "YES"]
         return not bad, (a.strip() if bad else "")
 
+    return fn
+
+
+def judged_checks(judge, moment_text: str):
+    from mellea.stdlib.requirements import req, simple_validate
+
+    fn = judge_fn(judge, moment_text)
     return [req("Grounded, in the voice, witty", validation_fn=simple_validate(fn))]
+
+
+def moment_text(brief: str, recent: list[str]) -> str:
+    """The moment as the judge reads it."""
+    return f"{brief}\nLog: " + " / ".join(recent)
+
+
+def judge_file(args) -> None:
+    """Score lines already written (``--judge``: rows with ``brief``, ``recent``,
+    ``prev`` and one line per ``--keys`` column, e.g. train_alora.py's
+    heldout_gen.jsonl) with the same checks, once each, without repair."""
+    from collections import Counter
+
+    from mellea import start_session
+
+    rows = [json.loads(x) for x in open(args.judge)]
+    keys = args.keys.split(",")
+    urls = args.base_url.split(",")
+
+    def one(ir):
+        i, r = ir
+        judge = start_session(
+            "openai", model_id=args.model, base_url=urls[i % len(urls)], api_key="none"
+        )
+        mt = moment_text(r["brief"], r["recent"])
+        out = {}
+        for k in keys:
+            fails = [d for d, f in code_fns(r["prev"]) if not f(r[k])[0]]
+            ok, why = judge_fn(judge, mt)(r[k])
+            if not ok:
+                fails.append("judge")
+            no = [q for q in JUDGE if re.search(rf"{q}\s*:\s*NO", why, re.I)]
+            out[k] = {"ok": not fails, "fails": fails, "judge_no": no, "why": why}
+        return {**r, "judged": out}
+
+    with ThreadPoolExecutor(args.concurrency) as pool:
+        judged = list(pool.map(one, enumerate(rows)))
+    with open(args.out, "w") as f:
+        for r in judged:
+            f.write(json.dumps(r) + "\n")
+    n = len(judged)
+    for k in keys:
+        ok = sum(r["judged"][k]["ok"] for r in judged)
+        fails = Counter(x for r in judged for x in r["judged"][k]["fails"])
+        no = Counter(x for r in judged for x in r["judged"][k]["judge_no"])
+        print(
+            f"{k:<8} pass every check {100 * ok / n:5.1f}% (n={n}); failed: "
+            + ", ".join(f"{d} {100 * c / n:.1f}%" for d, c in fails.most_common())
+            + "; judge said NO to: "
+            + ", ".join(f"{q} {100 * c / n:.1f}%" for q, c in no.most_common())
+        )
+    print(f"-> {args.out}")
 
 
 def run_match(match: dict, args, write) -> int:
@@ -212,7 +282,7 @@ def run_match(match: dict, args, write) -> int:
     judge = start_session("openai", model_id=args.model, **kw)
     prev: list[str] = []
     for m in match["moments"]:
-        moment = f"{m['brief']}\nLog: " + " / ".join(m["recent"])
+        moment = moment_text(m["brief"], m["recent"])
         task = TASK.format(
             persona=PERSONA,
             brief=m["brief"],
@@ -255,8 +325,17 @@ def run_match(match: dict, args, write) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--moments", type=Path, required=True)
+    ap.add_argument("--moments", type=Path)
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument(
+        "--judge",
+        type=Path,
+        help="Score lines already written instead (see judge_file); --out gets "
+        "the verdicts",
+    )
+    ap.add_argument(
+        "--keys", default="adapter,base", help="--judge: the columns holding lines"
+    )
     ap.add_argument("--base-url", required=True, help="One or more, comma-separated")
     ap.add_argument("--model", default="granite-4.2-30b")
     ap.add_argument("--matches", type=int, default=0, help="0: all")
@@ -267,6 +346,11 @@ def main() -> None:
     ap.add_argument("--max-tokens", type=int, default=800)
     ap.add_argument("--effort", default="low", help="Writer reasoning effort")
     args = ap.parse_args()
+    if args.judge:
+        judge_file(args)
+        return
+    if args.moments is None:
+        raise SystemExit("--moments is required (or --judge)")
 
     matches = [json.loads(x) for x in open(args.moments)]
     if args.matches:

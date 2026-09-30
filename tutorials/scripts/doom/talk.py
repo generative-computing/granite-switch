@@ -33,8 +33,16 @@ def _count(n: int, what: str) -> str:
     return f"one {what}" if n == 1 else f"{n} {what}s"
 
 
-def brief(entries: list[str], state: str) -> str:
-    """What just happened and where things stand, as short plain sentences."""
+def score(entries: list[str]) -> tuple[int, int]:
+    """Frags and deaths in these entries (a whole match's: the live history
+    keeps only the last 10 s, so the engine counts its own)."""
+    text = "".join(entries)
+    return len(re.findall(r"\| frag\b", text)), text.count("| died")
+
+
+def brief(entries: list[str], state: str, tally: tuple[int, int] | None = None) -> str:
+    """What just happened and where things stand, as short plain sentences;
+    with ``tally`` (frags, deaths so far), the score too."""
     recent = "".join(entries[-BRIEF_ENTRIES:])
     news = []
     frags = len(re.findall(r"\| frag\b", recent))
@@ -83,6 +91,9 @@ def brief(entries: list[str], state: str) -> str:
     if news:
         parts.append("Just now: " + "; ".join(news) + ".")
     parts.append("Right now: " + "; ".join(now) + ".")
+    if tally is not None:
+        f, d = tally
+        parts.append(f"Score so far: {_count(f, 'frag')}, {_count(d, 'death')}.")
     return " ".join(parts)
 
 
@@ -98,7 +109,10 @@ def sound_tag(brief_text: str, rng) -> str:
     return ""
 
 
-SALIENT = ("| frag", "| died", "| got weapon")  # as engine.SALIENT, in entry text
+# Events the player speaks soon after (engine, record_video), and the same in
+# history-entry text.
+SALIENT_EVENTS = ("frag", "died", "got weapon")
+SALIENT = tuple(f"| {e}" for e in SALIENT_EVENTS)
 
 
 def match_moments(
@@ -107,11 +121,13 @@ def match_moments(
     every_s: float = 4.0,
     gap_s: float = 2.5,
     limit: int = 60,
+    with_score: bool = False,
 ) -> list[dict]:
     """The moments a live game would speak at, in order: every ``every_s``
     seconds, or right after a frag, a death or a new weapon (at least ``gap_s``
     apart), as the engine does. ``rows`` are one match's collect.py rows (tick,
-    history length, state); each moment carries its brief and last log lines."""
+    history length, state); each moment carries its brief (with the score so
+    far if ``with_score``) and last log lines."""
     from doom_env import TIC_HZ
 
     out, last = [], -1e9
@@ -127,7 +143,9 @@ def match_moments(
                 "t": r["t"],
                 "hist_n": n,
                 "state": r["state"],
-                "brief": brief(entries[:n], r["state"]),
+                "brief": brief(
+                    entries[:n], r["state"], score(entries[:n]) if with_score else None
+                ),
                 "recent": [e.strip() for e in entries[max(0, n - 3) : n]],
             }
         )
@@ -157,6 +175,8 @@ def main() -> None:
     mo.add_argument("--style", default="fighter")
     mo.add_argument("--matches", type=int, default=400)
     mo.add_argument("--per-match", type=int, default=60)
+    mo.add_argument("--every-s", type=float, default=4.0, help="Talk cadence")
+    mo.add_argument("--score", action="store_true", help="Score so far in the brief")
     mo.add_argument("--seed", type=int, default=0)
     mo.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
@@ -177,7 +197,13 @@ def main() -> None:
         n = 0
         with open(args.out, "w") as f:
             for d, ep, entries, rows in matches[: args.matches]:
-                ms = match_moments(entries, rows, limit=args.per_match)
+                ms = match_moments(
+                    entries,
+                    rows,
+                    every_s=args.every_s,
+                    limit=args.per_match,
+                    with_score=args.score,
+                )
                 f.write(
                     json.dumps(
                         {"data": d, "style": args.style, "ep": ep, "moments": ms}

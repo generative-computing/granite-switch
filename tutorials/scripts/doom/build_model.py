@@ -43,7 +43,7 @@ import yaml
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from policy import ADAPTERS, alora_invocation_ids
+from policy import ADAPTERS, NARRATOR, alora_invocation_ids
 
 DEFAULT_TARGETS = (
     "q_proj",
@@ -60,13 +60,19 @@ KINDS = ("alora", "lora")
 
 
 def io_yaml(name: str) -> dict:
+    # The narrator writes a spoken line; every other adapter answers in one token.
+    params = (
+        {"max_completion_tokens": 40, "temperature": 0.8}
+        if name == NARRATOR
+        else {"max_completion_tokens": 1, "temperature": 0.0}
+    )
     return {
         "name": name,
         "model": None,
         "response_format": None,
         "transformations": None,
         "instruction": None,
-        "parameters": {"max_completion_tokens": 1, "temperature": 0.0},
+        "parameters": params,
         "sentence_boundaries": None,
     }
 
@@ -211,18 +217,87 @@ def live_check(pol, seconds: float = 20.0, seed: int = 5) -> dict:
     return rep
 
 
+def verify_lines(pol, rows: list[dict]) -> dict:
+    """The narrator, teacher-forced: for each held-out line (its prompt, then
+    the written line), the composed checkpoint's argmax at every line position
+    against PEFT's (``peft_ids`` in heldout_preds.jsonl)."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    sp = SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=1)
+    same = total = first = 0
+    clear: list[bool] = []  # agreement where PEFT's top-1 leads by >= MARGIN
+    for i in range(0, len(rows), 64):
+        chunk = rows[i : i + 64]
+        prompts = [
+            pol.pb.turn_ids(r["history_ids"], r["state"], r["extra"], NARRATOR)
+            + r["target_ids"]
+            for r in chunk
+        ]
+        outs = pol.llm.generate(
+            [TokensPrompt(prompt_token_ids=p) for p in prompts], sp, use_tqdm=False
+        )
+        for r, p, o in zip(chunk, prompts, outs):
+            k = len(r["target_ids"])
+            got = [
+                max(lp.items(), key=lambda kv: kv[1].logprob)[0]
+                for lp in o.prompt_logprobs[len(p) - k :]
+            ]
+            same += sum(g == q for g, q in zip(got, r["peft_ids"]))
+            total += k
+            first += got[0] == r["peft_ids"][0]
+            for g, q, mg in zip(got, r["peft_ids"], r.get("peft_margin", ())):
+                if mg >= MARGIN:
+                    clear.append(g == q)
+    agree = same / max(1, total)
+    rep = {
+        "n": len(rows),
+        "tokens": total,
+        "agree_with_peft": round(agree, 4),
+        "first_token_agree": round(first / max(1, len(rows)), 4),
+    }
+    extra = ""
+    if clear:
+        rep["agree_when_peft_margin_ge"] = {
+            "margin": MARGIN,
+            "n": len(clear),
+            "agree": round(sum(clear) / len(clear), 4),
+        }
+        extra = (
+            f"  agree at margin>={MARGIN} {100 * sum(clear) / len(clear):6.2f}% "
+            f"(n={len(clear)})"
+        )
+    print(
+        f"{NARRATOR:<10} n={len(rows):>5}  composed==PEFT {100 * agree:6.2f}% of "
+        f"{total} line tokens (teacher-forced), first token "
+        f"{100 * rep['first_token_agree']:.2f}%  {'PASS' if agree >= 0.99 else 'FAIL'}"
+        + extra,
+        flush=True,
+    )
+    return rep
+
+
 def verify(
-    runs: Path, model: str, router_runs: Path | None, limit: int, layout: str = "log"
+    runs: Path,
+    model: str,
+    router_runs: Path | None,
+    limit: int,
+    layout: str = "log",
+    narrator: Path | None = None,
 ) -> dict:
     """Argmax agreement: composed checkpoint in vLLM vs the PEFT adapter, on the
-    held-out rows each adapter's training run wrote (history ids + state); then
-    the live regime against cold batches (:func:`live_check`)."""
+    held-out rows each adapter's training run wrote (history ids + state); the
+    narrator's lines (:func:`verify_lines`); then the live regime against cold
+    batches (:func:`live_check`)."""
     from policy import ROUTER, VLLMPolicy
 
     # The demo's own engine settings: the FA3 schedule fault showed only with
     # the default max_num_seqs (16), not with 64.
     pol = VLLMPolicy(model, warmup=5, layout=layout)
     report = {}
+    if narrator is not None:
+        rows = [json.loads(x) for x in open(narrator / "heldout_preds.jsonl")]
+        report[NARRATOR] = verify_lines(pol, rows[:limit])
     for name in ADAPTERS:
         root = router_runs if (name == ROUTER and router_runs) else runs
         path = root / name / "heldout_preds.jsonl"
@@ -301,6 +376,11 @@ def main() -> None:
         "ibm-granite/granite-speech-5.0-470m-turboctc",
     )
     c.add_argument("--asr-device", default="cpu", help="cpu or cuda:0")
+    c.add_argument(
+        "--narrator",
+        type=Path,
+        help="Also compose this narrator adapter (train_alora.py --adapter narrator)",
+    )
     s.add_argument("--kind", choices=KINDS, default="alora")
     # The composer reads Shadow Residual from the weights (a cross_stream LoRA),
     # not from the staging directory, so SR adapters are staged under lora/.
@@ -316,11 +396,19 @@ def main() -> None:
     v.add_argument("--model", required=True)
     v.add_argument("--limit", type=int, default=5000)
     v.add_argument("--layout", default="log", help="The adapters' prompt layout")
+    v.add_argument("--narrator", type=Path, help="The narrator's training run")
     v.add_argument("--json", type=Path)
     args = ap.parse_args()
 
     if args.cmd == "verify":
-        rep = verify(args.runs, args.model, args.router_runs, args.limit, args.layout)
+        rep = verify(
+            args.runs,
+            args.model,
+            args.router_runs,
+            args.limit,
+            args.layout,
+            args.narrator,
+        )
         if args.json:
             args.json.write_text(json.dumps(rep, indent=1))
         return
@@ -345,8 +433,11 @@ def main() -> None:
                 else args.runs
             )
             adapters[name] = root / name
-            if not (adapters[name] / "adapter_config.json").exists():
-                raise SystemExit(f"missing trained adapter: {adapters[name]}")
+        if args.narrator:
+            adapters[NARRATOR] = args.narrator
+        for d in adapters.values():
+            if not (d / "adapter_config.json").exists():
+                raise SystemExit(f"missing trained adapter: {d}")
     kind = "lora" if args.kind == "sr" else args.kind
     paths = [stage(d, n, stage_root, target_model, kind) for n, d in adapters.items()]
     compose(

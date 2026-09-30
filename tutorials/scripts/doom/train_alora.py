@@ -17,6 +17,10 @@ Adapters and their labels (rows from ``collect.py``):
 * ``probe``: where the last enemy in the history was (history-only question;
   used for the aLoRA-vs-LoRA comparison, not composed into the demo).
 * ``router``: rows from ``router_data.py`` (instruction, label); no history.
+* ``narrator``: a whole spoken line, the one generating adapter. Rows are the
+  lines ``narrate_ivr.py`` wrote that passed every check, each in its match's
+  conversation (chat layout, :func:`load_narration_rows`); the loss is
+  cross-entropy on the line's tokens and the end of the turn.
 
 ``--kind lora`` trains a plain LoRA on the same data and prompts: the baseline
 the aLoRA is compared against. ``--kind sr`` trains a Shadow Residual adapter
@@ -63,10 +67,12 @@ from doom_env import TIC_HZ
 from history import PROBE_WORDS, History, said_entry
 from policy import (
     _EOR,
+    _EOT,
     ARMS,
     CRITIC,
     DANGER_LEVELS,
     LAYOUTS,
+    NARRATOR,
     OUTPUTS,
     ROUTER,
     ROUTER_SYSTEM_PROMPT,
@@ -76,6 +82,7 @@ from policy import (
     route_token_ids,
     spoken_entry,
     system_prompt,
+    talk_extra,
 )
 from talk import brief
 
@@ -226,6 +233,66 @@ def load_router_rows(paths: list[Path]):
     return out
 
 
+def load_narration_rows(paths: list[Path], moments: Path, tok) -> list:
+    """Narrator rows as (stream, n, (state, closing extra), target ids, match
+    key, meta), one per written line that passed every check.
+
+    A match's conversation is rebuilt as the chat layout's live game builds it:
+    its log entries, and at each earlier speaking moment the line written there
+    (passing or not: it is what the writer had said, and saw) as a closed turn,
+    ``policy.spoken_entry``, under the same 10 s window. The prompt is that
+    history up to the moment, closed by the moment's brief, what the person
+    watching said if anything (``partner_ivr.py`` rows' ``player``) and the
+    state (``PromptBuilder.turn_ids``); the target is the line and the end of
+    the turn. ``moments``: ``talk.py moments`` output, for each moment's state,
+    brief and last log lines."""
+    ctx = {}
+    for x in open(moments):
+        m = json.loads(x)
+        ctx[(m["data"], m["ep"])] = {mm["t"]: mm for mm in m["moments"]}
+    by_match: dict = {}
+    for p in paths:
+        for x in open(p):
+            r = json.loads(x)
+            by_match.setdefault((r["data"], r["style"], r["ep"]), []).append(r)
+    entries_of = {}
+    for data, style in {k[:2] for k in by_match}:
+        for x in open(Path(data) / f"{style}_history.jsonl"):
+            h = json.loads(x)
+            entries_of[(data, style, h["ep"])] = h["entries"]
+    eot = tok.encode(_EOT, add_special_tokens=False)
+    out = []
+    for key, rows in by_match.items():
+        rows.sort(key=lambda r: r["t"])
+        entries, conv, at, i = entries_of[key], [], [], 0
+        for r in rows:
+            m = ctx[(key[0], key[2])][r["t"]]
+            conv += entries[i : r["hist_n"]]
+            i = r["hist_n"]
+            extra = talk_extra(m["brief"], r.get("player"))
+            at.append((len(conv), m, extra, r))
+            if r["line"]:
+                conv.append(spoken_entry(m["state"], r["line"], extra))
+        stream = Stream(conv, tok)
+        for n, m, extra, r in at:
+            if not (r["ok"] and r["line"]):
+                continue
+            line = " ".join(r["line"].split())
+            meta = {
+                "data": key[0],
+                "ep": key[2],
+                "t": r["t"],
+                "brief": m["brief"],
+                "recent": m["recent"],
+                "prev": r["prev"],
+                "player": r.get("player"),
+                "line": line,
+            }
+            target = tok.encode(line, add_special_tokens=False) + eot
+            out.append((stream, n, (m["state"], extra), target, key, meta))
+    return out
+
+
 def split_by_episode(rows: list, val_frac: float, seed: int) -> tuple[list, list]:
     """Hold out whole matches: consecutive tics are near-duplicates."""
     eps = sorted({r[4] for r in rows})
@@ -283,6 +350,71 @@ def last_logits(model, input_ids, mask, pos, allowed):
     return out.logits[:, -1, :][:, allowed].float()
 
 
+def collate_lines(prompts: list[list[int]], targets: list[list[int]], pad_id, device):
+    """Prompt + target, left-padded so every target ends at the last position.
+    ``labels`` covers the last ``max target length`` positions, -100 where a
+    shorter target's prompt shows through."""
+    import torch
+
+    seqs = [p + t for p, t in zip(prompts, targets)]
+    n, k = max(len(s) for s in seqs), max(len(t) for t in targets)
+    input_ids = torch.full((len(seqs), n), pad_id, dtype=torch.long)
+    mask = torch.zeros((len(seqs), n), dtype=torch.long)
+    labels = torch.full((len(seqs), k), -100, dtype=torch.long)
+    for i, (s, t) in enumerate(zip(seqs, targets)):
+        input_ids[i, n - len(s) :] = torch.tensor(s)
+        mask[i, n - len(s) :] = 1
+        labels[i, k - len(t) :] = torch.tensor(t)
+    pos = (mask.cumsum(-1) - 1).clamp(min=0)
+    return input_ids.to(device), mask.to(device), pos.to(device), labels.to(device)
+
+
+def line_logits(model, input_ids, mask, pos, k: int):
+    """Full-vocabulary logits predicting the last ``k`` tokens (only those
+    positions are projected to the vocabulary)."""
+    out = model(
+        input_ids=input_ids, attention_mask=mask, position_ids=pos, logits_to_keep=k + 1
+    )
+    return out.logits[:, :-1, :].float()
+
+
+def generate_lines(
+    model, tok, prompts, pad_id, device, *, adapter=True, temperature=0.8, batch=8
+) -> list[str]:
+    """One sampled line per prompt, as the demo samples talk (temperature
+    only, at most 32 new tokens, up to the end of the turn or a newline);
+    ``adapter=False`` gives the base model's line for the same prompt."""
+    import torch
+
+    eot = tok.convert_tokens_to_ids(_EOT)
+    out = []
+    for i in range(0, len(prompts), batch):
+        chunk = prompts[i : i + batch]
+        n = max(len(p) for p in chunk)
+        ids = torch.full((len(chunk), n), pad_id, dtype=torch.long)
+        mask = torch.zeros((len(chunk), n), dtype=torch.long)
+        for j, p in enumerate(chunk):
+            ids[j, n - len(p) :] = torch.tensor(p)
+            mask[j, n - len(p) :] = 1
+        off = contextlib.nullcontext() if adapter else model.disable_adapter()
+        with torch.no_grad(), off:
+            g = model.generate(
+                input_ids=ids.to(device),
+                attention_mask=mask.to(device),
+                max_new_tokens=32,
+                do_sample=temperature > 0,
+                temperature=temperature if temperature > 0 else None,
+                top_k=0,
+                top_p=1.0,
+                eos_token_id=eot,
+                pad_token_id=pad_id,
+            )
+        for row in g[:, n:]:
+            text = tok.decode(row, skip_special_tokens=True)
+            out.append(text.strip().split("\n")[0].strip().strip('"'))
+    return out
+
+
 def train_window(curve: list[dict], steps: int) -> str:
     """Mean training loss over the last ``steps`` steps (one pass: each batch is
     fresh, so this is the training distribution's own held-out loss)."""
@@ -310,13 +442,25 @@ def auc(scores: list[float], positives: list[bool]) -> float | None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--adapter", required=True, choices=sorted(VOCAB))
+    ap.add_argument("--adapter", required=True, choices=sorted([*VOCAB, NARRATOR]))
     ap.add_argument(
         "--data",
         type=Path,
         nargs="+",
         required=True,
-        help="collect.py dirs (router: jsonl)",
+        help="collect.py dirs (router: jsonl; narrator: narrate_ivr.py jsonl)",
+    )
+    ap.add_argument(
+        "--moments",
+        type=Path,
+        help="Narrator: the talk.py moments file the lines were written for",
+    )
+    ap.add_argument(
+        "--gen-n",
+        type=int,
+        default=0,
+        help="Narrator: held-out moments to sample a line for after training, "
+        "from the adapter and from the base model (heldout_gen.jsonl)",
     )
     ap.add_argument("--eval-data", type=Path, nargs="*", help="Explicit held-out set")
     ap.add_argument(
@@ -408,11 +552,23 @@ def main() -> None:
     main_rank = rank == 0
     tok = AutoTokenizer.from_pretrained(args.base)
     a = args.adapter
+    lines = a == NARRATOR
     if a == ROUTER:
         label_ids = route_token_ids(tok)
         pb = PromptBuilder(tok, ROUTER_SYSTEM_PROMPT, align=False)
         rows = load_router_rows(args.data)
         val_rows = load_router_rows(args.eval_data) if args.eval_data else None
+    elif lines:
+        if args.moments is None:
+            raise SystemExit("--moments is required for the narrator")
+        label_ids = {}
+        pb = PromptBuilder(tok, system_prompt("chat"))
+        rows = load_narration_rows(args.data, args.moments, tok)
+        val_rows = (
+            load_narration_rows(args.eval_data, args.moments, tok)
+            if args.eval_data
+            else None
+        )
     else:
         label_ids = output_token_ids(tok, VOCAB[a])
         pb = PromptBuilder(tok, system_prompt(args.layout))
@@ -463,6 +619,8 @@ def main() -> None:
         stream, n, state = r[0], r[1], r[2]
         if stream is None:
             return pb.ids(state, None)
+        if lines:
+            return pb.turn_ids(stream.ids(n), *state)
         return pb.game_ids(stream.ids(n), state, [None])[0]
 
     def target(r) -> list[float]:
@@ -470,12 +628,15 @@ def main() -> None:
         s = sum(t)
         return [x / s for x in t]
 
-    hard = Counter(max(r[3], key=r[3].get) for r in train_rows)
     lens = [len(prompt(r)) for r in train_rows[:500]]
+    if lines:
+        tl = [len(r[3]) for r in train_rows]
+        mix = f"line {min(tl)}-{max(tl)} tokens (mean {sum(tl) / len(tl):.1f})"
+    else:
+        mix = f"label mix {Counter(max(r[3], key=r[3].get) for r in train_rows).most_common(6)}"
     print(
         f"{a} ({args.kind}): {len(train_rows)} train / {len(val_rows)} held-out rows, "
-        f"prompt {min(lens)}-{max(lens)} tokens (first 500); "
-        f"label mix {hard.most_common(6)}",
+        f"prompt {min(lens)}-{max(lens)} tokens (first 500); {mix}",
         flush=True,
     )
 
@@ -543,7 +704,48 @@ def main() -> None:
         raw.print_trainable_parameters()
     pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
 
+    def evaluate_lines(items: list) -> tuple[dict, list[tuple[list, list]]]:
+        """Teacher-forced: per-token CE and argmax accuracy over the held-out
+        lines' tokens (``soft_ce`` / ``acc``, the keys the loop reads), and each
+        line's argmax ids with their top-1 minus top-2 probability (what
+        ``build_model.py verify`` compares)."""
+        import torch.nn.functional as F
+
+        raw.eval()
+        ce_sum, n_tok, hit, first, preds = 0.0, 0, 0, 0, []
+        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
+            for b in batches(items, args.micro, False, 0):
+                ids, m, p, lab = collate_lines(
+                    [prompt(r) for r in b], [r[3] for r in b], pad_id, device
+                )
+                logits = line_logits(raw, ids, m, p, lab.shape[1])
+                ce = F.cross_entropy(
+                    logits.transpose(1, 2), lab, ignore_index=-100, reduction="none"
+                )
+                am, ok = logits.argmax(-1), lab != -100
+                top2 = torch.softmax(logits, -1).topk(2, -1).values
+                margin = top2[..., 0] - top2[..., 1]  # near-ties flip between kernels
+                ce_sum += ce[ok].sum().item()
+                n_tok += int(ok.sum())
+                hit += int((am == lab)[ok].sum())
+                for i, r in enumerate(b):
+                    k = len(r[3])
+                    preds.append((am[i, -k:].tolist(), margin[i, -k:].tolist()))
+                    first += int(preds[-1][0][0] == r[3][0])
+        raw.train()
+        ce = ce_sum / max(1, n_tok)
+        return {
+            "n": len(items),
+            "tokens": n_tok,
+            "acc": round(hit / max(1, n_tok), 4),
+            "soft_ce": round(ce, 4),
+            "ppl": round(math.exp(ce), 3),
+            "first_token_acc": round(first / max(1, len(items)), 4),
+        }, preds
+
     def evaluate(items: list) -> tuple[dict, list[list[float]]]:
+        if lines:
+            return evaluate_lines(items)
         # On the unwrapped model (rank 0 only): DDP's forward would wait for
         # the other ranks.
         raw.eval()
@@ -616,7 +818,8 @@ def main() -> None:
     train_curve: list[dict] = []  # training loss, every 50 steps
     best = {"soft_ce": math.inf, "step": None}
     lengths = [
-        (r[0].length(r[1]) if r[0] is not None else 0) + len(r[2]) // 3
+        (r[0].length(r[1]) if r[0] is not None else 0)
+        + len(r[2] if isinstance(r[2], str) else "".join(r[2])) // 3
         for r in train_rows
     ]
     model.train()
@@ -629,15 +832,35 @@ def main() -> None:
             micros = [
                 share[k : k + args.micro] for k in range(0, len(share), args.micro)
             ]
+            share_tokens = sum(len(r[3]) for r in share) if lines else 0
             for k, mb in enumerate(micros):
-                ids, m, p, tgt = collate(
-                    [prompt(r) for r in mb], [target(r) for r in mb], pad_id, device
-                )
                 # Sync gradients once per step, on the last micro-batch.
                 sync = (
                     model.no_sync()
                     if ddp and k < len(micros) - 1
                     else contextlib.nullcontext()
+                )
+                if lines:
+                    ids, m, p, lab = collate_lines(
+                        [prompt(r) for r in mb], [r[3] for r in mb], pad_id, device
+                    )
+                    with sync, torch.autocast("cuda", dtype=torch.bfloat16):
+                        logits = line_logits(model, ids, m, p, lab.shape[1])
+                        # Token mean over this rank's share; DDP averages the ranks.
+                        loss = (
+                            torch.nn.functional.cross_entropy(
+                                logits.transpose(1, 2),
+                                lab,
+                                ignore_index=-100,
+                                reduction="sum",
+                            )
+                            / share_tokens
+                        )
+                        loss.backward()
+                    run_loss += loss.item()
+                    continue
+                ids, m, p, tgt = collate(
+                    [prompt(r) for r in mb], [target(r) for r in mb], pad_id, device
                 )
                 with sync, torch.autocast("cuda", dtype=torch.bfloat16):
                     logp = torch.log_softmax(last_logits(model, ids, m, p, allowed), -1)
@@ -664,9 +887,14 @@ def main() -> None:
                 if args.keep_best and ev["soft_ce"] < best["soft_ce"]:
                     best = {"soft_ce": ev["soft_ce"], "acc": ev["acc"], "step": step}
                     raw.save_pretrained(str(args.out / "best"))
+                ref = (
+                    f"ppl {ev['ppl']:.3f}"
+                    if lines
+                    else f"majority {ev['majority_baseline']:.4f}"
+                )
                 print(
                     f"  held-out acc {ev['acc']:.4f} soft CE {ev['soft_ce']:.4f} "
-                    f"(majority {ev['majority_baseline']:.4f}) at step {step}"
+                    f"({ref}) at step {step}"
                     + train_window(train_curve, args.eval_every),
                     flush=True,
                 )
@@ -690,21 +918,55 @@ def main() -> None:
         acfg["last_context_token_id"] = tok.encode(_EOR, add_special_tokens=False)[0]
         acfg["share_moe_routing"] = True  # no-op on a dense base; recorded by SR
         path.write_text(json.dumps(acfg, indent=2))
+    if lines and best["step"] is not None:
+        # A line model can overfit a few thousand lines: the narrator is the
+        # checkpoint with the lowest held-out CE, not the last one.
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+
+        best_w = load_file(str(args.out / "best" / "adapter_model.safetensors"))
+        set_peft_model_state_dict(raw, best_w)
+        raw.save_pretrained(str(args.out))
     ev, probs = evaluate(val_rows)
     with open(args.out / "heldout_preds.jsonl", "w") as f:
         for r, q in zip(val_rows, probs):
             stream, n, state = r[0], r[1], r[2]
-            f.write(
-                json.dumps(
-                    {
-                        "history_ids": stream.ids(n) if stream is not None else None,
-                        "state": state,
-                        "label": max(r[3], key=r[3].get),
-                        "peft": classes[max(range(len(q)), key=q.__getitem__)],
-                        "peft_probs": {c: round(x, 5) for c, x in zip(classes, q)},
-                    }
-                )
-                + "\n"
+            if lines:
+                row = {
+                    "history_ids": stream.ids(n),
+                    "state": state[0],
+                    "extra": state[1],
+                    "line": r[5]["line"],
+                    "target_ids": r[3],
+                    "peft_ids": q[0],
+                    "peft_margin": [round(x, 4) for x in q[1]],
+                }
+            else:
+                row = {
+                    "history_ids": stream.ids(n) if stream is not None else None,
+                    "state": state,
+                    "label": max(r[3], key=r[3].get),
+                    "peft": classes[max(range(len(q)), key=q.__getitem__)],
+                    "peft_probs": {c: round(x, 5) for c, x in zip(classes, q)},
+                }
+            f.write(json.dumps(row) + "\n")
+    if lines and args.gen_n:
+        # The same held-out moments, a line from the adapter and one from the
+        # base model: narrate_ivr.py --judge scores both.
+        gen = val_rows[: args.gen_n]
+        ps = [prompt(r) for r in gen]
+        said = {
+            k: generate_lines(raw, tok, ps, pad_id, device, adapter=k == "adapter")
+            for k in ("adapter", "base")
+        }
+        with open(args.out / "heldout_gen.jsonl", "w") as f:
+            for i, r in enumerate(gen):
+                row = {**r[5], "adapter": said["adapter"][i], "base": said["base"][i]}
+                f.write(json.dumps(row) + "\n")
+        for i in range(min(8, len(gen))):
+            print(
+                f"  {gen[i][5]['brief']}\n    written: {gen[i][5]['line']}\n"
+                f"    adapter: {said['adapter'][i]}\n    base:    {said['base'][i]}"
             )
     metrics = {
         "adapter": a,
@@ -719,9 +981,14 @@ def main() -> None:
         "best": best if args.keep_best else None,
     }
     (args.out / "metrics.json").write_text(json.dumps(metrics, indent=1))
+    ref = (
+        f"ppl {ev['ppl']:.3f}, first-token acc {ev['first_token_acc']:.4f}"
+        if lines
+        else f"vs majority {ev['majority_baseline']:.4f} ({ev['majority_class']})"
+    )
     print(
         f"\n{a} ({args.kind}): held-out acc {ev['acc']:.4f} soft CE {ev['soft_ce']:.4f} "
-        f"vs majority {ev['majority_baseline']:.4f} ({ev['majority_class']})"
+        + ref
         + (
             f"; AUC damage-in-1s {ev['auc_damage_1s']:.3f}"
             if a == CRITIC and ev.get("auc_damage_1s")

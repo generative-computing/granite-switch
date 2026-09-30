@@ -59,6 +59,7 @@ from history import History, now_prefix
 ARMS = "arms"  # weapon planner: one slot digit
 CRITIC = "critic"  # danger of taking damage or dying within 1 s
 ROUTER = "router"
+NARRATOR = "narrator"  # the player's voice: one spoken line (chat layout)
 GAME_ADAPTERS: tuple[str, ...] = (*BEHAVIORS, ARMS, CRITIC)
 ADAPTERS: tuple[str, ...] = (*GAME_ADAPTERS, ROUTER)
 WEAPON_TOKENS: tuple[str, ...] = tuple(str(s) for s in WEAPON_SLOTS)
@@ -393,13 +394,25 @@ class PromptBuilder:
         return self.head[None] + self._body(history_ids, state) + suffix
 
     def turn_ids(
-        self, history_ids: list[int], state: str, extra: str = ""
+        self,
+        history_ids: list[int],
+        state: str,
+        extra: str = "",
+        adapter: str | None = None,
     ) -> list[int]:
-        """Chat layout: the base model's turn to speak. The open user turn
-        closes with ``extra`` and the state, and the assistant turn opens; after
-        the line is generated, :func:`spoken_entry` is what the history
-        appends."""
-        return self.head[None] + history_ids + self._enc(closing_text(state, extra))
+        """Chat layout: the player's turn to speak. The open user turn closes
+        with ``extra`` and the state, and the assistant turn opens; after the
+        line is generated, :func:`spoken_entry` is what the history appends.
+        ``adapter``: the one that writes the line (the narrator), its control
+        token placed as for any adapter; ``None``: the base model."""
+        if adapter is None:
+            return self.head[None] + history_ids + self._enc(closing_text(state, extra))
+        return (
+            self.head[adapter]
+            + history_ids
+            + self._enc(f"{extra}{state}")
+            + self.suffix[adapter]
+        )
 
     def _body(self, history_ids: list[int], state: str) -> list[int]:
         n_head = len(self.head[None])  # every head has the same length
@@ -409,6 +422,12 @@ class PromptBuilder:
 
     def n_fixed(self) -> int:
         return len(self.head[None])
+
+
+def has_narrator(tokenizer) -> bool:
+    """Whether a composed checkpoint carries the narrator (the adapter that
+    writes the player's spoken lines; without it the base model talks)."""
+    return control_token(NARRATOR) in tokenizer.get_vocab()
 
 
 def alora_invocation_ids(tokenizer) -> list[int]:
@@ -463,6 +482,9 @@ def check_template(
     game_names = (*GAME_ADAPTERS, None) if composed else (None,)
     route_names = (ROUTER, None) if composed else (None,)
     adapters = ADAPTERS if composed else ()
+    narrator = has_narrator(tok)
+    if narrator:
+        adapters = (*adapters, NARRATOR)
     system = system_prompt(layout)
     pb = PromptBuilder(tok, system, adapters, placement=placement, align=False)
     rb = PromptBuilder(
@@ -503,8 +525,10 @@ def check_template(
             for a, g in zip(game_names, got):
                 ref, r = render(msgs, a)
                 assert g == ref, f"chat, adapter={a}\n got={g}\n ref={ref}\n{r!r}"
-            ref, r = render([*msgs[:3], ("user", h2 + extra + state)], None)
-            assert pb.turn_ids(hist_ids, state, extra) == ref, f"chat turn\n{r!r}"
+            for a in (NARRATOR, None) if narrator else (None,):
+                ref, r = render([*msgs[:3], ("user", h2 + extra + state)], a)
+                got_turn = pb.turn_ids(hist_ids, state, extra, a)
+                assert got_turn == ref, f"chat turn, adapter={a}\n{r!r}"
     for hist_text, state in games if layout == "log" else ():
         hist_ids = tok.encode(hist_text, add_special_tokens=False)
         got = pb.game_ids(hist_ids, state, list(game_names))
@@ -517,7 +541,7 @@ def check_template(
             assert rb.ids(text, a) == ref, f"adapter={a}\n{r!r}"
     check_output_tokens(tok)
     kind = {"lora": "LoRA", "sr": "Shadow Residual", "alora": "aLoRA"}[placement]
-    what = f"{kind} adapters {', '.join(ADAPTERS)} and base" if composed else "base"
+    what = f"{kind} adapters {', '.join(adapters)} and base" if composed else "base"
     print(
         f"OK: prompt ids match apply_chat_template for {what} on {len(games)} "
         f"history+state prompts ({layout} layout) and {len(routes)} instructions."
@@ -676,6 +700,7 @@ class PromptKit:
     vocab: dict[str, dict[str, int]]
     words: dict[str, dict[int, str]]
     sp: dict  # adapter -> SamplingParams
+    talker: str | None = None  # who writes spoken lines: NARRATOR, or the base model
 
 
 def system_prompt(layout: str) -> str:
@@ -698,16 +723,18 @@ def prompt_kit(
 
     placement = "base" if base_model else adapter_placement(tok)
     adapters = () if base_model else ADAPTERS
+    talker = NARRATOR if not base_model and has_narrator(tok) else None
     place = "alora" if base_model else placement
     vocab = {a: vocab_ids(tok, a) for a in ADAPTERS}
     system = system_prompt(layout)
     return PromptKit(
         placement=placement,
         lora=placement == "lora",
+        talker=talker,
         pb=PromptBuilder(
             tok,
             system,
-            adapters,
+            (*adapters, talker) if talker else adapters,
             placement=place,
             align=align,
             persona=PERSONAS[persona],
@@ -832,6 +859,7 @@ class VLLMPolicy:
         )
         self.layout = layout
         self.placement, self.lora = kit.placement, kit.lora
+        self.talker = kit.talker
         self.pb, self.rb = kit.pb, kit.rb
         self.vocab, self.words, self.sp = kit.vocab, kit.words, kit.sp
         self.temperature = temperature
@@ -952,13 +980,14 @@ class VLLMPolicy:
         """One spoken line per game (history ids, state text), in one engine call.
         ``players``: what the person watching just said to each game, answered.
         Chat layout: the player's turn (the brief and the words close the user
-        turn); log layout: an extra user turn asking for a line."""
+        turn), written by the narrator adapter if the checkpoint has one; log
+        layout: an extra user turn asking the base model for a line."""
         briefs = briefs or [""] * len(games)
         players = players or [None] * len(games)
         lasts = lasts or [None] * len(games)
         if self.layout == "chat":
             prompts = [
-                self.pb.turn_ids(h, s, talk_extra(b, w))
+                self.pb.turn_ids(h, s, talk_extra(b, w), self.talker)
                 for (h, s), b, w in zip(games, briefs, players)
             ]
         else:

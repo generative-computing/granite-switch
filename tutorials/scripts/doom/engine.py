@@ -56,10 +56,9 @@ from policy import (
     state_text,
     talk_extra,
 )
-from talk import brief
+from talk import SALIENT_EVENTS, brief
 
 TIC_S = 1.0 / TIC_HZ
-SALIENT = ("frag", "died", "got weapon")  # say something soon after these
 MIN_TALK_GAP_S = 2.5
 
 
@@ -197,7 +196,7 @@ class AsyncPolicy:
         watching just said, which the line answers."""
         if self.layout == "chat":
             extra = talk_extra(brief_text, player)
-            ids = self.kit.pb.turn_ids(hist_ids, state, extra)
+            ids = self.kit.pb.turn_ids(hist_ids, state, extra, self.kit.talker)
         else:
             extra = ""
             ids = self.kit.pb.talk_ids(hist_ids, state, brief_text, player)
@@ -275,6 +274,7 @@ class Game:
         self.stats: dict = {}
         self.lags: list[int] = []
         self.player_queue: list[str] = []  # what the watcher said, not yet answered
+        self.tally = [0, 0]  # frags, deaths: the brief's score (the history is 10 s)
         self.state: str | None = None  # the latest live state, and its tick
         self.tick = 0
         self.done = self.lost = False
@@ -315,6 +315,8 @@ class Game:
                         self.conn.send(("bye",))
                     return
                 _, tick, state, entry, events = msg
+                self.tally[0] += events.count("frag")
+                self.tally[1] += events.count("died")
                 if entry is not None:
                     self.hist.append(entry)
                 if state is None:
@@ -327,7 +329,7 @@ class Game:
                     self.decided += 1
                     self._spawn(self._decide(tick, state))
                 now = time.perf_counter()
-                due = now >= self.next_talk or any(e in SALIENT for e in events)
+                due = now >= self.next_talk or any(e in SALIENT_EVENTS for e in events)
                 if (
                     self.talk_every
                     and not self.talking
@@ -362,9 +364,9 @@ class Game:
     async def _talk(self, tick: int, state: str) -> None:
         player = self.player_queue.pop(0) if self.player_queue else None
         t0 = time.perf_counter()
-        line, extra = await self.pol.talk(
-            self.hist.ids, state, brief(self.hist.entries, state), player
-        )
+        chat = self.pol.layout == "chat"  # the chat layout's briefs carry the score
+        b = brief(self.hist.entries, state, tuple(self.tally) if chat else None)
+        line, extra = await self.pol.talk(self.hist.ids, state, b, player)
         ms = int((time.perf_counter() - t0) * 1000)
         if line:
             if self.pol.layout == "chat":
