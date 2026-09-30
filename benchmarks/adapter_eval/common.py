@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 HARNESS_DIR = Path(__file__).resolve().parent
@@ -33,6 +33,16 @@ REFERENCE_LIBRARIES = ("torch", "transformers", "peft")
 
 
 @dataclass(frozen=True)
+class Model:
+    """A base model: its own staged adapters, bench_version and page tab."""
+
+    id: str
+    name: str  # on the Hugging Face Hub
+    label: str
+    bench_version: int
+
+
+@dataclass(frozen=True)
 class Technology:
     id: str
     label: str
@@ -51,11 +61,50 @@ class Intrinsic:
 
 @dataclass(frozen=True)
 class Spec:
-    bench_version: int
+    """The benchmark definition, for one of its models (``model_id``)."""
+
     reference_version: int
-    base_model: str
+    models: tuple[Model, ...]
     technologies: tuple[Technology, ...]
     intrinsics: tuple[Intrinsic, ...]
+    model_id: str
+
+    @property
+    def model(self) -> Model:
+        return self.get_model(self.model_id)
+
+    @property
+    def bench_version(self) -> int:
+        return self.model.bench_version
+
+    @property
+    def base_model(self) -> str:
+        return self.model.name
+
+    def get_model(self, model_id: str) -> Model:
+        for m in self.models:
+            if m.id == model_id:
+                return m
+        known = [m.id for m in self.models]
+        raise ValueError(f"unknown model {model_id!r}; known: {known}")
+
+    def for_model(self, model_id: str | None) -> Spec:
+        """This definition for another model; None keeps the current one."""
+        if model_id is None:
+            return self
+        return replace(self, model_id=self.get_model(model_id).id)
+
+    def model_of(self, block: dict) -> str:
+        """The model id of a results or reference block.
+
+        Blocks from before there were several models name only the base model.
+        """
+        if block.get("model"):
+            return self.get_model(block["model"]).id
+        for m in self.models:
+            if m.name == block.get("base_model"):
+                return m.id
+        raise ValueError(f"no model has base model {block.get('base_model')!r}")
 
     def intrinsic(self, intrinsic_id: str) -> Intrinsic:
         for i in self.intrinsics:
@@ -75,9 +124,8 @@ class Spec:
     def public(self) -> dict:
         """The part of the definition the results page needs."""
         return {
-            "bench_version": self.bench_version,
             "reference_version": self.reference_version,
-            "base_model": self.base_model,
+            "models": [vars(m) for m in self.models],
             "technologies": [vars(t) for t in self.technologies],
             "intrinsics": [
                 {
@@ -91,16 +139,28 @@ class Spec:
         }
 
 
-def load_spec(path: Path = SPEC_PATH) -> Spec:
+def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
+    """The benchmark definition for ``model``; None is the first model."""
     import yaml
 
     raw = yaml.safe_load(Path(path).read_text())
+    models = tuple(
+        Model(**{**m, "bench_version": int(m["bench_version"])}) for m in raw["models"]
+    )
+    if not models:
+        raise ValueError("adapters.yaml lists no models")
+    ids = [m.id for m in models]
+    if len(set(ids)) != len(ids):
+        raise ValueError(f"model ids must be unique: {ids}")
+    for model_id in ids:
+        if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", model_id):
+            raise ValueError(f"model id {model_id!r}: use a-z, 0-9, '.' and '-'")
     spec = Spec(
-        bench_version=int(raw["bench_version"]),
         reference_version=int(raw["reference_version"]),
-        base_model=raw["base_model"],
+        models=models,
         technologies=tuple(Technology(**t) for t in raw["technologies"]),
         intrinsics=tuple(Intrinsic(**i) for i in raw["intrinsics"]),
+        model_id=ids[0],
     )
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:
@@ -110,7 +170,7 @@ def load_spec(path: Path = SPEC_PATH) -> Spec:
     for i in spec.intrinsics:
         if not re.fullmatch(r"[a-z][a-z0-9_]*", i.id):
             raise ValueError(f"intrinsic id {i.id!r} must be snake_case")
-    return spec
+    return spec.for_model(model)
 
 
 def adapter_name(intrinsic_id: str, tech_id: str) -> str:

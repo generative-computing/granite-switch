@@ -16,7 +16,11 @@ set -euo pipefail
 
 HARNESS=$(cd "$(dirname "$0")/../../.." && pwd)
 MODE=${ADAPTER_BENCH_MODE:?}
-echo "[pod] mode=${MODE} harness=${ADAPTER_BENCH_HARNESS_SHA:-?} dirty=${ADAPTER_BENCH_HARNESS_DIRTY:-?} run=${RUN_TS:-?}"
+# The adapters.yaml model; empty means its first (default) model.
+MODEL=${ADAPTER_BENCH_MODEL:-}
+MODEL_ARGS=()
+if [[ -n "$MODEL" ]]; then MODEL_ARGS=(--model "$MODEL"); fi
+echo "[pod] mode=${MODE} model=${MODEL:-default} harness=${ADAPTER_BENCH_HARNESS_SHA:-?} dirty=${ADAPTER_BENCH_HARNESS_DIRTY:-?} run=${RUN_TS:-?}"
 nvidia-smi -L 2>/dev/null || true
 
 if ! command -v uv >/dev/null; then
@@ -45,7 +49,7 @@ discover)
     args=()
     for r in ${ADAPTER_BENCH_ADAPTER_SOURCES:-}; do args+=(--adapter-root "$r"); done
     for r in ${ADAPTER_BENCH_EVAL_SOURCES:-}; do args+=(--eval-root "$r"); done
-    harness_py -m benchmarks.adapter_eval.stage discover "${args[@]}"
+    harness_py -m benchmarks.adapter_eval.stage discover "${args[@]}" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ;;
 stage)
     args=(--selection "$HARNESS/extra/selection.json" --bench-root "${ADAPTER_BENCH_ROOT:?}")
@@ -53,16 +57,17 @@ stage)
         args+=(--judge-prompt "$HARNESS/extra/judge_prompt.txt")
     fi
     if [[ -n "${ADAPTER_BENCH_STAGE_REPLACE:-}" ]]; then args+=(--replace); fi
-    harness_py -m benchmarks.adapter_eval.stage apply "${args[@]}"
+    harness_py -m benchmarks.adapter_eval.stage apply "${args[@]}" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ;;
 bench)
     install_commit
     args=(
         --repo-dir "$REPO"
         --bench-root "${ADAPTER_BENCH_ROOT:?}"
-        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/${SHA:0:12}/${RUN_TS:-run}"
+        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}"
         --model-dir /workspace/models
     )
+    if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
     if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then
@@ -88,9 +93,10 @@ reference)
     export PYTHONPATH
     args=(
         --bench-root "${ADAPTER_BENCH_ROOT:?}"
-        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/reference/${RUN_TS:-run}"
+        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/reference/${MODEL:-default}/${RUN_TS:-run}"
         --model-dir /workspace/models
     )
+    if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
     if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then

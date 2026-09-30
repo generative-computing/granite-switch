@@ -158,6 +158,9 @@ def build(args) -> dict:
     for local_name, pod_name in optional.items():
         if os.environ.get(local_name):
             env.append(env_var(pod_name, os.environ[local_name]))
+    # submit.sh has already resolved the model's own settings (BENCH_ROOT, ...).
+    if args.model:
+        env.append(env_var("ADAPTER_BENCH_MODEL", args.model))
     if os.environ.get("JUDGE_SECRET_NAME"):
         env.append(
             {
@@ -223,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run-ts", required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--sha", help="bench: full commit sha")
+    p.add_argument("--model", help="adapters.yaml model id (default: the first)")
     p.add_argument("--limit", type=int)
     p.add_argument("--only")
     p.add_argument(

@@ -231,7 +231,9 @@ Everything goes through
 | `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
 | `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
 
-Any command takes `--dry-run`: it renders the job and stops.
+Any command takes `--dry-run`: it renders the job and stops. Any command
+also takes `--model <id>`, for a model other than the first (see
+[Models](#models)).
 
 `bench` flags:
 
@@ -345,6 +347,50 @@ git add docs/benchmarks && git commit -s -m "Adapter benchmark: reference"
 The largest eval sets (guardian-core and answerability, thousands of rows
 each) set the pace.
 
+## Models
+
+The benchmark covers several base models, listed under `models` in
+[adapters.yaml](../benchmarks/adapter_eval/adapters.yaml). Each model has its
+own:
+
+- **bench root**, with its own staged adapters and eval sets;
+- **selection file**, `local/selection.<id>.json`;
+- **`bench_version`**, so staging for one model leaves the others' rows
+  current;
+- **tab on the page**, with its own rows and reference columns.
+
+The first model is the default of every command. For another one, pass
+`--model`, and give its settings in `local.env` with a suffix: the model id
+with `-` and `.` as `_`. For example, for `granite-4.2-3b`:
+
+```bash
+BENCH_ROOT__granite_4_2_3b=$PVC_MOUNT/<path>/adapter-bench/granite-4.2-3b/v1
+BASE_MODEL_PATH__granite_4_2_3b=$PVC_MOUNT/<path>/granite-4.2-3b
+```
+
+`BENCH_ROOT__<id>` is required: the first model's plain settings are never
+used for another model. Without `BASE_MODEL_PATH__<id>` the pod downloads the
+base model by name.
+
+Then stage and run as usual, with `--model`:
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh stage --model granite-4.2-3b
+```
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh bench main --model granite-4.2-3b
+```
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh reference --model granite-4.2-3b
+```
+
+A bench root records the model it was staged for (`model.json`), and every
+run refuses a root staged for another model. Without that check, one model's
+adapters would load onto another base model with no error. A root staged
+before there were several models counts as the first model's.
+
 ## Cache rules
 
 A commit is a **cache hit** when its row has:
@@ -390,6 +436,7 @@ All under `benchmarks/adapter_eval/vela/`, all gitignored:
 local/
   local.env              cluster, storage and secret names; the SR code checkout
   selection.json         the reviewed picks for `stage`
+  selection.<id>.json    the same, for another model (also discovery.<id>.json, ...)
   judge_prompt.txt       query-rewrite judge prompt (shipped at stage time)
   discovery.json         output of `discover`
   selection.draft.json   suggested picks from `discover`

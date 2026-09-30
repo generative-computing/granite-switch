@@ -3,9 +3,14 @@
 
 Layout (see ``adapters.yaml``)::
 
+    <bench_root>/model.json                      the model it was staged for
     <bench_root>/adapters/<intrinsic>/<technology>/
         adapter_config.json, adapter_model.safetensors, provenance.json
     <bench_root>/eval/<intrinsic>/evaluation.jsonl
+
+Each model has its own bench root. ``check_bench_root`` refuses to run one
+model on another's root: its adapters would load onto the wrong base model
+without an error.
 
 The technology of a checkpoint is checked from its own files, the same way
 the composer decides it, so a checkpoint staged in the wrong folder is
@@ -45,6 +50,7 @@ CONFIG_FILE = "adapter_config.json"
 WEIGHTS_FILE = "adapter_model.safetensors"
 EVAL_FILE = "evaluation.jsonl"
 PROVENANCE_FILE = "provenance.json"
+MODEL_FILE = "model.json"
 # A saved SR checkpoint does not record whether its adapter stream had its own
 # K/V; only the run's config name says so ("..._sharedkv"). This backend always
 # takes K/V from the base stream, so a run with its own K/V would compose
@@ -295,6 +301,30 @@ def check_adapter(adapter_dir: Path, expected_tech: str) -> str | None:
     if tech != expected_tech:
         return f"invalid checkpoint: staged as {expected_tech}, looks like {tech}"
     return None
+
+
+def bench_root_model(bench_root: Path, spec: Spec) -> str | None:
+    """The id of the model ``bench_root`` was staged for; None if nothing is.
+
+    A root staged before there were several models has no record; it holds the
+    first model's adapters.
+    """
+    try:
+        return json.loads((bench_root / MODEL_FILE).read_text())["model"]
+    except FileNotFoundError:
+        pass
+    if any((bench_root / d).is_dir() for d in ("adapters", "eval")):
+        return spec.models[0].id
+    return None
+
+
+def check_bench_root(bench_root: Path, spec: Spec) -> None:
+    """Raise if ``bench_root`` holds another model's cells."""
+    staged_for = bench_root_model(bench_root, spec)
+    if staged_for not in (None, spec.model_id):
+        raise ValueError(
+            f"{bench_root} was staged for {staged_for}, not {spec.model_id}"
+        )
 
 
 def adapter_dir(bench_root: Path, intrinsic: str, tech: str) -> Path:

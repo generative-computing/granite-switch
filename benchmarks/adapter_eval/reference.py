@@ -6,7 +6,7 @@ see ``vela/pod_entry.sh``), from the harness checkout::
 
     cd <harness> && <refenv>/bin/python -m benchmarks.adapter_eval.reference \\
         --bench-root <staged adapters + eval> --work-dir <outputs> \\
-        [--limit 20] [--only answerability,guardian_core/sr]
+        [--model granite-4.2-3b] [--limit 20] [--only answerability,guardian_core/sr]
 
 Four columns per intrinsic (``common.REFERENCE_COLUMNS``):
 
@@ -16,8 +16,8 @@ Four columns per intrinsic (``common.REFERENCE_COLUMNS``):
 * ``base``: the base model with no adapter.
 
 None of them depends on the granite-switch commit, so they are computed once
-per ``(bench_version, reference_version)``; ``publish.py`` shows them on every
-row of that benchmark version.
+per model and ``(bench_version, reference_version)``; ``publish.py`` shows
+them on every row of that model and benchmark version.
 
 Steps:
 
@@ -46,7 +46,6 @@ import subprocess
 import sys
 import time
 import traceback
-from importlib import metadata
 from pathlib import Path
 
 from . import staged
@@ -59,7 +58,7 @@ from .common import (
     load_spec,
     skipped,
 )
-from .run_benchmark import base_model_dir, now, print_table, score_cell
+from .run_benchmark import base_model_dir, now, print_table, score_cell, versions
 from .scorers import ScorerUnavailable
 
 GENERATE_MODULE = "benchmarks.adapter_eval.hf_generate"
@@ -106,16 +105,6 @@ def gpu_ids(count: int | None) -> list[str]:
     if not ids:
         raise SystemExit("no GPUs to run the reference cells on")
     return ids
-
-
-def versions() -> dict[str, str | None]:
-    out = {}
-    for name in REFERENCE_LIBRARIES:
-        try:
-            out[name] = metadata.version(name)
-        except metadata.PackageNotFoundError:
-            out[name] = None
-    return out
 
 
 def sr_code_available() -> bool:
@@ -203,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--bench-root", required=True, type=Path)
     p.add_argument("--work-dir", required=True, type=Path)
     p.add_argument(
+        "--model", default=None, help="adapters.yaml model id (default: the first)"
+    )
+    p.add_argument(
         "--model-dir",
         type=Path,
         default=None,
@@ -211,7 +203,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--base-model",
         default=None,
-        help="local copy of the adapters.yaml base model (default: download it)",
+        help="local copy of the model's base model (default: download it)",
     )
     p.add_argument("--limit", type=int, default=None, help="rows per eval set")
     p.add_argument(
@@ -234,15 +226,16 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     started = now()
-    spec = load_spec()
+    spec = load_spec(model=args.model)
+    staged.check_bench_root(args.bench_root, spec)
     only = parse_only(args.only, spec)
     work = args.work_dir.resolve()
     copies = (args.model_dir or work / "models").resolve() / "reference"
     harness_root = Path(__file__).resolve().parents[2]
     base_model = args.base_model or spec.base_model
     print(
-        f"[reference] bench_version {spec.bench_version}, "
-        f"reference_version {spec.reference_version}",
+        f"[reference] model {spec.model_id} ({spec.base_model}), bench_version "
+        f"{spec.bench_version}, reference_version {spec.reference_version}",
         flush=True,
     )
 
@@ -374,6 +367,7 @@ def main(argv: list[str] | None = None) -> int:
         cells[intrinsic_id][column] = cell
 
     reference = {
+        "model": spec.model_id,
         "reference_version": spec.reference_version,
         "bench_version": spec.bench_version,
         "base_model": spec.base_model,
@@ -394,7 +388,7 @@ def main(argv: list[str] | None = None) -> int:
             "sr_ref": os.environ.get("ADAPTER_BENCH_SR_REF"),
             "gpu": gpu,
             "gpus": len(gpus),
-            **versions(),
+            **versions(REFERENCE_LIBRARIES),
             **run_meta,
         },
     }

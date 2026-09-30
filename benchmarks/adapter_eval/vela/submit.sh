@@ -4,7 +4,7 @@
 # Run the adapter benchmark on Vela from this machine (see docs/ADAPTER_BENCHMARK.md).
 #
 #   submit.sh discover             list adapter checkpoints and eval sets on the mount
-#   submit.sh stage [--replace]    copy local/selection.json's picks into the bench root
+#   submit.sh stage [--replace]    copy the selection's picks into the bench root
 #   submit.sh bench <ref> [--limit N] [--only a,b] [--no-cache] [--no-publish]
 #                         [--extra-args "..."]
 #   submit.sh reference [--limit N] [--only a,b/sr] [--no-cache] [--no-publish]
@@ -16,8 +16,9 @@
 #                                  the commit installed (one-off checks)
 #   submit.sh fetch <job>          resume following a job and collect its output
 #
-# Any mode takes --dry-run: render the job and stop. Settings come from the
-# gitignored local/local.env (start from local.env.example).
+# Any mode takes --model <id> (an adapters.yaml model; default: its first) and
+# --dry-run (render the job and stop). Settings come from the gitignored
+# local/local.env (start from local.env.example).
 #
 # Written for bash 3.2 (the macOS default).
 set -euo pipefail
@@ -28,7 +29,7 @@ LOCAL_DIR=$HERE/local
 RENDERED=$HERE/.rendered
 
 usage() {
-    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,21p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 say() { echo "[submit] $*"; }
@@ -62,6 +63,7 @@ publish() { local_py -m benchmarks.adapter_eval.publish "$@"; }
 MODE=${1:-}
 [[ $# -gt 0 ]] && shift
 SHA="" LIMIT="" ONLY="" EXTRA_ARGS="" NO_CACHE="" PUBLISH=1 REPLACE="" DRY_RUN="" JOB=""
+MODEL=""
 SCRIPT=""
 case "$MODE" in
 bench)
@@ -93,6 +95,7 @@ while [[ $# -gt 0 ]]; do
     --no-publish) PUBLISH="" && shift ;;
     --replace) REPLACE=1 && shift ;;
     --dry-run) DRY_RUN=1 && shift ;;
+    --model) MODEL=$2 && shift 2 ;;
     *) usage ;;
     esac
 done
@@ -161,12 +164,14 @@ collect() {
     local out=$LOCAL_DIR/results/$JOB.json
     case "$MODE" in
     discover)
-        publish extract "$LOG" --kind discovery --out "$LOCAL_DIR/discovery.json"
+        local found=$LOCAL_DIR/discovery${SUFFIX:-}.json
+        local draft=$LOCAL_DIR/selection${SUFFIX:-}.draft.json
+        publish extract "$LOG" --kind discovery --out "$found"
         local_py -c 'import json, sys
 d = json.load(open(sys.argv[1]))
 json.dump(d["draft_selection"], open(sys.argv[2], "w"), indent=2, sort_keys=True)' \
-            "$LOCAL_DIR/discovery.json" "$LOCAL_DIR/selection.draft.json"
-        say "draft selection: $LOCAL_DIR/selection.draft.json (review, then save as selection.json)"
+            "$found" "$draft"
+        say "draft selection: $draft (review, then save it without .draft)"
         ;;
     stage)
         publish extract "$LOG" --kind stage --out "$LOCAL_DIR/stage/$JOB.json"
@@ -203,39 +208,70 @@ fi
 
 # --- render and submit ---------------------------------------------------------
 
+# The model's own settings. local.env names another model's with a suffix,
+# e.g. BENCH_ROOT__granite_4_2_3b; the plain names are the default model's,
+# and are never used for another model.
+DEFAULT_MODEL=$(local_py -c 'from benchmarks.adapter_eval.common import load_spec
+print(load_spec().model_id)')
+MODEL=${MODEL:-$DEFAULT_MODEL}
+local_py -c 'import sys
+from benchmarks.adapter_eval.common import load_spec
+load_spec(model=sys.argv[1])' "$MODEL" || die "unknown model $MODEL"
+# Local files of another model get its id: selection.<model>.json, ...
+SUFFIX=""
+if [[ "$MODEL" != "$DEFAULT_MODEL" ]]; then
+    SUFFIX=.$MODEL
+    key=$(printf %s "$MODEL" | tr '.-' '__')
+    SELECTION_FILE=$LOCAL_DIR/selection$SUFFIX.json
+    for name in BENCH_ROOT BASE_MODEL_PATH SELECTION_FILE; do
+        var=${name}__$key
+        if [[ -n "${!var:-}" ]]; then
+            export "$name=${!var}"
+        elif [[ "$name" == BENCH_ROOT ]]; then
+            die "set $var in local.env: the bench root of $MODEL"
+        elif [[ "$name" == BASE_MODEL_PATH ]]; then
+            unset BASE_MODEL_PATH
+        fi
+    done
+    MODEL_TAG=-$(printf %s "$MODEL" | tr '.' '-')
+else
+    MODEL_TAG=""
+fi
+say "model $MODEL"
+
 STAMP=$(date -u +%m%d%H%M)
 RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
-render_args=(--mode "$MODE" --run-ts "$RUN_TS")
+render_args=(--mode "$MODE" --run-ts "$RUN_TS" --model "$MODEL")
 if [[ "$MODE" == bench ]]; then
     SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}") || die "unknown ref $REF"
     if ! git -C "$REPO" branch -r --contains "$SHA" 2>/dev/null | grep -q .; then
         say "warning: ${SHA:0:12} is on no remote branch; the pod clones from GitHub"
     fi
-    if [[ -z "$NO_CACHE$LIMIT$ONLY" ]] && publish check "$SHA"; then
+    if [[ -z "$NO_CACHE$LIMIT$ONLY" ]] && publish check "$SHA" --model "$MODEL"; then
         say "cache hit for ${SHA:0:12}; nothing to run (--no-cache to re-run)"
         exit 0
     fi
-    JOB="$JOB_PREFIX-bench-${SHA:0:8}-$STAMP"
+    JOB="$JOB_PREFIX-bench-${SHA:0:8}$MODEL_TAG-$STAMP"
     render_args+=(--sha "$SHA")
     if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
     if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
     if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
 elif [[ "$MODE" == reference ]]; then
-    if [[ -z "$NO_CACHE$LIMIT$ONLY" ]] && publish check-reference; then
+    if [[ -z "$NO_CACHE$LIMIT$ONLY" ]] && publish check-reference --model "$MODEL"; then
         say "reference columns are cached; nothing to run (--no-cache to re-run)"
         exit 0
     fi
-    JOB="$JOB_PREFIX-reference-$STAMP"
+    JOB="$JOB_PREFIX-reference$MODEL_TAG-$STAMP"
     if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
     if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
     if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
 elif [[ "$MODE" == script ]]; then
     SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}") || die "unknown ref $REF"
-    JOB="$JOB_PREFIX-script-${SHA:0:8}-$STAMP"
+    JOB="$JOB_PREFIX-script-${SHA:0:8}$MODEL_TAG-$STAMP"
     render_args+=(--sha "$SHA" --script "$SCRIPT")
     if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
 else
-    JOB="$JOB_PREFIX-$MODE-$STAMP"
+    JOB="$JOB_PREFIX-$MODE$MODEL_TAG-$STAMP"
     if [[ -n "$REPLACE" ]]; then render_args+=(--replace); fi
 fi
 JOB=$(echo "$JOB" | tr '[:upper:]_' '[:lower:]-')
@@ -253,7 +289,7 @@ fi
 mkdir -p "$LOCAL_DIR/jobs"
 {
     printf 'MODE=%q\nSHA=%q\nLIMIT=%q\nONLY=%q\n' "$MODE" "$SHA" "$LIMIT" "$ONLY"
-    printf 'PUBLISH=%q\nK8S=%q\n' "$PUBLISH" "$K8S"
+    printf 'PUBLISH=%q\nK8S=%q\nMODEL=%q\nSUFFIX=%q\n' "$PUBLISH" "$K8S" "$MODEL" "$SUFFIX"
 } >"$LOCAL_DIR/jobs/$JOB.env"
 oc create -n "$NAMESPACE" -f "$K8S"
 say "submitted $JOB"

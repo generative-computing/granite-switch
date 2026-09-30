@@ -176,11 +176,20 @@ def results_for(
     **run,
 ) -> dict:
     return {
+        "model": SPEC.model_id,
         "bench_version": SPEC.bench_version,
         "base_model": SPEC.base_model,
         "commit": {"sha": sha, "date": date, "subject": "subject"},
         "run": {"limit": None, "only": None, **run},
         "cells": cells if cells is not None else cells_for(SPEC),
+    }
+
+
+def page_data(*rows: dict, reference: dict | None = None) -> dict:
+    """Page data in the current layout, for the default model."""
+    return {
+        "rows": list(rows),
+        "references": {SPEC.model_id: reference} if reference else {},
     }
 
 
@@ -206,9 +215,32 @@ def test_spec_select():
 
 def test_spec_public_has_no_scorer_internals():
     public = SPEC.public()
-    assert public["bench_version"] == SPEC.bench_version
+    assert public["models"][0]["bench_version"] == SPEC.bench_version
     assert public["reference_version"] == SPEC.reference_version
     assert set(public["intrinsics"][0]) == {"id", "name", "headline", "headline_label"}
+
+
+def test_spec_for_another_model():
+    other = SPEC.models[1]
+    spec = SPEC.for_model(other.id)
+    assert (spec.model_id, spec.base_model, spec.bench_version) == (
+        other.id,
+        other.name,
+        other.bench_version,
+    )
+    assert spec.intrinsics == SPEC.intrinsics
+    assert SPEC.for_model(None) is SPEC
+    assert common.load_spec(model=other.id).model_id == other.id
+    with pytest.raises(ValueError, match="unknown model"):
+        SPEC.for_model("nope")
+
+
+def test_model_of_reads_old_blocks_by_base_model():
+    other = SPEC.models[1]
+    assert SPEC.model_of({"model": other.id, "base_model": "ignored"}) == other.id
+    assert SPEC.model_of({"base_model": SPEC.base_model}) == SPEC.model_id
+    with pytest.raises(ValueError, match="no model"):
+        SPEC.model_of({"base_model": "someone/else"})
 
 
 # --- results block ---------------------------------------------------------------
@@ -263,25 +295,26 @@ def test_cache_miss_on_old_bench_version():
 
 
 def test_find_row_by_prefix():
-    data = {"rows": [results_for(SHA_A), results_for("a" * 8 + "c" * 32)]}
-    assert publish.find_row(data, SHA_B) is None
-    assert publish.find_row(data, SHA_A)["commit"]["sha"] == SHA_A
+    data = page_data(results_for(SHA_A), results_for("a" * 8 + "c" * 32))
+    model = SPEC.model_id
+    assert publish.find_row(data, SHA_B, model) is None
+    assert publish.find_row(data, SHA_A, model)["commit"]["sha"] == SHA_A
     with pytest.raises(ValueError, match="matches 2 rows"):
-        publish.find_row(data, "aaaaaaaa")
+        publish.find_row(data, "aaaaaaaa", model)
 
 
 # --- merge ----------------------------------------------------------------------
 
 
 def test_merge_replaces_the_commits_row():
-    data = {"rows": [results_for(cells=cells_for(SPEC, 0.1))]}
+    data = page_data(results_for(cells=cells_for(SPEC, 0.1)))
     publish.merge(data, results_for(cells=cells_for(SPEC, 0.9)), SPEC)
     assert len(data["rows"]) == 1
     assert data["rows"][0]["cells"]["answerability"]["lora"]["accuracy"] == 0.9
 
 
 def test_merge_only_run_updates_just_those_intrinsics():
-    data = {"rows": [results_for(cells=cells_for(SPEC, 0.1))]}
+    data = page_data(results_for(cells=cells_for(SPEC, 0.1)))
     partial = results_for(cells=cells_for(SPEC, 0.9), only=["answerability"])
     row = publish.merge(data, partial, SPEC)
     assert len(data["rows"]) == 1
@@ -293,7 +326,7 @@ def test_merge_only_run_updates_just_those_intrinsics():
 def test_merge_only_run_on_old_row_replaces_it():
     old = results_for(cells=cells_for(SPEC, 0.1))
     old["bench_version"] = SPEC.bench_version - 1
-    data = {"rows": [old]}
+    data = page_data(old)
     partial = results_for(cells=cells_for(SPEC, 0.9), only=["answerability"])
     publish.merge(data, partial, SPEC)
     assert data["rows"] == [partial]
@@ -301,11 +334,64 @@ def test_merge_only_run_on_old_row_replaces_it():
 
 def test_merge_refuses_limit_runs_and_other_versions():
     with pytest.raises(ValueError, match="--limit"):
-        publish.merge({"rows": []}, results_for(limit=20), SPEC)
+        publish.merge(page_data(), results_for(limit=20), SPEC)
     other = results_for()
     other["bench_version"] = SPEC.bench_version + 1
     with pytest.raises(ValueError, match="bench_version"):
-        publish.merge({"rows": []}, other, SPEC)
+        publish.merge(page_data(), other, SPEC)
+
+
+def for_other_model(block: dict) -> dict:
+    """``block`` as the second model's."""
+    other = SPEC.models[1]
+    block.update(
+        model=other.id, base_model=other.name, bench_version=other.bench_version
+    )
+    return block
+
+
+def test_load_data_reads_the_one_model_layout(tmp_path):
+    row, ref = results_for(), reference_for()
+    del row["model"], ref["model"]
+    path = tmp_path / "data.json"
+    path.write_text(json.dumps({"rows": [row], "reference": ref}))
+
+    data = publish.load_data(path, SPEC)
+    assert "reference" not in data
+    assert data["references"][SPEC.model_id]["model"] == SPEC.model_id
+    assert data["rows"][0]["model"] == SPEC.model_id
+    empty = publish.load_data(tmp_path / "missing.json", SPEC)
+    assert empty == {"rows": [], "references": {}}
+
+
+def test_models_keep_their_own_rows_and_references():
+    other = SPEC.models[1].id
+    data = page_data(results_for(cells=cells_for(SPEC, 0.5)))
+    # SPEC is for the first model; each block names its own.
+    publish.merge(data, for_other_model(results_for(cells=cells_for(SPEC, 0.9))), SPEC)
+    publish.merge_reference(data, for_other_model(reference_for()), SPEC)
+
+    assert len(data["rows"]) == 2
+    for model, value in ((SPEC.model_id, 0.5), (other, 0.9)):
+        row = publish.find_row(data, SHA_A, model)
+        assert row["cells"]["answerability"]["lora"]["accuracy"] == value
+    assert set(data["references"]) == {other}
+
+
+def test_cli_check_takes_a_model(tmp_path, capsys):
+    data = tmp_path / "data.json"
+    results = tmp_path / "results.json"
+    other = SPEC.models[1].id
+    results.write_text(json.dumps(for_other_model(results_for())))
+    cli = ["--data", str(data)]
+
+    assert publish.main([*cli, "merge", str(results)]) == 0
+    assert publish.main([*cli, "check", SHA_A, "--model", other]) == 0
+    capsys.readouterr()
+    assert publish.main([*cli, "check", SHA_A]) == 1  # the first model has no row
+    assert f"no {SPEC.model_id} row" in capsys.readouterr().out
+    assert publish.main([*cli, "check-reference", "--model", other]) == 1
+    assert f"no reference columns for {other}" in capsys.readouterr().out
 
 
 def test_save_data_sorts_newest_first(tmp_path):
@@ -330,7 +416,7 @@ def test_cli_check_merge_render(tmp_path, capsys):
     log.write_text("noise\n" + common.format_results_block(results_for()) + "\n")
 
     assert publish.main(["--data", str(data), "check", SHA_A]) == 1
-    assert "no row" in capsys.readouterr().out
+    assert f"no {SPEC.model_id} row" in capsys.readouterr().out
     assert (
         publish.main(["--data", str(data), "extract", str(log), "--out", str(results)])
         == 0
@@ -359,7 +445,7 @@ def test_render_cells_and_escaping():
     old = results_for(SHA_B)
     old["bench_version"] = SPEC.bench_version - 1
 
-    page = publish.render({"rows": [row, old]}, SPEC)
+    page = publish.render(page_data(row, old), SPEC)
 
     assert "<script>alert" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
@@ -383,6 +469,7 @@ def reference_for(value: float = 0.5, cells: dict | None = None, **run) -> dict:
             for i in SPEC.intrinsics
         }
     return {
+        "model": SPEC.model_id,
         "reference_version": SPEC.reference_version,
         "bench_version": SPEC.bench_version,
         "base_model": SPEC.base_model,
@@ -446,13 +533,14 @@ def test_parse_only():
 
 
 def test_merge_reference_full_then_only_run():
-    data = {"rows": []}
+    data = page_data()
     publish.merge_reference(data, reference_for(0.1), SPEC)
-    assert data["reference"]["cells"]["answerability"]["lora"]["accuracy"] == 0.1
+    stored = data["references"][SPEC.model_id]
+    assert stored["cells"]["answerability"]["lora"]["accuracy"] == 0.1
 
     partial = reference_for(0.9, only=["answerability/sr", "guardian_core/base"])
     stored = publish.merge_reference(data, partial, SPEC)
-    assert stored is data["reference"]
+    assert stored is data["references"][SPEC.model_id]
     cells = stored["cells"]
     assert cells["answerability"]["sr"]["accuracy"] == 0.9
     assert cells["guardian_core"]["base"] == partial["cells"]["guardian_core"]["base"]
@@ -464,20 +552,20 @@ def test_merge_reference_full_then_only_run():
 def test_merge_reference_only_run_over_an_old_reference_replaces_it():
     old = reference_for(0.1)
     old["reference_version"] -= 1
-    data = {"rows": [], "reference": old}
+    data = page_data(reference=old)
     partial = reference_for(0.9, only=["answerability/sr"])
     publish.merge_reference(data, partial, SPEC)
-    assert data["reference"] is partial
+    assert data["references"][SPEC.model_id] is partial
 
 
 def test_merge_reference_refuses_limit_runs_and_other_versions():
     with pytest.raises(ValueError, match="--limit"):
-        publish.merge_reference({"rows": []}, reference_for(limit=20), SPEC)
+        publish.merge_reference(page_data(), reference_for(limit=20), SPEC)
     for key in ("bench_version", "reference_version"):
         other = reference_for()
         other[key] += 1
         with pytest.raises(ValueError, match="adapters.yaml"):
-            publish.merge_reference({"rows": []}, other, SPEC)
+            publish.merge_reference(page_data(), other, SPEC)
 
 
 def test_cli_reference_check_extract_merge(tmp_path, capsys):
@@ -502,7 +590,8 @@ def test_cli_reference_check_extract_merge(tmp_path, capsys):
     out.write_text(json.dumps(fix))
     assert publish.main([*cli, "merge-reference", str(out)]) == 0
     assert publish.main([*cli, "check-reference"]) == 0
-    assert json.loads(data.read_text())["reference"]["updates"] == [fix["run"]]
+    saved = json.loads(data.read_text())["references"][SPEC.model_id]
+    assert saved["updates"] == [fix["run"]]
 
 
 def test_render_reference_columns():
@@ -513,7 +602,7 @@ def test_render_reference_columns():
     ref["cells"]["answerability"]["alora"] = {"accuracy": 0.9, "n": 10}
     del ref["cells"]["answerability"]["base"]
 
-    page = publish.render({"rows": [row, old], "reference": ref}, SPEC)
+    page = publish.render(page_data(row, old, reference=ref), SPEC)
 
     n = len(SPEC.intrinsics)
     assert page.count('colspan="7"') == n
@@ -531,10 +620,10 @@ def test_render_reference_columns():
 
     stale = reference_for()
     stale["reference_version"] -= 1
-    page = publish.render({"rows": [row], "reference": stale}, SPEC)
+    page = publish.render(page_data(row, reference=stale), SPEC)
     assert 'title="reference out of date">·</td>' in page
     assert "They are not computed yet." in page
-    page = publish.render({"rows": [row]}, SPEC)
+    page = publish.render(page_data(row), SPEC)
     assert 'title="reference not computed yet">·</td>' in page
 
 
@@ -591,6 +680,7 @@ def test_reference_run(tmp_path, monkeypatch, capsys):
     assert reference.main(argv) == 0
 
     result = json.loads((work / "reference.json").read_text())
+    assert result["model"] == SPEC.model_id
     cells = result["cells"]["answerability"]
     assert cells["lora"]["accuracy"] == 1.0 and cells["lora"]["truncated"] == 1
     assert cells["alora"]["accuracy"] == 0.0
@@ -1221,20 +1311,22 @@ def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypat
     monkeypatch.setattr(run_benchmark, "compose", fake_compose)
     monkeypatch.setattr(run_benchmark, "generate", lambda *a: {"jobs": {}})
     work = tmp_path / "work"
-    assert (
-        run_benchmark.main(
-            [
-                "--bench-root", str(bench),
-                "--work-dir", str(work),
-                "--repo-dir", str(tmp_path),
-                "--base-model", str(write_base(tmp_path / "base")),
-                "--only", "answerability",
-            ]
-        )
-        == 0
-    )  # fmt: skip
+    argv = [
+        "--bench-root", str(bench),
+        "--work-dir", str(work),
+        "--repo-dir", str(tmp_path),
+        "--base-model", str(write_base(tmp_path / "base")),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert run_benchmark.main(argv) == 0
 
     results = json.loads((work / "results.json").read_text())
+    assert results["model"] == SPEC.model_id
+    assert {"torch", "transformers"} <= set(results["run"])
+    assert set(results["run"]["adapters"]) == {
+        "answerability/lora",
+        "answerability/alora",
+    }
     cells = results["cells"]["answerability"]
     assert cells["alora"] == common.error(
         "adapter weights name modules the base model lacks"
@@ -1250,6 +1342,10 @@ def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypat
         )
         == []
     )
+    # This root holds the first model's cells.
+    other = ["--model", SPEC.models[1].id]
+    with pytest.raises(ValueError, match="staged for"):
+        run_benchmark.main([*argv, *other])
 
 
 def test_compose_manifest_keeps_lora_and_alora_of_one_intrinsic_apart(tmp_path):
@@ -1262,6 +1358,24 @@ def test_compose_manifest_keeps_lora_and_alora_of_one_intrinsic_apart(tmp_path):
         "answerability_lora": {"path": str(tmp_path / "lora"), "type": "lora"},
         "answerability_alora": {"path": str(tmp_path / "alora"), "type": "alora"},
     }
+
+
+def test_check_bench_root(tmp_path):
+    other = SPEC.for_model(SPEC.models[1].id)
+    empty = tmp_path / "empty"
+    assert staged.bench_root_model(empty, SPEC) is None
+    staged.check_bench_root(empty, other)  # nothing staged yet: any model
+
+    # A root staged before there were several models holds the first model's.
+    legacy = tmp_path / "legacy"
+    write_eval(staged.eval_path(legacy, "answerability"))
+    assert staged.bench_root_model(legacy, SPEC) == SPEC.model_id
+    staged.check_bench_root(legacy, SPEC)
+    with pytest.raises(ValueError, match=f"staged for {SPEC.model_id}, not"):
+        staged.check_bench_root(legacy, other)
+
+    (legacy / staged.MODEL_FILE).write_text(json.dumps({"model": other.model_id}))
+    staged.check_bench_root(legacy, other)
 
 
 def test_check_adapter_catches_a_wrong_folder(tmp_path):
@@ -1689,9 +1803,16 @@ def test_apply_stages_the_selection(tmp_path, capsys):
     assert cells["answerability", "sr"] is None
     assert cells["answerability", "alora"] == "adapter not staged"
 
+    assert json.loads((bench / staged.MODEL_FILE).read_text())["model"] == (
+        SPEC.model_id
+    )
+
     # A second apply keeps what is staged unless --replace is given.
     assert stage.main(argv) == 1
     assert "already staged" in capsys.readouterr().out
+    # Another model's cells never go into this root.
+    with pytest.raises(ValueError, match="staged for"):
+        stage.main([*argv, "--model", SPEC.models[1].id])
 
 
 def test_apply_refuses_an_sr_run_without_shared_kv(tmp_path, capsys):
@@ -1862,7 +1983,8 @@ def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
         str(out),
     ]
 
-    assert render_job.main([*argv, "--only", "answerability/sr"]) == 0  # no --sha
+    other = SPEC.models[1].id
+    assert render_job.main([*argv, "--only", "answerability/sr", "--model", other]) == 0
 
     values = json.loads(out.read_text())
     job_env = {
@@ -1870,6 +1992,7 @@ def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
     }
     assert values["numGpusPerPod"] == 4
     assert job_env["ADAPTER_BENCH_MODE"] == "reference"
+    assert job_env["ADAPTER_BENCH_MODEL"] == other
     assert job_env["ADAPTER_BENCH_ONLY"] == "answerability/sr"
     assert "ADAPTER_BENCH_COMMIT" not in job_env
     assert job_env["ADAPTER_BENCH_SR_REF"] == sha  # the ref, resolved

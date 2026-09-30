@@ -3,26 +3,30 @@
 
 Runs locally, not on the pod::
 
-    python -m benchmarks.adapter_eval.publish check <sha>        # exit 0 = hit
-    python -m benchmarks.adapter_eval.publish check-reference    # exit 0 = hit
+    python -m benchmarks.adapter_eval.publish check <sha> [--model <id>]  # exit 0 = hit
+    python -m benchmarks.adapter_eval.publish check-reference [--model <id>]
     python -m benchmarks.adapter_eval.publish extract <pod.log> --out results.json
     python -m benchmarks.adapter_eval.publish extract <pod.log> --kind discovery ...
     python -m benchmarks.adapter_eval.publish merge results.json
     python -m benchmarks.adapter_eval.publish merge-reference reference.json
     python -m benchmarks.adapter_eval.publish render
 
-The page data (``docs/benchmarks/data.json``) holds one row per commit, each
-row being the results block ``run_benchmark.py`` printed. A commit is a cache
-hit when its row has the current ``bench_version`` and every
-(intrinsic, technology) cell is present and not an error. Skipped cells
-(nothing staged) do count as done: staging a new adapter is a
-``bench_version`` bump.
+The page data (``docs/benchmarks/data.json``) holds one row per (commit,
+model), each row being the results block ``run_benchmark.py`` printed. A
+commit is a cache hit for a model when its row has the model's current
+``bench_version`` and every (intrinsic, technology) cell is present and not an
+error. Skipped cells (nothing staged) do count as done: staging a new adapter
+is a ``bench_version`` bump.
 
 The reference columns (``reference.py``) do not depend on the commit, so the
-page data holds them once, under ``reference``, and the page repeats them on
-every row of their ``bench_version``. They are a cache hit when they have the
-current ``bench_version`` and ``reference_version`` and every
-(intrinsic, column) cell is present and not an error.
+page data holds them once per model, under ``references``, and the page
+repeats them on every row of their model and ``bench_version``. They are a
+cache hit when they have the model's current ``bench_version``, the current
+``reference_version``, and every (intrinsic, column) cell present and not an
+error.
+
+Blocks and data from before there were several models name only the base
+model; they are read as the model with that base model.
 """
 
 from __future__ import annotations
@@ -69,10 +73,18 @@ BASE_LABEL = "Base"
 # --- data ------------------------------------------------------------------
 
 
-def load_data(path: Path) -> dict:
-    if not path.is_file():
-        return {"rows": []}
-    return json.loads(path.read_text())
+def load_data(path: Path, spec: Spec) -> dict:
+    """The page data, in the current layout (see the module docstring)."""
+    data = json.loads(path.read_text()) if path.is_file() else {}
+    data.setdefault("rows", [])
+    references = data.setdefault("references", {})
+    single = data.pop("reference", None)  # the one-model layout
+    if single is not None:
+        single.setdefault("model", spec.model_of(single))
+        references.setdefault(single["model"], single)
+    for row in data["rows"]:
+        row.setdefault("model", spec.model_of(row))
+    return data
 
 
 def save_data(path: Path, data: dict, spec: Spec) -> None:
@@ -82,8 +94,12 @@ def save_data(path: Path, data: dict, spec: Spec) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
-def find_row(data: dict, sha: str) -> dict | None:
-    matches = [r for r in data["rows"] if r["commit"]["sha"].startswith(sha)]
+def find_row(data: dict, sha: str, model_id: str) -> dict | None:
+    matches = [
+        r
+        for r in data["rows"]
+        if r["model"] == model_id and r["commit"]["sha"].startswith(sha)
+    ]
     if len(matches) > 1:
         raise ValueError(f"{sha!r} matches {len(matches)} rows; use the full sha")
     return matches[0] if matches else None
@@ -111,19 +127,22 @@ def cache_hit(row: dict | None, spec: Spec) -> bool:
 def merge(data: dict, results: dict, spec: Spec) -> dict:
     """Put a run's results into ``data`` and return the stored row.
 
-    A full run replaces the commit's row. An ``--only`` run replaces just
-    those intrinsics inside the existing row of the same ``bench_version``.
+    A full run replaces the commit's row for its model. An ``--only`` run
+    replaces just those intrinsics inside the existing row of the same
+    ``bench_version``.
     """
+    spec = spec.for_model(spec.model_of(results))
+    results["model"] = spec.model_id
     run = results["run"]
     if run.get("limit") is not None:
         raise ValueError("refusing to publish a --limit run")
     if results["bench_version"] != spec.bench_version:
         raise ValueError(
             f"results are bench_version {results['bench_version']}, "
-            f"adapters.yaml is {spec.bench_version}"
+            f"adapters.yaml has {spec.bench_version} for {spec.model_id}"
         )
     sha = results["commit"]["sha"]
-    old = find_row(data, sha)
+    old = find_row(data, sha, spec.model_id)
     if run.get("only") and old and old.get("bench_version") == spec.bench_version:
         for intrinsic_id in run["only"]:
             old["cells"][intrinsic_id] = results["cells"][intrinsic_id]
@@ -176,9 +195,11 @@ def only_arg(keys: list[str]) -> str:
 def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
     """Put a reference run into ``data`` and return the stored reference.
 
-    A full run replaces the stored reference. An ``--only`` run replaces just
-    its cells inside a stored reference of the same versions.
+    A full run replaces its model's stored reference. An ``--only`` run
+    replaces just its cells inside a stored reference of the same versions.
     """
+    spec = spec.for_model(spec.model_of(reference))
+    reference["model"] = spec.model_id
     run = reference["run"]
     if run.get("limit") is not None:
         raise ValueError("refusing to publish a --limit run")
@@ -186,9 +207,9 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
         raise ValueError(
             f"reference is bench_version {reference.get('bench_version')}, "
             f"reference_version {reference.get('reference_version')}; adapters.yaml "
-            f"is {spec.bench_version}, {spec.reference_version}"
+            f"has {spec.bench_version}, {spec.reference_version} for {spec.model_id}"
         )
-    old = data.get("reference")
+    old = data["references"].get(spec.model_id)
     if run.get("only") and reference_current(old, spec):
         for key in run["only"]:
             intrinsic_id, column = key.split("/")
@@ -197,7 +218,7 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
             ][column]
         old.setdefault("updates", []).append(run)
         return old
-    data["reference"] = reference
+    data["references"][spec.model_id] = reference
     return reference
 
 
@@ -310,7 +331,7 @@ def _reference_note(reference: dict | None, spec: Spec) -> str:
 def render(data: dict, spec: Spec) -> str:
     techs = spec.technologies
     ref_columns = [t.id for t in techs] + [BASE_COLUMN]
-    reference = data.get("reference")
+    reference = data["references"].get(spec.model_id)
     head = [
         [f'<th rowspan="3">{h}</th>' for h in ("Commit", "Date", "Subject")],
         [],
@@ -336,7 +357,7 @@ def render(data: dict, spec: Spec) -> str:
         head[2].extend(f'<th class="ref">{_esc(t.label)}</th>' for t in techs)
 
     body = []
-    for row in data["rows"]:
+    for row in [r for r in data["rows"] if r["model"] == spec.model_id]:
         commit = row["commit"]
         sha = commit["sha"]
         old = row.get("bench_version") != spec.bench_version
@@ -430,9 +451,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check", help="exit 0 and print the row on a cache hit")
     c.add_argument("sha")
-    sub.add_parser(
+    c.add_argument("--model", default=None, help="default: the first model")
+    cr = sub.add_parser(
         "check-reference", help="exit 0 and print the reference columns on a cache hit"
     )
+    cr.add_argument("--model", default=None, help="default: the first model")
     e = sub.add_parser("extract", help="pull a JSON block out of a pod log")
     e.add_argument("log", type=Path)
     e.add_argument("--out", type=Path, required=True)
@@ -458,26 +481,28 @@ def main(argv: list[str] | None = None) -> int:
             print(f"extracted {args.kind} block to {args.out}")
         return 0
 
-    data = load_data(args.data)
+    data = load_data(args.data, spec)
+    if args.cmd in ("check", "check-reference"):
+        spec = spec.for_model(args.model)
     if args.cmd == "check":
-        row = find_row(data, args.sha)
+        row = find_row(data, args.sha, spec.model_id)
         if cache_hit(row, spec):
             print(json.dumps(row, indent=2, sort_keys=True))
             return 0
         if row is None:
-            print(f"cache miss: no row for {args.sha}")
+            print(f"cache miss: no {spec.model_id} row for {args.sha}")
         elif row.get("bench_version") != spec.bench_version:
             print(f"cache miss: row is bench_version {row.get('bench_version')}")
         else:
             print(f"cache miss: cells to run: {', '.join(missing_cells(row, spec))}")
         return 1
     if args.cmd == "check-reference":
-        reference = data.get("reference")
+        reference = data["references"].get(spec.model_id)
         if reference_hit(reference, spec):
             print(json.dumps(reference, indent=2, sort_keys=True))
             return 0
         if reference is None:
-            print("cache miss: no reference columns")
+            print(f"cache miss: no reference columns for {spec.model_id}")
         elif not reference_current(reference, spec):
             print(
                 f"cache miss: reference is bench_version {reference.get('bench_version')}, "
@@ -494,12 +519,12 @@ def main(argv: list[str] | None = None) -> int:
         results = json.loads(args.results.read_text())
         row = merge(data, results, spec)
         save_data(args.data, data, spec)
-        print(f"merged {row['commit']['sha'][:8]} into {args.data}")
+        print(f"merged {row['commit']['sha'][:8]} ({row['model']}) into {args.data}")
         return 0
     if args.cmd == "merge-reference":
-        merge_reference(data, json.loads(args.reference.read_text()), spec)
+        stored = merge_reference(data, json.loads(args.reference.read_text()), spec)
         save_data(args.data, data, spec)
-        print(f"merged the reference columns into {args.data}")
+        print(f"merged the {stored['model']} reference columns into {args.data}")
         return 0
     if args.cmd == "render":
         args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -2,8 +2,8 @@
 #
 # Adapter accuracy benchmark definition.
 #
-# Every (intrinsic, technology) pair is one results cell. A cell is run when
-# its staged checkpoint exists under the bench root:
+# Every (model, intrinsic, technology) triple is one results cell. A cell is
+# run when its staged checkpoint exists under the model's bench root:
 #
 #   <bench_root>/adapters/<intrinsic id>/<technology id>/
 #       adapter_config.json, adapter_model.safetensors, provenance.json
@@ -12,21 +12,33 @@
 # and is shown as skipped otherwise. To add an intrinsic: add an entry here,
 # a scorer under scorers/ if none fits, and stage its folders.
 #
-# Bump bench_version when a change here or in the harness would change the
-# numbers (eval set, scorer, generation settings, adapter checkpoints). Rows
-# with an older version stay on the page but are not cache hits.
+# Bump a model's bench_version when a change here or in the harness would
+# change its numbers (eval set, scorer, generation settings, adapter
+# checkpoints). Rows with an older version stay on the page but are not cache
+# hits. A change for every model bumps each of them.
 #
 # The reference columns run the same checkpoints without granite-switch (HF +
 # PEFT), plus the base model with no adapter. They do not depend on the
-# commit, so they are computed once (`submit.sh reference`) and shown on every
-# row of the current bench_version. Bump reference_version when a change
+# commit, so they are computed once per model (`submit.sh reference`) and shown
+# on every row of its current bench_version. Bump reference_version when a change
 # alters only them: the pinned library versions, the SR model code, or the
 # reference generation (hf_generate.py). A bench_version bump also
 # invalidates them.
 
-bench_version: 1
 reference_version: 1
-base_model: ibm-granite/granite-4.1-3b
+
+# One entry per base model, each with its own bench root (staged adapters and
+# eval sets), bench_version and tab on the page. The first is the default of
+# every command's --model.
+models:
+  - id: granite-4.1-3b
+    name: ibm-granite/granite-4.1-3b
+    label: Granite 4.1 3B
+    bench_version: 1
+  - id: granite-4.2-3b
+    name: ibm-research/granite-4.2-3b-prerelease-r260622a
+    label: Granite 4.2 3B (prerelease)
+    bench_version: 1
 
 technologies:
   - id: lora

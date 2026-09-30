@@ -7,12 +7,13 @@ commit::
 
     cd <harness> && <commit>/.venv/bin/python -m benchmarks.adapter_eval.run_benchmark \\
         --repo-dir <commit checkout> --bench-root <staged adapters + eval> \\
-        --work-dir <outputs> [--limit 20] [--only answerability,guardian_core]
+        --work-dir <outputs> [--model granite-4.2-3b] [--limit 20] \\
+        [--only answerability,guardian_core]
 
 Steps:
 
-1. Find the staged cells (``staged.py``); a missing or malformed checkpoint
-   becomes a skipped cell.
+1. Find the staged cells (``staged.py``) of the model's bench root; a
+   missing or malformed checkpoint becomes a skipped cell.
 2. Compose twice with the commit's composer CLI: all LoRA + aLoRA adapters
    into one checkpoint, all SR adapters into another. SR is a
    whole-checkpoint dual-stream mode and cannot be mixed with the others.
@@ -24,7 +25,9 @@ Steps:
    without a word.
 3. Generate greedily for every cell, one subprocess per composed checkpoint.
 4. Score every cell and print the results block (``common.py``) that
-   ``publish.py`` reads from the pod log.
+   ``publish.py`` reads from the pod log. It also records the library
+   versions and each staged checkpoint's fingerprint
+   (``staged.fingerprint``), for the page's details box.
 
 Everything the run produced (manifests, predictions, full score reports) is
 kept under ``--work-dir``.
@@ -39,6 +42,7 @@ import os
 import subprocess
 import sys
 import traceback
+from importlib import metadata
 from pathlib import Path
 
 from . import staged
@@ -154,6 +158,17 @@ def generation_prompt_anchor(base_model: str) -> tuple[str, int]:
     return tokenizer.decode([anchor_id]), anchor_id
 
 
+def versions(names: tuple[str, ...]) -> dict[str, str | None]:
+    """Installed versions of ``names``; None for one that is not installed."""
+    out = {}
+    for name in names:
+        try:
+            out[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            out[name] = None
+    return out
+
+
 def base_model_dir(base_model: str) -> Path:
     if Path(base_model).is_dir():
         return Path(base_model)
@@ -220,9 +235,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--repo-dir", required=True, type=Path, help="commit checkout")
     p.add_argument(
+        "--model", default=None, help="adapters.yaml model id (default: the first)"
+    )
+    p.add_argument(
         "--base-model",
         default=None,
-        help="local copy of the adapters.yaml base model (default: download it)",
+        help="local copy of the model's base model (default: download it)",
     )
     p.add_argument("--limit", type=int, default=None, help="rows per eval set")
     p.add_argument("--only", default=None, help="comma-separated intrinsic ids")
@@ -247,7 +265,8 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     started = now()
-    spec = load_spec()
+    spec = load_spec(model=args.model)
+    staged.check_bench_root(args.bench_root, spec)
     only = [s.strip() for s in args.only.split(",")] if args.only else None
     work = args.work_dir.resolve()
     model_root = (args.model_dir or work / "models").resolve()
@@ -256,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     base_model = args.base_model or spec.base_model
     commit = commit_info(args.repo_dir)
     print(f"[bench] commit {commit['sha']} — {commit['subject']}", flush=True)
+    print(f"[bench] model {spec.model_id} ({spec.base_model})", flush=True)
 
     cells: dict[str, dict[str, dict]] = {}
     runnable: dict[str, list[staged.StagedCell]] = {g: [] for g in COMPOSE_GROUPS}
@@ -279,6 +299,13 @@ def main(argv: list[str] | None = None) -> int:
         "scheduler": None,
         "sr_anchor_converted": [],
         "mlp_keys_renamed": [],
+        # The versions the commit's lockfile installed.
+        **versions(("torch", "transformers")),
+        "adapters": {
+            f"{c.intrinsic}/{c.tech}": staged.fingerprint(c.adapter_dir)
+            for group_cells in runnable.values()
+            for c in group_cells
+        },
     }
     base_modules: set[str] | None = None
     for group, group_cells in runnable.items():
@@ -416,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             cells[c.intrinsic][c.tech] = cell
 
     results = {
+        "model": spec.model_id,
         "bench_version": spec.bench_version,
         "base_model": spec.base_model,
         "commit": commit,

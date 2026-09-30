@@ -13,6 +13,11 @@ choice in between::
     python -m benchmarks.adapter_eval.stage apply \\
         --selection selection.json --bench-root <dir> [--judge-prompt <file>]
 
+Both take ``--model`` (default: the first in ``adapters.yaml``): the draft
+picks checkpoints trained on that base model, and a bench root holds one
+model's cells only. ``apply`` records the model in the root and refuses a
+root staged for another.
+
 ``discover`` prints its findings between markers so they can be read back
 from the pod log. Nothing is written by it. A root given as
 ``<intrinsic>=<dir>`` names the intrinsic of everything under it whose path
@@ -438,7 +443,7 @@ def short_base(name: str | None) -> str:
 
 
 def cmd_discover(args) -> int:
-    spec = load_spec()
+    spec = load_spec(model=args.model)
     adapters, evals = [], []
 
     unweighted = []
@@ -579,11 +584,16 @@ def check_judge_prompt(path: Path) -> None:
 
 
 def cmd_apply(args) -> int:
-    spec = load_spec()
+    spec = load_spec(model=args.model)
     selection = json.loads(args.selection.read_text())
     root = args.bench_root
-    report = {"adapters": {}, "eval": {}}
+    report = {"model": spec.model_id, "adapters": {}, "eval": {}}
     failures = 0
+    staged.check_bench_root(root, spec)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / staged.MODEL_FILE).write_text(
+        json.dumps({"model": spec.model_id, "name": spec.base_model}, indent=2)
+    )
 
     for intrinsic_id, by_tech in selection.get("adapters", {}).items():
         spec.intrinsic(intrinsic_id)
@@ -672,7 +682,9 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--adapter-root", action="append", default=[], help=root_help)
     d.add_argument("--eval-root", action="append", default=[], help=root_help)
     d.add_argument("--max-depth", type=int, default=8)
+    d.add_argument("--model", default=None, help="draft for this model")
     a = sub.add_parser("apply")
+    a.add_argument("--model", default=None, help="the model the root is for")
     a.add_argument("--selection", type=Path, required=True)
     a.add_argument("--bench-root", type=Path, required=True)
     a.add_argument("--judge-prompt", type=Path, default=None)
