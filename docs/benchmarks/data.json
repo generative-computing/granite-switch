@@ -122,28 +122,28 @@
         },
         "query_rewrite": {
           "alora": {
-            "accuracy_over_total": 0.7034220532319392,
-            "accuracy_over_valid": 0.8371040723981901,
+            "accuracy_over_total": 0.6967680608365019,
+            "accuracy_over_valid": 0.8434982738780207,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 4,
-            "ungraded": 168
+            "ungraded": 183
           },
           "lora": {
-            "accuracy_over_total": 0.7195817490494296,
-            "accuracy_over_valid": 0.8458100558659218,
+            "accuracy_over_total": 0.7167300380228137,
+            "accuracy_over_valid": 0.853907134767837,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 1,
-            "ungraded": 157
+            "ungraded": 169
           },
           "sr": {
             "accuracy_over_total": 0.7157794676806084,
-            "accuracy_over_valid": 0.8527746319365799,
+            "accuracy_over_valid": 0.8556818181818182,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 8,
-            "ungraded": 169
+            "ungraded": 172
           }
         },
         "requirement_check": {
@@ -187,10 +187,10 @@
       "run": {
         "base_model_local_copy": false,
         "enforce_eager": false,
-        "finished": "2026-09-30T00:04:46Z",
+        "finished": "2026-09-30T07:14:41Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
-        "harness_dirty": true,
-        "harness_sha": "6013c7ff82a73020f1d1fb00dcdc323398fffb38",
+        "harness_dirty": false,
+        "harness_sha": "13acf395d95676bd099f738713dd6ecb64989838",
         "limit": null,
         "max_model_len": 32768,
         "mlp_keys_renamed": [
@@ -228,7 +228,7 @@
           "guardian_core",
           "requirement_check"
         ],
-        "started": "2026-09-29T22:22:29Z",
+        "started": "2026-09-30T05:30:14Z",
         "vllm": "0.19.1"
       }
     }
