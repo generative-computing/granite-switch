@@ -4,9 +4,11 @@
 Runs locally, not on the pod::
 
     python -m benchmarks.adapter_eval.publish check <sha>        # exit 0 = hit
+    python -m benchmarks.adapter_eval.publish check-reference    # exit 0 = hit
     python -m benchmarks.adapter_eval.publish extract <pod.log> --out results.json
     python -m benchmarks.adapter_eval.publish extract <pod.log> --kind discovery ...
     python -m benchmarks.adapter_eval.publish merge results.json
+    python -m benchmarks.adapter_eval.publish merge-reference reference.json
     python -m benchmarks.adapter_eval.publish render
 
 The page data (``docs/benchmarks/data.json``) holds one row per commit, each
@@ -15,6 +17,12 @@ hit when its row has the current ``bench_version`` and every
 (intrinsic, technology) cell is present and not an error. Skipped cells
 (nothing staged) do count as done: staging a new adapter is a
 ``bench_version`` bump.
+
+The reference columns (``reference.py``) do not depend on the commit, so the
+page data holds them once, under ``reference``, and the page repeats them on
+every row of their ``bench_version``. They are a cache hit when they have the
+current ``bench_version`` and ``reference_version`` and every
+(intrinsic, column) cell is present and not an error.
 """
 
 from __future__ import annotations
@@ -27,8 +35,13 @@ from pathlib import Path
 
 from . import stage
 from .common import (
+    BASE_COLUMN,
     BEGIN_MARKER,
     END_MARKER,
+    REFERENCE_BEGIN,
+    REFERENCE_COLUMNS,
+    REFERENCE_END,
+    REFERENCE_LIBRARIES,
     Spec,
     extract_block,
     is_error,
@@ -43,9 +56,14 @@ PAGE_PATH = REPO_ROOT / "docs" / "benchmarks" / "index.html"
 COMMIT_URL = "https://github.com/generative-computing/granite-switch/commit/{sha}"
 BLOCKS = {
     "results": (BEGIN_MARKER, END_MARKER),
+    "reference": (REFERENCE_BEGIN, REFERENCE_END),
     "discovery": (stage.DISCOVERY_BEGIN, stage.DISCOVERY_END),
     "stage": (stage.STAGE_BEGIN, stage.STAGE_END),
 }
+# Column-group labels on the page.
+ENGINE_LABEL = "granite-switch (vLLM)"
+REFERENCE_LABEL = "HF + PEFT"
+BASE_LABEL = "Base"
 
 
 # --- data ------------------------------------------------------------------
@@ -117,21 +135,91 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     return results
 
 
+def reference_current(reference: dict | None, spec: Spec) -> bool:
+    """Whether reference columns were computed for the current adapters.yaml."""
+    return (
+        reference is not None
+        and reference.get("bench_version") == spec.bench_version
+        and reference.get("reference_version") == spec.reference_version
+    )
+
+
+def reference_missing(reference: dict, spec: Spec) -> list[str]:
+    """Reference cells still to run, as ``intrinsic/column``."""
+    out = []
+    for intrinsic in spec.intrinsics:
+        for column in REFERENCE_COLUMNS:
+            cell = reference["cells"].get(intrinsic.id, {}).get(column)
+            if cell is None or is_error(cell):
+                out.append(f"{intrinsic.id}/{column}")
+    return out
+
+
+def reference_hit(reference: dict | None, spec: Spec) -> bool:
+    return reference_current(reference, spec) and not reference_missing(reference, spec)
+
+
+def only_arg(keys: list[str]) -> str:
+    """The ``reference.py --only`` value that runs exactly ``keys``."""
+    by_intrinsic: dict[str, list[str]] = {}
+    for key in keys:
+        intrinsic_id, column = key.split("/")
+        by_intrinsic.setdefault(intrinsic_id, []).append(column)
+    return ",".join(
+        intrinsic_id
+        if set(columns) == set(REFERENCE_COLUMNS)
+        else ",".join(f"{intrinsic_id}/{c}" for c in columns)
+        for intrinsic_id, columns in by_intrinsic.items()
+    )
+
+
+def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
+    """Put a reference run into ``data`` and return the stored reference.
+
+    A full run replaces the stored reference. An ``--only`` run replaces just
+    its cells inside a stored reference of the same versions.
+    """
+    run = reference["run"]
+    if run.get("limit") is not None:
+        raise ValueError("refusing to publish a --limit run")
+    if not reference_current(reference, spec):
+        raise ValueError(
+            f"reference is bench_version {reference.get('bench_version')}, "
+            f"reference_version {reference.get('reference_version')}; adapters.yaml "
+            f"is {spec.bench_version}, {spec.reference_version}"
+        )
+    old = data.get("reference")
+    if run.get("only") and reference_current(old, spec):
+        for key in run["only"]:
+            intrinsic_id, column = key.split("/")
+            old["cells"].setdefault(intrinsic_id, {})[column] = reference["cells"][
+                intrinsic_id
+            ][column]
+        old.setdefault("updates", []).append(run)
+        return old
+    data["reference"] = reference
+    return reference
+
+
 # --- page ------------------------------------------------------------------
 
 PAGE_STYLE = """
 :root { color-scheme: light; }
 body { font: 14px/1.4 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
        background: #fff; }
+.wrap { overflow-x: auto; }
 table { border-collapse: collapse; }
 th, td { border: 1px solid #d0d0d0; padding: 4px 8px; }
 th { background: #f3f3f3; font-weight: 600; }
+th.ref { background: #e6ecf4; }
+td.ref { background: #f5f8fc; }
+th.g, td.g { border-left: 2px solid #8a8a8a; }
 td.num { text-align: right; font-variant-numeric: tabular-nums; }
 td.best { font-weight: 700; }
 td.skip { color: #9a9a9a; text-align: center; }
 td.err { color: #b3261e; text-align: center; }
 td.date { white-space: nowrap; }
-td.subject { max-width: 28em; overflow: hidden; text-overflow: ellipsis;
+td.subject { max-width: 20em; overflow: hidden; text-overflow: ellipsis;
              white-space: nowrap; }
 tr.old td { color: #8a8a8a; }
 code { font-size: 13px; }
@@ -143,6 +231,19 @@ def _esc(text) -> str:
     return html.escape(str(text), quote=True)
 
 
+def _classes(*names: str) -> str:
+    joined = " ".join(n for n in names if n)
+    return f' class="{joined}"' if joined else ""
+
+
+def _headline(cell: dict | None, headline: str) -> float | None:
+    """A cell's headline value, or None when it has none."""
+    if cell is None or not is_scored(cell):
+        return None
+    value = cell.get(headline)
+    return value if isinstance(value, int | float) else None
+
+
 def _cell_title(cell: dict) -> str:
     return ", ".join(
         f"{k}={v:.4f}" if isinstance(v, float) else f"{k}={v}"
@@ -151,37 +252,95 @@ def _cell_title(cell: dict) -> str:
     )
 
 
-def _cell_html(cell: dict | None, headline: str, best: float | None) -> str:
+def _cell_html(
+    cell: dict | None,
+    headline: str,
+    best: float | None,
+    extra: str = "",
+    missing: str = "not run",
+) -> str:
+    """One ``<td>``; ``missing`` is the hover text when there is no cell."""
     if cell is None:
-        return '<td class="skip" title="not run">·</td>'
-    if "skipped" in cell:
-        return f'<td class="skip" title="{_esc(cell["skipped"])}">—</td>'
-    if is_error(cell):
-        return f'<td class="err" title="{_esc(cell["error"])}">error</td>'
-    value = cell.get(headline)
-    if not isinstance(value, int | float):
-        return f'<td class="err" title="no {_esc(headline)} metric">?</td>'
-    cls = "num best" if best is not None and value == best else "num"
-    return f'<td class="{cls}" title="{_esc(_cell_title(cell))}">{value * 100:.1f}</td>'
+        cls, title, text = "skip", missing, "·"
+    elif "skipped" in cell:
+        cls, title, text = "skip", cell["skipped"], "—"
+    elif is_error(cell):
+        cls, title, text = "err", cell["error"], "error"
+    elif _headline(cell, headline) is None:
+        cls, title, text = "err", f"no {headline} metric", "?"
+    else:
+        value = cell[headline]
+        cls = "num best" if value == best else "num"
+        title, text = _cell_title(cell), f"{value * 100:.1f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _reference_gap(reference: dict | None, row: dict, spec: Spec) -> str | None:
+    """Why ``row`` shows no reference columns, or None when it shows them."""
+    if reference is None:
+        return "reference not computed yet"
+    if reference.get("reference_version") != spec.reference_version:
+        return "reference out of date"
+    if row.get("bench_version") != reference.get("bench_version"):
+        return "no reference for this benchmark version"
+    return None
+
+
+def _reference_note(reference: dict | None, spec: Spec) -> str:
+    note = (
+        f"The {REFERENCE_LABEL} and {BASE_LABEL} columns do not depend on the "
+        "commit: they are computed once per benchmark version and repeated on "
+        "every row of it."
+    )
+    if (
+        reference is None
+        or reference.get("reference_version") != spec.reference_version
+    ):
+        return f"{note} They are not computed yet."
+    run = reference["run"]
+    libraries = ", ".join(
+        f"{name} {run[name]}" for name in REFERENCE_LIBRARIES if run.get(name)
+    )
+    return (
+        f"{note} Shown: benchmark v{reference['bench_version']}, computed "
+        f"{run['finished'][:10]} with {libraries}."
+    )
 
 
 def render(data: dict, spec: Spec) -> str:
     techs = spec.technologies
-    head_top = ['<th rowspan="2">Commit</th>', '<th rowspan="2">Date</th>']
-    head_top.append('<th rowspan="2">Subject</th>')
-    head_sub = []
+    ref_columns = [t.id for t in techs] + [BASE_COLUMN]
+    reference = data.get("reference")
+    head = [
+        [f'<th rowspan="3">{h}</th>' for h in ("Commit", "Date", "Subject")],
+        [],
+        [],
+    ]
     for intrinsic in spec.intrinsics:
-        head_top.append(
-            f'<th colspan="{len(techs)}">{_esc(intrinsic.name)}<br>'
+        head[0].append(
+            f'<th class="g" colspan="{len(techs) + len(ref_columns)}">'
+            f"{_esc(intrinsic.name)}<br>"
             f"<small>{_esc(intrinsic.headline_label)}</small></th>"
         )
-        head_sub.extend(f"<th>{_esc(t.label)}</th>" for t in techs)
+        head[1].append(
+            f'<th class="g" colspan="{len(techs)}">{_esc(ENGINE_LABEL)}</th>'
+        )
+        head[1].append(
+            f'<th class="ref" colspan="{len(techs)}">{_esc(REFERENCE_LABEL)}</th>'
+        )
+        head[1].append(f'<th class="ref" rowspan="2">{_esc(BASE_LABEL)}</th>')
+        head[2].extend(
+            f"<th{_classes('g' if k == 0 else '')}>{_esc(t.label)}</th>"
+            for k, t in enumerate(techs)
+        )
+        head[2].extend(f'<th class="ref">{_esc(t.label)}</th>' for t in techs)
 
     body = []
     for row in data["rows"]:
         commit = row["commit"]
         sha = commit["sha"]
         old = row.get("bench_version") != spec.bench_version
+        gap = _reference_gap(reference, row, spec)
         cells = [
             f'<td><a href="{_esc(COMMIT_URL.format(sha=sha))}"><code>'
             f"{_esc(sha[:8])}</code></a></td>",
@@ -191,21 +350,28 @@ def render(data: dict, spec: Spec) -> str:
         ]
         for intrinsic in spec.intrinsics:
             by_tech = row["cells"].get(intrinsic.id, {})
+            by_column = {} if gap else reference["cells"].get(intrinsic.id, {})
+            group = [by_tech.get(t.id) for t in techs]
+            group += [by_column.get(c) for c in ref_columns]
             scored = [
-                c[intrinsic.headline]
-                for c in by_tech.values()
-                if is_scored(c) and isinstance(c.get(intrinsic.headline), int | float)
+                v
+                for v in (_headline(c, intrinsic.headline) for c in group)
+                if v is not None
             ]
             best = max(scored) if len(scored) > 1 else None
-            cells.extend(
-                _cell_html(by_tech.get(t.id), intrinsic.headline, best) for t in techs
-            )
+            for k, cell in enumerate(group):
+                if k < len(techs):
+                    extra, missing = ("g" if k == 0 else ""), "not run"
+                else:
+                    extra, missing = "ref", gap or "not run"
+                cells.append(_cell_html(cell, intrinsic.headline, best, extra, missing))
         cls = ' class="old"' if old else ""
         body.append(f"<tr{cls}>" + "".join(cells) + "</tr>")
 
     tech_notes = "".join(
         f"<li><b>{_esc(t.label)}</b>: {_esc(t.source)}</li>" for t in techs
     )
+    n_columns = len(techs) + len(ref_columns)
     return f"""<!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Generated by benchmarks/adapter_eval/publish.py; do not edit. -->
@@ -217,25 +383,37 @@ def render(data: dict, spec: Spec) -> str:
 </head>
 <body>
 <h1>Granite Switch adapter benchmark</h1>
-<p class="note">Accuracy of trained intrinsic adapters after they are composed
-into <code>{_esc(spec.base_model)}</code> with each commit's composer and run
-with its vLLM backend (greedy decoding). Values are percentages; the best
-technology per adapter is bold. Hover a cell for all its metrics, or for the
-reason it is empty.</p>
+<p class="note">Accuracy of trained intrinsic adapters on
+<code>{_esc(spec.base_model)}</code> (greedy decoding). Values are
+percentages; the best of an adapter's {n_columns} columns is bold. Hover a
+cell for all its metrics, or for the reason it is empty.</p>
+<ul class="note">
+<li><b>{_esc(ENGINE_LABEL)}</b>: the adapters composed into the base model
+with each commit's composer and run with its vLLM backend.</li>
+<li><b>{_esc(REFERENCE_LABEL)}</b>: the same adapter checkpoints without
+granite-switch, loaded with Hugging Face transformers and PEFT. SR runs on a
+standalone Hugging Face implementation of the Shadow Residual model.</li>
+<li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter, with Hugging
+Face transformers.</li>
+</ul>
+<p class="note">{_esc(_reference_note(reference, spec))}</p>
+<p class="note">Adapters:</p>
 <ul class="note">{tech_notes}</ul>
 <p class="note"><b>—</b> no adapter or eval set for this cell;
-<b>·</b> not run for this commit; <b>error</b> the run failed (hover for the
-step). Greyed rows used an older benchmark version (current:
-v{spec.bench_version}).</p>
+<b>·</b> not run; <b>error</b> the run failed (hover for the step). Greyed
+rows used an older benchmark version (current: v{spec.bench_version}).</p>
+<div class="wrap">
 <table>
 <thead>
-<tr>{"".join(head_top)}</tr>
-<tr>{"".join(head_sub)}</tr>
+<tr>{"".join(head[0])}</tr>
+<tr>{"".join(head[1])}</tr>
+<tr>{"".join(head[2])}</tr>
 </thead>
 <tbody>
 {chr(10).join(body)}
 </tbody>
 </table>
+</div>
 </body>
 </html>
 """
@@ -252,12 +430,17 @@ def main(argv: list[str] | None = None) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("check", help="exit 0 and print the row on a cache hit")
     c.add_argument("sha")
+    sub.add_parser(
+        "check-reference", help="exit 0 and print the reference columns on a cache hit"
+    )
     e = sub.add_parser("extract", help="pull a JSON block out of a pod log")
     e.add_argument("log", type=Path)
     e.add_argument("--out", type=Path, required=True)
     e.add_argument("--kind", choices=sorted(BLOCKS), default="results")
     m = sub.add_parser("merge", help="add a run's results to the page data")
     m.add_argument("results", type=Path)
+    mr = sub.add_parser("merge-reference", help="add a reference run to the page data")
+    mr.add_argument("reference", type=Path)
     r = sub.add_parser("render", help="write the page from the page data")
     r.add_argument("--out", type=Path, default=PAGE_PATH)
     args = p.parse_args(argv)
@@ -267,10 +450,10 @@ def main(argv: list[str] | None = None) -> int:
         block = extract_block(args.log.read_text(errors="replace"), *BLOCKS[args.kind])
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(block, indent=2, sort_keys=True) + "\n")
-        if args.kind == "results":
+        if args.kind in ("results", "reference"):
             bad = [f"{i}/{t}" for i, t, c in iter_cells(block["cells"]) if is_error(c)]
-            sha = block["commit"]["sha"][:8]
-            print(f"extracted {sha}; error cells: {', '.join(bad) or 'none'}")
+            name = block["commit"]["sha"][:8] if args.kind == "results" else "reference"
+            print(f"extracted {name}; error cells: {', '.join(bad) or 'none'}")
         else:
             print(f"extracted {args.kind} block to {args.out}")
         return 0
@@ -288,11 +471,35 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"cache miss: cells to run: {', '.join(missing_cells(row, spec))}")
         return 1
+    if args.cmd == "check-reference":
+        reference = data.get("reference")
+        if reference_hit(reference, spec):
+            print(json.dumps(reference, indent=2, sort_keys=True))
+            return 0
+        if reference is None:
+            print("cache miss: no reference columns")
+        elif not reference_current(reference, spec):
+            print(
+                f"cache miss: reference is bench_version {reference.get('bench_version')}, "
+                f"reference_version {reference.get('reference_version')}"
+            )
+        else:
+            missing = reference_missing(reference, spec)
+            print(
+                f"cache miss: cells to run: {', '.join(missing)} "
+                f"(just these: --only {only_arg(missing)})"
+            )
+        return 1
     if args.cmd == "merge":
         results = json.loads(args.results.read_text())
         row = merge(data, results, spec)
         save_data(args.data, data, spec)
         print(f"merged {row['commit']['sha'][:8]} into {args.data}")
+        return 0
+    if args.cmd == "merge-reference":
+        merge_reference(data, json.loads(args.reference.read_text()), spec)
+        save_data(args.data, data, spec)
+        print(f"merged the reference columns into {args.data}")
         return 0
     if args.cmd == "render":
         args.out.parent.mkdir(parents=True, exist_ok=True)

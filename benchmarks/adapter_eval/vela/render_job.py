@@ -11,6 +11,11 @@ The harness is shipped inside the job itself, as a base64 tarball of
 ``pod_entry.sh``. So the harness is exactly the local working tree, and the
 benchmarked commit's own copy (if any) is never used.
 
+The reference job also ships the SR model code the same way: only its model
+package, taken with ``git archive`` from a local shadow-residual checkout at
+a pinned commit (``SR_REPO``, ``SR_REF``). It is never added to this repo;
+the results record only its commit sha.
+
 Cluster names, storage paths and secret names come from the environment,
 which ``submit.sh`` loads from the gitignored ``local/local.env``. Standard
 library only.
@@ -31,6 +36,8 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 EXCLUDE_DIRS = {"local", ".rendered", "__pycache__"}
+# The SR model package inside a shadow-residual checkout.
+SR_CODE_DIR = "src/shadow_residual/shadow_residual"
 # One environment string must stay below Linux's 128 KiB MAX_ARG_STRLEN.
 MAX_PAYLOAD = 120_000
 
@@ -41,6 +48,8 @@ RESOURCES = {
     "discover": (1, 4, "16Gi"),
     "stage": (1, 4, "16Gi"),
     "bench": (1, 16, "128Gi"),
+    # reference.py spreads its cells over every GPU of the pod.
+    "reference": (4, 32, "256Gi"),
     "script": (1, 16, "128Gi"),
 }
 
@@ -70,6 +79,26 @@ def harness_payload(extra: dict[str, Path]) -> str:
     if len(payload) > MAX_PAYLOAD:
         fail(f"harness payload is {len(payload)} bytes, limit {MAX_PAYLOAD}")
     return payload
+
+
+def sr_payload() -> tuple[str, str]:
+    """The SR model code at ``SR_REF``, as a base64 tarball, and its full sha."""
+    repo, ref = need("SR_REPO"), need("SR_REF")
+
+    def git(*args: str) -> bytes:
+        return subprocess.run(
+            ["git", "-C", repo, *args], check=True, capture_output=True
+        ).stdout
+
+    try:
+        sha = git("rev-parse", "--verify", f"{ref}^{{commit}}").decode().strip()
+        tgz = git("archive", "--format=tar.gz", sha, SR_CODE_DIR)
+    except subprocess.CalledProcessError as e:
+        fail(f"SR code at {ref}: {e.stderr.decode().strip()}")
+    payload = base64.b64encode(tgz).decode()
+    if len(payload) > MAX_PAYLOAD:
+        fail(f"SR code payload is {len(payload)} bytes, limit {MAX_PAYLOAD}")
+    return payload, sha
 
 
 def harness_version() -> tuple[str, bool]:
@@ -139,16 +168,21 @@ def build(args) -> dict:
                 },
             }
         )
-    if mode in ("bench", "script"):
+    if mode in ("bench", "reference", "script"):
         need("BENCH_ROOT")
         need("WORK_ROOT")
-        env.append(env_var("ADAPTER_BENCH_COMMIT", args.sha))
+        if mode != "reference":
+            env.append(env_var("ADAPTER_BENCH_COMMIT", args.sha))
         if args.limit:
             env.append(env_var("ADAPTER_BENCH_LIMIT", args.limit))
         if args.only:
             env.append(env_var("ADAPTER_BENCH_ONLY", args.only))
         if args.extra_args:
             env.append(env_var("ADAPTER_BENCH_EXTRA_ARGS", args.extra_args))
+    if mode == "reference":
+        payload, sr_sha = sr_payload()
+        env.append(env_var("ADAPTER_BENCH_SR_REF", sr_sha))
+        env.append(env_var("ADAPTER_BENCH_SR_TGZ", payload))
     if mode == "stage":
         need("BENCH_ROOT")
         if args.replace:
@@ -191,7 +225,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--sha", help="bench: full commit sha")
     p.add_argument("--limit", type=int)
     p.add_argument("--only")
-    p.add_argument("--extra-args", help="bench, script: extra flags for the program")
+    p.add_argument(
+        "--extra-args", help="bench, reference, script: extra flags for the program"
+    )
     p.add_argument("--script", help="script: local Python file to run in the pod")
     p.add_argument("--replace", action="store_true", help="stage: overwrite cells")
     args = p.parse_args(argv)

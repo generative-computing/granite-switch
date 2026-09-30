@@ -1,7 +1,8 @@
 # Adapter Accuracy Benchmark
 
 This page explains how to measure the accuracy of trained intrinsic adapters
-through one granite-switch commit, and how the results page is built.
+through one granite-switch commit, how that compares with the same adapters
+outside granite-switch, and how the results page is built.
 
 ## Background
 
@@ -20,14 +21,31 @@ two commits are always compared on the same inputs.
 
 Each adapter is measured in three forms:
 
-| Column | Technology | Configuration |
-|---|---|---|
-| LoRA | LoRA | all-linear, r=16 |
-| aLoRA | activated LoRA | all-linear, r=32 |
-| SR | Shadow Residual | q,o + MLP, r=32, cross-stream r=32, shared KV |
+| Technology | Configuration |
+|---|---|
+| LoRA | all-linear, r=16 |
+| aLoRA (activated LoRA) | all-linear, r=32 |
+| SR (Shadow Residual) | q,o + MLP, r=32, cross-stream r=32, shared KV |
 
 The base model, the intrinsics and their headline metrics are listed in
 [adapters.yaml](../benchmarks/adapter_eval/adapters.yaml).
+
+### Columns
+
+Each intrinsic has 7 columns on the page:
+
+| Group | Columns | What runs | Per commit |
+|---|---|---|---|
+| granite-switch (vLLM) | LoRA, aLoRA, SR | the adapters composed with the commit, under its vLLM backend | yes |
+| HF + PEFT | LoRA, aLoRA, SR | the same checkpoints without granite-switch, with Hugging Face transformers and PEFT | no |
+| Base | one | the base model with no adapter | no |
+
+The last two groups are the **reference columns**. They show what the
+checkpoints score outside granite-switch, and what the base model scores
+alone. For example, if a commit drops aLoRA on answerability from 88 to 70
+while HF + PEFT aLoRA stays at 88, the commit broke something. The reference
+columns do not depend on the commit, so they are computed once and repeated
+on every row (see [Reference columns](#reference-columns)).
 
 ## How one run works
 
@@ -101,10 +119,82 @@ page:
 
 | Shown | Meaning |
 |---|---|
-| `86.7` | scored; hover for every metric. The best technology per intrinsic is bold. |
+| `86.7` | scored; hover for every metric. The best of an intrinsic's 7 columns is bold. |
 | `—` | skipped: no adapter or eval set for this cell (reason on hover) |
-| `·` | not run for this commit (e.g. a new intrinsic, before an `--only` run) |
+| `·` | not run: for a commit, e.g. a new intrinsic before an `--only` run; in the reference columns, not computed yet or out of date (reason on hover) |
 | `error` | the run failed for this cell (reason on hover) |
+
+## Reference columns
+
+### What runs
+
+One job computes all of them: 6 intrinsics × 4 columns, 24 cells. No
+granite-switch commit is involved.
+
+```
+local machine                          GPU pod (Vela), 4 GPUs
+-------------                          ----------------------
+submit.sh reference
+  cache check ── hit ──> stop
+  render + submit job  ───────────>    virtualenv: pinned torch, transformers, peft
+                                       unpack the SR model code (pinned commit)
+                                       find staged adapters, check formats
+                                       convert copies for PEFT (if needed)
+                                       generate (HF, greedy), one cell per GPU
+                                       score, print the reference block
+  follow the pod log   <───────────
+  extract reference block
+  merge into data.json, render page
+```
+
+Per column:
+
+- **LoRA:** the base model with the checkpoint loaded by PEFT.
+- **aLoRA:** the same. PEFT turns the adapter on at its invocation tokens.
+  The run checks that every prompt contains them; without them PEFT would
+  run the base model.
+- **SR:** a standalone Hugging Face implementation of the Shadow Residual
+  model, with the checkpoint loaded by PEFT. The checkpoint's invocation
+  tokens are dropped first, in a copy: PEFT would read them as aLoRA and keep
+  the adapter off before them. The generated output does not change, for the
+  same reason as the SR activation conversion above.
+- **Base:** the base model, no adapter.
+
+The same as in the granite-switch run:
+
+- the staged checkpoints and eval sets, and the MLP weight renaming;
+- the prompts: the base tokenizer's chat template, with the same documents
+  and tools;
+- greedy decoding in bfloat16, with the same token budgets;
+- the scorers.
+
+One more check: every checkpoint weight must be in the loaded model, with its
+saved value. PEFT loads a weight that names no module of the model without an
+error. Without this check, a cell could silently run with part of its adapter.
+
+### The SR model code
+
+The SR column needs model code that is not in this repository. The job ships
+it from a local checkout, at a pinned commit: `SR_REPO` and `SR_REF` in
+`local.env`. Only the model package is shipped, and nothing of it is
+committed here. The results record only its commit sha.
+
+Without that code, the SR cells are error cells. The other columns still run.
+
+### When the reference is re-computed
+
+The page data holds one reference, with the two versions it was computed
+for: `bench_version` and `reference_version` from `adapters.yaml`. The page
+shows it on every row of its `bench_version`.
+
+Bump `reference_version` when something changes only the reference numbers:
+
+- the pinned library versions (in `vela/pod_entry.sh`),
+- the SR model code commit (`SR_REF`),
+- the HF generation code (`hf_generate.py`).
+
+A `bench_version` bump also needs a new reference. Until it is computed, rows
+of the new version show `·` in the reference columns.
 
 ## One-time setup
 
@@ -137,6 +227,7 @@ Everything goes through
 | `submit.sh discover` | Lists adapter checkpoints and eval files under the source roots. Read-only. |
 | `submit.sh stage [--replace]` | Copies the picks in `local/selection.json` into the bench root. |
 | `submit.sh bench <ref> [flags]` | Benchmarks one commit and publishes its row. |
+| `submit.sh reference [flags]` | Computes the reference columns and publishes them. |
 | `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
 | `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
 
@@ -151,6 +242,12 @@ Any command takes `--dry-run`: it renders the job and stops.
 | `--no-cache` | Runs even if the commit already has a complete row. |
 | `--no-publish` | Keeps the results in `local/results/` without touching the page. |
 | `--extra-args "..."` | Passes flags to the in-pod driver, e.g. `--enforce-eager`. |
+
+`reference` takes the same flags, with one difference: `--only` also takes
+single cells, as `intrinsic/column`. For example, `--only answerability,guardian_core/sr`
+runs the 4 answerability columns and guardian-core's SR column. The cells
+merge into the stored reference. When only some cells are missing, the cache
+check prints the `--only` value that runs just them.
 
 A job that fails is kept for 24 hours, for its logs. A job that succeeds is
 deleted.
@@ -225,6 +322,29 @@ the row:
 git add docs/benchmarks && git commit -s -m "Adapter benchmark: <sha>"
 ```
 
+### Computing the reference columns
+
+Once per benchmark version, after staging. A short smoke run first:
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh reference --limit 20
+```
+
+Then the full run:
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh reference
+```
+
+Commit the result the same way:
+
+```bash
+git add docs/benchmarks && git commit -s -m "Adapter benchmark: reference"
+```
+
+The full run can take hours. The longest cell (hallucination detection, up
+to 4096 new tokens per row) sets the pace.
+
 ## Cache rules
 
 A commit is a **cache hit** when its row has:
@@ -243,6 +363,10 @@ On a hit, `bench` prints the row and submits nothing. Some examples:
 
 Publishing refuses a `--limit` run and a run whose version differs from
 `adapters.yaml`. A failed run publishes nothing, so the next run retries.
+
+The reference columns follow the same rules, with both versions. They are a
+hit when their `bench_version` and `reference_version` match `adapters.yaml`
+and every cell is present, with no error cells.
 
 ## Adding an intrinsic or an adapter
 
@@ -264,14 +388,14 @@ All under `benchmarks/adapter_eval/vela/`, all gitignored:
 
 ```
 local/
-  local.env              cluster, storage and secret names
+  local.env              cluster, storage and secret names; the SR code checkout
   selection.json         the reviewed picks for `stage`
   judge_prompt.txt       query-rewrite judge prompt (shipped at stage time)
   discovery.json         output of `discover`
   selection.draft.json   suggested picks from `discover`
   jobs/<job>.env         what `fetch` needs to resume a job
   logs/<job>.log         full pod logs
-  results/<job>.json     results blocks from bench runs
+  results/<job>.json     results blocks from bench and reference runs
   stage/<job>.json       stage reports
 .rendered/               rendered Helm values and job specs
 ```
@@ -284,22 +408,29 @@ This repository is public. So:
   scores, commit metadata and generic skip reasons.
 - **Private (in `local/`):** namespace, image, volume and paths, secret
   names, the judge endpoint and the judge prompt.
+- **Private, and not in this repository at all:** the SR model code of the
+  reference column. The job ships it from a local checkout. Only its commit
+  sha is published.
 
 ## Tests
 
 The harness has CPU unit tests: cache rules, merging, page rendering, every
-scorer, checkpoint conversions, staging and job rendering.
+scorer, checkpoint conversions, staging, job rendering, and the reference
+run's driver.
 
 ```bash
 pytest tests/unit/test_adapter_benchmark.py -v -s --tb=short -x
 ```
 
-Composing and generating need a GPU and are only exercised by a real run.
+Composing and generating, with vLLM or HF + PEFT, need a GPU and are only
+exercised by a real run.
 
 ## Known gaps
 
-- **Numbers will not match internal results exactly.** Those evaluate with
-  plain HuggingFace + PEFT. This benchmark uses the composed model under vLLM.
+- **The vLLM and HF + PEFT columns will differ slightly.** They use the same
+  checkpoints, prompts and greedy decoding. But different kernels and
+  batching change bfloat16 rounding, which can flip near-ties. A large gap is
+  worth investigating.
 - **All adapters come from the internal trainer.** Their MLP weight names,
   and SR's activation, are converted as described above. Moving to
   shadow-residual trainer checkpoints for SR later replaces checkpoints, so

@@ -19,9 +19,10 @@ rejected instead of benchmarked under the wrong label:
 
 The composer accepts only the ``last_context_token`` form for SR, so an SR
 checkpoint with invocation tokens is converted before composing
-(``sr_anchor_copy``). So is a checkpoint whose MLP weights lack the base
-model's ``mlp.`` level (``mlp_key_copy``). After both, every LoRA weight must
-name a base-model weight (``modules_missing_from_base``).
+(``sr_anchor_copy``; ``peft_sr_copy`` for the PEFT reference instead). So is a
+checkpoint whose MLP weights lack the base model's ``mlp.`` level
+(``mlp_key_copy``). After both, every LoRA weight must name a base-model
+weight (``modules_missing_from_base``).
 
 An SR checkpoint must also have been trained with shared K/V
 (``shared_kv_reason``).
@@ -140,6 +141,28 @@ def sr_anchor_copy(src: Path, dest: Path, anchor: tuple[str, int]) -> dict | Non
     }
 
 
+def peft_sr_copy(src: Path, dest: Path) -> dict | None:
+    """Make an invocation-token SR checkpoint load as plain LoRA with PEFT.
+
+    For the reference columns (``reference.py``): PEFT reads
+    ``alora_invocation_tokens`` as aLoRA and would turn the LoRA weights off
+    before the invocation sequence. The shadow-residual model needs no
+    activation point: its adapter stream runs at every position, and, as in
+    ``sr_anchor_copy``, generated tokens do not depend on where it turns on.
+
+    Writes ``dest`` with the config without the invocation tokens and links
+    to the other files; ``src`` is left as staged. Returns what changed, or
+    None when the config has no invocation tokens (nothing written).
+    """
+    config = json.loads((src / CONFIG_FILE).read_text())
+    invocation = config.pop("alora_invocation_tokens", None)
+    if not invocation:
+        return None
+    link_others(src, dest, CONFIG_FILE)
+    (dest / CONFIG_FILE).write_text(json.dumps(config, indent=2))
+    return {"dropped_invocation_tokens": invocation}
+
+
 def mlp_key_copy(src: Path, dest: Path) -> dict | None:
     """Give MLP LoRA weights saved without their ``mlp.`` level the base names.
 
@@ -151,8 +174,8 @@ def mlp_key_copy(src: Path, dest: Path) -> dict | None:
     Only the safetensors header changes; the tensor bytes are copied as they
     are. Writes ``dest`` with the renamed weights and links to the other
     files. ``dest`` may be ``src`` itself when it is already a converted copy
-    (``sr_anchor_copy``). Returns what changed, or None when every name is
-    already standard (nothing written).
+    (``sr_anchor_copy``, ``peft_sr_copy``). Returns what changed, or None when
+    every name is already standard (nothing written).
     """
     weights = src / WEIGHTS_FILE
     header, data_start = safetensors_header(weights)

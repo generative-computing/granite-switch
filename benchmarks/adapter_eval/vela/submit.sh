@@ -7,6 +7,10 @@
 #   submit.sh stage [--replace]    copy local/selection.json's picks into the bench root
 #   submit.sh bench <ref> [--limit N] [--only a,b] [--no-cache] [--no-publish]
 #                         [--extra-args "..."]
+#   submit.sh reference [--limit N] [--only a,b/sr] [--no-cache] [--no-publish]
+#                       [--extra-args "..."]
+#                                  the HF + PEFT and base-model columns, computed
+#                                  once per benchmark version (4 GPUs)
 #   submit.sh script <ref> <file.py> [--extra-args "..."]
 #                                  run one local Python file on a GPU pod, with
 #                                  the commit installed (one-off checks)
@@ -24,7 +28,7 @@ LOCAL_DIR=$HERE/local
 RENDERED=$HERE/.rendered
 
 usage() {
-    sed -n '4,16p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,20p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 say() { echo "[submit] $*"; }
@@ -77,7 +81,7 @@ fetch)
     JOB=$1
     shift
     ;;
-discover | stage) ;;
+discover | stage | reference) ;;
 *) usage ;;
 esac
 while [[ $# -gt 0 ]]; do
@@ -136,7 +140,25 @@ follow() {
     say "pod $phase; log saved to $LOG"
 }
 
+# Merge a run's results file into the page data, unless it must not be published.
+publish_run() {
+    local merge_cmd=$1 out=$2 label=$3
+    if [[ "$POD_PHASE" != Succeeded ]]; then
+        say "pod did not succeed; not publishing"
+    elif [[ -n "$LIMIT" ]]; then
+        say "--limit run; not publishing"
+    elif [[ -z "$PUBLISH" ]]; then
+        say "--no-publish; results are in $out"
+    else
+        publish "$merge_cmd" "$out"
+        publish render
+        say "page updated. To record it:"
+        say "  git add docs/benchmarks && git commit -s -m 'Adapter benchmark: $label'"
+    fi
+}
+
 collect() {
+    local out=$LOCAL_DIR/results/$JOB.json
     case "$MODE" in
     discover)
         publish extract "$LOG" --kind discovery --out "$LOCAL_DIR/discovery.json"
@@ -150,20 +172,12 @@ json.dump(d["draft_selection"], open(sys.argv[2], "w"), indent=2, sort_keys=True
         publish extract "$LOG" --kind stage --out "$LOCAL_DIR/stage/$JOB.json"
         ;;
     bench)
-        local out=$LOCAL_DIR/results/$JOB.json
         publish extract "$LOG" --out "$out"
-        if [[ "$POD_PHASE" != Succeeded ]]; then
-            say "pod did not succeed; not publishing"
-        elif [[ -n "$LIMIT" ]]; then
-            say "--limit run; not publishing"
-        elif [[ -z "$PUBLISH" ]]; then
-            say "--no-publish; results are in $out"
-        else
-            publish merge "$out"
-            publish render
-            say "page updated. To record it:"
-            say "  git add docs/benchmarks && git commit -s -m 'Adapter benchmark: ${SHA:0:8}'"
-        fi
+        publish_run merge "$out" "${SHA:0:8}"
+        ;;
+    reference)
+        publish extract "$LOG" --kind reference --out "$out"
+        publish_run merge-reference "$out" reference
         ;;
     esac
 }
@@ -203,6 +217,15 @@ if [[ "$MODE" == bench ]]; then
     fi
     JOB="$JOB_PREFIX-bench-${SHA:0:8}-$STAMP"
     render_args+=(--sha "$SHA")
+    if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
+    if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
+    if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
+elif [[ "$MODE" == reference ]]; then
+    if [[ -z "$NO_CACHE$LIMIT$ONLY" ]] && publish check-reference; then
+        say "reference columns are cached; nothing to run (--no-cache to re-run)"
+        exit 0
+    fi
+    JOB="$JOB_PREFIX-reference-$STAMP"
     if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
     if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
     if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi

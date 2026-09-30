@@ -15,8 +15,17 @@
 # Bump bench_version when a change here or in the harness would change the
 # numbers (eval set, scorer, generation settings, adapter checkpoints). Rows
 # with an older version stay on the page but are not cache hits.
+#
+# The reference columns run the same checkpoints without granite-switch (HF +
+# PEFT), plus the base model with no adapter. They do not depend on the
+# commit, so they are computed once (`submit.sh reference`) and shown on every
+# row of the current bench_version. Bump reference_version when a change
+# alters only them: the pinned library versions, the SR model code, or the
+# reference generation (hf_generate.py). A bench_version bump also
+# invalidates them.
 
 bench_version: 1
+reference_version: 1
 base_model: ibm-granite/granite-4.1-3b
 
 technologies:

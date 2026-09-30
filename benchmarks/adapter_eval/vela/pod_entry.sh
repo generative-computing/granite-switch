@@ -8,6 +8,8 @@
 #   discover  list adapter checkpoints and eval files under the source roots
 #   stage     copy the selection shipped in extra/ into the bench root
 #   bench     clone + install the commit, then run run_benchmark.py
+#   reference install pinned torch / transformers / peft in their own
+#             virtualenv, then run reference.py (no commit involved)
 #   script    clone + install the commit, then run the Python file shipped as
 #             extra/script.py (a one-off check, e.g. from scratch/)
 set -euo pipefail
@@ -68,6 +70,34 @@ bench)
     fi
     # shellcheck disable=SC2086
     cd "$HARNESS" && "$REPO/.venv/bin/python" -m benchmarks.adapter_eval.run_benchmark \
+        "${args[@]}" ${ADAPTER_BENCH_EXTRA_ARGS:-}
+    ;;
+reference)
+    # Pinned, so the reference columns change only with reference_version
+    # (adapters.yaml). Keep in step with reference_version.
+    uv venv --quiet --python 3.12 /workspace/refenv
+    uv pip install --quiet --python /workspace/refenv/bin/python \
+        torch==2.10.0 transformers==5.8.1 peft==0.19.1 accelerate==1.13.0 pyyaml
+    # The SR model code, shipped by render_job.py at a pinned commit.
+    PYTHONPATH=$HARNESS
+    if [[ -n "${ADAPTER_BENCH_SR_TGZ:-}" ]]; then
+        mkdir -p /workspace/sr_ref
+        printf %s "$ADAPTER_BENCH_SR_TGZ" | base64 -d | tar xzf - -C /workspace/sr_ref
+        PYTHONPATH=$PYTHONPATH:/workspace/sr_ref/src
+    fi
+    export PYTHONPATH
+    args=(
+        --bench-root "${ADAPTER_BENCH_ROOT:?}"
+        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/reference/${RUN_TS:-run}"
+        --model-dir /workspace/models
+    )
+    if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
+    if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
+    if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then
+        args+=(--base-model "$ADAPTER_BENCH_BASE_MODEL")
+    fi
+    # shellcheck disable=SC2086
+    cd "$HARNESS" && /workspace/refenv/bin/python -m benchmarks.adapter_eval.reference \
         "${args[@]}" ${ADAPTER_BENCH_EXTRA_ARGS:-}
     ;;
 script)

@@ -17,10 +17,19 @@ SPEC_PATH = HARNESS_DIR / "adapters.yaml"
 
 BEGIN_MARKER = "=== ADAPTER_BENCH_RESULTS_BEGIN ==="
 END_MARKER = "=== ADAPTER_BENCH_RESULTS_END ==="
+REFERENCE_BEGIN = "=== ADAPTER_BENCH_REFERENCE_BEGIN ==="
+REFERENCE_END = "=== ADAPTER_BENCH_REFERENCE_END ==="
 
 # Technologies composed into the same checkpoint. SR is a whole-checkpoint
 # dual-stream mode and the composer refuses to mix it with LoRA / aLoRA.
 COMPOSE_GROUPS = {"single_stream": ("lora", "alora"), "dual_stream": ("sr",)}
+
+# Reference columns (``reference.py``): each technology's staged checkpoint
+# with HF + PEFT and no granite-switch, and the base model with no adapter.
+BASE_COLUMN = "base"
+REFERENCE_COLUMNS = ("lora", "alora", "sr", BASE_COLUMN)
+# Libraries whose versions the reference run records.
+REFERENCE_LIBRARIES = ("torch", "transformers", "peft")
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,7 @@ class Intrinsic:
 @dataclass(frozen=True)
 class Spec:
     bench_version: int
+    reference_version: int
     base_model: str
     technologies: tuple[Technology, ...]
     intrinsics: tuple[Intrinsic, ...]
@@ -66,6 +76,7 @@ class Spec:
         """The part of the definition the results page needs."""
         return {
             "bench_version": self.bench_version,
+            "reference_version": self.reference_version,
             "base_model": self.base_model,
             "technologies": [vars(t) for t in self.technologies],
             "intrinsics": [
@@ -86,6 +97,7 @@ def load_spec(path: Path = SPEC_PATH) -> Spec:
     raw = yaml.safe_load(Path(path).read_text())
     spec = Spec(
         bench_version=int(raw["bench_version"]),
+        reference_version=int(raw["reference_version"]),
         base_model=raw["base_model"],
         technologies=tuple(Technology(**t) for t in raw["technologies"]),
         intrinsics=tuple(Intrinsic(**i) for i in raw["intrinsics"]),
@@ -93,6 +105,8 @@ def load_spec(path: Path = SPEC_PATH) -> Spec:
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:
         raise ValueError(f"technologies must be exactly {sorted(grouped)}")
+    if set(REFERENCE_COLUMNS) != grouped | {BASE_COLUMN}:
+        raise ValueError("REFERENCE_COLUMNS must be every technology plus the base")
     for i in spec.intrinsics:
         if not re.fullmatch(r"[a-z][a-z0-9_]*", i.id):
             raise ValueError(f"intrinsic id {i.id!r} must be snake_case")
@@ -142,8 +156,16 @@ def iter_cells(cells: dict):
 # --- results block -----------------------------------------------------------
 
 
+def format_block(results: dict, begin_marker: str, end_marker: str) -> str:
+    return f"{begin_marker}\n{json.dumps(results, sort_keys=True)}\n{end_marker}"
+
+
 def format_results_block(results: dict) -> str:
-    return f"{BEGIN_MARKER}\n{json.dumps(results, sort_keys=True)}\n{END_MARKER}"
+    return format_block(results, BEGIN_MARKER, END_MARKER)
+
+
+def format_reference_block(reference: dict) -> str:
+    return format_block(reference, REFERENCE_BEGIN, REFERENCE_END)
 
 
 def extract_block(text: str, begin_marker: str, end_marker: str):

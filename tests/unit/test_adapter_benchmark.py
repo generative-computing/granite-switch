@@ -3,8 +3,9 @@
 
 Covers what runs without a GPU: the benchmark definition, the results block,
 the cache / merge / page rules, every scorer on tiny fixtures, checkpoint
-detection, the stage tool, and the Vela job payload. Checkpoints are fake
-safetensors files with a header and no tensor data.
+detection, the stage tool, the reference run's driver and helpers, and the
+Vela job payload. Checkpoints are fake safetensors files with a header and no
+tensor data.
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import json
 import os
 import shutil
 import struct
+import subprocess
+import sys
 import tarfile
 import urllib.error
 from pathlib import Path
@@ -24,7 +27,15 @@ import pytest
 
 pytest.importorskip("yaml")
 
-from benchmarks.adapter_eval import common, publish, run_benchmark, stage, staged
+from benchmarks.adapter_eval import (
+    common,
+    hf_generate,
+    publish,
+    reference,
+    run_benchmark,
+    stage,
+    staged,
+)
 from benchmarks.adapter_eval.scorers import (
     ScoreContext,
     ScorerUnavailable,
@@ -196,6 +207,7 @@ def test_spec_select():
 def test_spec_public_has_no_scorer_internals():
     public = SPEC.public()
     assert public["bench_version"] == SPEC.bench_version
+    assert public["reference_version"] == SPEC.reference_version
     assert set(public["intrinsics"][0]) == {"id", "name", "headline", "headline_label"}
 
 
@@ -352,13 +364,370 @@ def test_render_cells_and_escaping():
     assert "<script>alert" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert 'title="adapter &quot;x&quot; not staged">—</td>' in page
-    assert 'class="err" title="generate failed">error</td>' in page
+    assert 'class="err g" title="generate failed">error</td>' in page
     assert ">?</td>" in page
     assert 'title="not run">·</td>' in page
     assert 'class="num best"' in page and ">70.0</td>" in page
     assert '<tr class="old">' in page
     for intrinsic in SPEC.intrinsics:
         assert intrinsic.name in page
+
+
+# --- reference columns ------------------------------------------------------------
+
+
+def reference_for(value: float = 0.5, cells: dict | None = None, **run) -> dict:
+    if cells is None:
+        cells = {
+            i.id: {c: {i.headline: value, "n": 10} for c in common.REFERENCE_COLUMNS}
+            for i in SPEC.intrinsics
+        }
+    return {
+        "reference_version": SPEC.reference_version,
+        "bench_version": SPEC.bench_version,
+        "base_model": SPEC.base_model,
+        "cells": cells,
+        "run": {
+            "limit": None,
+            "only": None,
+            "finished": "2026-09-30T12:00:00+00:00",
+            "torch": "2.10.0",
+            "transformers": "5.8.1",
+            "peft": "0.19.1",
+            **run,
+        },
+    }
+
+
+def test_reference_hit_needs_current_versions_and_every_cell():
+    ref = reference_for()
+    assert publish.reference_hit(ref, SPEC)
+    assert not publish.reference_hit(None, SPEC)
+
+    ref["cells"]["answerability"]["base"] = common.error("generation failed")
+    del ref["cells"]["guardian_core"]["sr"]
+    assert publish.reference_missing(ref, SPEC) == [
+        "answerability/base",
+        "guardian_core/sr",
+    ]
+    assert not publish.reference_hit(ref, SPEC)
+
+    for key in ("bench_version", "reference_version"):
+        old = reference_for()
+        old[key] -= 1
+        assert not publish.reference_current(old, SPEC)
+        assert not publish.reference_hit(old, SPEC)
+
+
+def test_only_arg_runs_exactly_the_given_cells():
+    keys = [f"answerability/{c}" for c in common.REFERENCE_COLUMNS]
+    keys += ["guardian_core/sr", "guardian_core/base"]
+    only = publish.only_arg(keys)
+    assert only == "answerability,guardian_core/sr,guardian_core/base"
+    assert reference.parse_only(only, SPEC) == {
+        "answerability": common.REFERENCE_COLUMNS,
+        "guardian_core": ("sr", "base"),
+    }
+
+
+def test_parse_only():
+    assert reference.parse_only(None, SPEC) is None
+    assert reference.parse_only(" , ", SPEC) is None
+    only = reference.parse_only(
+        "guardian_core/base,answerability,guardian_core/sr", SPEC
+    )
+    # Intrinsics in spec order, columns in REFERENCE_COLUMNS order.
+    assert list(only) == ["answerability", "guardian_core"]
+    assert only["guardian_core"] == ("sr", "base")
+    with pytest.raises(ValueError, match="unknown column"):
+        reference.parse_only("answerability/nope", SPEC)
+    with pytest.raises(ValueError, match="unknown intrinsics"):
+        reference.parse_only("nope/sr", SPEC)
+
+
+def test_merge_reference_full_then_only_run():
+    data = {"rows": []}
+    publish.merge_reference(data, reference_for(0.1), SPEC)
+    assert data["reference"]["cells"]["answerability"]["lora"]["accuracy"] == 0.1
+
+    partial = reference_for(0.9, only=["answerability/sr", "guardian_core/base"])
+    stored = publish.merge_reference(data, partial, SPEC)
+    assert stored is data["reference"]
+    cells = stored["cells"]
+    assert cells["answerability"]["sr"]["accuracy"] == 0.9
+    assert cells["guardian_core"]["base"] == partial["cells"]["guardian_core"]["base"]
+    # Cells outside --only are kept, even though the run carried them.
+    assert cells["answerability"]["lora"]["accuracy"] == 0.1
+    assert stored["updates"] == [partial["run"]]
+
+
+def test_merge_reference_only_run_over_an_old_reference_replaces_it():
+    old = reference_for(0.1)
+    old["reference_version"] -= 1
+    data = {"rows": [], "reference": old}
+    partial = reference_for(0.9, only=["answerability/sr"])
+    publish.merge_reference(data, partial, SPEC)
+    assert data["reference"] is partial
+
+
+def test_merge_reference_refuses_limit_runs_and_other_versions():
+    with pytest.raises(ValueError, match="--limit"):
+        publish.merge_reference({"rows": []}, reference_for(limit=20), SPEC)
+    for key in ("bench_version", "reference_version"):
+        other = reference_for()
+        other[key] += 1
+        with pytest.raises(ValueError, match="adapters.yaml"):
+            publish.merge_reference({"rows": []}, other, SPEC)
+
+
+def test_cli_reference_check_extract_merge(tmp_path, capsys):
+    data = tmp_path / "data.json"
+    out = tmp_path / "reference.json"
+    log = tmp_path / "pod.log"
+    first = reference_for()
+    first["cells"]["answerability"]["sr"] = common.error("generation failed")
+    log.write_text("noise\n" + common.format_reference_block(first) + "\n")
+    cli = ["--data", str(data)]
+
+    assert publish.main([*cli, "check-reference"]) == 1
+    assert "no reference columns" in capsys.readouterr().out
+    extract = [*cli, "extract", str(log), "--kind", "reference", "--out", str(out)]
+    assert publish.main(extract) == 0
+    assert "error cells: answerability/sr" in capsys.readouterr().out
+    assert publish.main([*cli, "merge-reference", str(out)]) == 0
+    assert publish.main([*cli, "check-reference"]) == 1
+    assert "(just these: --only answerability/sr)" in capsys.readouterr().out
+
+    fix = reference_for(only=["answerability/sr"])
+    out.write_text(json.dumps(fix))
+    assert publish.main([*cli, "merge-reference", str(out)]) == 0
+    assert publish.main([*cli, "check-reference"]) == 0
+    assert json.loads(data.read_text())["reference"]["updates"] == [fix["run"]]
+
+
+def test_render_reference_columns():
+    row = results_for(cells=cells_for(SPEC, 0.5))
+    old = results_for(SHA_B)
+    old["bench_version"] = SPEC.bench_version - 1
+    ref = reference_for(0.5)
+    ref["cells"]["answerability"]["alora"] = {"accuracy": 0.9, "n": 10}
+    del ref["cells"]["answerability"]["base"]
+
+    page = publish.render({"rows": [row, old], "reference": ref}, SPEC)
+
+    n = len(SPEC.intrinsics)
+    assert page.count('colspan="7"') == n
+    assert page.count(f">{publish.ENGINE_LABEL}</th>") == n
+    assert page.count(f">{publish.REFERENCE_LABEL}</th>") == n
+    assert page.count(f'rowspan="2">{publish.BASE_LABEL}</th>') == n
+    # The best of all 7 columns can be a reference column.
+    assert '<td class="num best ref" title="accuracy=0.9000, n=10">90.0</td>' in page
+    assert '<td class="skip ref" title="not run">·</td>' in page
+    # A row of another benchmark version shows no reference.
+    assert 'title="no reference for this benchmark version">·</td>' in page
+    assert (
+        "computed 2026-09-30 with torch 2.10.0, transformers 5.8.1, peft 0.19.1" in page
+    )
+
+    stale = reference_for()
+    stale["reference_version"] -= 1
+    page = publish.render({"rows": [row], "reference": stale}, SPEC)
+    assert 'title="reference out of date">·</td>' in page
+    assert "They are not computed yet." in page
+    page = publish.render({"rows": [row]}, SPEC)
+    assert 'title="reference not computed yet">·</td>' in page
+
+
+def write_answerability_eval(bench: Path, n: int = 3) -> None:
+    staged.write_jsonl(
+        staged.eval_path(bench, "answerability"),
+        [{"messages": [{"role": "user", "content": "q"}], "ground_truth": "answerable"}]
+        * n,
+    )
+
+
+def test_reference_run(tmp_path, monkeypatch, capsys):
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    make_adapter(
+        staged.adapter_dir(bench, "answerability", "lora"),
+        "lora",
+        modules=QKVO_MLP,
+        flat_mlp=True,
+    )
+    make_adapter(staged.adapter_dir(bench, "answerability", "alora"), "alora")
+    sr = make_adapter(
+        staged.adapter_dir(bench, "answerability", "sr"), "sr", invocation=True
+    )
+    (sr / staged.PROVENANCE_FILE).write_text(json.dumps({"shared_kv": True}))
+    jobs = {}
+
+    def fake_run_jobs(job_list, gpus, python, harness_root):
+        statuses = {}
+        for job in job_list:
+            jobs[job["column"]] = job
+            if job["column"] == "base":
+                statuses[job["key"]] = {"ok": False, "reason": "generation failed"}
+                continue
+            answer = '"unanswerable"' if job["column"] == "alora" else '"answerable"'
+            rows = staged.read_jsonl(Path(job["eval_path"]), job["limit"])
+            staged.write_jsonl(
+                Path(job["out_path"]),
+                [{**r, "generated_content": answer} for r in rows],
+            )
+            statuses[job["key"]] = {"ok": True, "truncated": 1, "gpu": "fake"}
+        return statuses
+
+    monkeypatch.setattr(reference, "gpu_ids", lambda count: ["0", "1"])
+    monkeypatch.setattr(reference, "sr_code_available", lambda: True)
+    monkeypatch.setattr(reference, "run_jobs", fake_run_jobs)
+    work = tmp_path / "work"
+    argv = [
+        "--bench-root", str(bench),
+        "--work-dir", str(work),
+        "--base-model", str(write_base(tmp_path / "base")),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert reference.main(argv) == 0
+
+    result = json.loads((work / "reference.json").read_text())
+    cells = result["cells"]["answerability"]
+    assert cells["lora"]["accuracy"] == 1.0 and cells["lora"]["truncated"] == 1
+    assert cells["alora"]["accuracy"] == 0.0
+    assert cells["sr"]["accuracy"] == 1.0
+    assert cells["base"] == common.error("generation failed")
+    run = result["run"]
+    assert run["only"] == [f"answerability/{c}" for c in common.REFERENCE_COLUMNS]
+    assert run["sr_invocation_dropped"] == ["answerability"]
+    assert run["mlp_keys_renamed"] == ["answerability/lora"]
+    assert (run["gpus"], run["gpu"], run["limit"]) == (2, "fake", None)
+    # The block in the log is what was saved.
+    log = capsys.readouterr().out
+    block = common.extract_block(log, common.REFERENCE_BEGIN, common.REFERENCE_END)
+    assert block == result
+
+    # SR and the flat-MLP LoRA run from converted copies, the aLoRA as staged.
+    copies = work.resolve() / "models" / "reference" / "answerability"
+    assert jobs["sr"]["adapter_dir"] == str(copies / "sr")
+    sr_config = json.loads((copies / "sr" / staged.CONFIG_FILE).read_text())
+    assert "alora_invocation_tokens" not in sr_config
+    assert jobs["lora"]["adapter_dir"] == str(copies / "lora")
+    assert jobs["alora"]["adapter_dir"] == str(
+        staged.adapter_dir(bench, "answerability", "alora")
+    )
+    assert jobs["base"]["adapter_dir"] is None
+    assert (
+        jobs["base"]["max_new_tokens"] == SPEC.intrinsic("answerability").max_new_tokens
+    )
+
+
+def test_reference_run_without_the_sr_code(tmp_path, monkeypatch):
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    sr = make_adapter(staged.adapter_dir(bench, "answerability", "sr"), "sr")
+    (sr / staged.PROVENANCE_FILE).write_text(json.dumps({"shared_kv": True}))
+    monkeypatch.setattr(reference, "sr_code_available", lambda: False)
+    monkeypatch.setattr(reference, "run_jobs", lambda *a: pytest.fail("nothing to run"))
+    work = tmp_path / "work"
+    only = "answerability/sr,guardian_core/base"
+    argv = ["--bench-root", str(bench), "--work-dir", str(work), "--only", only]
+    assert reference.main(argv) == 0
+
+    assert json.loads((work / "reference.json").read_text())["cells"] == {
+        "answerability": {"sr": common.error("SR model code not available")},
+        "guardian_core": {"base": common.skipped("eval set not staged")},
+    }
+
+
+def test_sr_code_available_finds_the_shipped_package(tmp_path, monkeypatch):
+    # Shipped as src/shadow_residual/shadow_residual/, with no __init__.py at
+    # the top: a namespace package.
+    code = tmp_path / "src" / "shadow_residual" / "shadow_residual"
+    code.mkdir(parents=True)
+    (code / "__init__.py").write_text("")
+    (code / "build.py").write_text("")
+    monkeypatch.syspath_prepend(str(tmp_path / "src"))
+    assert reference.sr_code_available()
+
+
+FAKE_GENERATE = """
+import json, os, sys
+from pathlib import Path
+
+job = json.loads(Path(sys.argv[1]).read_text())
+if job["column"] == "fail":
+    sys.exit(3)
+status = {"ok": True, "gpu": os.environ["CUDA_VISIBLE_DEVICES"]}
+Path(job["status_path"]).write_text(json.dumps(status))
+"""
+
+
+def test_run_jobs_runs_each_job_in_its_own_process(tmp_path):
+    (tmp_path / "fake_generate.py").write_text(FAKE_GENERATE)
+    jobs = [
+        {
+            "key": f"{intrinsic}/{column}",
+            "column": column,
+            "status_path": str(tmp_path / "generate" / intrinsic / f"{column}.json"),
+        }
+        for intrinsic in ("a", "b")
+        for column in ("lora", "fail")
+    ]
+    statuses = reference.run_jobs(
+        jobs, ["0", "1"], sys.executable, tmp_path, module="fake_generate", poll=0.05
+    )
+    assert set(statuses) == {j["key"] for j in jobs}
+    for key in ("a/lora", "b/lora"):
+        assert statuses[key]["ok"] and statuses[key]["gpu"] in ("0", "1")
+    for key in ("a/fail", "b/fail"):
+        assert statuses[key] == {"ok": False, "reason": "generation failed"}
+    assert (tmp_path / "generate" / "a" / "lora.job.json").is_file()
+
+
+def test_hf_generate_helpers():
+    assert hf_generate.contains([5, 1, 2, 3, 6], [1, 2, 3])
+    assert not hf_generate.contains([1, 2, 4, 3], [1, 2, 3])
+    assert not hf_generate.contains([1, 2], [1, 2, 3])
+
+    # A batch is padded to its longest prompt plus the new tokens.
+    assert hf_generate.batch_size([10, 10, 10, 10], 10, 60, 64) == 3
+    assert hf_generate.batch_size([10, 10, 50], 10, 100, 64) == 2
+    assert hf_generate.batch_size([500], 10, 100, 64) == 1  # at least one row
+    assert hf_generate.batch_size([1] * 10, 1, 1000, 4) == 4  # the row cap
+
+    assert hf_generate.cut([7, 8, 0, 9], 10, {0}) == ([7, 8, 0], False)
+    # An EOS past the row's own budget does not count.
+    assert hf_generate.cut([7, 8, 9, 0], 2, {0}) == ([7, 8], True)
+    assert hf_generate.cut([7, 8], 5, {0}) == ([7, 8], True)
+
+    lora_a = "base_model.model.model.layers.0.self_attn.q_proj.lora_A.weight"
+    assert hf_generate.loaded_name(lora_a) == lora_a.replace(
+        ".lora_A.", ".lora_A.default."
+    )
+    assert hf_generate.loaded_name("base_model.model.lm_head.weight") is None
+
+
+def test_unloaded_weights_compares_names_shapes_and_values():
+    torch = pytest.importorskip("torch")
+    ones = torch.ones(2, 3, dtype=torch.bfloat16)
+    saved = {
+        "m.q.lora_A.weight": ones,
+        "m.q.lora_B.weight": torch.zeros(3, 2),
+        "m.k.lora_A.weight": ones,
+        "m.v.lora_A.weight": ones,
+        "m.norm.weight": ones,  # not a LoRA weight: not checked
+    }
+    state = {
+        "m.q.lora_A.default.weight": ones.float(),  # PEFT may keep float32
+        "m.q.lora_B.default.weight": torch.zeros(3, 2),
+        "m.k.lora_A.default.weight": torch.ones(3, 2),  # wrong shape
+    }  # m.v was not loaded at all
+    assert hf_generate.unloaded_weights(saved, state) == [
+        "m.k.lora_A.weight",
+        "m.v.lora_A.weight",
+    ]
+    state["m.q.lora_B.default.weight"] = torch.full((3, 2), 0.5)
+    assert "m.q.lora_B.weight" in hf_generate.unloaded_weights(saved, state)
 
 
 # --- scorers ---------------------------------------------------------------------
@@ -648,6 +1017,25 @@ def test_sr_anchor_copy_leaves_anchored_checkpoints(tmp_path):
     src = make_adapter(tmp_path / "src", "sr")
     assert staged.sr_anchor_copy(src, tmp_path / "dest", ("<|end_of_role|>", 3)) is None
     assert not (tmp_path / "dest").exists()
+
+
+def test_peft_sr_copy_drops_the_invocation_tokens(tmp_path):
+    src = make_adapter(tmp_path / "src", "sr", invocation=True)
+    before = (src / staged.CONFIG_FILE).read_text()
+    dest = tmp_path / "dest"
+
+    assert staged.peft_sr_copy(src, dest) == {"dropped_invocation_tokens": [1, 2, 3]}
+    config = json.loads((dest / staged.CONFIG_FILE).read_text())
+    assert "alora_invocation_tokens" not in config
+    assert config["target_modules"] == ["q_proj"]
+    assert (dest / staged.WEIGHTS_FILE).resolve() == (
+        src / staged.WEIGHTS_FILE
+    ).resolve()
+    assert (src / staged.CONFIG_FILE).read_text() == before
+
+    anchored = make_adapter(tmp_path / "anchored", "sr")
+    assert staged.peft_sr_copy(anchored, tmp_path / "dest2") is None
+    assert not (tmp_path / "dest2").exists()
 
 
 PEFT = "base_model.model.model.layers"
@@ -1391,3 +1779,79 @@ def test_script_job_ships_the_script(tmp_path, monkeypatch):
     payload = base64.b64decode(job_env["ADAPTER_BENCH_HARNESS_TGZ"])
     with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
         assert tar.extractfile("extra/script.py").read() == b"print('hi')\n"
+
+
+def git_repo_with_sr_code(root: Path, code_dir: str) -> str:
+    """A git repo holding a fake SR model package; returns its commit sha."""
+    code = root / code_dir
+    code.mkdir(parents=True)
+    (code / "build.py").write_text("def build_sr_base(*a, **k): ...\n")
+    (root / "README.md").write_text("not shipped\n")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_SYSTEM": os.devnull,
+    }
+
+    def git(*args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        ).stdout.strip()
+
+    git("init", "--quiet")
+    git("add", ".")
+    git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "c")
+    return git("rev-parse", "HEAD")
+
+
+def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("needs git")
+    render_job = load_render_job()
+    monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))
+    for k in ("NAMESPACE", "CONTAINER_IMAGE", "IMAGE_PULL_SECRET", "PVC_NAME"):
+        monkeypatch.setenv(k, "x")
+    for k, v in {"PVC_MOUNT": "/m", "BENCH_ROOT": "/m/b", "WORK_ROOT": "/m/r"}.items():
+        monkeypatch.setenv(k, v)
+    sha = git_repo_with_sr_code(tmp_path / "sr", render_job.SR_CODE_DIR)
+    monkeypatch.setenv("SR_REPO", str(tmp_path / "sr"))
+    monkeypatch.setenv("SR_REF", "HEAD")
+    out = tmp_path / "values.json"
+    argv = [
+        "--mode",
+        "reference",
+        "--job-name",
+        "j",
+        "--run-ts",
+        "T",
+        "--out",
+        str(out),
+    ]
+
+    assert render_job.main([*argv, "--only", "answerability/sr"]) == 0  # no --sha
+
+    values = json.loads(out.read_text())
+    job_env = {
+        e["name"]: e["value"] for e in values["environmentVariables"] if "value" in e
+    }
+    assert values["numGpusPerPod"] == 4
+    assert job_env["ADAPTER_BENCH_MODE"] == "reference"
+    assert job_env["ADAPTER_BENCH_ONLY"] == "answerability/sr"
+    assert "ADAPTER_BENCH_COMMIT" not in job_env
+    assert job_env["ADAPTER_BENCH_SR_REF"] == sha  # the ref, resolved
+    payload = base64.b64decode(job_env["ADAPTER_BENCH_SR_TGZ"])
+    with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
+        names = tar.getnames()
+    assert f"{render_job.SR_CODE_DIR}/build.py" in names
+    assert not any(n.endswith("README.md") for n in names)  # only the package
+
+    monkeypatch.setenv("SR_REF", "no-such-ref")
+    with pytest.raises(SystemExit):
+        render_job.main(argv)
+    monkeypatch.delenv("SR_REPO")
+    with pytest.raises(SystemExit):
+        render_job.main(argv)
