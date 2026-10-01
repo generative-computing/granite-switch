@@ -38,6 +38,10 @@ install_commit() {
     SHA=${ADAPTER_BENCH_COMMIT:?}
     REPO=/workspace/granite-switch
     git clone --quiet --filter=blob:none https://github.com/generative-computing/granite-switch.git "$REPO"
+    # A pull request's commit can be on no branch (a fork's): fetch it by sha.
+    if ! git -C "$REPO" cat-file -e "$SHA^{commit}" 2>/dev/null; then
+        git -C "$REPO" fetch --quiet origin "$SHA"
+    fi
     git -C "$REPO" checkout --quiet --detach "$SHA"
     # shellcheck disable=SC2086  # the sync args are a word list on purpose
     (cd "$REPO" && uv sync --frozen ${ADAPTER_BENCH_UV_SYNC_ARGS:---group dev})

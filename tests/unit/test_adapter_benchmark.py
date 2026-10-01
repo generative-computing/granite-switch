@@ -869,6 +869,32 @@ def test_render_marks_a_model_with_no_rows():
     assert page.count("no commit benchmarked yet") == len(SPEC.models)
 
 
+def test_summary_for_the_pr_comment():
+    cells = cells_for(SPEC, 0.8)
+    cells["answerability"]["sr"] = common.skipped("adapter not staged")
+    ref = reference_for(0.9)
+    for by_column in ref["cells"].values():
+        by_column["base"] = {"accuracy": 0.5, "balanced_accuracy": 0.5, "n": 10}
+    data = page_data(results_for(cells=cells), reference=ref)
+
+    text = publish.summary(data, SPEC, SHA_A[:8], "ran", "https://run")
+    lines = text.splitlines()
+    # The marker names the model: a later run edits this comment.
+    assert lines[0] == f"<!-- adapter-benchmark:{SPEC.model_id} -->"
+    assert f"[results page]({publish.PAGE_URL}#{SPEC.model_id})" in text
+    assert "[run](https://run)" in text
+    answerability = next(line for line in lines if line.startswith("| Answerability"))
+    # granite-switch, HF + PEFT, Base, then (0.8 - 0.5) / (0.9 - 0.5) = 0.75.
+    assert answerability == (
+        "| Answerability | 80.0 / 80.0 / — | 90.0 / 90.0 / 90.0 | 50.0 "
+        "| 0.75 / 0.75 / · |"
+    )
+    assert "(cached result)" in publish.summary(data, SPEC, SHA_A, "cached")
+
+    failed = publish.summary(data, SPEC, SHA_B, "ran", "https://run")
+    assert "failed, so nothing was published" in failed  # no row for SHA_B
+
+
 def write_answerability_eval(bench: Path, n: int = 3) -> None:
     staged.write_jsonl(
         staged.eval_path(bench, "answerability"),

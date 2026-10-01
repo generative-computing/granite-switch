@@ -10,6 +10,7 @@ Runs locally, not on the pod::
     python -m benchmarks.adapter_eval.publish merge results.json
     python -m benchmarks.adapter_eval.publish merge-reference reference.json
     python -m benchmarks.adapter_eval.publish render
+    python -m benchmarks.adapter_eval.publish summary <sha> [--model <id>]  # PR comment
 
 The page data (``docs/benchmarks/data.json``) holds one row per (commit,
 model), each row being the results block ``run_benchmark.py`` printed. A
@@ -58,6 +59,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = REPO_ROOT / "docs" / "benchmarks" / "data.json"
 PAGE_PATH = REPO_ROOT / "docs" / "benchmarks" / "index.html"
 COMMIT_URL = "https://github.com/generative-computing/granite-switch/commit/{sha}"
+PAGE_URL = "https://generative-computing.github.io/granite-switch/benchmarks/"
 BLOCKS = {
     "results": (BEGIN_MARKER, END_MARKER),
     "reference": (REFERENCE_BEGIN, REFERENCE_END),
@@ -875,6 +877,80 @@ messages, the way its adapters were trained.</li>
 """
 
 
+# --- PR comment -------------------------------------------------------------
+
+
+def _plain(cell: dict | None, headline: str) -> str:
+    """A cell as plain text: its value, or why it has none."""
+    if cell is None:
+        return "·"
+    if "skipped" in cell:
+        return "—"
+    if is_error(cell):
+        return "error"
+    value = _headline(cell, headline)
+    return "?" if value is None else f"{value * 100:.1f}"
+
+
+def summary(
+    data: dict, spec: Spec, sha: str, outcome: str, run_url: str | None = None
+) -> str:
+    """The PR comment of a ``/benchmark`` run, as Markdown.
+
+    It starts with a marker naming the model, so a later run of the same
+    model edits this comment instead of adding one.
+    """
+    marker = f"<!-- adapter-benchmark:{spec.model_id} -->"
+    title = f"### Adapter benchmark: {spec.model.label}"
+    run = f" · [run]({run_url})" if run_url else ""
+    row = find_row(data, sha, spec.model_id)
+    if outcome == "failed" or row is None:
+        return (
+            f"{marker}\n{title}\n\nThe run for `{sha[:8]}` failed, so nothing "
+            f"was published{run}."
+        )
+    reference = data["references"].get(spec.model_id)
+    gap = _reference_gap(reference, row, spec)
+    techs = spec.technologies
+    labels = " / ".join(t.label for t in techs)
+    cached = " (cached result)" if outcome == "cached" else ""
+    lines = [
+        marker,
+        title,
+        "",
+        f"Commit `{sha[:8]}`{cached} · [results page]({PAGE_URL}#{spec.model_id}){run}",
+        "",
+        f"| Intrinsic | {ENGINE_LABEL} {labels} | {REFERENCE_LABEL} {labels} "
+        f"| {BASE_LABEL} | {RATIO_LABEL} {labels} |",
+        "|---|---|---|---|---|",
+    ]
+    for intrinsic in spec.intrinsics:
+        headline = intrinsic.headline
+        gs = row["cells"].get(intrinsic.id, {})
+        ref = {} if gap else reference["cells"].get(intrinsic.id, {})
+        ratios = []
+        for t in techs:
+            values = [
+                _headline(gs.get(t.id), headline),
+                _headline(ref.get(t.id), headline),
+                _headline(ref.get(BASE_COLUMN), headline),
+            ]
+            ratio = None if None in values else gain_ratio(*values)
+            ratios.append(
+                "·" if None in values else "n/a" if ratio is None else f"{ratio:.2f}"
+            )
+        lines.append(
+            f"| {intrinsic.name} "
+            f"| {' / '.join(_plain(gs.get(t.id), headline) for t in techs)} "
+            f"| {' / '.join(_plain(ref.get(t.id), headline) for t in techs)} "
+            f"| {_plain(ref.get(BASE_COLUMN), headline)} "
+            f"| {' / '.join(ratios)} |"
+        )
+    if gap:
+        lines += ["", f"No {REFERENCE_LABEL} and {BASE_LABEL} columns yet: {gap}."]
+    return "\n".join(lines)
+
+
 # --- CLI -------------------------------------------------------------------
 
 
@@ -901,6 +977,11 @@ def main(argv: list[str] | None = None) -> int:
     mr.add_argument("reference", type=Path)
     r = sub.add_parser("render", help="write the page from the page data")
     r.add_argument("--out", type=Path, default=PAGE_PATH)
+    s = sub.add_parser("summary", help="print a /benchmark run's PR comment")
+    s.add_argument("sha")
+    s.add_argument("--model", default=None, help="default: the first model")
+    s.add_argument("--outcome", choices=("ran", "cached", "failed"), default="ran")
+    s.add_argument("--run-url", default=None)
     args = p.parse_args(argv)
 
     spec = load_spec()
@@ -917,7 +998,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     data = load_data(args.data, spec)
-    if args.cmd in ("check", "check-reference"):
+    if args.cmd in ("check", "check-reference", "summary"):
         spec = spec.for_model(args.model)
     if args.cmd == "check":
         row = find_row(data, args.sha, spec.model_id)
@@ -965,6 +1046,9 @@ def main(argv: list[str] | None = None) -> int:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(render(data, spec))
         print(f"wrote {args.out} ({len(data['rows'])} rows)")
+        return 0
+    if args.cmd == "summary":
+        print(summary(data, spec, args.sha, args.outcome, args.run_url))
         return 0
     return 2
 

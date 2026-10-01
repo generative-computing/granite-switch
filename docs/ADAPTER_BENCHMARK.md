@@ -546,8 +546,66 @@ exercised by a real run.
 - **No throughput yet.** Cells are dictionaries, so more metrics can be added
   without breaking old rows.
 
-## Later: PR-comment trigger
+## PR command: `/benchmark`
 
-A `/benchmark` PR comment, like `/gpu-test`, is planned. It needs the workflow
-files on `main` and support in the GPU runner. See [CICD.md](CICD.md) for the
-existing GPU-test flow.
+A maintainer can benchmark a pull request's head commit with a comment:
+
+| Comment | Runs |
+|---|---|
+| `/benchmark` | the first model |
+| `/benchmark --model granite-4.2-3b` | another model |
+| `/benchmark --no-cache` | again, though the commit already has its row |
+
+It works like `/gpu-test` (see [CICD.md](CICD.md)):
+
+1. **Comment handler** (`benchmark-command.yaml`, on GitHub's runners):
+   checks that the commenter has the Maintain or Admin role, and dispatches
+   the benchmark workflow for the PR's head commit.
+2. **Benchmark workflow** (`adapter-benchmark.yaml`, on the self-hosted GPU
+   runner):
+   - checks the role again, with the runner image's script;
+   - checks out this branch;
+   - runs `submit.sh bench <sha> --no-publish`, which stops early on a cache
+     hit;
+   - merges the row into the page data and pushes it to this branch, so the
+     page updates;
+   - posts the result on the PR: a comment per model, edited by later runs,
+     and a commit status `adapter-benchmark/<model>`.
+
+The PR comment holds the commit's numbers (`publish.py summary`), for example:
+
+```text
+| Intrinsic | granite-switch (vLLM) LoRA / aLoRA / SR | HF + PEFT LoRA / aLoRA / SR | Base | Gain ratio LoRA / aLoRA / SR |
+| Answerability | 84.8 / 83.7 / 84.2 | 84.7 / 83.6 / 84.3 | 72.5 | 1.01 / 0.99 / 0.99 |
+```
+
+### Where the files live
+
+- The two workflows and `.github/scripts/benchmark_command.sh` live on
+  `main`. GitHub runs comment-triggered and dispatched workflows only from the
+  default branch, and a pull request cannot change them for its own run.
+- Everything they run lives on this branch: the harness, the page and its
+  data. The workflow never runs the commit under test on the runner; that
+  happens in the cluster pod, as for a local run.
+
+### What the GPU runner needs
+
+The runner's owner sets these up; nothing of it is in the repository.
+
+- `oc`, logged in with rights to create and follow the jobs in the
+  benchmark's namespace, including its storage volume and the judge's secret.
+- `helm`, with the repository that provides `mlbatch/pytorchjob-generator`.
+- `git`, and network access to GitHub. The workflow installs `uv` itself.
+- The private settings in `/opt/gsw/adapter-bench/`: a `local.env` like the
+  one in `vela/local/`, for every model it should run.
+
+### What stays manual
+
+- **The reference columns** (`submit.sh reference`): once per model and
+  version, and they need the private SR model code.
+- **Staging adapters** (`submit.sh stage`).
+
+### Public log
+
+The workflow's log is public. It prints only `submit.sh`'s status lines: the
+pod log, which names internal storage paths, stays in a file on the runner.
