@@ -541,11 +541,18 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
         )
         return f"<dl>{body}</dl>"
 
+    def code(run: dict) -> str:
+        """The benchmark's own code that ran, as a link to its commit."""
+        sha = run.get("harness_sha")
+        if not sha:
+            return "not recorded"
+        text = (
+            f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
+            f"<code>{_esc(sha[:8])}</code></a>"
+        )
+        return text + (" with local changes" if run.get("harness_dirty") else "")
+
     commit, run = row["commit"], row["run"]
-    harness = run.get("harness_sha")
-    harness = f"<code>{_esc(harness[:8])}</code>" if harness else "not recorded"
-    if run.get("harness_dirty"):
-        harness += " with local changes"
     versions = (
         _esc(_libraries(run, ("vllm", "torch", "transformers"))) or "not recorded"
     )
@@ -572,7 +579,7 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
                 ),
                 ("CUDA graphs", "off" if run.get("enforce_eager") else "on"),
                 ("benchmark", f"v{row.get('bench_version')}"),
-                ("harness", harness),
+                ("benchmark code", code(run)),
             ]
         ),
     ]
@@ -597,8 +604,9 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
         out += [
             "<h4>Adapters</h4>",
             f"<table><tr><th></th>{head}</tr>{''.join(body)}</table>",
-            "<p>Each checkpoint's ranks and the start of its weights checksum"
-            + (f"; staged {_esc(', '.join(staged))}." if staged else ".")
+            "<p>Each checkpoint's rank and the first 8 characters of its weights'"
+            " SHA-256 checksum, which change if the checkpoint is replaced"
+            + (f". Staged {_esc(', '.join(staged))}." if staged else ".")
             + "</p>",
         ]
     out.append(f"<h4>{_esc(REFERENCE_LABEL)} and {_esc(BASE_LABEL)}</h4>")
@@ -607,6 +615,7 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
     else:
         ref_run = reference["run"]
         sr_ref = ref_run.get("sr_ref")
+        instructions = ref_run.get("base_instructions_sha256")
         out.append(
             items(
                 [
@@ -615,9 +624,22 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
                         _esc(ref_run.get("finished", "")[:16].replace("T", " ")),
                     ),
                     ("libraries", _esc(_libraries(ref_run, REFERENCE_LIBRARIES))),
-                    ("SR model", f"<code>{_esc(sr_ref[:8])}</code>" if sr_ref else ""),
+                    (
+                        "SR model code",
+                        f"<code>{_esc(sr_ref[:8])}</code>, the commit of the "
+                        "standalone SR implementation"
+                        if sr_ref
+                        else "",
+                    ),
+                    (
+                        "Base prompt",
+                        f"instructions <code>{_esc(instructions[:8])}</code> (checksum)"
+                        if instructions
+                        else "",
+                    ),
                     ("GPU", _esc(ref_run.get("gpu") or "")),
                     ("version", f"reference v{reference.get('reference_version')}"),
+                    ("benchmark code", code(ref_run)),
                 ]
             )
         )
@@ -759,7 +781,8 @@ set; a scorer grades the answers</span></div><div class="arrow">&rarr;</div>
 <div class="step ref"><b>Same adapters, no granite-switch</b><span>Hugging Face
 transformers + PEFT</span></div><div class="arrow">&rarr;</div>
 <div class="result ref">{REFERENCE_LABEL}</div>
-<div class="step ref"><b>Base model alone</b><span>no adapter</span></div>
+<div class="step ref"><b>Base model alone</b><span>no adapter; told the
+answer format</span></div>
 <div class="arrow">&rarr;</div><div class="result ref">{BASE_LABEL}</div></div>
 <figcaption><b>{RATIO_LABEL}</b> = ({ENGINE_LABEL} &minus; {BASE_LABEL}) &divide;
 ({REFERENCE_LABEL} &minus; {BASE_LABEL}). At 1.00, granite-switch keeps all of an
@@ -828,7 +851,9 @@ each commit's composer, and served by its vLLM backend.</li>
 <li><b>{_esc(REFERENCE_LABEL)}</b>: the same adapter checkpoints without
 granite-switch, loaded with Hugging Face transformers and PEFT. SR runs on a
 standalone Hugging Face implementation of the Shadow Residual model.</li>
-<li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter.</li>
+<li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter. A final
+instruction tells it the answer format each scorer expects, which only the
+adapters were trained on.</li>
 <li><b>{_esc(RATIO_LABEL)}</b>: the share of an adapter's gain over the base
 model that granite-switch keeps. <b>n/a</b>: the adapter gains under
 {MIN_GAIN * 100:.0f} point under {_esc(REFERENCE_LABEL)}, too little to

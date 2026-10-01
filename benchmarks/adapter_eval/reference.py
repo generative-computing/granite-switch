@@ -13,7 +13,10 @@ Four columns per intrinsic (``common.REFERENCE_COLUMNS``):
 * ``lora``, ``alora``, ``sr``: the checkpoint the granite-switch run composes,
   loaded with HF + PEFT instead. SR runs on the shadow-residual repo's model
   code, shipped to the pod at a pinned commit.
-* ``base``: the base model with no adapter.
+* ``base``: the base model with no adapter, told the output format its
+  scorer expects in a final user turn (``--base-instructions``; see
+  ``prompts.py``). The instruction texts are private and reach the pod with
+  the job; the run records their checksum.
 
 None of them depends on the granite-switch commit, so they are computed once
 per model and ``(bench_version, reference_version)``; ``publish.py`` shows
@@ -39,6 +42,7 @@ under ``--work-dir``.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -223,6 +227,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--max-batch", type=int, default=64, help="rows per batch")
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--results-out", type=Path, default=None)
+    p.add_argument(
+        "--base-instructions",
+        type=Path,
+        default=None,
+        help="JSON of {intrinsic: {mode, text}}: the base model's instructions",
+    )
     args = p.parse_args(argv)
 
     started = now()
@@ -244,6 +254,9 @@ def main(argv: list[str] | None = None) -> int:
         for c in staged.discover(args.bench_root, spec, list(only) if only else None)
     }
     has_sr_code = sr_code_available()
+    instructions = (
+        json.loads(args.base_instructions.read_text()) if args.base_instructions else {}
+    )
     cells: dict[str, dict[str, dict]] = {}
     runnable: list[tuple[str, str, Path | None, Path]] = []
     for intrinsic in spec.select(list(only) if only else None):
@@ -261,6 +274,9 @@ def main(argv: list[str] | None = None) -> int:
             elif column == "sr" and not has_sr_code:
                 reason = "SR model code not available"
                 cells[intrinsic.id][column] = error(reason)
+            elif column == BASE_COLUMN and intrinsic.id not in instructions:
+                reason = "no base-model instruction"
+                cells[intrinsic.id][column] = error(reason)
             else:
                 cells[intrinsic.id][column] = error("not run")
                 runnable.append((intrinsic.id, column, adapter, ev))
@@ -271,6 +287,11 @@ def main(argv: list[str] | None = None) -> int:
         "sr_invocation_dropped": [],
         "mlp_keys_renamed": [],
         "adapters": {},
+        "base_instructions_sha256": hashlib.sha256(
+            args.base_instructions.read_bytes()
+        ).hexdigest()
+        if args.base_instructions
+        else None,
     }
     base_modules: set[str] | None = None
     jobs = []
@@ -328,6 +349,9 @@ def main(argv: list[str] | None = None) -> int:
                 "token_budget": args.token_budget,
                 "max_batch": args.max_batch,
                 **spec.model.prompt_for(None if column == BASE_COLUMN else column),
+                "instruction": instructions.get(intrinsic_id)
+                if column == BASE_COLUMN
+                else None,
             }
         )
     # Longest first, so the cells still running at the end are short ones.

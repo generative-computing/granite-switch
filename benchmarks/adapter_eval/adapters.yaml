@@ -24,8 +24,11 @@
 # alters only them: the pinned library versions, the SR model code, or the
 # reference generation (hf_generate.py). A bench_version bump also
 # invalidates them.
+#
+# reference_version 2: the base model is told the output format its scorer
+# expects, in a final user turn (private instructions, see prompts.py).
 
-reference_version: 1
+reference_version: 2
 
 # One entry per base model, each with its own bench root (staged adapters and
 # eval sets), bench_version and tab on the page. The first is the default of

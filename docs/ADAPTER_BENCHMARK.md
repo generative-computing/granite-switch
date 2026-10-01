@@ -38,7 +38,7 @@ Each intrinsic has 10 columns on the page, in four groups:
 |---|---|---|---|
 | granite-switch (vLLM) | LoRA, aLoRA, SR | the adapters composed with the commit, under its vLLM backend | yes |
 | HF + PEFT | LoRA, aLoRA, SR | the same checkpoints without granite-switch, with Hugging Face transformers and PEFT | no |
-| Base | one | the base model with no adapter | no |
+| Base | one | the base model with no adapter, told the answer format | no |
 | Gain ratio | LoRA, aLoRA, SR | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
 
 HF + PEFT and Base are the **reference columns**. They show what the
@@ -47,9 +47,9 @@ alone. They do not depend on the commit, so they are computed once and
 repeated on every row (see [Reference columns](#reference-columns)).
 
 The **gain ratio** is the share of an adapter's gain over the base model that
-granite-switch keeps. For example, with Base at 4.4, HF + PEFT at 84.7 and
-granite-switch at 84.8, the ratio is (84.8 − 4.4) ÷ (84.7 − 4.4) = 1.00. If a
-commit drops granite-switch to 44.6, the ratio falls to 0.50, while HF + PEFT
+granite-switch keeps. For example, with Base at 72.5, HF + PEFT at 84.7 and
+granite-switch at 84.8, the ratio is (84.8 − 72.5) ÷ (84.7 − 72.5) = 1.01. If
+a commit drops granite-switch to 78.6, the ratio falls to 0.50, while HF + PEFT
 stays put: the commit broke something. A ratio needs a gain to divide by: when
 HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
 
@@ -178,7 +178,16 @@ Per column:
   tokens are dropped first, in a copy: PEFT would read them as aLoRA and keep
   the adapter off before them. The generated output does not change, for the
   same reason as the SR activation conversion above.
-- **Base:** the base model, no adapter.
+- **Base:** the base model, no adapter, with one more user turn at the end:
+  an instruction naming the answer format its scorer expects. Only the
+  adapters were trained on that format. Without it, the base model answers in
+  prose and scores near zero: answerability 4.4, the share of rows whose
+  expected label is neither answerable nor unanswerable. For requirement
+  check the instruction replaces the row's own terse last request; for the
+  others it follows the conversation. The texts are private, like the judge
+  prompt: they live in
+  `local/base_instructions.json`, travel with each reference job, and the
+  results record only their checksum.
 
 The same as in the granite-switch run:
 
@@ -211,7 +220,10 @@ Bump `reference_version` when something changes only the reference numbers:
 
 - the pinned library versions (in `vela/pod_entry.sh`),
 - the SR model code commit (`SR_REF`),
-- the HF generation code (`hf_generate.py`).
+- the HF generation code (`hf_generate.py`),
+- the base model's instructions (`local/base_instructions.json`).
+
+Version 2 added those instructions.
 
 A `bench_version` bump also needs a new reference. Until it is computed, rows
 of the new version show `·` in the reference columns.
@@ -482,6 +494,8 @@ local/
   selection.json         the reviewed picks for `stage`
   selection.<id>.json    the same, for another model (also discovery.<id>.json, ...)
   judge_prompt.txt       query-rewrite judge prompt (shipped at stage time)
+  base_instructions.json the base model's answer-format instructions (shipped
+                         with each reference job)
   discovery.json         output of `discover`
   selection.draft.json   suggested picks from `discover`
   jobs/<job>.env         what `fetch` needs to resume a job
@@ -498,7 +512,8 @@ This repository is public. So:
 - **Public:** the harness, the page, and the page data. The page shows only
   scores, commit metadata and generic skip reasons.
 - **Private (in `local/`):** namespace, image, volume and paths, secret
-  names, the judge endpoint and the judge prompt.
+  names, the judge endpoint, the judge prompt and the base model's
+  instructions.
 - **Private, and not in this repository at all:** the SR model code of the
   reference column. The job ships it from a local checkout. Only its commit
   sha is published.

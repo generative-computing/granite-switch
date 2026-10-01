@@ -46,6 +46,7 @@ SELECTION_FILE=${SELECTION_FILE:-$LOCAL_DIR/selection.json}
 if [[ -z "${JUDGE_PROMPT_FILE:-}" && -f "$LOCAL_DIR/judge_prompt.txt" ]]; then
     JUDGE_PROMPT_FILE=$LOCAL_DIR/judge_prompt.txt
 fi
+BASE_INSTRUCTIONS_FILE=${BASE_INSTRUCTIONS_FILE:-$LOCAL_DIR/base_instructions.json}
 set +a
 : "${NAMESPACE:?set NAMESPACE in local.env}"
 JOB_PREFIX=${JOB_PREFIX:-adapter-bench}

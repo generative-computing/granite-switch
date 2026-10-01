@@ -14,7 +14,8 @@ benchmarked commit's own copy (if any) is never used.
 The reference job also ships the SR model code the same way: only its model
 package, taken with ``git archive`` from a local shadow-residual checkout at
 a pinned commit (``SR_REPO``, ``SR_REF``). It is never added to this repo;
-the results record only its commit sha.
+the results record only its commit sha. And it ships the base model's
+instructions (``BASE_INSTRUCTIONS_FILE``, private) as ``extra/``.
 
 Cluster names, storage paths and secret names come from the environment,
 which ``submit.sh`` loads from the gitignored ``local/local.env``. Standard
@@ -129,6 +130,8 @@ def build(args) -> dict:
             extra["judge_prompt.txt"] = Path(os.environ["JUDGE_PROMPT_FILE"])
     if mode == "script":
         extra["script.py"] = Path(args.script)
+    if mode == "reference":
+        extra["base_instructions.json"] = Path(need("BASE_INSTRUCTIONS_FILE"))
     for path in extra.values():
         if not path.is_file():
             fail(f"{path} does not exist")

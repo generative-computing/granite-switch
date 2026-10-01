@@ -12,11 +12,13 @@ each gets a clean CUDA context and a failure stays in its cell::
      "adapter_dir": "..." | null, "eval_path": "...", "out_path": "...",
      "status_path": "...", "limit": null, "max_new_tokens": 200,
      "max_model_len": 32768, "token_budget": 262144, "max_batch": 64,
-     "documents": "native", "chat_template_kwargs": {}}
+     "documents": "native", "chat_template_kwargs": {},
+     "instruction": {"mode": "append", "text": "..."} | null}
 
 The model per column:
 
-* ``base``: the base model, no adapter.
+* ``base``: the base model, no adapter, with the job's ``instruction`` (the
+  output format to use) as a final user turn.
 * ``lora`` / ``alora``: the base model with the checkpoint loaded by PEFT.
   PEFT turns an aLoRA on at its invocation tokens.
 * ``sr``: the shadow-residual repo's model (``build_sr_base``, shipped to the
@@ -249,6 +251,7 @@ def run(job: dict) -> dict:
             row,
             job.get("documents", "native"),
             job.get("chat_template_kwargs", {}),
+            job.get("instruction"),
         )
         ids = list(tok(text, add_special_tokens=False).input_ids)
         if invocation and not contains(ids, invocation):

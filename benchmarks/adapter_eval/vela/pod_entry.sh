@@ -102,6 +102,9 @@ reference)
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then
         args+=(--base-model "$ADAPTER_BENCH_BASE_MODEL")
     fi
+    if [[ -f "$HARNESS/extra/base_instructions.json" ]]; then
+        args+=(--base-instructions "$HARNESS/extra/base_instructions.json")
+    fi
     # shellcheck disable=SC2086
     cd "$HARNESS" && /workspace/refenv/bin/python -m benchmarks.adapter_eval.reference \
         "${args[@]}" ${ADAPTER_BENCH_EXTRA_ARGS:-}

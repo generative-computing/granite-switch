@@ -11,6 +11,7 @@ tensor data.
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import io
 import json
@@ -355,6 +356,29 @@ def test_chat_text_passes_the_template_options():
     )
     assert calls[-1][1]["enable_thinking"] is False
     assert calls[-1][1]["documents"] is None
+
+
+def test_chat_text_adds_the_base_models_instruction():
+    calls = []
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            calls.append(messages)
+            return "prompt"
+
+    terse = {"role": "user", "content": "<requirements>"}
+    row = {"messages": [*QUESTION, terse], "documents": DOCS}
+    append = {"mode": "append", "text": "Answer in JSON."}
+    prompts.chat_text(Tokenizer(), row, "tool_json_after_question", {}, append)
+    # The documents keep their place after the question; the instruction ends it.
+    assert [m["role"] for m in calls[-1]] == ["user", "user", "tool", "user"]
+    assert calls[-1][-1]["content"] == "Answer in JSON."
+
+    replace = {"mode": "replace_last_user", "text": "Answer in JSON."}
+    prompts.chat_text(Tokenizer(), row, "native", {}, replace)
+    assert calls[-1] == [*QUESTION, {"role": "user", "content": "Answer in JSON."}]
+    with pytest.raises(ValueError, match="unknown instruction mode"):
+        prompts.chat_text(Tokenizer(), row, "native", {}, {"mode": "x", "text": ""})
 
 
 def test_chatml_template_gets_the_documents_with_reasoning_off():
@@ -833,7 +857,7 @@ def test_render_run_details():
     assert "vllm 0.19.1, torch 2.10.0, transformers 5.8.1" in details
     assert "NVIDIA A100-SXM4-80GB" in details and "<code>ffffffff</code>" in details
     assert "<td>r=16 <code>3eef7a1a</code></td>" in details
-    assert "staged 2026-09-29" in details
+    assert "Staged 2026-09-29." in details
     assert "torch 2.10.0, transformers 5.8.1, peft 0.19.1" in details
     assert "<code>488f8e7a</code>" in details  # the SR model code
     # Without scripts the button keeps a plain tooltip.
@@ -851,6 +875,14 @@ def write_answerability_eval(bench: Path, n: int = 3) -> None:
         [{"messages": [{"role": "user", "content": "q"}], "ground_truth": "answerable"}]
         * n,
     )
+
+
+INSTRUCTION = {"mode": "append", "text": 'Answer "answerable" or "unanswerable".'}
+
+
+def write_instructions(path: Path, **by_intrinsic) -> Path:
+    path.write_text(json.dumps(by_intrinsic or {"answerability": INSTRUCTION}))
+    return path
 
 
 def test_reference_run(tmp_path, monkeypatch, capsys):
@@ -889,16 +921,23 @@ def test_reference_run(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(reference, "sr_code_available", lambda: True)
     monkeypatch.setattr(reference, "run_jobs", fake_run_jobs)
     work = tmp_path / "work"
+    instructions = write_instructions(tmp_path / "instructions.json")
     argv = [
         "--bench-root", str(bench),
         "--work-dir", str(work),
         "--base-model", str(write_base(tmp_path / "base")),
+        "--base-instructions", str(instructions),
         "--only", "answerability",
     ]  # fmt: skip
     assert reference.main(argv) == 0
 
     result = json.loads((work / "reference.json").read_text())
     assert result["model"] == SPEC.model_id
+    # Only the base model gets the instruction; the run records its checksum.
+    assert jobs["base"]["instruction"] == INSTRUCTION
+    assert jobs["lora"]["instruction"] is None
+    sha = hashlib.sha256(instructions.read_bytes()).hexdigest()
+    assert result["run"]["base_instructions_sha256"] == sha
     cells = result["cells"]["answerability"]
     assert cells["lora"]["accuracy"] == 1.0 and cells["lora"]["truncated"] == 1
     assert cells["alora"]["accuracy"] == 0.0
@@ -956,6 +995,7 @@ def test_reference_jobs_carry_each_cells_prompt_settings(tmp_path, monkeypatch):
         "--bench-root", str(bench),
         "--work-dir", str(tmp_path / "work"),
         "--base-model", str(write_base(tmp_path / "base")),
+        "--base-instructions", str(write_instructions(tmp_path / "i.json")),
         "--model", model.id,
         "--only", "answerability",
     ]  # fmt: skip
@@ -965,6 +1005,25 @@ def test_reference_jobs_carry_each_cells_prompt_settings(tmp_path, monkeypatch):
     assert jobs["alora"]["documents"] == "tool_text_before_question"
     assert jobs["base"]["documents"] == "tool_json_after_question"
     assert jobs["base"]["chat_template_kwargs"] == {"enable_thinking": False}
+
+
+def test_reference_base_needs_an_instruction(tmp_path, monkeypatch):
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    monkeypatch.setattr(reference, "run_jobs", lambda *a: pytest.fail("nothing to run"))
+    work = tmp_path / "work"
+    other = write_instructions(tmp_path / "i.json", guardian_core=INSTRUCTION)
+    argv = [
+        "--bench-root", str(bench),
+        "--work-dir", str(work),
+        "--base-instructions", str(other),
+        "--only", "answerability/base",
+    ]  # fmt: skip
+    assert reference.main(argv) == 0
+    cells = json.loads((work / "reference.json").read_text())["cells"]
+    assert cells == {
+        "answerability": {"base": common.error("no base-model instruction")}
+    }
 
 
 def test_reference_run_without_the_sr_code(tmp_path, monkeypatch):
@@ -2227,6 +2286,8 @@ def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
     sha = git_repo_with_sr_code(tmp_path / "sr", render_job.SR_CODE_DIR)
     monkeypatch.setenv("SR_REPO", str(tmp_path / "sr"))
     monkeypatch.setenv("SR_REF", "HEAD")
+    instructions = write_instructions(tmp_path / "instructions.json")
+    monkeypatch.setenv("BASE_INSTRUCTIONS_FILE", str(instructions))
     out = tmp_path / "values.json"
     argv = [
         "--mode",
@@ -2257,8 +2318,17 @@ def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
         names = tar.getnames()
     assert f"{render_job.SR_CODE_DIR}/build.py" in names
     assert not any(n.endswith("README.md") for n in names)  # only the package
+    # The base model's instructions travel with the harness, as extra/.
+    harness = base64.b64decode(job_env["ADAPTER_BENCH_HARNESS_TGZ"])
+    with tarfile.open(fileobj=io.BytesIO(harness)) as tar:
+        shipped = tar.extractfile("extra/base_instructions.json").read()
+    assert shipped == instructions.read_bytes()
 
     monkeypatch.setenv("SR_REF", "no-such-ref")
+    with pytest.raises(SystemExit):
+        render_job.main(argv)
+    monkeypatch.setenv("SR_REF", "HEAD")
+    monkeypatch.delenv("BASE_INSTRUCTIONS_FILE")
     with pytest.raises(SystemExit):
         render_job.main(argv)
     monkeypatch.delenv("SR_REPO")

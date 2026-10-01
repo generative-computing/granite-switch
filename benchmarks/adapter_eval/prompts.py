@@ -19,6 +19,15 @@ messages end with the user's question:
   with every document in a JSON list of ``{source, document_id, content}``.
 * ``tool_text_before_question``: one tool message per document, holding its
   text, before the last user turn.
+
+The base-model column also gets an instruction: a final user turn naming the
+output format its scorer expects, since a base model without an adapter does
+not know it. The instruction texts are private (``vela/local``) and reach the
+pod with the reference job; ``with_instruction`` applies one. Its ``mode``:
+
+* ``append``: after the conversation.
+* ``replace_last_user``: in place of the row's own last user turn, a terse
+  task request the adapter was trained on.
 """
 
 from __future__ import annotations
@@ -26,6 +35,7 @@ from __future__ import annotations
 import json
 
 DOCUMENT_STYLES = ("native", "tool_json_after_question", "tool_text_before_question")
+INSTRUCTION_MODES = ("append", "replace_last_user")
 
 
 def fix_documents(docs):
@@ -76,18 +86,38 @@ def with_documents(
     return [*messages[:at], *tool, *messages[at:]], None
 
 
+def without_last_user(messages: list[dict]) -> list[dict]:
+    users = [i for i, m in enumerate(messages) if m.get("role") == "user"]
+    return [m for i, m in enumerate(messages) if not users or i != users[-1]]
+
+
 def chat_text(
-    tokenizer, row: dict, documents: str, template_kwargs: dict, **extra
+    tokenizer,
+    row: dict,
+    documents: str,
+    template_kwargs: dict,
+    instruction: dict | None = None,
+    **extra,
 ) -> str:
     """A row's prompt, ending in the generation prompt.
 
     ``documents`` is the row's document style, ``template_kwargs`` its model's
-    chat-template options, and ``extra`` more template arguments (the
+    chat-template options, ``instruction`` a base-model instruction
+    (``{"mode", "text"}``), and ``extra`` more template arguments (the
     composed model's ``adapter_name``).
+
+    The documents go in before the instruction, so they keep their place
+    next to the question and the instruction is the last thing read.
     """
-    messages, documents_arg = with_documents(
-        row["messages"], row.get("documents"), documents
-    )
+    messages = row["messages"]
+    if instruction:
+        if instruction["mode"] not in INSTRUCTION_MODES:
+            raise ValueError(f"unknown instruction mode {instruction['mode']!r}")
+        if instruction["mode"] == "replace_last_user":
+            messages = without_last_user(messages)
+    messages, documents_arg = with_documents(messages, row.get("documents"), documents)
+    if instruction:
+        messages = [*messages, {"role": "user", "content": instruction["text"]}]
     return tokenizer.apply_chat_template(
         messages,
         tools=row.get("tools"),
