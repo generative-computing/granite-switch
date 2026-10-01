@@ -1,0 +1,51 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Slash-command launcher for /benchmark: measures a pull request's head commit
+# with the adapter accuracy benchmark and publishes its row to
+# https://generative-computing.github.io/granite-switch/benchmarks/
+#
+#   /benchmark [--model <id>] [--no-cache]
+#
+# Built like gpu-test-command.yaml: this job runs on a GitHub-hosted runner,
+# checks the commenter's role with .github/scripts/check_role.sh (fast-fail UX;
+# adapter-benchmark.yaml re-checks with the runner image's copy), and dispatches
+# adapter-benchmark.yaml on the self-hosted GPU runner.
+#
+# NOTE: issue_comment workflows only fire when the file is on the DEFAULT branch.
+
+name: Benchmark Command
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  actions: write         # dispatch adapter-benchmark.yaml
+  pull-requests: write   # react to the comment and post feedback
+  contents: read
+
+jobs:
+  dispatch:
+    name: Dispatch the adapter benchmark
+    runs-on: ubuntu-latest
+    # Only for `/benchmark` comments on a pull request (not plain issues).
+    if: >-
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/benchmark')
+    steps:
+      - name: Checkout scripts (trusted default branch)
+        uses: actions/checkout@v4
+
+      - name: Handle /benchmark command
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SCRIPT_DIR: ${{ github.workspace }}/.github/scripts
+          # GitHub-controlled values pass through env, never interpolated into the
+          # script body: the login and the comment are attacker-controlled text.
+          ACTOR: ${{ github.event.comment.user.login }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+          BODY: ${{ github.event.comment.body }}
+        run: .github/scripts/benchmark_command.sh "$ACTOR" "$PR_NUMBER" "$COMMENT_ID" "$BODY"
