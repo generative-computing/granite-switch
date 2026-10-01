@@ -1,4 +1,471 @@
 {
+  "references": {
+    "granite-4.1-3b": {
+      "base_model": "ibm-granite/granite-4.1-3b",
+      "bench_version": 1,
+      "cells": {
+        "answerability": {
+          "alora": {
+            "accuracy": 0.8359046283309958,
+            "answerable_f1": 0.8757905388312673,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8268785170473354,
+            "weighted_f1": 0.8187528609151492
+          },
+          "base": {
+            "accuracy": 0.04375876577840112,
+            "answerable_f1": 0.0,
+            "n": 3565,
+            "truncated": 788,
+            "unanswerable_f1": 0.0,
+            "weighted_f1": 0.0036691037148242813
+          },
+          "lora": {
+            "accuracy": 0.846844319775596,
+            "answerable_f1": 0.889589905362776,
+            "n": 3565,
+            "truncated": 2,
+            "unanswerable_f1": 0.8325728325728324,
+            "weighted_f1": 0.828847321205111
+          },
+          "sr": {
+            "accuracy": 0.8429172510518934,
+            "answerable_f1": 0.8825587206396802,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8337819650067295,
+            "weighted_f1": 0.825276629446655
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "accuracy": 0.8152009756163077,
+            "accuracy_pooled": 0.8375782145060369,
+            "balanced_accuracy": 0.814277318614209,
+            "f1": 0.7882282677893645,
+            "n": 11347,
+            "parse_failures": 0,
+            "truncated": 0
+          },
+          "base": {
+            "accuracy": 0.5524485507069227,
+            "accuracy_pooled": 0.6881995241032872,
+            "balanced_accuracy": 0.5415792243211113,
+            "f1": 0.4742753483007604,
+            "n": 11347,
+            "parse_failures": 115,
+            "truncated": 131
+          },
+          "lora": {
+            "accuracy": 0.8160424419393809,
+            "accuracy_pooled": 0.8378426015686966,
+            "balanced_accuracy": 0.8182432943274662,
+            "f1": 0.7894065326146293,
+            "n": 11347,
+            "parse_failures": 0,
+            "truncated": 0
+          },
+          "sr": {
+            "accuracy": 0.7987564329735587,
+            "accuracy_pooled": 0.8342293117123468,
+            "balanced_accuracy": 0.7955715242233982,
+            "f1": 0.7677226736256979,
+            "n": 11347,
+            "parse_failures": 1,
+            "truncated": 0
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "clear_hard_accuracy": 0.86,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.9175627240143369,
+            "truncated": 2,
+            "underspecified_accuracy": 0.7974683544303798
+          },
+          "base": {
+            "clear_hard_accuracy": 0.0,
+            "clear_random_accuracy": 0.0,
+            "n": 279,
+            "overall_accuracy": 0.2831541218637993,
+            "truncated": 91,
+            "underspecified_accuracy": 1.0
+          },
+          "lora": {
+            "clear_hard_accuracy": 0.84,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.9247311827956989,
+            "truncated": 0,
+            "underspecified_accuracy": 0.8354430379746836
+          },
+          "sr": {
+            "clear_hard_accuracy": 0.96,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.931899641577061,
+            "truncated": 2,
+            "underspecified_accuracy": 0.7848101265822784
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "accuracy_over_total": 0.7015209125475285,
+            "accuracy_over_valid": 0.8434285714285714,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 5,
+            "ungraded": 177
+          },
+          "base": {
+            "accuracy_over_total": 0.7015209125475285,
+            "accuracy_over_valid": 0.7314172447968286,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 488,
+            "ungraded": 43
+          },
+          "lora": {
+            "accuracy_over_total": 0.7167300380228137,
+            "accuracy_over_valid": 0.8519774011299435,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 1,
+            "ungraded": 167
+          },
+          "sr": {
+            "accuracy_over_total": 0.7186311787072244,
+            "accuracy_over_valid": 0.8542372881355932,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 4,
+            "ungraded": 167
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "accuracy": 0.6728933167289332,
+            "balanced_accuracy": 0.6664159240390053,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5795090715048026,
+            "truncated": 0,
+            "weighted_f1": 0.6789201532073927,
+            "yes_f1": 0.7323369565217391
+          },
+          "base": {
+            "accuracy": 0.6712328767123288,
+            "balanced_accuracy": 0.539032479570476,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.175,
+            "truncated": 0,
+            "weighted_f1": 0.5781088220882422,
+            "yes_f1": 0.7947122861586315
+          },
+          "lora": {
+            "accuracy": 0.6629306766293067,
+            "balanced_accuracy": 0.6623296402796999,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.577962577962578,
+            "truncated": 0,
+            "weighted_f1": 0.6699770980805904,
+            "yes_f1": 0.7194194885970974
+          },
+          "sr": {
+            "accuracy": 0.6604400166044002,
+            "balanced_accuracy": 0.6571182358228729,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.570828961175236,
+            "truncated": 0,
+            "weighted_f1": 0.6672716286597828,
+            "yes_f1": 0.7190934065934067
+          }
+        }
+      },
+      "model": "granite-4.1-3b",
+      "reference_version": 1,
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:27Z",
+            "weights_sha256": "3eef7a1ab5e03123b4855cba0381c03626baf4106bb1a609424343ad78904f55"
+          },
+          "answerability/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:33Z",
+            "weights_sha256": "3a4a5896b8bb1ac2e6c7a6e832434ae9a37104c4f78dbee84152a0bb7c4eb925"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:40Z",
+            "weights_sha256": "b1507f14ca9c0f9406cf4322c34207fc330f43796bcbc4e0d0164a966c75af5c"
+          },
+          "guardian_core/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:46Z",
+            "weights_sha256": "be9c33a55f224a54d0c1e7fc98e6111fec7501a1a7132f44878e165b441a0361"
+          },
+          "guardian_core/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:51Z",
+            "weights_sha256": "ac82a4d63e4611deb3dc433a76d087d32d5d7ac41726cb57e8ecdecc11b79929"
+          },
+          "guardian_core/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:57Z",
+            "weights_sha256": "6fc83f8f40a958df521fb3dfe4c019ae660a85ecb7405f72e91ae079e15b9c54"
+          },
+          "query_clarification/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:31Z",
+            "weights_sha256": "27a1e51b5a5014a2277ccb9869d9d44ec22108b2a0472d59b9afa6625a77aebd"
+          },
+          "query_clarification/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:36Z",
+            "weights_sha256": "0f5f5bb14f74fe61c0c621c25b63270ccfc9ffc978b4a7f97be7f199ca6d26e0"
+          },
+          "query_clarification/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:42Z",
+            "weights_sha256": "0ba24f445e25bbc747fed3eb78859e404f806bf037569bb913c4b5e3dd177d11"
+          },
+          "query_rewrite/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:48Z",
+            "weights_sha256": "e9c4bd8a1cb048ab9b355c040481f693a981ce58d5a8afce25ca9396d39f4e07"
+          },
+          "query_rewrite/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:54Z",
+            "weights_sha256": "ec30859fdaf4d0dd1b937eda7ebd6a4ca66018f5c310caea2d62479e985ed0d4"
+          },
+          "query_rewrite/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:00Z",
+            "weights_sha256": "25a5ea8ef63237099a9a5f6ce5e3923983d448a02d88f44be4f209ea7f715ee0"
+          },
+          "requirement_check/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:06Z",
+            "weights_sha256": "246a59878bea77e981d54ba76807f65cfd2ce3b0d77c3428adb784e030a93f39"
+          },
+          "requirement_check/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:39:13Z",
+            "weights_sha256": "bf3f93e05a77731227df970bc025590834579d06fd5109e537a6290e9f661330"
+          },
+          "requirement_check/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:18Z",
+            "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
+          }
+        },
+        "base_model_local_copy": false,
+        "finished": "2026-09-30T22:37:29Z",
+        "gpu": "NVIDIA A100-SXM4-80GB",
+        "gpus": 4,
+        "harness_dirty": false,
+        "harness_sha": "f270ebbbc31c171f0313fb12faa555f989e1f384",
+        "limit": null,
+        "max_batch": 64,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [
+          "answerability/lora",
+          "answerability/alora",
+          "answerability/sr",
+          "query_rewrite/lora",
+          "query_rewrite/alora",
+          "query_rewrite/sr",
+          "query_clarification/lora",
+          "query_clarification/alora",
+          "query_clarification/sr",
+          "guardian_core/lora",
+          "guardian_core/alora",
+          "guardian_core/sr",
+          "requirement_check/lora",
+          "requirement_check/alora",
+          "requirement_check/sr"
+        ],
+        "only": null,
+        "peft": "0.19.1",
+        "sr_invocation_dropped": [
+          "answerability",
+          "query_rewrite",
+          "query_clarification",
+          "guardian_core",
+          "requirement_check"
+        ],
+        "sr_ref": "488f8e7af9c88e02659d5ff8b04eb744ce9a3c61",
+        "started": "2026-09-30T21:00:52Z",
+        "token_budget": 262144,
+        "torch": "2.10.0",
+        "transformers": "5.8.1"
+      }
+    },
+    "granite-4.2-3b": {
+      "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
+      "bench_version": 1,
+      "cells": {
+        "answerability": {
+          "alora": {
+            "accuracy": 0.832538569424965,
+            "answerable_f1": 0.8745679012345678,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8187414500683995,
+            "weighted_f1": 0.8149382036235591
+          },
+          "base": {
+            "accuracy": 0.04375876577840112,
+            "answerable_f1": 0.0,
+            "n": 3565,
+            "truncated": 3266,
+            "unanswerable_f1": 0.0,
+            "weighted_f1": 0.0036691037148242813
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "accuracy": 0.6339410939691444,
+            "answerable_f1": 0.6214908034849952,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.6694193548387097,
+            "weighted_f1": 0.6126330134998079
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "base": {
+            "accuracy": 0.4468570223800006,
+            "accuracy_pooled": 0.5717810875121178,
+            "balanced_accuracy": 0.39574740997385927,
+            "f1": 0.007034659817845658,
+            "n": 11347,
+            "parse_failures": 246,
+            "truncated": 1137
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "base": {
+            "clear_hard_accuracy": 0.0,
+            "clear_random_accuracy": 0.0,
+            "n": 279,
+            "overall_accuracy": 0.2831541218637993,
+            "truncated": 266,
+            "underspecified_accuracy": 1.0
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "base": {
+            "accuracy_over_total": 0.7034220532319392,
+            "accuracy_over_valid": 0.7198443579766537,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 920,
+            "ungraded": 24
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "base": {
+            "accuracy": 0.5994188459941885,
+            "balanced_accuracy": 0.5266913948161835,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.3321799307958478,
+            "truncated": 0,
+            "weighted_f1": 0.5804831505502503,
+            "yes_f1": 0.713904536021346
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        }
+      },
+      "model": "granite-4.2-3b",
+      "reference_version": 1,
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:22Z",
+            "weights_sha256": "a32b4f4a9c48434080bf58ca661a059735a69e568330aa1fc38a242059a3031c"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:28Z",
+            "weights_sha256": "937022a0862ec932a20fcaee38be849188f5d9f2db669d77399a0b2f27482198"
+          }
+        },
+        "base_model_local_copy": true,
+        "finished": "2026-10-01T05:46:53Z",
+        "gpu": "NVIDIA A100-SXM4-80GB",
+        "gpus": 4,
+        "harness_dirty": false,
+        "harness_sha": "c45407c9a618161bd7d156e782290c4d44aeb161",
+        "limit": null,
+        "max_batch": 64,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [],
+        "only": null,
+        "peft": "0.19.1",
+        "sr_invocation_dropped": [
+          "answerability"
+        ],
+        "sr_ref": "488f8e7af9c88e02659d5ff8b04eb744ce9a3c61",
+        "started": "2026-10-01T05:13:17Z",
+        "token_budget": 262144,
+        "torch": "2.10.0",
+        "transformers": "5.8.1"
+      }
+    }
+  },
   "rows": [
     {
       "base_model": "ibm-granite/granite-4.1-3b",
@@ -32,19 +499,19 @@
         },
         "guardian_core": {
           "alora": {
-            "accuracy": 0.8156143978292614,
-            "accuracy_pooled": 0.8382832466731295,
-            "balanced_accuracy": 0.8146003300752058,
-            "f1": 0.7887317550130988,
+            "accuracy": 0.8156474994512408,
+            "accuracy_pooled": 0.838371375694016,
+            "balanced_accuracy": 0.8146291817774562,
+            "f1": 0.7887707751606639,
             "n": 11347,
             "parse_failures": 0,
             "truncated": 0
           },
           "lora": {
-            "accuracy": 0.8167015282110104,
+            "accuracy": 0.8166995790092955,
             "accuracy_pooled": 0.838371375694016,
-            "balanced_accuracy": 0.8188825452330644,
-            "f1": 0.7899079585140335,
+            "balanced_accuracy": 0.8188913246751783,
+            "f1": 0.7898379715926067,
             "n": 11347,
             "parse_failures": 0,
             "truncated": 0
@@ -59,48 +526,13 @@
             "truncated": 0
           }
         },
-        "hallucination_detection": {
-          "alora": {
-            "n": 1025,
-            "parse_failures": 3,
-            "response_accuracy_mean": 0.83375,
-            "response_accuracy_pooled": 0.8405088062622309,
-            "response_macro_f1_mean": 0.72635,
-            "sentence_accuracy_mean": 0.8866,
-            "sentence_accuracy_pooled": 0.9512661251791686,
-            "sentence_macro_f1_mean": 0.6831499999999999,
-            "truncated": 0
-          },
-          "lora": {
-            "n": 1025,
-            "parse_failures": 2,
-            "response_accuracy_mean": 0.8304,
-            "response_accuracy_pooled": 0.8377321603128055,
-            "response_macro_f1_mean": 0.7233499999999999,
-            "sentence_accuracy_mean": 0.8888,
-            "sentence_accuracy_pooled": 0.9539609461819336,
-            "sentence_macro_f1_mean": 0.6868000000000001,
-            "truncated": 2
-          },
-          "sr": {
-            "n": 1025,
-            "parse_failures": 21,
-            "response_accuracy_mean": 0.8382499999999999,
-            "response_accuracy_pooled": 0.8276892430278885,
-            "response_macro_f1_mean": 0.7232000000000001,
-            "sentence_accuracy_mean": 0.8949,
-            "sentence_accuracy_pooled": 0.9467802022352315,
-            "sentence_macro_f1_mean": 0.6797,
-            "truncated": 21
-          }
-        },
         "query_clarification": {
           "alora": {
             "clear_hard_accuracy": 0.86,
             "clear_random_accuracy": 1.0,
             "n": 279,
             "overall_accuracy": 0.9175627240143369,
-            "truncated": 1,
+            "truncated": 2,
             "underspecified_accuracy": 0.7974683544303798
           },
           "lora": {
@@ -108,7 +540,7 @@
             "clear_random_accuracy": 1.0,
             "n": 279,
             "overall_accuracy": 0.9247311827956989,
-            "truncated": 1,
+            "truncated": 0,
             "underspecified_accuracy": 0.8354430379746836
           },
           "sr": {
@@ -122,28 +554,28 @@
         },
         "query_rewrite": {
           "alora": {
-            "accuracy_over_total": 0.6967680608365019,
-            "accuracy_over_valid": 0.8434982738780207,
+            "accuracy_over_total": 0.7024714828897338,
+            "accuracy_over_valid": 0.8397727272727272,
             "judge_errors": 0,
             "n": 1052,
-            "truncated": 4,
-            "ungraded": 183
+            "truncated": 5,
+            "ungraded": 172
           },
           "lora": {
-            "accuracy_over_total": 0.7167300380228137,
-            "accuracy_over_valid": 0.853907134767837,
+            "accuracy_over_total": 0.7224334600760456,
+            "accuracy_over_valid": 0.852017937219731,
             "judge_errors": 0,
             "n": 1052,
-            "truncated": 1,
-            "ungraded": 169
+            "truncated": 2,
+            "ungraded": 160
           },
           "sr": {
-            "accuracy_over_total": 0.7157794676806084,
-            "accuracy_over_valid": 0.8556818181818182,
+            "accuracy_over_total": 0.7138783269961977,
+            "accuracy_over_valid": 0.8543799772468714,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 8,
-            "ungraded": 172
+            "ungraded": 173
           }
         },
         "requirement_check": {
@@ -184,20 +616,101 @@
         "sha": "6013c7ff82a73020f1d1fb00dcdc323398fffb38",
         "subject": "Refactor/multiswitch only and conversation ids (#131)"
       },
+      "model": "granite-4.1-3b",
       "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:27Z",
+            "weights_sha256": "3eef7a1ab5e03123b4855cba0381c03626baf4106bb1a609424343ad78904f55"
+          },
+          "answerability/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:33Z",
+            "weights_sha256": "3a4a5896b8bb1ac2e6c7a6e832434ae9a37104c4f78dbee84152a0bb7c4eb925"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:40Z",
+            "weights_sha256": "b1507f14ca9c0f9406cf4322c34207fc330f43796bcbc4e0d0164a966c75af5c"
+          },
+          "guardian_core/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:46Z",
+            "weights_sha256": "be9c33a55f224a54d0c1e7fc98e6111fec7501a1a7132f44878e165b441a0361"
+          },
+          "guardian_core/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:51Z",
+            "weights_sha256": "ac82a4d63e4611deb3dc433a76d087d32d5d7ac41726cb57e8ecdecc11b79929"
+          },
+          "guardian_core/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:57Z",
+            "weights_sha256": "6fc83f8f40a958df521fb3dfe4c019ae660a85ecb7405f72e91ae079e15b9c54"
+          },
+          "query_clarification/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:31Z",
+            "weights_sha256": "27a1e51b5a5014a2277ccb9869d9d44ec22108b2a0472d59b9afa6625a77aebd"
+          },
+          "query_clarification/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:36Z",
+            "weights_sha256": "0f5f5bb14f74fe61c0c621c25b63270ccfc9ffc978b4a7f97be7f199ca6d26e0"
+          },
+          "query_clarification/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:42Z",
+            "weights_sha256": "0ba24f445e25bbc747fed3eb78859e404f806bf037569bb913c4b5e3dd177d11"
+          },
+          "query_rewrite/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:48Z",
+            "weights_sha256": "e9c4bd8a1cb048ab9b355c040481f693a981ce58d5a8afce25ca9396d39f4e07"
+          },
+          "query_rewrite/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:54Z",
+            "weights_sha256": "ec30859fdaf4d0dd1b937eda7ebd6a4ca66018f5c310caea2d62479e985ed0d4"
+          },
+          "query_rewrite/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:00Z",
+            "weights_sha256": "25a5ea8ef63237099a9a5f6ce5e3923983d448a02d88f44be4f209ea7f715ee0"
+          },
+          "requirement_check/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:06Z",
+            "weights_sha256": "246a59878bea77e981d54ba76807f65cfd2ce3b0d77c3428adb784e030a93f39"
+          },
+          "requirement_check/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:39:13Z",
+            "weights_sha256": "bf3f93e05a77731227df970bc025590834579d06fd5109e537a6290e9f661330"
+          },
+          "requirement_check/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:18Z",
+            "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
+          }
+        },
         "base_model_local_copy": false,
         "enforce_eager": false,
-        "finished": "2026-09-30T07:14:41Z",
+        "finished": "2026-09-30T22:34:12Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
         "harness_dirty": false,
-        "harness_sha": "13acf395d95676bd099f738713dd6ecb64989838",
+        "harness_sha": "f270ebbbc31c171f0313fb12faa555f989e1f384",
         "limit": null,
         "max_model_len": 32768,
         "mlp_keys_renamed": [
           "answerability/lora",
           "answerability/alora",
-          "hallucination_detection/lora",
-          "hallucination_detection/alora",
           "query_rewrite/lora",
           "query_rewrite/alora",
           "query_clarification/lora",
@@ -207,7 +720,6 @@
           "requirement_check/lora",
           "requirement_check/alora",
           "answerability/sr",
-          "hallucination_detection/sr",
           "query_rewrite/sr",
           "query_clarification/sr",
           "guardian_core/sr",
@@ -222,32 +734,140 @@
         },
         "sr_anchor_converted": [
           "answerability",
-          "hallucination_detection",
           "query_rewrite",
           "query_clarification",
           "guardian_core",
           "requirement_check"
         ],
-        "started": "2026-09-30T05:30:14Z",
+        "started": "2026-09-30T21:01:34Z",
+        "torch": "2.10.0",
+        "transformers": "5.8.1",
+        "vllm": "0.19.1"
+      }
+    },
+    {
+      "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
+      "bench_version": 1,
+      "cells": {
+        "answerability": {
+          "alora": {
+            "accuracy": 0.8316970546984572,
+            "answerable_f1": 0.873733629849271,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8179022890331398,
+            "weighted_f1": 0.8141385681018126
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "accuracy": 0.6333800841514726,
+            "answerable_f1": 0.6210899709771043,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.6687322489026595,
+            "weighted_f1": 0.6121401902247982
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        }
+      },
+      "commit": {
+        "date": "2026-09-10T13:31:54+03:00",
+        "sha": "6013c7ff82a73020f1d1fb00dcdc323398fffb38",
+        "subject": "Refactor/multiswitch only and conversation ids (#131)"
+      },
+      "model": "granite-4.2-3b",
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:22Z",
+            "weights_sha256": "a32b4f4a9c48434080bf58ca661a059735a69e568330aa1fc38a242059a3031c"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:28Z",
+            "weights_sha256": "937022a0862ec932a20fcaee38be849188f5d9f2db669d77399a0b2f27482198"
+          }
+        },
+        "base_model_local_copy": true,
+        "enforce_eager": false,
+        "finished": "2026-10-01T05:31:53Z",
+        "gpu": "NVIDIA A100-SXM4-80GB",
+        "harness_dirty": false,
+        "harness_sha": "c45407c9a618161bd7d156e782290c4d44aeb161",
+        "limit": null,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [],
+        "only": null,
+        "prefix_caching": false,
+        "scheduler": {
+          "chunked_prefill": true,
+          "max_num_batched_tokens": 8192,
+          "max_num_seqs": 256
+        },
+        "sr_anchor_converted": [
+          "answerability"
+        ],
+        "started": "2026-10-01T05:14:00Z",
+        "torch": "2.10.0",
+        "transformers": "5.8.1",
         "vllm": "0.19.1"
       }
     }
   ],
   "spec": {
-    "base_model": "ibm-granite/granite-4.1-3b",
-    "bench_version": 1,
     "intrinsics": [
       {
         "headline": "accuracy",
         "headline_label": "Accuracy",
         "id": "answerability",
         "name": "Answerability"
-      },
-      {
-        "headline": "response_accuracy_mean",
-        "headline_label": "Accuracy",
-        "id": "hallucination_detection",
-        "name": "Hallucination detection"
       },
       {
         "headline": "accuracy_over_valid",
@@ -274,6 +894,31 @@
         "name": "Requirement check"
       }
     ],
+    "models": [
+      {
+        "bench_version": 1,
+        "id": "granite-4.1-3b",
+        "label": "Granite 4.1 3B",
+        "name": "ibm-granite/granite-4.1-3b",
+        "prompt": {}
+      },
+      {
+        "bench_version": 1,
+        "id": "granite-4.2-3b",
+        "label": "Granite 4.2 3B (prerelease)",
+        "name": "ibm-research/granite-4.2-3b-prerelease-r260622a",
+        "prompt": {
+          "chat_template_kwargs": {
+            "enable_thinking": false
+          },
+          "documents": "tool_json_after_question",
+          "documents_by_technology": {
+            "alora": "tool_text_before_question"
+          }
+        }
+      }
+    ],
+    "reference_version": 1,
     "technologies": [
       {
         "id": "lora",
@@ -288,7 +933,7 @@
       {
         "id": "sr",
         "label": "SR",
-        "source": "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV; internal trainer)"
+        "source": "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)"
       }
     ]
   }

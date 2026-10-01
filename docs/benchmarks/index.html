@@ -4,46 +4,216 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Granite Switch adapter benchmark</title>
 <style>
 :root { color-scheme: light; }
-body { font: 14px/1.4 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
+body { font: 14px/1.45 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
        background: #fff; }
-table { border-collapse: collapse; }
-th, td { border: 1px solid #d0d0d0; padding: 4px 8px; }
-th { background: #f3f3f3; font-weight: 600; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.best { font-weight: 700; }
-td.skip { color: #9a9a9a; text-align: center; }
-td.err { color: #b3261e; text-align: center; }
-td.date { white-space: nowrap; }
-td.subject { max-width: 28em; overflow: hidden; text-overflow: ellipsis;
-             white-space: nowrap; }
-tr.old td { color: #8a8a8a; }
+h1 { margin-bottom: .2em; }
+h2 { font-size: 18px; margin: 1.2em 0 .3em; }
+h2 small { font-weight: 400; color: #666; margin-left: .4em; }
 code { font-size: 13px; }
-.note { color: #555; max-width: 60em; }
+.lede, .note { color: #444; max-width: 62em; }
+.flow { margin: 1.2em 0; padding: .9em 1.1em; border: 1px solid #e3e3e3;
+        border-radius: 8px; max-width: 74em; background: #fcfcfc; }
+.flow .lane { display: flex; align-items: center; gap: .55em; flex-wrap: wrap;
+              margin: .45em 0; }
+@media (min-width: 1000px) { .flow .lane { flex-wrap: nowrap; } }
+.flow .tag { flex: 0 0 8em; color: #666; font-size: 12px;
+             text-transform: uppercase; letter-spacing: .04em; }
+.flow .step { border: 1px solid; border-radius: 6px; padding: .45em .75em;
+              flex: 0 1 15em; min-width: 9em; }
+.flow .step b { display: block; }
+.flow .step span { color: #555; font-size: 12.5px; }
+.flow .arrow { color: #888; font-size: 18px; }
+.flow .result { font-weight: 600; font-size: 13px; padding: .3em .7em;
+                border: 1px dashed; border-radius: 999px; white-space: nowrap; }
+.flow .gs { background: #f3f3f3; border-color: #c4c4c4; }
+.flow .ref { background: #e6ecf4; border-color: #b4c3d8; }
+.flow figcaption { margin-top: .5em; color: #333; }
+.tabs, .controls { display: none; }
+.js .tabs { display: flex; gap: .4em; margin: 1.2em 0 .6em; flex-wrap: wrap; }
+.tabs button { font: inherit; padding: .4em 1em; border: 1px solid #c4c4c4;
+               border-radius: 999px; background: #fff; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: #1b1b1b; border-color: #1b1b1b;
+                                     color: #fff; }
+.js .controls { display: flex; gap: 1em; align-items: center; flex-wrap: wrap;
+                margin-bottom: .4em; color: #444; }
+.controls label { cursor: pointer; }
+.js section.model { display: none; }
+.js section.model.active { display: block; }
+.wrap { overflow-x: auto; }
+table.bench { border-collapse: collapse; }
+.bench th, .bench td { border: 1px solid #d0d0d0; padding: 4px 8px; }
+.bench th { background: #f3f3f3; font-weight: 600; }
+.bench th.grp-ref, .bench th.grp-base { background: #e6ecf4; }
+.bench td.grp-ref, .bench td.grp-base { background: #f5f8fc; }
+.bench th.grp-ratio { background: #efece3; }
+.bench td.grp-ratio { background: #fbfaf6; }
+.bench .start { border-left: 2px solid #b0b0b0; }
+.bench .i-start { border-left: 2px solid #6b6b6b; }
+.bench .commit { position: sticky; left: 0; z-index: 1; background: #fff;
+                 white-space: nowrap; box-shadow: 1px 0 0 #d0d0d0; }
+.bench th.commit { background: #f3f3f3; z-index: 2; }
+.bench .commit .date { color: #777; font-size: 12px; }
+.bench td.subject { max-width: 16em; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+.bench td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.bench td.best { font-weight: 700; }
+.bench td.skip { color: #9a9a9a; text-align: center; }
+.bench td.err { color: #b3261e; text-align: center; }
+.bench tr.old td { color: #8a8a8a; }
+table.hide-gs .grp-gs, table.hide-ref .grp-ref, table.hide-base .grp-base,
+table.hide-ratio .grp-ratio { display: none; }
+button.info { width: 1.45em; height: 1.45em; padding: 0; margin-left: 5px;
+              font: italic 600 12px/1 Georgia, serif; vertical-align: 1px;
+              border: 1px solid #b8b8b8; border-radius: 999px; background: #fff;
+              color: #555; cursor: pointer; }
+button.info:hover, button.info:focus { border-color: #555; color: #1b1b1b; }
+.tip { position: fixed; z-index: 10; max-width: 34em; padding: .7em .9em;
+       max-height: calc(100vh - 16px); overflow: auto; box-sizing: border-box;
+       background: #fff; border: 1px solid #bdbdbd; border-radius: 8px;
+       box-shadow: 0 6px 24px rgba(0, 0, 0, .15); font-size: 13px; }
+.tip h4 { margin: .5em 0 .15em; font-size: 12px; text-transform: uppercase;
+          letter-spacing: .04em; color: #666; }
+.tip h4:first-child { margin-top: 0; }
+.tip dl { display: grid; grid-template-columns: auto 1fr; gap: .1em .8em; margin: 0; }
+.tip dt { color: #666; }
+.tip dd { margin: 0; }
+.tip table { border-collapse: collapse; margin-top: .2em; }
+.tip th, .tip td { padding: 1px 8px 1px 0; text-align: left; font-weight: 400; }
+.tip th { color: #666; }
+.tip p { margin: .2em 0 0; color: #666; }
+.notes { margin-top: 2em; }
+.notes li { margin: .2em 0; }
 </style>
 </head>
 <body>
 <h1>Granite Switch adapter benchmark</h1>
-<p class="note">Accuracy of trained intrinsic adapters after they are composed
-into <code>ibm-granite/granite-4.1-3b</code> with each commit's composer and run
-with its vLLM backend (greedy decoding). Values are percentages; the best
-technology per adapter is bold. Hover a cell for all its metrics, or for the
-reason it is empty.</p>
-<ul class="note"><li><b>LoRA</b>: LoRA (all-linear, r=16)</li><li><b>aLoRA</b>: aLoRA (all-linear, r=32)</li><li><b>SR</b>: Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV; internal trainer)</li></ul>
-<p class="note"><b>—</b> no adapter or eval set for this cell;
-<b>·</b> not run for this commit; <b>error</b> the run failed (hover for the
-step). Greyed rows used an older benchmark version (current:
-v1).</p>
-<table>
-<thead>
-<tr><th rowspan="2">Commit</th><th rowspan="2">Date</th><th rowspan="2">Subject</th><th colspan="3">Answerability<br><small>Accuracy</small></th><th colspan="3">Hallucination detection<br><small>Accuracy</small></th><th colspan="3">Query rewrite<br><small>Judge accuracy</small></th><th colspan="3">Query clarification<br><small>Accuracy</small></th><th colspan="3">Guardian-core<br><small>Accuracy</small></th><th colspan="3">Requirement check<br><small>Balanced accuracy</small></th></tr>
-<tr><th>LoRA</th><th>aLoRA</th><th>SR</th><th>LoRA</th><th>aLoRA</th><th>SR</th><th>LoRA</th><th>aLoRA</th><th>SR</th><th>LoRA</th><th>aLoRA</th><th>SR</th><th>LoRA</th><th>aLoRA</th><th>SR</th><th>LoRA</th><th>aLoRA</th><th>SR</th></tr>
-</thead>
-<tbody>
-<tr><td><a href="https://github.com/generative-computing/granite-switch/commit/6013c7ff82a73020f1d1fb00dcdc323398fffb38"><code>6013c7ff</code></a></td><td class="date">2026-09-10</td><td class="subject" title="Refactor/multiswitch only and conversation ids (#131)">Refactor/multiswitch only and conversation ids (#131)</td><td class="num best" title="accuracy=0.8480, answerable_f1=0.8900, n=3565, truncated=2, unanswerable_f1=0.8347, weighted_f1=0.8299">84.8</td><td class="num" title="accuracy=0.8370, answerable_f1=0.8773, n=3565, truncated=0, unanswerable_f1=0.8275, weighted_f1=0.8198">83.7</td><td class="num" title="accuracy=0.8421, answerable_f1=0.8814, n=3565, truncated=0, unanswerable_f1=0.8333, weighted_f1=0.8245">84.2</td><td class="num" title="n=1025, parse_failures=2, response_accuracy_mean=0.8304, response_accuracy_pooled=0.8377, response_macro_f1_mean=0.7233, sentence_accuracy_mean=0.8888, sentence_accuracy_pooled=0.9540, sentence_macro_f1_mean=0.6868, truncated=2">83.0</td><td class="num" title="n=1025, parse_failures=3, response_accuracy_mean=0.8337, response_accuracy_pooled=0.8405, response_macro_f1_mean=0.7264, sentence_accuracy_mean=0.8866, sentence_accuracy_pooled=0.9513, sentence_macro_f1_mean=0.6831, truncated=0">83.4</td><td class="num best" title="n=1025, parse_failures=21, response_accuracy_mean=0.8382, response_accuracy_pooled=0.8277, response_macro_f1_mean=0.7232, sentence_accuracy_mean=0.8949, sentence_accuracy_pooled=0.9468, sentence_macro_f1_mean=0.6797, truncated=21">83.8</td><td class="num" title="accuracy_over_total=0.7167, accuracy_over_valid=0.8539, judge_errors=0, n=1052, truncated=1, ungraded=169">85.4</td><td class="num" title="accuracy_over_total=0.6968, accuracy_over_valid=0.8435, judge_errors=0, n=1052, truncated=4, ungraded=183">84.3</td><td class="num best" title="accuracy_over_total=0.7158, accuracy_over_valid=0.8557, judge_errors=0, n=1052, truncated=8, ungraded=172">85.6</td><td class="num" title="clear_hard_accuracy=0.8400, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9247, truncated=1, underspecified_accuracy=0.8354">92.5</td><td class="num" title="clear_hard_accuracy=0.8600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9176, truncated=1, underspecified_accuracy=0.7975">91.8</td><td class="num best" title="clear_hard_accuracy=0.9600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9319, truncated=4, underspecified_accuracy=0.7848">93.2</td><td class="num best" title="accuracy=0.8167, accuracy_pooled=0.8384, balanced_accuracy=0.8189, f1=0.7899, n=11347, parse_failures=0, truncated=0">81.7</td><td class="num" title="accuracy=0.8156, accuracy_pooled=0.8383, balanced_accuracy=0.8146, f1=0.7887, n=11347, parse_failures=0, truncated=0">81.6</td><td class="num" title="accuracy=0.7981, accuracy_pooled=0.8335, balanced_accuracy=0.7949, f1=0.7670, n=11347, parse_failures=1, truncated=0">79.8</td><td class="num" title="accuracy=0.6650, balanced_accuracy=0.6642, invalid=0, n=2409, no_f1=0.5799, truncated=0, weighted_f1=0.6720, yes_f1=0.7214">66.4</td><td class="num best" title="accuracy=0.6725, balanced_accuracy=0.6661, invalid=0, n=2409, no_f1=0.5792, truncated=0, weighted_f1=0.6785, yes_f1=0.7319">66.6</td><td class="num" title="accuracy=0.6579, balanced_accuracy=0.6569, invalid=0, n=2409, no_f1=0.5717, truncated=0, weighted_f1=0.6651, yes_f1=0.7153">65.7</td></tr>
-</tbody>
-</table>
+<p class="lede">How well trained intrinsic adapters work through each
+granite-switch commit, next to the same adapters without granite-switch and
+the base model alone. Greedy decoding; values are percentages.</p>
+<figure class="flow">
+<div class="lane"><div class="tag">Every commit</div>
+<div class="step gs"><b>1. Pick adapters</b><span>trained LoRA, aLoRA and SR
+checkpoints, staged once per base model</span></div><div class="arrow">&rarr;</div>
+<div class="step gs"><b>2. Compose</b><span>the commit's composer builds one
+checkpoint holding every adapter</span></div><div class="arrow">&rarr;</div>
+<div class="step gs"><b>3. Evaluate</b><span>its vLLM backend answers each eval
+set; a scorer grades the answers</span></div><div class="arrow">&rarr;</div>
+<div class="result gs">granite-switch (vLLM)</div></div>
+<div class="lane"><div class="tag">Once per model</div>
+<div class="step ref"><b>Same adapters, no granite-switch</b><span>Hugging Face
+transformers + PEFT</span></div><div class="arrow">&rarr;</div>
+<div class="result ref">HF + PEFT</div>
+<div class="step ref"><b>Base model alone</b><span>no adapter</span></div>
+<div class="arrow">&rarr;</div><div class="result ref">Base</div></div>
+<figcaption><b>Gain ratio</b> = (granite-switch (vLLM) &minus; Base) &divide;
+(HF + PEFT &minus; Base). At 1.00, granite-switch keeps all of an
+adapter's gain over the base model.</figcaption>
+</figure>
+<nav class="tabs" role="tablist" aria-label="Base model"><button type="button" role="tab" data-model="granite-4.1-3b">Granite 4.1 3B</button><button type="button" role="tab" data-model="granite-4.2-3b">Granite 4.2 3B (prerelease)</button></nav>
+<div class="controls">Show: <label><input type="checkbox" data-group="gs" checked> granite-switch (vLLM)</label><label><input type="checkbox" data-group="ref" checked> HF + PEFT</label><label><input type="checkbox" data-group="base" checked> Base</label><label><input type="checkbox" data-group="ratio" checked> Gain ratio</label></div>
+<section class="model" data-model="granite-4.1-3b"><h2>Granite 4.1 3B <small><code>ibm-granite/granite-4.1-3b</code></small></h2><p class="note">The HF + PEFT and Base columns do not depend on the commit: computed once, on 2026-09-30 with torch 2.10.0, transformers 5.8.1, peft 0.19.1, and shown on every row of benchmark v1. Staged adapters: LoRA r=16 · aLoRA r=32 · SR r=32, cross r=32.</p><div class="wrap"><table class="bench"><thead><tr><th class="commit" rowspan="3">Commit</th><th rowspan="3">Subject</th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Answerability<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Query rewrite<br><small>Judge accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Query clarification<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Guardian-core<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Requirement check<br><small>Balanced accuracy</small></th></tr><tr><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th></tr><tr><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th></tr></thead><tbody>
+<tr><td class="commit"><a href="https://github.com/generative-computing/granite-switch/commit/6013c7ff82a73020f1d1fb00dcdc323398fffb38"><code>6013c7ff</code></a><button class="info" type="button" aria-label="Run details" title="vllm 0.19.1, torch 2.10.0, transformers 5.8.1; NVIDIA A100-SXM4-80GB; benchmark v1">i</button><div class="details" hidden><h4>Commit</h4><dl><dt>sha</dt><dd><code>6013c7ff82a73020f1d1fb00dcdc323398fffb38</code></dd><dt>date</dt><dd>2026-09-10 13:31</dd><dt>subject</dt><dd>Refactor/multiswitch only and conversation ids (#131)</dd></dl><h4>granite-switch (vLLM) run</h4><dl><dt>finished</dt><dd>2026-09-30 22:34</dd><dt>libraries</dt><dd>vllm 0.19.1, torch 2.10.0, transformers 5.8.1</dd><dt>GPU</dt><dd>NVIDIA A100-SXM4-80GB</dd><dt>context</dt><dd>32,768 tokens</dd><dt>CUDA graphs</dt><dd>on</dd><dt>benchmark</dt><dd>v1</dd><dt>harness</dt><dd><code>f270ebbb</code></dd></dl><h4>Adapters</h4><table><tr><th></th><th>LoRA</th><th>aLoRA</th><th>SR</th></tr><tr><th>Answerability</th><td>r=16 <code>3a4a5896</code></td><td>r=32 <code>3eef7a1a</code></td><td>r=32, cross r=32 <code>b1507f14</code></td></tr><tr><th>Query rewrite</th><td>r=16 <code>ec30859f</code></td><td>r=32 <code>e9c4bd8a</code></td><td>r=32, cross r=32 <code>25a5ea8e</code></td></tr><tr><th>Query clarification</th><td>r=16 <code>0f5f5bb1</code></td><td>r=32 <code>27a1e51b</code></td><td>r=32, cross r=32 <code>0ba24f44</code></td></tr><tr><th>Guardian-core</th><td>r=16 <code>ac82a4d6</code></td><td>r=32 <code>be9c33a5</code></td><td>r=32, cross r=32 <code>6fc83f8f</code></td></tr><tr><th>Requirement check</th><td>r=16 <code>bf3f93e0</code></td><td>r=32 <code>246a5987</code></td><td>r=32, cross r=32 <code>fa9ac180</code></td></tr></table><p>Each checkpoint's ranks and the start of its weights checksum; staged 2026-09-29.</p><h4>HF + PEFT and Base</h4><dl><dt>finished</dt><dd>2026-09-30 22:37</dd><dt>libraries</dt><dd>torch 2.10.0, transformers 5.8.1, peft 0.19.1</dd><dt>SR model</dt><dd><code>488f8e7a</code></dd><dt>GPU</dt><dd>NVIDIA A100-SXM4-80GB</dd><dt>version</dt><dd>reference v1</dd></dl></div><div class="date">2026-09-10</div></td><td class="subject" title="Refactor/multiswitch only and conversation ids (#131)">Refactor/multiswitch only and conversation ids (#131)</td><td class="num best grp-gs start i-start" title="accuracy=0.8480, answerable_f1=0.8900, n=3565, truncated=2, unanswerable_f1=0.8347, weighted_f1=0.8299">84.8</td><td class="num grp-gs" title="accuracy=0.8370, answerable_f1=0.8773, n=3565, truncated=0, unanswerable_f1=0.8275, weighted_f1=0.8198">83.7</td><td class="num grp-gs" title="accuracy=0.8421, answerable_f1=0.8814, n=3565, truncated=0, unanswerable_f1=0.8333, weighted_f1=0.8245">84.2</td><td class="num grp-ref start" title="accuracy=0.8468, answerable_f1=0.8896, n=3565, truncated=2, unanswerable_f1=0.8326, weighted_f1=0.8288">84.7</td><td class="num grp-ref" title="accuracy=0.8359, answerable_f1=0.8758, n=3565, truncated=0, unanswerable_f1=0.8269, weighted_f1=0.8188">83.6</td><td class="num grp-ref" title="accuracy=0.8429, answerable_f1=0.8826, n=3565, truncated=0, unanswerable_f1=0.8338, weighted_f1=0.8253">84.3</td><td class="num grp-base start" title="accuracy=0.0438, answerable_f1=0.0000, n=3565, truncated=788, unanswerable_f1=0.0000, weighted_f1=0.0037">4.4</td><td class="num grp-ratio start" title="over Base: granite-switch (vLLM) +80.4 points, HF + PEFT +80.3">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +79.3 points, HF + PEFT +79.2">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +79.8 points, HF + PEFT +79.9">1.00</td><td class="num grp-gs start i-start" title="accuracy_over_total=0.7224, accuracy_over_valid=0.8520, judge_errors=0, n=1052, truncated=2, ungraded=160">85.2</td><td class="num grp-gs" title="accuracy_over_total=0.7025, accuracy_over_valid=0.8398, judge_errors=0, n=1052, truncated=5, ungraded=172">84.0</td><td class="num best grp-gs" title="accuracy_over_total=0.7139, accuracy_over_valid=0.8544, judge_errors=0, n=1052, truncated=8, ungraded=173">85.4</td><td class="num grp-ref start" title="accuracy_over_total=0.7167, accuracy_over_valid=0.8520, judge_errors=0, n=1052, truncated=1, ungraded=167">85.2</td><td class="num grp-ref" title="accuracy_over_total=0.7015, accuracy_over_valid=0.8434, judge_errors=0, n=1052, truncated=5, ungraded=177">84.3</td><td class="num grp-ref" title="accuracy_over_total=0.7186, accuracy_over_valid=0.8542, judge_errors=0, n=1052, truncated=4, ungraded=167">85.4</td><td class="num grp-base start" title="accuracy_over_total=0.7015, accuracy_over_valid=0.7314, judge_errors=0, n=1052, truncated=488, ungraded=43">73.1</td><td class="num grp-ratio start" title="over Base: granite-switch (vLLM) +12.1 points, HF + PEFT +12.1">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +10.8 points, HF + PEFT +11.2">0.97</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +12.3 points, HF + PEFT +12.3">1.00</td><td class="num grp-gs start i-start" title="clear_hard_accuracy=0.8400, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9247, truncated=0, underspecified_accuracy=0.8354">92.5</td><td class="num grp-gs" title="clear_hard_accuracy=0.8600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9176, truncated=2, underspecified_accuracy=0.7975">91.8</td><td class="num best grp-gs" title="clear_hard_accuracy=0.9600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9319, truncated=4, underspecified_accuracy=0.7848">93.2</td><td class="num grp-ref start" title="clear_hard_accuracy=0.8400, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9247, truncated=0, underspecified_accuracy=0.8354">92.5</td><td class="num grp-ref" title="clear_hard_accuracy=0.8600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9176, truncated=2, underspecified_accuracy=0.7975">91.8</td><td class="num best grp-ref" title="clear_hard_accuracy=0.9600, clear_random_accuracy=1.0000, n=279, overall_accuracy=0.9319, truncated=2, underspecified_accuracy=0.7848">93.2</td><td class="num grp-base start" title="clear_hard_accuracy=0.0000, clear_random_accuracy=0.0000, n=279, overall_accuracy=0.2832, truncated=91, underspecified_accuracy=1.0000">28.3</td><td class="num grp-ratio start" title="over Base: granite-switch (vLLM) +64.2 points, HF + PEFT +64.2">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +63.4 points, HF + PEFT +63.4">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +64.9 points, HF + PEFT +64.9">1.00</td><td class="num best grp-gs start i-start" title="accuracy=0.8167, accuracy_pooled=0.8384, balanced_accuracy=0.8189, f1=0.7898, n=11347, parse_failures=0, truncated=0">81.7</td><td class="num grp-gs" title="accuracy=0.8156, accuracy_pooled=0.8384, balanced_accuracy=0.8146, f1=0.7888, n=11347, parse_failures=0, truncated=0">81.6</td><td class="num grp-gs" title="accuracy=0.7981, accuracy_pooled=0.8335, balanced_accuracy=0.7949, f1=0.7670, n=11347, parse_failures=1, truncated=0">79.8</td><td class="num grp-ref start" title="accuracy=0.8160, accuracy_pooled=0.8378, balanced_accuracy=0.8182, f1=0.7894, n=11347, parse_failures=0, truncated=0">81.6</td><td class="num grp-ref" title="accuracy=0.8152, accuracy_pooled=0.8376, balanced_accuracy=0.8143, f1=0.7882, n=11347, parse_failures=0, truncated=0">81.5</td><td class="num grp-ref" title="accuracy=0.7988, accuracy_pooled=0.8342, balanced_accuracy=0.7956, f1=0.7677, n=11347, parse_failures=1, truncated=0">79.9</td><td class="num grp-base start" title="accuracy=0.5524, accuracy_pooled=0.6882, balanced_accuracy=0.5416, f1=0.4743, n=11347, parse_failures=115, truncated=131">55.2</td><td class="num grp-ratio start" title="over Base: granite-switch (vLLM) +26.4 points, HF + PEFT +26.4">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +26.3 points, HF + PEFT +26.3">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +24.6 points, HF + PEFT +24.6">1.00</td><td class="num grp-gs start i-start" title="accuracy=0.6650, balanced_accuracy=0.6642, invalid=0, n=2409, no_f1=0.5799, truncated=0, weighted_f1=0.6720, yes_f1=0.7214">66.4</td><td class="num grp-gs" title="accuracy=0.6725, balanced_accuracy=0.6661, invalid=0, n=2409, no_f1=0.5792, truncated=0, weighted_f1=0.6785, yes_f1=0.7319">66.6</td><td class="num grp-gs" title="accuracy=0.6579, balanced_accuracy=0.6569, invalid=0, n=2409, no_f1=0.5717, truncated=0, weighted_f1=0.6651, yes_f1=0.7153">65.7</td><td class="num grp-ref start" title="accuracy=0.6629, balanced_accuracy=0.6623, invalid=0, n=2409, no_f1=0.5780, truncated=0, weighted_f1=0.6700, yes_f1=0.7194">66.2</td><td class="num best grp-ref" title="accuracy=0.6729, balanced_accuracy=0.6664, invalid=0, n=2409, no_f1=0.5795, truncated=0, weighted_f1=0.6789, yes_f1=0.7323">66.6</td><td class="num grp-ref" title="accuracy=0.6604, balanced_accuracy=0.6571, invalid=0, n=2409, no_f1=0.5708, truncated=0, weighted_f1=0.6673, yes_f1=0.7191">65.7</td><td class="num grp-base start" title="accuracy=0.6712, balanced_accuracy=0.5390, invalid=0, n=2409, no_f1=0.1750, truncated=0, weighted_f1=0.5781, yes_f1=0.7947">53.9</td><td class="num grp-ratio start" title="over Base: granite-switch (vLLM) +12.5 points, HF + PEFT +12.3">1.02</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +12.7 points, HF + PEFT +12.7">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +11.8 points, HF + PEFT +11.8">1.00</td></tr>
+</tbody></table></div></section>
+<section class="model" data-model="granite-4.2-3b"><h2>Granite 4.2 3B (prerelease) <small><code>ibm-research/granite-4.2-3b-prerelease-r260622a</code></small></h2><p class="note">The HF + PEFT and Base columns do not depend on the commit: computed once, on 2026-10-01 with torch 2.10.0, transformers 5.8.1, peft 0.19.1, and shown on every row of benchmark v1. Staged adapters: aLoRA r=32 · SR r=32, cross r=32.</p><div class="wrap"><table class="bench"><thead><tr><th class="commit" rowspan="3">Commit</th><th rowspan="3">Subject</th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Answerability<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Query rewrite<br><small>Judge accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Query clarification<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Guardian-core<br><small>Accuracy</small></th><th class="i i-start" colspan="10" data-gs="3" data-ref="3" data-base="1" data-ratio="3">Requirement check<br><small>Balanced accuracy</small></th></tr><tr><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th><th class="grp-gs start i-start" colspan="3">granite-switch (vLLM)</th><th class="grp-ref start" colspan="3">HF + PEFT</th><th class="grp-base start" rowspan="2">Base</th><th class="grp-ratio start" colspan="3">Gain ratio</th></tr><tr><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th><th class="grp-gs start i-start">LoRA</th><th class="grp-gs">aLoRA</th><th class="grp-gs">SR</th><th class="grp-ref start">LoRA</th><th class="grp-ref">aLoRA</th><th class="grp-ref">SR</th><th class="grp-ratio start">LoRA</th><th class="grp-ratio">aLoRA</th><th class="grp-ratio">SR</th></tr></thead><tbody>
+<tr><td class="commit"><a href="https://github.com/generative-computing/granite-switch/commit/6013c7ff82a73020f1d1fb00dcdc323398fffb38"><code>6013c7ff</code></a><button class="info" type="button" aria-label="Run details" title="vllm 0.19.1, torch 2.10.0, transformers 5.8.1; NVIDIA A100-SXM4-80GB; benchmark v1">i</button><div class="details" hidden><h4>Commit</h4><dl><dt>sha</dt><dd><code>6013c7ff82a73020f1d1fb00dcdc323398fffb38</code></dd><dt>date</dt><dd>2026-09-10 13:31</dd><dt>subject</dt><dd>Refactor/multiswitch only and conversation ids (#131)</dd></dl><h4>granite-switch (vLLM) run</h4><dl><dt>finished</dt><dd>2026-10-01 05:31</dd><dt>libraries</dt><dd>vllm 0.19.1, torch 2.10.0, transformers 5.8.1</dd><dt>GPU</dt><dd>NVIDIA A100-SXM4-80GB</dd><dt>context</dt><dd>32,768 tokens</dd><dt>CUDA graphs</dt><dd>on</dd><dt>benchmark</dt><dd>v1</dd><dt>harness</dt><dd><code>c45407c9</code></dd></dl><h4>Adapters</h4><table><tr><th></th><th>LoRA</th><th>aLoRA</th><th>SR</th></tr><tr><th>Answerability</th><td>—</td><td>r=32 <code>a32b4f4a</code></td><td>r=32, cross r=32 <code>937022a0</code></td></tr><tr><th>Query rewrite</th><td>—</td><td>—</td><td>—</td></tr><tr><th>Query clarification</th><td>—</td><td>—</td><td>—</td></tr><tr><th>Guardian-core</th><td>—</td><td>—</td><td>—</td></tr><tr><th>Requirement check</th><td>—</td><td>—</td><td>—</td></tr></table><p>Each checkpoint's ranks and the start of its weights checksum; staged 2026-09-30.</p><h4>HF + PEFT and Base</h4><dl><dt>finished</dt><dd>2026-10-01 05:46</dd><dt>libraries</dt><dd>torch 2.10.0, transformers 5.8.1, peft 0.19.1</dd><dt>SR model</dt><dd><code>488f8e7a</code></dd><dt>GPU</dt><dd>NVIDIA A100-SXM4-80GB</dd><dt>version</dt><dd>reference v1</dd></dl></div><div class="date">2026-09-10</div></td><td class="subject" title="Refactor/multiswitch only and conversation ids (#131)">Refactor/multiswitch only and conversation ids (#131)</td><td class="skip grp-gs start i-start" title="adapter not staged">—</td><td class="num grp-gs" title="accuracy=0.8317, answerable_f1=0.8737, n=3565, truncated=0, unanswerable_f1=0.8179, weighted_f1=0.8141">83.2</td><td class="num grp-gs" title="accuracy=0.6334, answerable_f1=0.6211, n=3565, truncated=0, unanswerable_f1=0.6687, weighted_f1=0.6121">63.3</td><td class="skip grp-ref start" title="adapter not staged">—</td><td class="num best grp-ref" title="accuracy=0.8325, answerable_f1=0.8746, n=3565, truncated=0, unanswerable_f1=0.8187, weighted_f1=0.8149">83.3</td><td class="num grp-ref" title="accuracy=0.6339, answerable_f1=0.6215, n=3565, truncated=0, unanswerable_f1=0.6694, weighted_f1=0.6126">63.4</td><td class="num grp-base start" title="accuracy=0.0438, answerable_f1=0.0000, n=3565, truncated=3266, unanswerable_f1=0.0000, weighted_f1=0.0037">4.4</td><td class="skip grp-ratio start" title="adapter not staged">—</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +78.8 points, HF + PEFT +78.9">1.00</td><td class="num grp-ratio" title="over Base: granite-switch (vLLM) +59.0 points, HF + PEFT +59.0">1.00</td><td class="skip grp-gs start i-start" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-ref start" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="num grp-base start" title="accuracy_over_total=0.7034, accuracy_over_valid=0.7198, judge_errors=0, n=1052, truncated=920, ungraded=24">72.0</td><td class="skip grp-ratio start" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-gs start i-start" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-ref start" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="num grp-base start" title="clear_hard_accuracy=0.0000, clear_random_accuracy=0.0000, n=279, overall_accuracy=0.2832, truncated=266, underspecified_accuracy=1.0000">28.3</td><td class="skip grp-ratio start" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-gs start i-start" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-ref start" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="num grp-base start" title="accuracy=0.4469, accuracy_pooled=0.5718, balanced_accuracy=0.3957, f1=0.0070, n=11347, parse_failures=246, truncated=1137">44.7</td><td class="skip grp-ratio start" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-gs start i-start" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-gs" title="adapter not staged">—</td><td class="skip grp-ref start" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="skip grp-ref" title="adapter not staged">—</td><td class="num grp-base start" title="accuracy=0.5994, balanced_accuracy=0.5267, invalid=0, n=2409, no_f1=0.3322, truncated=0, weighted_f1=0.5805, yes_f1=0.7139">52.7</td><td class="skip grp-ratio start" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td><td class="skip grp-ratio" title="adapter not staged">—</td></tr>
+</tbody></table></div></section>
+<section class="notes">
+<h2>Reading the table</h2>
+<ul class="note">
+<li>Each intrinsic shows its headline metric. The best of its seven accuracy
+columns is <b>bold</b>. Hover a cell for all its metrics, or for why it is
+empty.</li>
+<li><b>granite-switch (vLLM)</b>: the adapters composed into the base model by
+each commit's composer, and served by its vLLM backend.</li>
+<li><b>HF + PEFT</b>: the same adapter checkpoints without
+granite-switch, loaded with Hugging Face transformers and PEFT. SR runs on a
+standalone Hugging Face implementation of the Shadow Residual model.</li>
+<li><b>Base</b>: the base model with no adapter.</li>
+<li><b>Gain ratio</b>: the share of an adapter's gain over the base
+model that granite-switch keeps. <b>n/a</b>: the adapter gains under
+1 point under HF + PEFT, too little to
+divide by.</li>
+<li><b>—</b> no adapter or eval set for this cell; <b>·</b> not run;
+<b>error</b> the run failed. Greyed rows used an older benchmark version.</li>
+<li>The <b>i</b> next to a commit opens its run details: library versions,
+GPU, the adapter checkpoints and the reference run.</li>
+<li>Granite 4.2 prompts turn reasoning off and carry their documents as tool
+messages, the way its adapters were trained.</li>
+</ul>
+<p class="note">Adapters:</p>
+<ul class="note"><li><b>LoRA</b>: LoRA (all-linear, r=16)</li><li><b>aLoRA</b>: aLoRA (all-linear, r=32)</li><li><b>SR</b>: Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)</li></ul>
+</section>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script>
+(() => {
+  document.documentElement.classList.add("js");
+  const tabs = [...document.querySelectorAll(".tabs button")];
+  const sections = [...document.querySelectorAll("section.model")];
+  function show(id) {
+    if (!sections.some(s => s.dataset.model === id)) id = sections[0].dataset.model;
+    sections.forEach(s => s.classList.toggle("active", s.dataset.model === id));
+    tabs.forEach(t => t.setAttribute("aria-selected", String(t.dataset.model === id)));
+    if (decodeURIComponent(location.hash.slice(1)) !== id) {
+      history.replaceState(null, "", "#" + id);
+    }
+  }
+  tabs.forEach(t => t.addEventListener("click", () => show(t.dataset.model)));
+  addEventListener("hashchange", () => show(decodeURIComponent(location.hash.slice(1))));
+  show(decodeURIComponent(location.hash.slice(1)));
+
+  const boxes = [...document.querySelectorAll(".controls input")];
+  function columns(event) {
+    if (!boxes.some(b => b.checked)) event.target.checked = true;  // keep one group
+    const on = boxes.filter(b => b.checked).map(b => b.dataset.group);
+    document.querySelectorAll("table.bench").forEach(t => boxes.forEach(b =>
+      t.classList.toggle("hide-" + b.dataset.group, !b.checked)));
+    document.querySelectorAll("th.i").forEach(th => {
+      th.colSpan = on.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
+    });
+  }
+  boxes.forEach(b => b.addEventListener("change", columns));
+
+  const tip = document.getElementById("tip");
+  let pinned = null, timer = null;
+  function open(button) {
+    clearTimeout(timer);
+    tip.innerHTML = button.nextElementSibling.innerHTML;
+    tip.hidden = false;
+    // Beside the button, which sits in the table's first column.
+    const r = button.getBoundingClientRect();
+    const left = Math.min(r.right + 8, innerWidth - tip.offsetWidth - 8);
+    const top = Math.min(r.top - 12, innerHeight - tip.offsetHeight - 8);
+    tip.style.left = Math.max(8, left) + "px";
+    tip.style.top = Math.max(8, top) + "px";
+  }
+  function close() { if (!pinned) tip.hidden = true; }
+  function later() { timer = setTimeout(close, 200); }
+  document.querySelectorAll("button.info").forEach(b => {
+    b.removeAttribute("title");  // the box replaces the plain tooltip
+    b.addEventListener("mouseenter", () => open(b));
+    b.addEventListener("focus", () => open(b));
+    b.addEventListener("mouseleave", later);
+    b.addEventListener("blur", later);
+    b.addEventListener("click", e => {
+      e.stopPropagation();
+      pinned = pinned === b ? null : b;
+      open(b);
+    });
+  });
+  tip.addEventListener("mouseenter", () => clearTimeout(timer));
+  tip.addEventListener("mouseleave", later);
+  document.addEventListener("click", e => {
+    if (!tip.contains(e.target)) { pinned = null; tip.hidden = true; }
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") { pinned = null; tip.hidden = true; }
+  });
+  addEventListener("scroll", () => pinned ? open(pinned) : close(), true);
+})();
+</script>
 </body>
 </html>
