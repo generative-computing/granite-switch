@@ -86,9 +86,12 @@ granite-switch/
 │
 ├── benchmarks/                          # Benchmarks run against a commit (not part of the package)
 │   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
-│       ├── adapters.yaml                # Benchmark definition: intrinsics, technologies, bench_version
+│       ├── adapters.yaml                # Benchmark definition: models, intrinsics, technologies, versions
 │       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block
 │       ├── generate.py                  # vLLM generation for one composed checkpoint
+│       ├── reference.py                 # In-pod driver for the HF + PEFT and base-model columns
+│       ├── hf_generate.py               # HF + PEFT generation for one reference cell
+│       ├── prompts.py                   # Per-model prompt building (documents, chat-template options)
 │       ├── staged.py                    # Staged adapter / eval-set layout and format checks
 │       ├── stage.py                     # Discover source checkpoints and stage the chosen ones
 │       ├── publish.py                   # Cache check, merge results into the page data, render the page

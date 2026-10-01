@@ -68,6 +68,7 @@ BLOCKS = {
 ENGINE_LABEL = "granite-switch (vLLM)"
 REFERENCE_LABEL = "HF + PEFT"
 BASE_LABEL = "Base"
+RATIO_LABEL = "Gain ratio"
 
 
 # --- data ------------------------------------------------------------------
@@ -224,27 +225,166 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
 
 # --- page ------------------------------------------------------------------
 
+# Column groups of one intrinsic, in page order: key -> label.
+GROUP_LABELS = {
+    "gs": ENGINE_LABEL,
+    "ref": REFERENCE_LABEL,
+    "base": BASE_LABEL,
+    "ratio": RATIO_LABEL,
+}
+# A gain ratio divides by the adapter's gain over the base under HF + PEFT;
+# below this gain the ratio mostly measures noise, so it is not shown.
+MIN_GAIN = 0.01
+
 PAGE_STYLE = """
 :root { color-scheme: light; }
-body { font: 14px/1.4 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
+body { font: 14px/1.45 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
        background: #fff; }
-.wrap { overflow-x: auto; }
-table { border-collapse: collapse; }
-th, td { border: 1px solid #d0d0d0; padding: 4px 8px; }
-th { background: #f3f3f3; font-weight: 600; }
-th.ref { background: #e6ecf4; }
-td.ref { background: #f5f8fc; }
-th.g, td.g { border-left: 2px solid #8a8a8a; }
-td.num { text-align: right; font-variant-numeric: tabular-nums; }
-td.best { font-weight: 700; }
-td.skip { color: #9a9a9a; text-align: center; }
-td.err { color: #b3261e; text-align: center; }
-td.date { white-space: nowrap; }
-td.subject { max-width: 20em; overflow: hidden; text-overflow: ellipsis;
-             white-space: nowrap; }
-tr.old td { color: #8a8a8a; }
+h1 { margin-bottom: .2em; }
+h2 { font-size: 18px; margin: 1.2em 0 .3em; }
+h2 small { font-weight: 400; color: #666; margin-left: .4em; }
 code { font-size: 13px; }
-.note { color: #555; max-width: 60em; }
+.lede, .note { color: #444; max-width: 62em; }
+.flow { margin: 1.2em 0; padding: .9em 1.1em; border: 1px solid #e3e3e3;
+        border-radius: 8px; max-width: 74em; background: #fcfcfc; }
+.flow .lane { display: flex; align-items: center; gap: .55em; flex-wrap: wrap;
+              margin: .45em 0; }
+@media (min-width: 1000px) { .flow .lane { flex-wrap: nowrap; } }
+.flow .tag { flex: 0 0 8em; color: #666; font-size: 12px;
+             text-transform: uppercase; letter-spacing: .04em; }
+.flow .step { border: 1px solid; border-radius: 6px; padding: .45em .75em;
+              flex: 0 1 15em; min-width: 9em; }
+.flow .step b { display: block; }
+.flow .step span { color: #555; font-size: 12.5px; }
+.flow .arrow { color: #888; font-size: 18px; }
+.flow .result { font-weight: 600; font-size: 13px; padding: .3em .7em;
+                border: 1px dashed; border-radius: 999px; white-space: nowrap; }
+.flow .gs { background: #f3f3f3; border-color: #c4c4c4; }
+.flow .ref { background: #e6ecf4; border-color: #b4c3d8; }
+.flow figcaption { margin-top: .5em; color: #333; }
+.tabs, .controls { display: none; }
+.js .tabs { display: flex; gap: .4em; margin: 1.2em 0 .6em; flex-wrap: wrap; }
+.tabs button { font: inherit; padding: .4em 1em; border: 1px solid #c4c4c4;
+               border-radius: 999px; background: #fff; cursor: pointer; }
+.tabs button[aria-selected="true"] { background: #1b1b1b; border-color: #1b1b1b;
+                                     color: #fff; }
+.js .controls { display: flex; gap: 1em; align-items: center; flex-wrap: wrap;
+                margin-bottom: .4em; color: #444; }
+.controls label { cursor: pointer; }
+.js section.model { display: none; }
+.js section.model.active { display: block; }
+.wrap { overflow-x: auto; }
+table.bench { border-collapse: collapse; }
+.bench th, .bench td { border: 1px solid #d0d0d0; padding: 4px 8px; }
+.bench th { background: #f3f3f3; font-weight: 600; }
+.bench th.grp-ref, .bench th.grp-base { background: #e6ecf4; }
+.bench td.grp-ref, .bench td.grp-base { background: #f5f8fc; }
+.bench th.grp-ratio { background: #efece3; }
+.bench td.grp-ratio { background: #fbfaf6; }
+.bench .start { border-left: 2px solid #b0b0b0; }
+.bench .i-start { border-left: 2px solid #6b6b6b; }
+.bench .commit { position: sticky; left: 0; z-index: 1; background: #fff;
+                 white-space: nowrap; box-shadow: 1px 0 0 #d0d0d0; }
+.bench th.commit { background: #f3f3f3; z-index: 2; }
+.bench .commit .date { color: #777; font-size: 12px; }
+.bench td.subject { max-width: 16em; overflow: hidden; text-overflow: ellipsis;
+                    white-space: nowrap; }
+.bench td.num { text-align: right; font-variant-numeric: tabular-nums; }
+.bench td.best { font-weight: 700; }
+.bench td.skip { color: #9a9a9a; text-align: center; }
+.bench td.err { color: #b3261e; text-align: center; }
+.bench tr.old td { color: #8a8a8a; }
+table.hide-gs .grp-gs, table.hide-ref .grp-ref, table.hide-base .grp-base,
+table.hide-ratio .grp-ratio { display: none; }
+button.info { width: 1.45em; height: 1.45em; padding: 0; margin-left: 5px;
+              font: italic 600 12px/1 Georgia, serif; vertical-align: 1px;
+              border: 1px solid #b8b8b8; border-radius: 999px; background: #fff;
+              color: #555; cursor: pointer; }
+button.info:hover, button.info:focus { border-color: #555; color: #1b1b1b; }
+.tip { position: fixed; z-index: 10; max-width: 34em; padding: .7em .9em;
+       max-height: calc(100vh - 16px); overflow: auto; box-sizing: border-box;
+       background: #fff; border: 1px solid #bdbdbd; border-radius: 8px;
+       box-shadow: 0 6px 24px rgba(0, 0, 0, .15); font-size: 13px; }
+.tip h4 { margin: .5em 0 .15em; font-size: 12px; text-transform: uppercase;
+          letter-spacing: .04em; color: #666; }
+.tip h4:first-child { margin-top: 0; }
+.tip dl { display: grid; grid-template-columns: auto 1fr; gap: .1em .8em; margin: 0; }
+.tip dt { color: #666; }
+.tip dd { margin: 0; }
+.tip table { border-collapse: collapse; margin-top: .2em; }
+.tip th, .tip td { padding: 1px 8px 1px 0; text-align: left; font-weight: 400; }
+.tip th { color: #666; }
+.tip p { margin: .2em 0 0; color: #666; }
+.notes { margin-top: 2em; }
+.notes li { margin: .2em 0; }
+"""
+
+PAGE_SCRIPT = """
+(() => {
+  document.documentElement.classList.add("js");
+  const tabs = [...document.querySelectorAll(".tabs button")];
+  const sections = [...document.querySelectorAll("section.model")];
+  function show(id) {
+    if (!sections.some(s => s.dataset.model === id)) id = sections[0].dataset.model;
+    sections.forEach(s => s.classList.toggle("active", s.dataset.model === id));
+    tabs.forEach(t => t.setAttribute("aria-selected", String(t.dataset.model === id)));
+    if (decodeURIComponent(location.hash.slice(1)) !== id) {
+      history.replaceState(null, "", "#" + id);
+    }
+  }
+  tabs.forEach(t => t.addEventListener("click", () => show(t.dataset.model)));
+  addEventListener("hashchange", () => show(decodeURIComponent(location.hash.slice(1))));
+  show(decodeURIComponent(location.hash.slice(1)));
+
+  const boxes = [...document.querySelectorAll(".controls input")];
+  function columns(event) {
+    if (!boxes.some(b => b.checked)) event.target.checked = true;  // keep one group
+    const on = boxes.filter(b => b.checked).map(b => b.dataset.group);
+    document.querySelectorAll("table.bench").forEach(t => boxes.forEach(b =>
+      t.classList.toggle("hide-" + b.dataset.group, !b.checked)));
+    document.querySelectorAll("th.i").forEach(th => {
+      th.colSpan = on.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
+    });
+  }
+  boxes.forEach(b => b.addEventListener("change", columns));
+
+  const tip = document.getElementById("tip");
+  let pinned = null, timer = null;
+  function open(button) {
+    clearTimeout(timer);
+    tip.innerHTML = button.nextElementSibling.innerHTML;
+    tip.hidden = false;
+    // Beside the button, which sits in the table's first column.
+    const r = button.getBoundingClientRect();
+    const left = Math.min(r.right + 8, innerWidth - tip.offsetWidth - 8);
+    const top = Math.min(r.top - 12, innerHeight - tip.offsetHeight - 8);
+    tip.style.left = Math.max(8, left) + "px";
+    tip.style.top = Math.max(8, top) + "px";
+  }
+  function close() { if (!pinned) tip.hidden = true; }
+  function later() { timer = setTimeout(close, 200); }
+  document.querySelectorAll("button.info").forEach(b => {
+    b.removeAttribute("title");  // the box replaces the plain tooltip
+    b.addEventListener("mouseenter", () => open(b));
+    b.addEventListener("focus", () => open(b));
+    b.addEventListener("mouseleave", later);
+    b.addEventListener("blur", later);
+    b.addEventListener("click", e => {
+      e.stopPropagation();
+      pinned = pinned === b ? null : b;
+      open(b);
+    });
+  });
+  tip.addEventListener("mouseenter", () => clearTimeout(timer));
+  tip.addEventListener("mouseleave", later);
+  document.addEventListener("click", e => {
+    if (!tip.contains(e.target)) { pinned = null; tip.hidden = true; }
+  });
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape") { pinned = null; tip.hidden = true; }
+  });
+  addEventListener("scroll", () => pinned ? open(pinned) : close(), true);
+})();
 """
 
 
@@ -296,6 +436,37 @@ def _cell_html(
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
 
+def gain_ratio(gs: float, peft: float, base: float) -> float | None:
+    """(granite-switch - base) / (HF + PEFT - base); None below ``MIN_GAIN``."""
+    gain = peft - base
+    return None if gain < MIN_GAIN else (gs - base) / gain
+
+
+def _ratio_html(
+    gs: float | None,
+    peft: float | None,
+    base: float | None,
+    extra: str,
+    missing: str,
+) -> str:
+    if gs is None or peft is None or base is None:
+        cls, title, text = "skip", missing, "·"
+    else:
+        ratio = gain_ratio(gs, peft, base)
+        title = (
+            f"over {BASE_LABEL}: {ENGINE_LABEL} {(gs - base) * 100:+.1f} points, "
+            f"{REFERENCE_LABEL} {(peft - base) * 100:+.1f}"
+        )
+        if ratio is None:
+            cls, text = "skip", "n/a"
+            title += (
+                f"; a gain under {MIN_GAIN * 100:.0f} point is too small to divide by"
+            )
+        else:
+            cls, text = "num", f"{ratio:.2f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
 def _reference_gap(reference: dict | None, row: dict, spec: Spec) -> str | None:
     """Why ``row`` shows no reference columns, or None when it shows them."""
     if reference is None:
@@ -307,134 +478,367 @@ def _reference_gap(reference: dict | None, row: dict, spec: Spec) -> str | None:
     return None
 
 
+def _libraries(run: dict, names: tuple[str, ...]) -> str:
+    return ", ".join(f"{name} {run[name]}" for name in names if run.get(name))
+
+
 def _reference_note(reference: dict | None, spec: Spec) -> str:
-    note = (
-        f"The {REFERENCE_LABEL} and {BASE_LABEL} columns do not depend on the "
-        "commit: they are computed once per benchmark version and repeated on "
-        "every row of it."
-    )
-    if (
-        reference is None
-        or reference.get("reference_version") != spec.reference_version
-    ):
-        return f"{note} They are not computed yet."
+    if reference is None or not reference_current(reference, spec):
+        return (
+            f"The {REFERENCE_LABEL} and {BASE_LABEL} columns are not computed "
+            f"yet for benchmark v{spec.bench_version}."
+        )
     run = reference["run"]
-    libraries = ", ".join(
-        f"{name} {run[name]}" for name in REFERENCE_LIBRARIES if run.get(name)
-    )
     return (
-        f"{note} Shown: benchmark v{reference['bench_version']}, computed "
-        f"{run['finished'][:10]} with {libraries}."
+        f"The {REFERENCE_LABEL} and {BASE_LABEL} columns do not depend on the "
+        f"commit: computed once, on {run['finished'][:10]} with "
+        f"{_libraries(run, REFERENCE_LIBRARIES)}, and shown on every row of "
+        f"benchmark v{reference['bench_version']}."
     )
 
 
-def render(data: dict, spec: Spec) -> str:
+def _adapter_fingerprints(row: dict, reference: dict | None) -> dict:
+    """The row's staged-checkpoint fingerprints, else its reference's.
+
+    A bench root is fixed per benchmark version, so a reference of the same
+    version used the same checkpoints.
+    """
+    found = row["run"].get("adapters")
+    if (
+        not found
+        and reference
+        and reference.get("bench_version") == row.get("bench_version")
+    ):
+        found = reference["run"].get("adapters")
+    return found or {}
+
+
+def _ranks(fingerprint: dict) -> str:
+    text = f"r={fingerprint['rank']}" if fingerprint.get("rank") else "r=?"
+    if fingerprint.get("cross_rank"):
+        text += f", cross r={fingerprint['cross_rank']}"
+    return text
+
+
+def _adapters_line(fingerprints: dict, spec: Spec) -> str:
+    """``LoRA r=16 · SR r=32, cross r=32``: the ranks of each staged technology."""
+    parts = []
+    for tech in spec.technologies:
+        ranks = sorted(
+            {_ranks(f) for k, f in fingerprints.items() if k.endswith(f"/{tech.id}")}
+        )
+        if ranks:
+            parts.append(f"{tech.label} {' or '.join(ranks)}")
+    return " · ".join(parts)
+
+
+def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> str:
+    """The run-details box of a row, as HTML."""
+
+    def items(pairs) -> str:
+        body = "".join(
+            f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in pairs if v not in (None, "")
+        )
+        return f"<dl>{body}</dl>"
+
+    commit, run = row["commit"], row["run"]
+    harness = run.get("harness_sha")
+    harness = f"<code>{_esc(harness[:8])}</code>" if harness else "not recorded"
+    if run.get("harness_dirty"):
+        harness += " with local changes"
+    versions = (
+        _esc(_libraries(run, ("vllm", "torch", "transformers"))) or "not recorded"
+    )
+    out = [
+        "<h4>Commit</h4>",
+        items(
+            [
+                ("sha", f"<code>{_esc(commit['sha'])}</code>"),
+                ("date", _esc(commit["date"][:16].replace("T", " "))),
+                ("subject", _esc(commit["subject"])),
+            ]
+        ),
+        f"<h4>{_esc(ENGINE_LABEL)} run</h4>",
+        items(
+            [
+                ("finished", _esc(run.get("finished", "")[:16].replace("T", " "))),
+                ("libraries", versions),
+                ("GPU", _esc(run.get("gpu") or "")),
+                (
+                    "context",
+                    f"{run['max_model_len']:,} tokens"
+                    if run.get("max_model_len")
+                    else "",
+                ),
+                ("CUDA graphs", "off" if run.get("enforce_eager") else "on"),
+                ("benchmark", f"v{row.get('bench_version')}"),
+                ("harness", harness),
+            ]
+        ),
+    ]
+    fingerprints = _adapter_fingerprints(row, reference)
+    if fingerprints:
+        head = "".join(f"<th>{_esc(t.label)}</th>" for t in spec.technologies)
+        body = []
+        for intrinsic in spec.intrinsics:
+            cells = []
+            for tech in spec.technologies:
+                f = fingerprints.get(f"{intrinsic.id}/{tech.id}")
+                weights = (f or {}).get("weights_sha256")
+                cells.append(
+                    f"<td>{_esc(_ranks(f))} <code>{_esc(weights[:8])}</code></td>"
+                    if f and weights
+                    else f"<td>{_esc(_ranks(f)) if f else '—'}</td>"
+                )
+            body.append(f"<tr><th>{_esc(intrinsic.name)}</th>{''.join(cells)}</tr>")
+        staged = sorted(
+            {f["staged_at"][:10] for f in fingerprints.values() if f.get("staged_at")}
+        )
+        out += [
+            "<h4>Adapters</h4>",
+            f"<table><tr><th></th>{head}</tr>{''.join(body)}</table>",
+            "<p>Each checkpoint's ranks and the start of its weights checksum"
+            + (f"; staged {_esc(', '.join(staged))}." if staged else ".")
+            + "</p>",
+        ]
+    out.append(f"<h4>{_esc(REFERENCE_LABEL)} and {_esc(BASE_LABEL)}</h4>")
+    if gap:
+        out.append(f"<p>{_esc(gap)}</p>")
+    else:
+        ref_run = reference["run"]
+        sr_ref = ref_run.get("sr_ref")
+        out.append(
+            items(
+                [
+                    (
+                        "finished",
+                        _esc(ref_run.get("finished", "")[:16].replace("T", " ")),
+                    ),
+                    ("libraries", _esc(_libraries(ref_run, REFERENCE_LIBRARIES))),
+                    ("SR model", f"<code>{_esc(sr_ref[:8])}</code>" if sr_ref else ""),
+                    ("GPU", _esc(ref_run.get("gpu") or "")),
+                    ("version", f"reference v{reference.get('reference_version')}"),
+                ]
+            )
+        )
+    return "".join(out)
+
+
+def _details_text(row: dict) -> str:
+    """A plain-text summary of the details box, for browsers without scripts."""
+    run = row["run"]
+    parts = [
+        _libraries(run, ("vllm", "torch", "transformers")),
+        run.get("gpu"),
+        f"benchmark v{row.get('bench_version')}",
+    ]
+    return "; ".join(p for p in parts if p)
+
+
+def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     techs = spec.technologies
-    ref_columns = [t.id for t in techs] + [BASE_COLUMN]
-    reference = data["references"].get(spec.model_id)
+    sizes = {"gs": len(techs), "ref": len(techs), "base": 1, "ratio": len(techs)}
+    width = sum(sizes.values())
+    data_attrs = " ".join(f'data-{g}="{n}"' for g, n in sizes.items())
     head = [
-        [f'<th rowspan="3">{h}</th>' for h in ("Commit", "Date", "Subject")],
+        [
+            '<th class="commit" rowspan="3">Commit</th>',
+            '<th rowspan="3">Subject</th>',
+        ],
         [],
         [],
     ]
     for intrinsic in spec.intrinsics:
         head[0].append(
-            f'<th class="g" colspan="{len(techs) + len(ref_columns)}">'
+            f'<th class="i i-start" colspan="{width}" {data_attrs}>'
             f"{_esc(intrinsic.name)}<br>"
             f"<small>{_esc(intrinsic.headline_label)}</small></th>"
         )
-        head[1].append(
-            f'<th class="g" colspan="{len(techs)}">{_esc(ENGINE_LABEL)}</th>'
-        )
-        head[1].append(
-            f'<th class="ref" colspan="{len(techs)}">{_esc(REFERENCE_LABEL)}</th>'
-        )
-        head[1].append(f'<th class="ref" rowspan="2">{_esc(BASE_LABEL)}</th>')
-        head[2].extend(
-            f"<th{_classes('g' if k == 0 else '')}>{_esc(t.label)}</th>"
-            for k, t in enumerate(techs)
-        )
-        head[2].extend(f'<th class="ref">{_esc(t.label)}</th>' for t in techs)
+        for group, label in GROUP_LABELS.items():
+            span = 'rowspan="2"' if group == "base" else f'colspan="{sizes[group]}"'
+            start = "start i-start" if group == "gs" else "start"
+            head[1].append(f'<th class="grp-{group} {start}" {span}>{_esc(label)}</th>')
+            if group == "base":
+                continue
+            for k, tech in enumerate(techs):
+                first = start if k == 0 else ""
+                head[2].append(
+                    f"<th{_classes(f'grp-{group}', first)}>{_esc(tech.label)}</th>"
+                )
 
     body = []
-    for row in [r for r in data["rows"] if r["model"] == spec.model_id]:
+    for row in rows:
         commit = row["commit"]
         sha = commit["sha"]
-        old = row.get("bench_version") != spec.bench_version
         gap = _reference_gap(reference, row, spec)
         cells = [
-            f'<td><a href="{_esc(COMMIT_URL.format(sha=sha))}"><code>'
-            f"{_esc(sha[:8])}</code></a></td>",
-            f'<td class="date">{_esc(commit["date"][:10])}</td>',
+            '<td class="commit">'
+            f'<a href="{_esc(COMMIT_URL.format(sha=sha))}"><code>'
+            f"{_esc(sha[:8])}</code></a>"
+            f'<button class="info" type="button" aria-label="Run details" '
+            f'title="{_esc(_details_text(row))}">i</button>'
+            f'<div class="details" hidden>{_details(row, reference, gap, spec)}</div>'
+            f'<div class="date">{_esc(commit["date"][:10])}</div></td>',
             f'<td class="subject" title="{_esc(commit["subject"])}">'
             f"{_esc(commit['subject'])}</td>",
         ]
         for intrinsic in spec.intrinsics:
+            headline = intrinsic.headline
             by_tech = row["cells"].get(intrinsic.id, {})
             by_column = {} if gap else reference["cells"].get(intrinsic.id, {})
-            group = [by_tech.get(t.id) for t in techs]
-            group += [by_column.get(c) for c in ref_columns]
+            gs = [by_tech.get(t.id) for t in techs]
+            ref = [by_column.get(t.id) for t in techs]
+            base = by_column.get(BASE_COLUMN)
             scored = [
                 v
-                for v in (_headline(c, intrinsic.headline) for c in group)
+                for v in (_headline(c, headline) for c in [*gs, *ref, base])
                 if v is not None
             ]
             best = max(scored) if len(scored) > 1 else None
-            for k, cell in enumerate(group):
-                if k < len(techs):
-                    extra, missing = ("g" if k == 0 else ""), "not run"
-                else:
-                    extra, missing = "ref", gap or "not run"
-                cells.append(_cell_html(cell, intrinsic.headline, best, extra, missing))
-        cls = ' class="old"' if old else ""
-        body.append(f"<tr{cls}>" + "".join(cells) + "</tr>")
-
-    tech_notes = "".join(
-        f"<li><b>{_esc(t.label)}</b>: {_esc(t.source)}</li>" for t in techs
+            ref_missing = gap or "not run"
+            for k, cell in enumerate(gs):
+                start = "start i-start" if k == 0 else ""
+                cells.append(
+                    _cell_html(cell, headline, best, f"grp-gs {start}".strip())
+                )
+            for k, cell in enumerate(ref):
+                start = "start" if k == 0 else ""
+                cells.append(
+                    _cell_html(
+                        cell, headline, best, f"grp-ref {start}".strip(), ref_missing
+                    )
+                )
+            cells.append(
+                _cell_html(base, headline, best, "grp-base start", ref_missing)
+            )
+            for k in range(len(techs)):
+                start = "start" if k == 0 else ""
+                cells.append(
+                    _ratio_html(
+                        _headline(gs[k], headline),
+                        _headline(ref[k], headline),
+                        _headline(base, headline),
+                        f"grp-ratio {start}".strip(),
+                        gap
+                        or f"needs the {ENGINE_LABEL}, {REFERENCE_LABEL} and "
+                        f"{BASE_LABEL} scores",
+                    )
+                )
+        old = row.get("bench_version") != spec.bench_version
+        body.append(f"<tr{_classes('old' if old else '')}>" + "".join(cells) + "</tr>")
+    if not body:
+        body.append(
+            f'<tr><td class="commit" colspan="2">no commit benchmarked yet</td>'
+            f'<td colspan="{width * len(spec.intrinsics)}"></td></tr>'
+        )
+    return (
+        '<div class="wrap"><table class="bench"><thead>'
+        + "".join(f"<tr>{''.join(r)}</tr>" for r in head)
+        + "</thead><tbody>\n"
+        + "\n".join(body)
+        + "\n</tbody></table></div>"
     )
-    n_columns = len(techs) + len(ref_columns)
+
+
+FLOW = f"""<figure class="flow">
+<div class="lane"><div class="tag">Every commit</div>
+<div class="step gs"><b>1. Pick adapters</b><span>trained LoRA, aLoRA and SR
+checkpoints, staged once per base model</span></div><div class="arrow">&rarr;</div>
+<div class="step gs"><b>2. Compose</b><span>the commit's composer builds one
+checkpoint holding every adapter</span></div><div class="arrow">&rarr;</div>
+<div class="step gs"><b>3. Evaluate</b><span>its vLLM backend answers each eval
+set; a scorer grades the answers</span></div><div class="arrow">&rarr;</div>
+<div class="result gs">{ENGINE_LABEL}</div></div>
+<div class="lane"><div class="tag">Once per model</div>
+<div class="step ref"><b>Same adapters, no granite-switch</b><span>Hugging Face
+transformers + PEFT</span></div><div class="arrow">&rarr;</div>
+<div class="result ref">{REFERENCE_LABEL}</div>
+<div class="step ref"><b>Base model alone</b><span>no adapter</span></div>
+<div class="arrow">&rarr;</div><div class="result ref">{BASE_LABEL}</div></div>
+<figcaption><b>{RATIO_LABEL}</b> = ({ENGINE_LABEL} &minus; {BASE_LABEL}) &divide;
+({REFERENCE_LABEL} &minus; {BASE_LABEL}). At 1.00, granite-switch keeps all of an
+adapter's gain over the base model.</figcaption>
+</figure>"""
+
+
+def render(data: dict, spec: Spec) -> str:
+    sections, tabs = [], []
+    for m in spec.models:
+        model_spec = spec.for_model(m.id)
+        rows = [r for r in data["rows"] if r["model"] == m.id]
+        reference = data["references"].get(m.id)
+        fingerprints = next(
+            (f for f in (_adapter_fingerprints(r, reference) for r in rows) if f),
+            (reference or {}).get("run", {}).get("adapters", {}),
+        )
+        adapters = _adapters_line(fingerprints, model_spec)
+        tabs.append(
+            f'<button type="button" role="tab" data-model="{_esc(m.id)}">'
+            f"{_esc(m.label)}</button>"
+        )
+        sections.append(
+            f'<section class="model" data-model="{_esc(m.id)}">'
+            f"<h2>{_esc(m.label)} <small><code>{_esc(m.name)}</code></small></h2>"
+            f'<p class="note">{_esc(_reference_note(reference, model_spec))}'
+            + (f" Staged adapters: {_esc(adapters)}." if adapters else "")
+            + "</p>"
+            + _model_table(rows, reference, model_spec)
+            + "</section>"
+        )
+    toggles = "".join(
+        f'<label><input type="checkbox" data-group="{g}" checked> {_esc(label)}</label>'
+        for g, label in GROUP_LABELS.items()
+    )
+    tech_notes = "".join(
+        f"<li><b>{_esc(t.label)}</b>: {_esc(t.source)}</li>" for t in spec.technologies
+    )
     return f"""<!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Generated by benchmarks/adapter_eval/publish.py; do not edit. -->
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Granite Switch adapter benchmark</title>
 <style>{PAGE_STYLE}</style>
 </head>
 <body>
 <h1>Granite Switch adapter benchmark</h1>
-<p class="note">Accuracy of trained intrinsic adapters on
-<code>{_esc(spec.base_model)}</code> (greedy decoding). Values are
-percentages; the best of an adapter's {n_columns} columns is bold. Hover a
-cell for all its metrics, or for the reason it is empty.</p>
+<p class="lede">How well trained intrinsic adapters work through each
+granite-switch commit, next to the same adapters without granite-switch and
+the base model alone. Greedy decoding; values are percentages.</p>
+{FLOW}
+<nav class="tabs" role="tablist" aria-label="Base model">{"".join(tabs)}</nav>
+<div class="controls">Show: {toggles}</div>
+{chr(10).join(sections)}
+<section class="notes">
+<h2>Reading the table</h2>
 <ul class="note">
-<li><b>{_esc(ENGINE_LABEL)}</b>: the adapters composed into the base model
-with each commit's composer and run with its vLLM backend.</li>
+<li>Each intrinsic shows its headline metric. The best of its seven accuracy
+columns is <b>bold</b>. Hover a cell for all its metrics, or for why it is
+empty.</li>
+<li><b>{_esc(ENGINE_LABEL)}</b>: the adapters composed into the base model by
+each commit's composer, and served by its vLLM backend.</li>
 <li><b>{_esc(REFERENCE_LABEL)}</b>: the same adapter checkpoints without
 granite-switch, loaded with Hugging Face transformers and PEFT. SR runs on a
 standalone Hugging Face implementation of the Shadow Residual model.</li>
-<li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter, with Hugging
-Face transformers.</li>
+<li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter.</li>
+<li><b>{_esc(RATIO_LABEL)}</b>: the share of an adapter's gain over the base
+model that granite-switch keeps. <b>n/a</b>: the adapter gains under
+{MIN_GAIN * 100:.0f} point under {_esc(REFERENCE_LABEL)}, too little to
+divide by.</li>
+<li><b>—</b> no adapter or eval set for this cell; <b>·</b> not run;
+<b>error</b> the run failed. Greyed rows used an older benchmark version.</li>
+<li>The <b>i</b> next to a commit opens its run details: library versions,
+GPU, the adapter checkpoints and the reference run.</li>
+<li>Granite 4.2 prompts turn reasoning off and carry their documents as tool
+messages, the way its adapters were trained.</li>
 </ul>
-<p class="note">{_esc(_reference_note(reference, spec))}</p>
 <p class="note">Adapters:</p>
 <ul class="note">{tech_notes}</ul>
-<p class="note"><b>—</b> no adapter or eval set for this cell;
-<b>·</b> not run; <b>error</b> the run failed (hover for the step). Greyed
-rows used an older benchmark version (current: v{spec.bench_version}).</p>
-<div class="wrap">
-<table>
-<thead>
-<tr>{"".join(head[0])}</tr>
-<tr>{"".join(head[1])}</tr>
-<tr>{"".join(head[2])}</tr>
-</thead>
-<tbody>
-{chr(10).join(body)}
-</tbody>
-</table>
-</div>
+</section>
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script>{PAGE_SCRIPT}</script>
 </body>
 </html>
 """

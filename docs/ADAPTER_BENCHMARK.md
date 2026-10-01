@@ -32,20 +32,38 @@ The base model, the intrinsics and their headline metrics are listed in
 
 ### Columns
 
-Each intrinsic has 7 columns on the page:
+Each intrinsic has 10 columns on the page, in four groups:
 
-| Group | Columns | What runs | Per commit |
+| Group | Columns | What it shows | Per commit |
 |---|---|---|---|
 | granite-switch (vLLM) | LoRA, aLoRA, SR | the adapters composed with the commit, under its vLLM backend | yes |
 | HF + PEFT | LoRA, aLoRA, SR | the same checkpoints without granite-switch, with Hugging Face transformers and PEFT | no |
 | Base | one | the base model with no adapter | no |
+| Gain ratio | LoRA, aLoRA, SR | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
 
-The last two groups are the **reference columns**. They show what the
+HF + PEFT and Base are the **reference columns**. They show what the
 checkpoints score outside granite-switch, and what the base model scores
-alone. For example, if a commit drops aLoRA on answerability from 88 to 70
-while HF + PEFT aLoRA stays at 88, the commit broke something. The reference
-columns do not depend on the commit, so they are computed once and repeated
-on every row (see [Reference columns](#reference-columns)).
+alone. They do not depend on the commit, so they are computed once and
+repeated on every row (see [Reference columns](#reference-columns)).
+
+The **gain ratio** is the share of an adapter's gain over the base model that
+granite-switch keeps. For example, with Base at 4.4, HF + PEFT at 84.7 and
+granite-switch at 84.8, the ratio is (84.8 − 4.4) ÷ (84.7 − 4.4) = 1.00. If a
+commit drops granite-switch to 44.6, the ratio falls to 0.50, while HF + PEFT
+stays put: the commit broke something. A ratio needs a gain to divide by: when
+HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
+
+### The page
+
+- **One tab per base model.** The link remembers the tab, e.g.
+  `.../benchmarks/#granite-4.2-3b`.
+- **Show** switches hide or show each column group.
+- **The `i` next to a commit** opens its run details: the commit, the library
+  versions (vLLM, torch, transformers), the GPU, each adapter checkpoint (ranks
+  and the start of its weights checksum, never its storage path), and the
+  reference run.
+- A diagram at the top shows the pipeline: pick adapters, compose, evaluate,
+  next to the reference path.
 
 ## How one run works
 
@@ -119,7 +137,9 @@ page:
 
 | Shown | Meaning |
 |---|---|
-| `86.7` | scored; hover for every metric. The best of an intrinsic's 7 columns is bold. |
+| `86.7` | scored; hover for every metric. The best of an intrinsic's 7 accuracy columns is bold. |
+| `0.98` | a gain ratio; hover for both gains |
+| `n/a` | a gain ratio with too small a gain to divide by |
 | `—` | skipped: no adapter or eval set for this cell (reason on hover) |
 | `·` | not run: for a commit, e.g. a new intrinsic before an `--only` run; in the reference columns, not computed yet or out of date (reason on hover) |
 | `error` | the run failed for this cell (reason on hover) |

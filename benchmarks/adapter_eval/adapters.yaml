@@ -57,7 +57,7 @@ technologies:
     source: "aLoRA (all-linear, r=32)"
   - id: sr
     label: SR
-    source: "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV; internal trainer)"
+    source: "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)"
 
 # max_new_tokens comes from each intrinsic's training config.
 # headline is the metric the results page shows; it matches the internal

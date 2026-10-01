@@ -582,10 +582,10 @@ def test_render_cells_and_escaping():
     assert "<script>alert" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert 'title="adapter &quot;x&quot; not staged">—</td>' in page
-    assert 'class="err g" title="generate failed">error</td>' in page
+    assert 'class="err grp-gs start i-start" title="generate failed">error</td>' in page
     assert ">?</td>" in page
     assert 'title="not run">·</td>' in page
-    assert 'class="num best"' in page and ">70.0</td>" in page
+    assert 'class="num best grp-gs"' in page and ">70.0</td>" in page
     assert '<tr class="old">' in page
     for intrinsic in SPEC.intrinsics:
         assert intrinsic.name in page
@@ -736,27 +736,108 @@ def test_render_reference_columns():
 
     page = publish.render(page_data(row, old, reference=ref), SPEC)
 
-    n = len(SPEC.intrinsics)
-    assert page.count('colspan="7"') == n
+    # Every model has its table: 10 columns per intrinsic, in four groups.
+    n = len(SPEC.intrinsics) * len(SPEC.models)
+    assert page.count('colspan="10"') == n
     assert page.count(f">{publish.ENGINE_LABEL}</th>") == n
     assert page.count(f">{publish.REFERENCE_LABEL}</th>") == n
     assert page.count(f'rowspan="2">{publish.BASE_LABEL}</th>') == n
-    # The best of all 7 columns can be a reference column.
-    assert '<td class="num best ref" title="accuracy=0.9000, n=10">90.0</td>' in page
-    assert '<td class="skip ref" title="not run">·</td>' in page
+    assert page.count(f">{publish.RATIO_LABEL}</th>") == n
+    # The best of the 7 accuracy columns can be a reference column.
+    best = '<td class="num best grp-ref" title="accuracy=0.9000, n=10">90.0</td>'
+    assert best in page
+    assert '<td class="skip grp-base start" title="not run">·</td>' in page
     # A row of another benchmark version shows no reference.
     assert 'title="no reference for this benchmark version">·</td>' in page
-    assert (
-        "computed 2026-09-30 with torch 2.10.0, transformers 5.8.1, peft 0.19.1" in page
-    )
+    assert "on 2026-09-30 with torch 2.10.0, transformers 5.8.1, peft 0.19.1" in page
 
     stale = reference_for()
     stale["reference_version"] -= 1
     page = publish.render(page_data(row, reference=stale), SPEC)
     assert 'title="reference out of date">·</td>' in page
-    assert "They are not computed yet." in page
+    assert "are not computed yet" in page
     page = publish.render(page_data(row), SPEC)
     assert 'title="reference not computed yet">·</td>' in page
+
+
+def test_gain_ratio():
+    assert publish.gain_ratio(0.8, 0.9, 0.5) == pytest.approx(0.75)
+    assert publish.gain_ratio(0.9, 0.9, 0.5) == pytest.approx(1.0)
+    assert publish.gain_ratio(0.8, 0.505, 0.5) is None  # gains under a point
+
+
+def test_render_gain_ratio_cells():
+    cells = cells_for(SPEC, 0.5)
+    cells["answerability"] = {
+        "lora": {"accuracy": 0.8, "n": 10},
+        "alora": {"accuracy": 0.8, "n": 10},
+    }
+    ref = reference_for(0.5)
+    ref["cells"]["answerability"].update(
+        lora={"accuracy": 0.9, "n": 10},
+        alora={"accuracy": 0.505, "n": 10},
+        base={"accuracy": 0.5, "n": 10},
+    )
+    page = publish.render(page_data(results_for(cells=cells), reference=ref), SPEC)
+
+    gains = "over Base: granite-switch (vLLM) +30.0 points, HF + PEFT +40.0"
+    assert f'class="num grp-ratio start" title="{gains}">0.75</td>' in page
+    assert ">n/a</td>" in page  # aLoRA gains half a point under HF + PEFT
+    # SR has no granite-switch cell.
+    assert (
+        'title="needs the granite-switch (vLLM), HF + PEFT and Base scores">·' in page
+    )
+
+
+def test_render_has_a_tab_per_model_with_its_own_rows():
+    other = SPEC.models[1]
+    row_42 = for_other_model(results_for(SHA_B))
+    page = publish.render(page_data(results_for(SHA_A), row_42), SPEC)
+
+    for model in SPEC.models:
+        assert f'role="tab" data-model="{model.id}">{model.label}</button>' in page
+    first, second = page.split('<section class="model"')[1:3]
+    assert f'data-model="{SPEC.model_id}"' in first
+    assert SHA_A[:8] in first and SHA_B[:8] not in first
+    assert f'data-model="{other.id}"' in second and SHA_B[:8] in second
+    # Column-group switches, and what they need to resize the headers.
+    for group in publish.GROUP_LABELS:
+        assert f'data-group="{group}"' in page
+    assert 'data-gs="3" data-ref="3" data-base="1" data-ratio="3"' in page
+
+
+def test_render_run_details():
+    row = results_for(
+        vllm="0.19.1",
+        torch="2.10.0",
+        transformers="5.8.1",
+        gpu="NVIDIA A100-SXM4-80GB",
+        harness_sha="f" * 40,
+        adapters={
+            "answerability/lora": {
+                "rank": 16,
+                "weights_sha256": "3eef7a1a" + "0" * 56,
+                "staged_at": "2026-09-29T18:37:27Z",
+            }
+        },
+    )
+    ref = reference_for(sr_ref="488f8e7a" + "0" * 32)
+    page = publish.render(page_data(row, reference=ref), SPEC)
+
+    details = page.split('<div class="details" hidden>')[1].split("</div>")[0]
+    assert "vllm 0.19.1, torch 2.10.0, transformers 5.8.1" in details
+    assert "NVIDIA A100-SXM4-80GB" in details and "<code>ffffffff</code>" in details
+    assert "<td>r=16 <code>3eef7a1a</code></td>" in details
+    assert "staged 2026-09-29" in details
+    assert "torch 2.10.0, transformers 5.8.1, peft 0.19.1" in details
+    assert "<code>488f8e7a</code>" in details  # the SR model code
+    # Without scripts the button keeps a plain tooltip.
+    assert 'title="vllm 0.19.1, torch 2.10.0, transformers 5.8.1; NVIDIA' in page
+
+
+def test_render_marks_a_model_with_no_rows():
+    page = publish.render(page_data(), SPEC)
+    assert page.count("no commit benchmarked yet") == len(SPEC.models)
 
 
 def write_answerability_eval(bench: Path, n: int = 3) -> None:
