@@ -788,6 +788,11 @@ def test_render_gain_ratio_cells():
         'title="needs the granite-switch (vLLM), HF + PEFT and Base scores">·' in page
     )
 
+    # A technology with no adapter shows the reason in its ratio column too.
+    cells["answerability"]["sr"] = common.skipped("adapter not staged")
+    page = publish.render(page_data(results_for(cells=cells), reference=ref), SPEC)
+    assert 'class="skip grp-ratio" title="adapter not staged">—</td>' in page
+
 
 def test_render_has_a_tab_per_model_with_its_own_rows():
     other = SPEC.models[1]

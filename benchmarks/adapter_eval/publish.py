@@ -713,6 +713,12 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
             )
             for k in range(len(techs)):
                 start = "start" if k == 0 else ""
+                # No adapter for this technology: the ratio cell says so too.
+                skip = next((c for c in (gs[k], ref[k]) if c and "skipped" in c), None)
+                if skip:
+                    extra = f"grp-ratio {start}".strip()
+                    cells.append(_cell_html(skip, headline, None, extra))
+                    continue
                 cells.append(
                     _ratio_html(
                         _headline(gs[k], headline),
