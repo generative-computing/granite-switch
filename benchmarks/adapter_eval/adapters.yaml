@@ -34,14 +34,16 @@ reference_version: 2
 # eval sets), bench_version and tab on the page. The first is the default of
 # every command's --model.
 models:
+  # bench_version 2: an answerability label counts without its quotes too
+  # (scorers/answerability.py).
   - id: granite-4.1-3b
     name: ibm-granite/granite-4.1-3b
     label: Granite 4.1 3B
-    bench_version: 1
+    bench_version: 2
   - id: granite-4.2-3b
     name: ibm-research/granite-4.2-3b-prerelease-r260622a
     label: Granite 4.2 3B (prerelease)
-    bench_version: 1
+    bench_version: 2
     # Its chat template ignores documents= and reasons unless told not to. Its
     # checkpoints were trained with reasoning off and the documents in tool
     # messages, placed differently by its SR and aLoRA trainers (prompts.py).

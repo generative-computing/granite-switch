@@ -182,7 +182,9 @@ Per column:
   an instruction naming the answer format its scorer expects. Only the
   adapters were trained on that format. Without it, the base model answers in
   prose and scores near zero: answerability 4.4, the share of rows whose
-  expected label is neither answerable nor unanswerable. For requirement
+  expected label is neither answerable nor unanswerable. With it, it answers
+  in the format, though without the quotes around an answerability label;
+  since benchmark v2 the scorer accepts a label either way. For requirement
   check the instruction replaces the row's own terse last request; for the
   others it follows the conversation. The texts are private, like the judge
   prompt: they live in

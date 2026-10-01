@@ -1173,12 +1173,14 @@ def test_answerability(tmp_path):
         {"ground_truth": "unanswerable", "generated_content": '"unanswerable"<|x|>'},
         {"ground_truth": "answerable", "generated_content": '"answerable"'},
         {"ground_truth": "answerable", "generated_content": '"answerable" extra'},
-        # Unquoted output is "others", so wrong.
+        # Unquoted counts too: the base model answers that way.
         {"ground_truth": "unanswerable", "generated_content": "unanswerable"},
+        # The label must come first.
+        {"ground_truth": "answerable", "generated_content": "It is answerable."},
     ]
     m = run_scorer("answerability", rows, tmp_path).metrics
-    assert m["accuracy"] == pytest.approx(0.75)
-    assert m["n"] == 4
+    assert m["accuracy"] == pytest.approx(0.8)
+    assert m["n"] == 5
 
 
 def test_guardian_parsing():
