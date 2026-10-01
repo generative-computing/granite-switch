@@ -1,0 +1,244 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapter Benchmark: measures one commit with the adapter accuracy benchmark on
+# the self-hosted GPU runner, publishes the commit's row to
+# https://generative-computing.github.io/granite-switch/benchmarks/, and reports
+# on a pull request when given one.
+#
+# This file lives on the benchmark branch (BENCH_BRANCH below) with the rest of
+# the benchmark, never on main. So it has no Run button in the Actions tab and no
+# PR-comment command: GitHub offers both only for workflows on the default
+# branch. Start it from a terminal instead:
+#
+#   gh workflow run adapter-benchmark.yaml --repo generative-computing/granite-switch \
+#     --ref feature/adapter-benchmark -f sha=<full sha> [-f model=<id>] \
+#     [-f pr_number=<number>] [-f no_cache=true]
+#
+# GitHub dispatches a workflow from another branch only once it has run there,
+# so a push that changes this file runs the small `registered` job below, on a
+# GitHub-hosted runner.
+#
+# Same rules as gpu-tests.yaml:
+#   - The runner image's role gate (/opt/gsw/check_role.sh) is the first step.
+#   - Nothing internal reaches this PUBLIC log. The private settings (cluster,
+#     storage, secret names) come from the runner, at /opt/gsw/adapter-bench/, and
+#     the pod log (which names internal storage paths) goes to a file on the
+#     runner, never to the console. Only submit.sh's status lines are printed.
+#   - The commit under test runs only inside the cluster pod.
+# The workflow itself comes from this branch: whoever can push to it can change
+# what runs on the GPU runner, so the branch should be protected.
+
+name: Adapter Benchmark
+
+on:
+  # Registers the workflow; see the header.
+  push:
+    branches: [feature/adapter-benchmark]
+    paths: [.github/workflows/adapter-benchmark.yaml]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Full commit SHA to benchmark."
+        required: true
+        type: string
+      pr_number:
+        description: "PR number to report on (optional)."
+        required: false
+        type: string
+      model:
+        description: "Base model id from the benchmark's adapters.yaml (empty: its first)."
+        required: false
+        default: ""
+        type: string
+      no_cache:
+        description: "Run even if the commit already has a complete row."
+        required: false
+        default: false
+        type: boolean
+
+# One run per commit and model; a re-dispatch cancels the stale one.
+concurrency:
+  group: adapter-benchmark-${{ inputs.sha || github.sha }}-${{ inputs.model || 'default' }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  BENCH_BRANCH: feature/adapter-benchmark
+  SETTINGS_DIR: /opt/gsw/adapter-bench
+  TARGET_SHA: ${{ inputs.sha }}
+  MODEL: ${{ inputs.model }}
+  RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+  PAGE_URL: https://generative-computing.github.io/granite-switch/benchmarks/
+
+jobs:
+  registered:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Registered. Dispatch it with gh workflow run (see the file's header)."
+
+  benchmark:
+    if: github.event_name == 'workflow_dispatch'
+    name: Adapter benchmark (${{ inputs.model || 'default model' }})
+    runs-on: [self-hosted, gpu]
+    permissions:
+      contents: write        # push the new row to the benchmark branch
+      statuses: write        # commit status on the benchmarked SHA
+      pull-requests: write   # the sticky PR comment
+    # A benchmark run takes about 1.5 hours on a free GPU; the rest is room for
+    # the cluster queue. On a cancel the cluster job keeps running and is not
+    # published; it deletes itself when it succeeds.
+    timeout-minutes: 600
+    steps:
+      - name: Verify launcher is Maintain/Admin
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: /opt/gsw/check_role.sh "$ACTOR"
+
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full 40-character commit SHA"; exit 1
+          fi
+          if [[ -n "$MODEL" && ! "$MODEL" =~ ^[a-z0-9][a-z0-9.-]{0,63}$ ]]; then
+            echo "::error::not a model id: $MODEL"; exit 1
+          fi
+
+      - name: Check out the benchmark branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BENCH_BRANCH }}
+          fetch-depth: 0
+
+      # submit.sh resolves the commit locally. A fork's pull request commit is on
+      # no branch, so it is fetched by sha.
+      - name: Fetch the commit under test
+        run: git fetch --quiet origin "$TARGET_SHA"
+
+      - uses: astral-sh/setup-uv@v5
+
+      # Unknown ids fail here, before anything reaches the cluster.
+      - name: Resolve the model
+        run: |
+          set -euo pipefail
+          id="$(uv run --quiet --no-project --with pyyaml python -c '
+          import sys
+          from benchmarks.adapter_eval.common import load_spec
+          print(load_spec(model=sys.argv[1] or None).model_id)' "$MODEL")"
+          echo "MODEL_ID=$id" >> "$GITHUB_ENV"
+          echo "model: $id"
+
+      - name: Install the private settings
+        run: |
+          set -euo pipefail
+          if [[ ! -r "$SETTINGS_DIR/local.env" ]]; then
+            echo "::error::this runner has no adapter-benchmark settings"; exit 1
+          fi
+          mkdir -p benchmarks/adapter_eval/vela/local
+          cp -R "$SETTINGS_DIR"/. benchmarks/adapter_eval/vela/local/
+
+      - name: Post pending status
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/statuses/$TARGET_SHA" -f state=pending \
+            -f context="adapter-benchmark/$MODEL_ID" \
+            -f description="Benchmarking on the GPU cluster…" \
+            -f target_url="$RUN_URL" >/dev/null
+
+      - name: Benchmark the commit
+        id: run
+        env:
+          NO_CACHE: ${{ inputs.no_cache }}
+        run: |
+          set -uo pipefail
+          args=(bench "$TARGET_SHA" --model "$MODEL_ID" --no-publish)
+          if [[ "$NO_CACHE" == "true" ]]; then args+=(--no-cache); fi
+          log="$RUNNER_TEMP/adapter-bench.log"
+          benchmarks/adapter_eval/vela/submit.sh "${args[@]}" >"$log" 2>&1
+          rc=$?
+          # Status lines only; the rest of the log is the pod's.
+          grep -E '^\[submit\] (model|submitted|pod/|pod |cache hit|deleted|kept)' "$log" || true
+          results="$(sed -n 's/^\[submit\] --no-publish; results are in //p' "$log" | tail -n1)"
+          if grep -q '^\[submit\] cache hit' "$log"; then
+            echo "outcome=cached" >> "$GITHUB_OUTPUT"
+          elif [[ $rc -eq 0 && -n "$results" ]]; then
+            echo "outcome=ran" >> "$GITHUB_OUTPUT"
+            echo "results=$results" >> "$GITHUB_OUTPUT"
+          else
+            echo "outcome=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::the benchmark failed (exit $rc); its log is on the runner"
+            exit 1
+          fi
+
+      # Re-applied on the branch's latest state until the push lands, so two runs
+      # finishing together do not lose each other's rows.
+      - name: Publish the row
+        if: steps.run.outputs.outcome == 'ran'
+        env:
+          RESULTS: ${{ steps.run.outputs.results }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          publish() { uv run --quiet --no-project --with pyyaml python -m benchmarks.adapter_eval.publish "$@"; }
+          for attempt in 1 2 3 4 5; do
+            git fetch --quiet origin "$BENCH_BRANCH"
+            git reset --quiet --hard "origin/$BENCH_BRANCH"
+            publish merge "$RESULTS"
+            publish render
+            git add docs/benchmarks
+            git commit --quiet -s -m "Adapter benchmark: ${TARGET_SHA:0:8} on $MODEL_ID"
+            if git push --quiet origin "HEAD:$BENCH_BRANCH"; then exit 0; fi
+            sleep $((attempt * 15))
+          done
+          echo "::error::could not push the new row"
+          exit 1
+
+      - name: Report on the pull request
+        if: always() && inputs.pr_number != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          OUTCOME: ${{ steps.run.outputs.outcome || 'failed' }}
+        run: |
+          set -euo pipefail
+          if ! body="$(uv run --quiet --no-project --with pyyaml python -m benchmarks.adapter_eval.publish \
+                 summary "$TARGET_SHA" --model "${MODEL_ID:-}" --outcome "$OUTCOME" --run-url "$RUN_URL")"; then
+            body="<!-- adapter-benchmark:${MODEL_ID:-unknown} -->"$'\n'"The adapter benchmark failed before it could report. See [the run]($RUN_URL)."
+          fi
+          # One comment per model, edited by later runs.
+          marker="$(head -n1 <<<"$body")"
+          id="$(gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+                  --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" \
+                | tail -n1)"
+          if [[ -n "$id" ]]; then
+            gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null
+          else
+            gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null
+          fi
+
+      - name: Post final status
+        if: always() && env.MODEL_ID != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          OUTCOME: ${{ steps.run.outputs.outcome || 'failed' }}
+          PUBLISHED: ${{ steps.run.outputs.outcome != 'ran' || job.status == 'success' }}
+        run: |
+          if [[ "$OUTCOME" == "ran" && "$PUBLISHED" == "true" ]]; then
+            state=success desc="Published to the results page" url="$PAGE_URL#$MODEL_ID"
+          elif [[ "$OUTCOME" == "cached" ]]; then
+            state=success desc="Already benchmarked (cached row)" url="$PAGE_URL#$MODEL_ID"
+          else
+            state=failure desc="The benchmark failed" url="$RUN_URL"
+          fi
+          gh api "repos/$REPO/statuses/$TARGET_SHA" -f state="$state" \
+            -f context="adapter-benchmark/$MODEL_ID" -f description="$desc" \
+            -f target_url="$url" >/dev/null

@@ -546,47 +546,39 @@ exercised by a real run.
 - **No throughput yet.** Cells are dictionaries, so more metrics can be added
   without breaking old rows.
 
-## PR command: `/benchmark`
+## Running it from GitHub
 
-A maintainer can benchmark a pull request's head commit with a comment:
+The benchmark can also run on the self-hosted GPU runner, started from any
+terminal with `gh`. The workflow
+([adapter-benchmark.yaml](../.github/workflows/adapter-benchmark.yaml)) lives
+on this branch, so it has no Run button in the Actions tab and no PR-comment
+command; GitHub offers those only for workflows on `main`.
 
-| Comment | Runs |
-|---|---|
-| `/benchmark` | the first model |
-| `/benchmark --model granite-4.2-3b` | another model |
-| `/benchmark --no-cache` | again, though the commit already has its row |
-
-It works like `/gpu-test` (see [CICD.md](CICD.md)):
-
-1. **Comment handler** (`benchmark-command.yaml`, on GitHub's runners):
-   checks that the commenter has the Maintain or Admin role, and dispatches
-   the benchmark workflow for the PR's head commit.
-2. **Benchmark workflow** (`adapter-benchmark.yaml`, on the self-hosted GPU
-   runner):
-   - checks the role again, with the runner image's script;
-   - checks out this branch;
-   - runs `submit.sh bench <sha> --no-publish`, which stops early on a cache
-     hit;
-   - merges the row into the page data and pushes it to this branch, so the
-     page updates;
-   - posts the result on the PR: a comment per model, edited by later runs,
-     and a commit status `adapter-benchmark/<model>`.
-
-The PR comment holds the commit's numbers (`publish.py summary`), for example:
-
-```text
-| Intrinsic | granite-switch (vLLM) LoRA / aLoRA / SR | HF + PEFT LoRA / aLoRA / SR | Base | Gain ratio LoRA / aLoRA / SR |
-| Answerability | 84.8 / 83.7 / 84.2 | 84.7 / 83.6 / 84.3 | 72.5 | 1.01 / 0.99 / 0.99 |
+```bash
+gh workflow run adapter-benchmark.yaml --repo generative-computing/granite-switch --ref feature/adapter-benchmark -f sha=6013c7ff82a73020f1d1fb00dcdc323398fffb38 -f model=granite-4.2-3b
 ```
 
-### Where the files live
+| Input | Effect |
+|---|---|
+| `sha` | the full commit sha to benchmark (required) |
+| `model` | a model id from `adapters.yaml`; empty for the first |
+| `pr_number` | also report on this pull request |
+| `no_cache` | `true` to run although the commit already has its row |
 
-- The two workflows and `.github/scripts/benchmark_command.sh` live on
-  `main`. GitHub runs comment-triggered and dispatched workflows only from the
-  default branch, and a pull request cannot change them for its own run.
-- Everything they run lives on this branch: the harness, the page and its
-  data. The workflow never runs the commit under test on the runner; that
-  happens in the cluster pod, as for a local run.
+The workflow:
+
+1. checks the role (Maintain or Admin) with the runner image's script;
+2. checks out this branch and runs `submit.sh bench <sha> --no-publish`,
+   which stops early on a cache hit;
+3. merges the row into the page data and pushes it to this branch, so the
+   page updates;
+4. with a `pr_number`, posts the result on that pull request: a comment per
+   model (`publish.py summary`), edited by later runs. It also sets a commit
+   status `adapter-benchmark/<model>`.
+
+GitHub dispatches a workflow from a branch other than `main` only once it has
+run there. A push that changes the workflow file runs a small job that does
+just that.
 
 ### What the GPU runner needs
 
@@ -605,7 +597,11 @@ The runner's owner sets these up; nothing of it is in the repository.
   version, and they need the private SR model code.
 - **Staging adapters** (`submit.sh stage`).
 
-### Public log
+### Safety
 
-The workflow's log is public. It prints only `submit.sh`'s status lines: the
-pod log, which names internal storage paths, stays in a file on the runner.
+- The log is public. It prints only `submit.sh`'s status lines: the pod log,
+  which names internal storage paths, stays in a file on the runner.
+- The commit under test runs only in the cluster pod; the runner runs this
+  branch's code.
+- The workflow comes from this branch, so whoever can push to it can change
+  what runs on the GPU runner. Protect the branch.
