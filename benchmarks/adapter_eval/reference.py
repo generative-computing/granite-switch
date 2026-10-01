@@ -327,6 +327,7 @@ def main(argv: list[str] | None = None) -> int:
                 "max_model_len": args.max_model_len,
                 "token_budget": args.token_budget,
                 "max_batch": args.max_batch,
+                **spec.model.prompt_for(None if column == BASE_COLUMN else column),
             }
         )
     # Longest first, so the cells still running at the end are short ones.

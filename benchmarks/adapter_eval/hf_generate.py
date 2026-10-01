@@ -11,7 +11,8 @@ each gets a clean CUDA context and a failure stays in its cell::
     {"key": "answerability/alora", "column": "alora", "base_model": "...",
      "adapter_dir": "..." | null, "eval_path": "...", "out_path": "...",
      "status_path": "...", "limit": null, "max_new_tokens": 200,
-     "max_model_len": 32768, "token_budget": 262144, "max_batch": 64}
+     "max_model_len": 32768, "token_budget": 262144, "max_batch": 64,
+     "documents": "native", "chat_template_kwargs": {}}
 
 The model per column:
 
@@ -24,8 +25,8 @@ The model per column:
   (``staged.peft_sr_copy``).
 
 Prompts are rendered by the base tokenizer's chat template, with the same
-documents and tools as the granite-switch run, and generated greedily in
-bfloat16. The token budgets match ``generate.py``: a row gets
+documents, tools, document style and chat-template options as the
+granite-switch run (``prompts.py``), and generated greedily in bfloat16. The token budgets match ``generate.py``: a row gets
 ``min(max_new_tokens, max_model_len - prompt length)`` new tokens, a row with
 no room is left out (``too_long``), and a row that does not reach EOS in its
 budget counts as truncated.
@@ -54,7 +55,7 @@ import time
 import traceback
 from pathlib import Path
 
-from .generate import fix_documents
+from .prompts import chat_text
 from .staged import CONFIG_FILE, WEIGHTS_FILE, read_jsonl, write_jsonl
 
 
@@ -243,12 +244,11 @@ def run(job: dict) -> dict:
     kept, prompts, budgets = [], [], []
     too_long = 0
     for row in rows:
-        text = tok.apply_chat_template(
-            row["messages"],
-            tools=row.get("tools"),
-            documents=fix_documents(row.get("documents")),
-            add_generation_prompt=True,
-            tokenize=False,
+        text = chat_text(
+            tok,
+            row,
+            job.get("documents", "native"),
+            job.get("chat_template_kwargs", {}),
         )
         ids = list(tok(text, add_special_tokens=False).input_ids)
         if invocation and not contains(ids, invocation):

@@ -386,6 +386,30 @@ benchmarks/adapter_eval/vela/submit.sh bench main --model granite-4.2-3b
 benchmarks/adapter_eval/vela/submit.sh reference --model granite-4.2-3b
 ```
 
+### Prompts per model
+
+A model's chat template decides how a prompt carries its documents, and the
+benchmark has to build prompts the way the checkpoints were trained:
+
+- **Granite 4.1** renders a `documents=` argument itself. Its prompts are
+  passed through as they are.
+- **Granite 4.2** ignores `documents=`, and opens a reasoning block unless
+  `enable_thinking` is false. Its checkpoints were trained with reasoning off
+  and the documents in tool messages, so its prompts are built that way. Its
+  two trainers placed the documents differently, so each technology gets its
+  own form; the base model gets the SR form.
+
+| Form | Where the documents go |
+|---|---|
+| `tool_json_after_question` (4.2 SR, base) | one tool message after the question, all documents as a JSON list |
+| `tool_text_before_question` (4.2 aLoRA) | one tool message per document, its text, before the question |
+
+The `prompt` entry of a model in `adapters.yaml` sets this. Both generation
+paths, granite-switch under vLLM and HF + PEFT, build their prompts the same
+way ([prompts.py](../benchmarks/adapter_eval/prompts.py)).
+
+### One model's adapters never run on another
+
 A bench root records the model it was staged for (`model.json`), and every
 run refuses a root staged for another model. Without that check, one model's
 adapters would load onto another base model with no error. A root staged

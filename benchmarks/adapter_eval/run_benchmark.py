@@ -139,17 +139,23 @@ def compose_manifest(
     }
 
 
-def generation_prompt_anchor(base_model: str) -> tuple[str, int]:
+def generation_prompt_anchor(
+    base_model: str, template_kwargs: dict | None = None
+) -> tuple[str, int]:
     """The last token of the base chat template's generation prompt, as (text, id).
 
-    This is where the composer puts an SR adapter's control token.
+    The composer places an SR adapter's control token from it. Rendered with
+    the SR cells' chat-template options (Granite 4.2: reasoning off), as
+    their prompts are.
     """
     from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(base_model)
     messages = [{"role": "user", "content": "Hello"}]
     without, with_prompt = (
-        tokenizer.apply_chat_template(messages, add_generation_prompt=g, tokenize=False)
+        tokenizer.apply_chat_template(
+            messages, add_generation_prompt=g, tokenize=False, **(template_kwargs or {})
+        )
         for g in (False, True)
     )
     if not (with_prompt.startswith(without) and len(with_prompt) > len(without)):
@@ -313,7 +319,9 @@ def main(argv: list[str] | None = None) -> int:
         for c in [c for c in group_cells if c.tech == "sr"]:
             dest = copies / c.intrinsic / c.tech
             try:
-                anchor = anchor or generation_prompt_anchor(base_model)
+                anchor = anchor or generation_prompt_anchor(
+                    base_model, spec.model.prompt_for("sr")["chat_template_kwargs"]
+                )
                 change = staged.sr_anchor_copy(c.adapter_dir, dest, anchor)
             except Exception as e:
                 traceback.print_exc()
@@ -383,6 +391,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     "limit": args.limit,
                     "max_new_tokens": intrinsic.max_new_tokens,
+                    **spec.model.prompt_for(c.tech),
                 }
             )
         status = generate(

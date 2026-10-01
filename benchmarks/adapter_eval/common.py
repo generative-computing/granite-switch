@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+
+from .prompts import DOCUMENT_STYLES
 
 HARNESS_DIR = Path(__file__).resolve().parent
 SPEC_PATH = HARNESS_DIR / "adapters.yaml"
@@ -40,6 +42,17 @@ class Model:
     name: str  # on the Hugging Face Hub
     label: str
     bench_version: int
+    # How its prompts carry documents, and its chat-template options
+    # (prompts.py): documents, documents_by_technology, chat_template_kwargs.
+    prompt: dict = field(default_factory=dict)
+
+    def prompt_for(self, tech_id: str | None) -> dict:
+        """The prompt settings of a technology's cells; None for the base model."""
+        by_tech = self.prompt.get("documents_by_technology", {})
+        return {
+            "documents": by_tech.get(tech_id) or self.prompt.get("documents", "native"),
+            "chat_template_kwargs": dict(self.prompt.get("chat_template_kwargs", {})),
+        }
 
 
 @dataclass(frozen=True)
@@ -165,6 +178,16 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:
         raise ValueError(f"technologies must be exactly {sorted(grouped)}")
+    for m in models:
+        unknown = set(m.prompt) - {
+            "documents",
+            "documents_by_technology",
+            "chat_template_kwargs",
+        }
+        by_tech = m.prompt.get("documents_by_technology", {})
+        styles = {m.prompt.get("documents", "native"), *by_tech.values()}
+        if unknown or set(by_tech) - grouped or styles - set(DOCUMENT_STYLES):
+            raise ValueError(f"model {m.id}: bad prompt settings {m.prompt}")
     if set(REFERENCE_COLUMNS) != grouped | {BASE_COLUMN}:
         raise ValueError("REFERENCE_COLUMNS must be every technology plus the base")
     for i in spec.intrinsics:

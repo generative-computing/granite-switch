@@ -15,7 +15,8 @@ so each gets a clean CUDA context::
               "enable_chunked_prefill": true, "max_num_batched_tokens": null},
       "jobs": [{"key": "answerability/lora", "adapter_name": "answerability_lora",
                 "eval_path": "...", "out_path": "...", "limit": null,
-                "max_new_tokens": 200}]
+                "max_new_tokens": 200, "documents": "native",
+                "chat_template_kwargs": {}}]
     }
 
 Each job writes its eval rows plus ``generated_content`` and ``prompt_tokens``
@@ -24,7 +25,8 @@ The status file records per-job counts, or the reason a job failed; one
 failing job does not stop the others.
 
 Prompts are rendered by the composed tokenizer's chat template with
-``adapter_name``. An unknown name silently renders the base-model prompt, so
+``adapter_name``, in the job's document style and chat-template options
+(``prompts.py``). An unknown name silently renders the base-model prompt, so
 every prompt is checked to contain the adapter's control token.
 """
 
@@ -37,31 +39,22 @@ import time
 import traceback
 from pathlib import Path
 
+from .prompts import chat_text
 from .staged import read_jsonl, write_jsonl
-
-
-def fix_documents(docs):
-    if not docs:
-        return docs
-    return [
-        d if isinstance(d, dict) else {"title": "Context", "text": str(d)} for d in docs
-    ]
 
 
 class ControlTokenMissing(Exception):
     pass
 
 
-def render(
-    tok, row: dict, adapter_name: str, control_token_id: int | None
-) -> list[int]:
-    text = tok.apply_chat_template(
-        row["messages"],
+def render(tok, row: dict, job: dict, control_token_id: int | None) -> list[int]:
+    adapter_name = job["adapter_name"]
+    text = chat_text(
+        tok,
+        row,
+        job.get("documents", "native"),
+        job.get("chat_template_kwargs", {}),
         adapter_name=adapter_name,
-        tools=row.get("tools"),
-        documents=fix_documents(row.get("documents")),
-        add_generation_prompt=True,
-        tokenize=False,
     )
     if f"<|{adapter_name}|>" not in text:
         raise ControlTokenMissing(f"control token for {adapter_name} not rendered")
@@ -139,9 +132,7 @@ def run(spec: dict) -> dict:
             kept, prompts, params = [], [], []
             too_long = 0
             for row in rows:
-                ids = render(
-                    tok, row, job["adapter_name"], token_ids.get(job["adapter_name"])
-                )
+                ids = render(tok, row, job, token_ids.get(job["adapter_name"]))
                 budget = min(int(job["max_new_tokens"]), max_model_len - len(ids))
                 if budget < 1:
                     too_long += 1

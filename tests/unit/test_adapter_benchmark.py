@@ -30,6 +30,7 @@ pytest.importorskip("yaml")
 from benchmarks.adapter_eval import (
     common,
     hf_generate,
+    prompts,
     publish,
     reference,
     run_benchmark,
@@ -241,6 +242,137 @@ def test_model_of_reads_old_blocks_by_base_model():
     assert SPEC.model_of({"base_model": SPEC.base_model}) == SPEC.model_id
     with pytest.raises(ValueError, match="no model"):
         SPEC.model_of({"base_model": "someone/else"})
+
+
+def test_prompt_settings_per_model_and_technology():
+    g41, g42 = SPEC.get_model("granite-4.1-3b"), SPEC.get_model("granite-4.2-3b")
+    native = {"documents": "native", "chat_template_kwargs": {}}
+    assert all(g41.prompt_for(t) == native for t in ("lora", "alora", "sr", None))
+    assert g42.prompt_for("sr") == {
+        "documents": "tool_json_after_question",
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    assert g42.prompt_for(None) == g42.prompt_for("sr")  # the base gets the SR form
+    assert g42.prompt_for("alora")["documents"] == "tool_text_before_question"
+
+
+def test_load_spec_rejects_bad_prompt_settings(tmp_path):
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["models"][1]["prompt"]["documents_by_technology"] = {"alora": "sideways"}
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="bad prompt settings"):
+        common.load_spec(path)
+
+
+# --- prompts --------------------------------------------------------------------
+
+CHATML_TEMPLATE = (
+    Path(__file__).resolve().parents[1]
+    / "composer"
+    / "fixtures"
+    / "granite_chatml_template.jinja"
+)
+QUESTION = [{"role": "user", "content": "Is the sky green?"}]
+DOCS = [{"doc_id": 7, "text": "The sky is blue."}, "Grass is green."]
+
+
+def test_native_documents_go_to_the_template():
+    messages, documents = prompts.with_documents(QUESTION, DOCS, "native")
+    assert messages == QUESTION
+    assert documents == [DOCS[0], {"title": "Context", "text": "Grass is green."}]
+
+
+def test_tool_json_after_question():
+    messages, documents = prompts.with_documents(
+        QUESTION, DOCS, "tool_json_after_question"
+    )
+    assert documents is None
+    assert messages[:-1] == QUESTION and messages[-1]["role"] == "tool"
+    assert json.loads(messages[-1]["content"]) == [
+        {"source": "knowledge_base", "document_id": "7", "content": "The sky is blue."},
+        {"source": "knowledge_base", "document_id": "1", "content": "Grass is green."},
+    ]
+
+
+def test_tool_text_before_question():
+    history = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello"},
+        *QUESTION,
+    ]
+    messages, documents = prompts.with_documents(
+        history, DOCS, "tool_text_before_question"
+    )
+    assert documents is None
+    assert [m["role"] for m in messages] == [
+        "user",
+        "assistant",
+        "tool",
+        "tool",
+        "user",
+    ]
+    assert [m["content"] for m in messages[2:4]] == [
+        "The sky is blue.",
+        "Grass is green.",
+    ]
+
+
+def test_with_documents_edge_cases():
+    no_docs = prompts.with_documents(QUESTION, None, "tool_json_after_question")
+    assert no_docs == (QUESTION, None)
+    with pytest.raises(ValueError, match="unknown document style"):
+        prompts.with_documents(QUESTION, DOCS, "nope")
+
+
+def test_chat_text_passes_the_template_options():
+    calls = []
+
+    class Tokenizer:
+        def apply_chat_template(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return "prompt"
+
+    row = {"messages": QUESTION, "documents": DOCS, "tools": [{"name": "t"}]}
+    assert (
+        prompts.chat_text(Tokenizer(), row, "native", {}, adapter_name="a") == "prompt"
+    )
+    # Granite 4.1: exactly the call the harness made before documents styles.
+    assert calls[-1] == (
+        QUESTION,
+        {
+            "tools": row["tools"],
+            "documents": prompts.fix_documents(DOCS),
+            "add_generation_prompt": True,
+            "tokenize": False,
+            "adapter_name": "a",
+        },
+    )
+    prompts.chat_text(
+        Tokenizer(), row, "tool_json_after_question", {"enable_thinking": False}
+    )
+    assert calls[-1][1]["enable_thinking"] is False
+    assert calls[-1][1]["documents"] is None
+
+
+def test_chatml_template_gets_the_documents_with_reasoning_off():
+    templates = pytest.importorskip("transformers.utils.chat_template_utils")
+    template = CHATML_TEMPLATE.read_text()
+    g42 = SPEC.get_model("granite-4.2-3b")
+    for tech in ("sr", "alora"):
+        settings = g42.prompt_for(tech)
+        messages, _ = prompts.with_documents(QUESTION, DOCS, settings["documents"])
+        rendered, _ = templates.render_jinja_template(
+            conversations=[messages],
+            chat_template=template,
+            add_generation_prompt=True,
+            **settings["chat_template_kwargs"],
+        )
+        text = rendered[0]
+        assert "<tool_response>" in text and "The sky is blue." in text, tech
+        assert text.endswith("<|im_start|>assistant\n<think></think>"), tech
 
 
 # --- results block ---------------------------------------------------------------
@@ -714,6 +846,39 @@ def test_reference_run(tmp_path, monkeypatch, capsys):
     assert (
         jobs["base"]["max_new_tokens"] == SPEC.intrinsic("answerability").max_new_tokens
     )
+    assert (jobs["base"]["documents"], jobs["base"]["chat_template_kwargs"]) == (
+        "native",
+        {},
+    )
+
+
+def test_reference_jobs_carry_each_cells_prompt_settings(tmp_path, monkeypatch):
+    model = SPEC.get_model("granite-4.2-3b")
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    (bench / staged.MODEL_FILE).write_text(json.dumps({"model": model.id}))
+    make_adapter(staged.adapter_dir(bench, "answerability", "alora"), "alora")
+    jobs = {}
+
+    def fake_run_jobs(job_list, gpus, python, harness_root):
+        jobs.update({j["column"]: j for j in job_list})
+        return {}
+
+    monkeypatch.setattr(reference, "gpu_ids", lambda count: ["0"])
+    monkeypatch.setattr(reference, "run_jobs", fake_run_jobs)
+    argv = [
+        "--bench-root", str(bench),
+        "--work-dir", str(tmp_path / "work"),
+        "--base-model", str(write_base(tmp_path / "base")),
+        "--model", model.id,
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert reference.main(argv) == 0
+
+    assert set(jobs) == {"alora", "base"}
+    assert jobs["alora"]["documents"] == "tool_text_before_question"
+    assert jobs["base"]["documents"] == "tool_json_after_question"
+    assert jobs["base"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_reference_run_without_the_sr_code(tmp_path, monkeypatch):
@@ -1309,7 +1474,10 @@ def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypat
     )
     monkeypatch.setattr(run_benchmark, "composer_flags", lambda *a: set())
     monkeypatch.setattr(run_benchmark, "compose", fake_compose)
-    monkeypatch.setattr(run_benchmark, "generate", lambda *a: {"jobs": {}})
+    generated = []
+    monkeypatch.setattr(
+        run_benchmark, "generate", lambda *a: generated.append(a[3]) or {"jobs": {}}
+    )
     work = tmp_path / "work"
     argv = [
         "--bench-root", str(bench),
@@ -1323,6 +1491,8 @@ def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypat
     results = json.loads((work / "results.json").read_text())
     assert results["model"] == SPEC.model_id
     assert {"torch", "transformers"} <= set(results["run"])
+    job = generated[0]["jobs"][0]
+    assert (job["documents"], job["chat_template_kwargs"]) == ("native", {})
     assert set(results["run"]["adapters"]) == {
         "answerability/lora",
         "answerability/alora",
