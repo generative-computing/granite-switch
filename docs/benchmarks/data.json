@@ -2,7 +2,7 @@
   "references": {
     "granite-4.1-3b": {
       "base_model": "ibm-granite/granite-4.1-3b",
-      "bench_version": 1,
+      "bench_version": 2,
       "cells": {
         "answerability": {
           "alora": {
@@ -14,12 +14,12 @@
             "weighted_f1": 0.8187528609151492
           },
           "base": {
-            "accuracy": 0.04375876577840112,
-            "answerable_f1": 0.0,
+            "accuracy": 0.7262272089761571,
+            "answerable_f1": 0.7563805104408353,
             "n": 3565,
-            "truncated": 788,
-            "unanswerable_f1": 0.0,
-            "weighted_f1": 0.0036691037148242813
+            "truncated": 0,
+            "unanswerable_f1": 0.7288712422007941,
+            "weighted_f1": 0.7127569476054394
           },
           "lora": {
             "accuracy": 0.846844319775596,
@@ -49,13 +49,13 @@
             "truncated": 0
           },
           "base": {
-            "accuracy": 0.5524485507069227,
-            "accuracy_pooled": 0.6881995241032872,
-            "balanced_accuracy": 0.5415792243211113,
-            "f1": 0.4742753483007604,
+            "accuracy": 0.6670582952068108,
+            "accuracy_pooled": 0.722481713228166,
+            "balanced_accuracy": 0.6616176704282657,
+            "f1": 0.6449740196118244,
             "n": 11347,
-            "parse_failures": 115,
-            "truncated": 131
+            "parse_failures": 0,
+            "truncated": 0
           },
           "lora": {
             "accuracy": 0.8160424419393809,
@@ -87,11 +87,11 @@
           },
           "base": {
             "clear_hard_accuracy": 0.0,
-            "clear_random_accuracy": 0.0,
+            "clear_random_accuracy": 0.006666666666666667,
             "n": 279,
             "overall_accuracy": 0.2831541218637993,
-            "truncated": 91,
-            "underspecified_accuracy": 1.0
+            "truncated": 0,
+            "underspecified_accuracy": 0.9873417721518988
           },
           "lora": {
             "clear_hard_accuracy": 0.84,
@@ -112,36 +112,36 @@
         },
         "query_rewrite": {
           "alora": {
-            "accuracy_over_total": 0.7015209125475285,
-            "accuracy_over_valid": 0.8434285714285714,
+            "accuracy_over_total": 0.7271863117870723,
+            "accuracy_over_valid": 0.8181818181818182,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 5,
-            "ungraded": 177
+            "ungraded": 117
           },
           "base": {
-            "accuracy_over_total": 0.7015209125475285,
-            "accuracy_over_valid": 0.7314172447968286,
+            "accuracy_over_total": 0.5456273764258555,
+            "accuracy_over_valid": 0.6575028636884307,
             "judge_errors": 0,
             "n": 1052,
-            "truncated": 488,
-            "ungraded": 43
+            "truncated": 0,
+            "ungraded": 179
           },
           "lora": {
-            "accuracy_over_total": 0.7167300380228137,
-            "accuracy_over_valid": 0.8519774011299435,
+            "accuracy_over_total": 0.7423954372623575,
+            "accuracy_over_valid": 0.8238396624472574,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 1,
-            "ungraded": 167
+            "ungraded": 104
           },
           "sr": {
-            "accuracy_over_total": 0.7186311787072244,
-            "accuracy_over_valid": 0.8542372881355932,
+            "accuracy_over_total": 0.7357414448669202,
+            "accuracy_over_valid": 0.827807486631016,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 4,
-            "ungraded": 167
+            "ungraded": 117
           }
         },
         "requirement_check": {
@@ -156,14 +156,14 @@
             "yes_f1": 0.7323369565217391
           },
           "base": {
-            "accuracy": 0.6712328767123288,
-            "balanced_accuracy": 0.539032479570476,
-            "invalid": 0,
+            "accuracy": 0.6911581569115816,
+            "balanced_accuracy": 0.6029779129219487,
+            "invalid": 1,
             "n": 2409,
-            "no_f1": 0.175,
+            "no_f1": 0.4123222748815166,
             "truncated": 0,
-            "weighted_f1": 0.5781088220882422,
-            "yes_f1": 0.7947122861586315
+            "weighted_f1": 0.658489512446671,
+            "yes_f1": 0.7907631653055478
           },
           "lora": {
             "accuracy": 0.6629306766293067,
@@ -188,7 +188,7 @@
         }
       },
       "model": "granite-4.1-3b",
-      "reference_version": 1,
+      "reference_version": 2,
       "run": {
         "adapters": {
           "answerability/alora": {
@@ -272,12 +272,13 @@
             "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
           }
         },
+        "base_instructions_sha256": "b729efc36ee51aad46d9ae3d45d00a8eb8179a5f1196555273f705af694525dd",
         "base_model_local_copy": false,
-        "finished": "2026-09-30T22:37:29Z",
+        "finished": "2026-10-01T12:05:52Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
         "gpus": 4,
         "harness_dirty": false,
-        "harness_sha": "f270ebbbc31c171f0313fb12faa555f989e1f384",
+        "harness_sha": "2f61267350d833a0a5d0242c8fe2dbd54dcb72af",
         "limit": null,
         "max_batch": 64,
         "max_model_len": 32768,
@@ -308,7 +309,7 @@
           "requirement_check"
         ],
         "sr_ref": "488f8e7af9c88e02659d5ff8b04eb744ce9a3c61",
-        "started": "2026-09-30T21:00:52Z",
+        "started": "2026-10-01T10:36:56Z",
         "token_budget": 262144,
         "torch": "2.10.0",
         "transformers": "5.8.1"
@@ -316,7 +317,7 @@
     },
     "granite-4.2-3b": {
       "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
-      "bench_version": 1,
+      "bench_version": 2,
       "cells": {
         "answerability": {
           "alora": {
@@ -328,12 +329,12 @@
             "weighted_f1": 0.8149382036235591
           },
           "base": {
-            "accuracy": 0.04375876577840112,
-            "answerable_f1": 0.0,
+            "accuracy": 0.7545582047685835,
+            "answerable_f1": 0.7978723404255319,
             "n": 3565,
-            "truncated": 3266,
-            "unanswerable_f1": 0.0,
-            "weighted_f1": 0.0036691037148242813
+            "truncated": 0,
+            "unanswerable_f1": 0.7412021177203364,
+            "weighted_f1": 0.7412759115682332
           },
           "lora": {
             "skipped": "adapter not staged"
@@ -352,13 +353,13 @@
             "skipped": "adapter not staged"
           },
           "base": {
-            "accuracy": 0.4468570223800006,
-            "accuracy_pooled": 0.5717810875121178,
-            "balanced_accuracy": 0.39574740997385927,
-            "f1": 0.007034659817845658,
+            "accuracy": 0.6433280130566033,
+            "accuracy_pooled": 0.6796510090772891,
+            "balanced_accuracy": 0.620443235385246,
+            "f1": 0.5067872578205515,
             "n": 11347,
-            "parse_failures": 246,
-            "truncated": 1137
+            "parse_failures": 0,
+            "truncated": 0
           },
           "lora": {
             "skipped": "adapter not staged"
@@ -373,10 +374,10 @@
           },
           "base": {
             "clear_hard_accuracy": 0.0,
-            "clear_random_accuracy": 0.0,
+            "clear_random_accuracy": 0.11333333333333333,
             "n": 279,
-            "overall_accuracy": 0.2831541218637993,
-            "truncated": 266,
+            "overall_accuracy": 0.34408602150537637,
+            "truncated": 0,
             "underspecified_accuracy": 1.0
           },
           "lora": {
@@ -391,12 +392,12 @@
             "skipped": "adapter not staged"
           },
           "base": {
-            "accuracy_over_total": 0.7034220532319392,
-            "accuracy_over_valid": 0.7198443579766537,
+            "accuracy_over_total": 0.6711026615969582,
+            "accuracy_over_valid": 0.716024340770791,
             "judge_errors": 0,
             "n": 1052,
-            "truncated": 920,
-            "ungraded": 24
+            "truncated": 0,
+            "ungraded": 66
           },
           "lora": {
             "skipped": "adapter not staged"
@@ -410,14 +411,14 @@
             "skipped": "adapter not staged"
           },
           "base": {
-            "accuracy": 0.5994188459941885,
-            "balanced_accuracy": 0.5266913948161835,
+            "accuracy": 0.6151930261519303,
+            "balanced_accuracy": 0.5476082563926107,
             "invalid": 0,
             "n": 2409,
-            "no_f1": 0.3321799307958478,
+            "no_f1": 0.3698164513936098,
             "truncated": 0,
-            "weighted_f1": 0.5804831505502503,
-            "yes_f1": 0.713904536021346
+            "weighted_f1": 0.5995774867364769,
+            "yes_f1": 0.7230355542276665
           },
           "lora": {
             "skipped": "adapter not staged"
@@ -428,7 +429,7 @@
         }
       },
       "model": "granite-4.2-3b",
-      "reference_version": 1,
+      "reference_version": 2,
       "run": {
         "adapters": {
           "answerability/alora": {
@@ -443,12 +444,13 @@
             "weights_sha256": "937022a0862ec932a20fcaee38be849188f5d9f2db669d77399a0b2f27482198"
           }
         },
+        "base_instructions_sha256": "b729efc36ee51aad46d9ae3d45d00a8eb8179a5f1196555273f705af694525dd",
         "base_model_local_copy": true,
-        "finished": "2026-10-01T05:46:53Z",
+        "finished": "2026-10-01T10:59:31Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
         "gpus": 4,
         "harness_dirty": false,
-        "harness_sha": "c45407c9a618161bd7d156e782290c4d44aeb161",
+        "harness_sha": "2f61267350d833a0a5d0242c8fe2dbd54dcb72af",
         "limit": null,
         "max_batch": 64,
         "max_model_len": 32768,
@@ -459,7 +461,7 @@
           "answerability"
         ],
         "sr_ref": "488f8e7af9c88e02659d5ff8b04eb744ce9a3c61",
-        "started": "2026-10-01T05:13:17Z",
+        "started": "2026-10-01T10:36:59Z",
         "token_budget": 262144,
         "torch": "2.10.0",
         "transformers": "5.8.1"
@@ -469,7 +471,7 @@
   "rows": [
     {
       "base_model": "ibm-granite/granite-4.1-3b",
-      "bench_version": 1,
+      "bench_version": 2,
       "cells": {
         "answerability": {
           "alora": {
@@ -554,28 +556,28 @@
         },
         "query_rewrite": {
           "alora": {
-            "accuracy_over_total": 0.7024714828897338,
-            "accuracy_over_valid": 0.8397727272727272,
+            "accuracy_over_total": 0.723384030418251,
+            "accuracy_over_valid": 0.8147751605995718,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 5,
-            "ungraded": 172
+            "ungraded": 118
           },
           "lora": {
-            "accuracy_over_total": 0.7224334600760456,
-            "accuracy_over_valid": 0.852017937219731,
+            "accuracy_over_total": 0.7404942965779467,
+            "accuracy_over_valid": 0.8278427205100957,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 2,
-            "ungraded": 160
+            "ungraded": 111
           },
           "sr": {
-            "accuracy_over_total": 0.7138783269961977,
-            "accuracy_over_valid": 0.8543799772468714,
+            "accuracy_over_total": 0.7319391634980988,
+            "accuracy_over_valid": 0.8270676691729323,
             "judge_errors": 0,
             "n": 1052,
             "truncated": 8,
-            "ungraded": 173
+            "ungraded": 121
           }
         },
         "requirement_check": {
@@ -702,10 +704,10 @@
         },
         "base_model_local_copy": false,
         "enforce_eager": false,
-        "finished": "2026-09-30T22:34:12Z",
+        "finished": "2026-10-01T11:55:13Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
         "harness_dirty": false,
-        "harness_sha": "f270ebbbc31c171f0313fb12faa555f989e1f384",
+        "harness_sha": "2f61267350d833a0a5d0242c8fe2dbd54dcb72af",
         "limit": null,
         "max_model_len": 32768,
         "mlp_keys_renamed": [
@@ -739,7 +741,7 @@
           "guardian_core",
           "requirement_check"
         ],
-        "started": "2026-09-30T21:01:34Z",
+        "started": "2026-10-01T10:37:39Z",
         "torch": "2.10.0",
         "transformers": "5.8.1",
         "vllm": "0.19.1"
@@ -747,7 +749,7 @@
     },
     {
       "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
-      "bench_version": 1,
+      "bench_version": 2,
       "cells": {
         "answerability": {
           "alora": {
@@ -837,10 +839,10 @@
         },
         "base_model_local_copy": true,
         "enforce_eager": false,
-        "finished": "2026-10-01T05:31:53Z",
+        "finished": "2026-10-01T10:55:21Z",
         "gpu": "NVIDIA A100-SXM4-80GB",
         "harness_dirty": false,
-        "harness_sha": "c45407c9a618161bd7d156e782290c4d44aeb161",
+        "harness_sha": "2f61267350d833a0a5d0242c8fe2dbd54dcb72af",
         "limit": null,
         "max_model_len": 32768,
         "mlp_keys_renamed": [],
@@ -854,7 +856,7 @@
         "sr_anchor_converted": [
           "answerability"
         ],
-        "started": "2026-10-01T05:14:00Z",
+        "started": "2026-10-01T10:37:38Z",
         "torch": "2.10.0",
         "transformers": "5.8.1",
         "vllm": "0.19.1"
@@ -896,14 +898,14 @@
     ],
     "models": [
       {
-        "bench_version": 1,
+        "bench_version": 2,
         "id": "granite-4.1-3b",
         "label": "Granite 4.1 3B",
         "name": "ibm-granite/granite-4.1-3b",
         "prompt": {}
       },
       {
-        "bench_version": 1,
+        "bench_version": 2,
         "id": "granite-4.2-3b",
         "label": "Granite 4.2 3B (prerelease)",
         "name": "ibm-research/granite-4.2-3b-prerelease-r260622a",
@@ -918,7 +920,7 @@
         }
       }
     ],
-    "reference_version": 1,
+    "reference_version": 2,
     "technologies": [
       {
         "id": "lora",
