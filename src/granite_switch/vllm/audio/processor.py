@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """vLLM multimodal processor for the audio cascade.
 
-``_call_hf_processor`` runs ASR and tokenizes the transcript;
-``_get_prompt_updates`` then replaces the ``<|audio|>`` marker with the real
-transcript token ids via ``PromptReplacement``, so the scheduler sizes KV for the
-runtime-determined length rather than a fixed audio window.
+ASR runs in the HF-processor hook (``_call_hf_processor`` on vLLM 0.26 - 0.28,
+``_apply_hf_processor_main`` on 0.29+, which deleted the former) and tokenizes the
+transcript; ``_get_prompt_updates`` then replaces the ``<|audio|>`` marker with the
+real transcript token ids via ``PromptReplacement``, so the scheduler sizes KV for
+the runtime-determined length rather than a fixed audio window.
 
 Modeled on vLLM 0.19.1's ``ultravox.py``. Audio is answered by the base model —
 no adapter control tokens are placed, so the switch is not involved.
@@ -338,19 +339,17 @@ class GraniteSwitchASRMultiModalProcessor(
             f"tokens must not originate from audio content."
         )
 
-    def _call_hf_processor(
+    def _audio_features(
         self,
-        prompt: str,
-        mm_data: Mapping[str, object],
+        audios: Sequence[object],
         mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        tokenizer = self.info.get_tokenizer()
-        audios = mm_data.get("audios", []) or []
+    ) -> dict[str, torch.Tensor]:
+        """Transcribe every clip into the out-of-band audio tensors.
 
+        Empty when there is no audio, so the caller can splat it unconditionally.
+        """
         if not audios:
-            input_ids = tokenizer.encode(prompt, add_special_tokens=False)
-            return BatchFeature(dict(input_ids=[input_ids]), tensor_type="pt")
+            return {}
 
         # Resolved once, then applied to every audio item in this request.
         generate_kwargs = resolve_generate_kwargs(
@@ -359,19 +358,72 @@ class GraniteSwitchASRMultiModalProcessor(
             DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
         )
 
-        input_ids = tokenizer.encode(prompt, add_special_tokens=False)
-
         # Concatenated flat, with per-item sizes to split them back.
         per_item_ids = [self._transcribe(a, generate_kwargs) for a in audios]
         sizes = [len(ids) for ids in per_item_ids]
         flat_ids = [tid for ids in per_item_ids for tid in ids]
 
+        return dict(
+            audio_token_ids=torch.tensor(flat_ids, dtype=torch.long),
+            audio_num_tokens=torch.tensor(sizes, dtype=torch.long),
+        )
+
+    def _call_hf_processor(
+        self,
+        prompt: str,
+        mm_data: Mapping[str, object],
+        mm_kwargs: Mapping[str, object],
+        tok_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        """vLLM 0.26 - 0.28 only; the base class dropped this hook at 0.29.
+
+        Here the processor owns both halves of the job, so it returns the
+        tokenized prompt alongside the audio tensors. See
+        ``_apply_hf_processor_main`` for the 0.29+ split.
+        """
+        tokenizer = self.info.get_tokenizer()
+        input_ids = tokenizer.encode(prompt, add_special_tokens=False)
+        features = self._audio_features(mm_data.get("audios", []) or [], mm_kwargs)
         return BatchFeature(
-            dict(
-                input_ids=[input_ids],
-                audio_token_ids=torch.tensor(flat_ids, dtype=torch.long),
-                audio_num_tokens=torch.tensor(sizes, dtype=torch.long),
-            ),
+            dict(input_ids=[input_ids], **features),
+            tensor_type="pt",
+        )
+
+    def _apply_hf_processor_main(self, **kwargs):
+        """Produce the audio tensors on whichever hook this vLLM actually calls.
+
+        vLLM 0.29 deleted ``BaseMultiModalProcessor._call_hf_processor`` (and
+        ``_apply_hf_processor_text_mm``, which was its only caller). Text and
+        multi-modal data are now processed independently: ``apply()`` tokenizes the
+        prompt itself via ``_postprocess_prompt`` and ``_apply_hf_processor_main``
+        was narrowed to ``(mm_items, hf_processor_mm_kwargs) -> BatchFeature``,
+        returning the MM tensors ONLY. Left alone, our ``_call_hf_processor`` above
+        is simply never called on 0.29+ and no transcript is ever produced.
+
+        The two signatures are mutually exclusive, so this dispatches on whether the
+        base class still has ``_call_hf_processor``: that is the hook whose removal
+        is the actual problem, and it was removed in the same commit that narrowed
+        this signature. Both vLLM call sites pass keywords only (0.28 adds
+        ``prompt`` / ``tokenization_kwargs`` / ``enable_hf_prompt_update``), hence
+        ``**kwargs`` rather than a signature that could only match one line.
+        """
+        if hasattr(super(), "_call_hf_processor"):  # 0.26 - 0.28
+            return super()._apply_hf_processor_main(**kwargs)
+
+        mm_items = kwargs["mm_items"]
+        hf_processor_mm_kwargs = kwargs["hf_processor_mm_kwargs"]
+
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        features = self._audio_features(
+            processor_data.get("audios", []) or [],
+            hf_processor_mm_kwargs,
+        )
+        # No input_ids: on 0.29+ the prompt is vLLM's business, not ours.
+        return BatchFeature(
+            dict(**features, **passthrough_data),
             tensor_type="pt",
         )
 
@@ -397,6 +449,11 @@ class GraniteSwitchASRMultiModalProcessor(
         Only the uncached path consults this hook; the cached path already
         hardcodes False, which is why audio works with the default
         ``mm_processor_cache_gb=4`` and breaks under ``--mm-processor-cache-gb 0``.
+
+        Required on vLLM 0.26 - 0.28 and inert on 0.29+, where the base class
+        deleted the hook along with the ``is_update_applied`` branch it fed:
+        ``_apply_prompt_updates`` now always runs, which is exactly the False
+        behaviour asked for here. Kept because one tree has to serve both.
         """
         return False
 

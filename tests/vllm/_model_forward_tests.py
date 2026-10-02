@@ -104,6 +104,7 @@ def _tiny_vllm_config_no_adapters():
 
 
 from tests.shared.vllm_distributed import ensure_distributed as _ensure_distributed
+from tests.shared.vllm_kv_cache import setup_kv_cache
 
 
 def _make_vllm_config(config):
@@ -251,15 +252,9 @@ class _VLLMModelTestBase:
         self._layer_names = list(self._attention_map.keys())
 
     def _setup_single_attn(self, attn, layer_name, num_blocks):
-        attn.kv_cache_torch_dtype = torch.bfloat16
-        cache_shape = attn.attn_backend.get_kv_cache_shape(
-            num_blocks,
-            BLOCK_SIZE,
-            attn.num_kv_heads,
-            attn.head_size,
+        kv_cache = setup_kv_cache(
+            attn, self.vllm_config, num_blocks, BLOCK_SIZE, self.device
         )
-        kv_cache = torch.zeros(cache_shape, device=self.device, dtype=torch.bfloat16)
-        attn.kv_cache = kv_cache
         self._kv_caches.append(kv_cache)
         self._attention_map[layer_name] = attn
 

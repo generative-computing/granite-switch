@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 
 from tests.shared.vllm_distributed import ensure_distributed
+from tests.shared.vllm_kv_cache import setup_kv_cache
 
 BLOCK_SIZE = 16
 MAX_TOKENS = 8192
@@ -130,18 +131,11 @@ def _build_switch(harness, adapter_token_ids):
     backend_name = None
     num_blocks = (MAX_TOKENS + BLOCK_SIZE - 1) // BLOCK_SIZE + 1
     for layer_name, attn in attn_layers:
-        attn.kv_cache_torch_dtype = torch.bfloat16
         if backend_name is None:
             backend_name = attn.attn_backend.get_name()
-        cache_shape = attn.attn_backend.get_kv_cache_shape(
-            num_blocks,
-            BLOCK_SIZE,
-            attn.num_kv_heads,
-            attn.head_size,
+        kv_caches[layer_name] = setup_kv_cache(
+            attn, vllm_config, num_blocks, BLOCK_SIZE, device
         )
-        kv_cache = torch.zeros(cache_shape, device=device, dtype=torch.bfloat16)
-        attn.kv_cache = kv_cache
-        kv_caches[layer_name] = kv_cache
 
     harness["switch"] = switch
     harness["attn_layers"] = attn_layers

@@ -20,8 +20,10 @@ Documentation = "https://github.com/generative-computing/granite-switch/tree/mai
 
 [project.optional-dependencies]
 hf = ["accelerate>=0.20.0"]
-vllm = ["vllm>=0.30.0,<0.31.0"]
-vllm27 = ["vllm>=0.27.0,<0.28.0"]
+# Every line from 0.26 through 0.30 is supported by one tree; the backend uses
+# capability checks (hasattr) rather than version comparisons where the two
+# differ. Pin a specific line with the per-line dependency groups below.
+vllm = ["vllm>=0.26.0,<0.31.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
@@ -67,22 +69,15 @@ test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { includ
 
 [tool.uv]
 default-groups = ["vllm26"]
+# Only the per-line GROUPS are mutually exclusive now. The `vllm` extra spans
+# 0.26-0.30, so it overlaps every group and no longer conflicts with any of them --
+# which is what made `uv sync` unsatisfiable while the extra said 0.30-only and the
+# default group said 0.26.
 conflicts = [
-    # group-vs-group
     [{ group = "vllm26" },     { group = "vllm27" }],
     [{ group = "dev" },        { group = "vllm27" }],
     [{ group = "dev" },        { group = "dev-vllm27" }],
     [{ group = "dev-vllm27" }, { group = "vllm26" }],
-    # group-vs-extra
-    [{ group = "vllm26" },     { extra = "vllm27" }],
-    [{ group = "vllm27" },     { extra = "vllm" }],
-    [{ group = "vllm27" },     { extra = "tutorials" }],
-    [{ group = "dev" },        { extra = "vllm27" }],
-    [{ group = "dev-vllm27" }, { extra = "vllm" }],
-    [{ group = "dev-vllm27" }, { extra = "tutorials" }],
-    # extra-vs-extra
-    [{ extra = "vllm" },       { extra = "vllm27" }],
-    [{ extra = "tutorials" },  { extra = "vllm27" }],
 ]
 
 [tool.coverage.run]
