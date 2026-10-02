@@ -150,6 +150,7 @@ from tests.shared.synthetic_adapters import (
     sr_activation_anchor,
     synthesize_adapter,
 )
+from tests.shared.vllm_gpu_mem import gpu_mem_util
 
 TOPK = int(os.environ.get("MULTI_ADAPTER_TOPK", "64"))
 K_SWEEP = [int(x) for x in os.environ.get("MULTI_ADAPTER_KS", "1,5,10,20").split(",")]
@@ -722,30 +723,14 @@ def cmd_cases(args):
 
 
 def _gpu_mem_util() -> float:
-    """A gpu_memory_utilization that fits in the memory actually free right now.
+    """This worker's free-memory-aware gpu_memory_utilization.
 
-    vLLM measures the fraction against TOTAL device memory and refuses to start if
-    that exceeds what is free, so a fixed value only works on an idle card. Take
-    90% of the free fraction instead, capped at the configured ceiling.
+    Thin wrapper over the shared helper so the MULTI_ADAPTER_* knobs above keep
+    working; it always runs on CUDA here, so the shared ``None`` (no device to
+    measure) cannot come back.
     """
-    import torch
-
-    if not torch.cuda.is_available():
-        return GPU_MEM_UTIL
-    free, total = torch.cuda.mem_get_info()
-    fits = 0.9 * free / total
-    util = min(GPU_MEM_UTIL, fits)
-    print(
-        f"  GPU memory: {free / 2**30:.1f}/{total / 2**30:.1f} GiB free -> "
-        f"gpu_memory_utilization={util:.3f} (ceiling {GPU_MEM_UTIL:g})"
-    )
-    if util < GPU_MEM_UTIL_FLOOR:
-        raise SystemExit(
-            f"FATAL: only {free / 2**30:.1f} GiB free on this device, which leaves "
-            f"gpu_memory_utilization={util:.3f} below the {GPU_MEM_UTIL_FLOOR:g} "
-            "floor. Another process is holding the card; this is not a test failure."
-        )
-    return util
+    util = gpu_mem_util(ceiling=GPU_MEM_UTIL, floor=GPU_MEM_UTIL_FLOOR)
+    return GPU_MEM_UTIL if util is None else util
 
 
 def _dists(prompt_logprobs):

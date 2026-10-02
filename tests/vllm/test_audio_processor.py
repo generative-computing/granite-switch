@@ -535,6 +535,14 @@ class TestPromptUpdatesAreApplied:
     the default cache setting hid this. These tests drive vLLM's real
     ``_apply_hf_processor_text_mm`` / ``_maybe_apply_prompt_updates`` rather than
     asserting on the override in isolation.
+
+    On vLLM 0.29+ that hook is gone: ``_maybe_apply_prompt_updates`` lost the
+    ``is_update_applied`` branch and ``_apply_prompt_updates`` always runs, which is
+    exactly the False behaviour the override was asking for. So
+    ``test_hook_reports_updates_not_applied`` still passes there — it calls our own
+    override — but is VACUOUS, because nothing in vLLM consults it any more. The
+    splicing tests below are the live coverage on every line; see
+    ``_apply_uncached``.
     """
 
     def _audio_items(self, count=1):
@@ -570,6 +578,13 @@ class TestPromptUpdatesAreApplied:
         # Real vLLM code: this is the call site that decides whether the
         # replacement runs (processing/processor.py, _apply_hf_processor_text_mm).
         proc, items = self._proc(monkeypatch)
+        if not hasattr(proc, "_apply_hf_processor_text_mm"):
+            pytest.skip(
+                "vLLM 0.29+ deleted _apply_hf_processor_text_mm and the "
+                "(prompt_ids, processed, is_update_applied) tri-tuple it returned; "
+                "prompt updates are now always applied, so there is no flag left "
+                "to assert on. The splicing tests cover the behaviour instead."
+            )
         prompt_ids, _, is_update_applied = proc._apply_hf_processor_text_mm(
             prompt_text=proc_mod.AUDIO_MARKER,
             mm_items=items,
@@ -581,15 +596,42 @@ class TestPromptUpdatesAreApplied:
         assert is_update_applied is False
 
     def _apply_uncached(self, proc, items, prompt_text):
-        """vLLM's ``apply()`` with cache=None, minus the hashing/cache plumbing."""
+        """vLLM's ``apply()`` with cache=None, minus the hashing/cache plumbing.
+
+        Two shapes, because 0.29 split text processing away from MM processing:
+
+        * 0.26 - 0.28: one ``_apply_hf_processor_text_mm`` call returns the prompt
+          ids, the MM tensors AND the ``is_update_applied`` flag together.
+        * 0.29+: ``apply()`` tokenizes the prompt itself (upstream of the processor,
+          then ``_postprocess_prompt``), ``_apply_hf_processor_main`` returns the MM
+          tensors only, and ``_maybe_apply_prompt_updates`` no longer takes a flag.
+
+        Everything after that — ``_get_mm_fields_config`` →
+        ``_get_mm_prompt_updates`` → ``_maybe_apply_prompt_updates`` — is unchanged
+        on every line, which is why only the first call differs here.
+        """
         from vllm.multimodal.inputs import MultiModalKwargsItems
 
-        prompt_ids, processed, is_update_applied = proc._apply_hf_processor_text_mm(
-            prompt_text=prompt_text,
-            mm_items=items,
-            hf_processor_mm_kwargs={},
-            tokenization_kwargs={},
-        )
+        flag_kwargs = {}
+        if hasattr(proc, "_apply_hf_processor_text_mm"):  # 0.26 - 0.28
+            prompt_ids, processed, is_update_applied = proc._apply_hf_processor_text_mm(
+                prompt_text=prompt_text,
+                mm_items=items,
+                hf_processor_mm_kwargs={},
+                tokenization_kwargs={},
+            )
+            flag_kwargs["is_update_applied"] = is_update_applied
+        else:  # 0.29+
+            # vLLM hands apply() an already-tokenized prompt; the marker survives
+            # because it is a registered special token.
+            prompt_ids = proc._postprocess_prompt(
+                proc.info.get_tokenizer().encode(prompt_text, add_special_tokens=False)
+            )
+            processed = proc._apply_hf_processor_main(
+                mm_items=items,
+                hf_processor_mm_kwargs={},
+            )
+
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed, proc._get_mm_fields_config(processed, {})
         )
@@ -599,7 +641,7 @@ class TestPromptUpdatesAreApplied:
             prompt_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_prompt_updates=updates,
-            is_update_applied=is_update_applied,
+            **flag_kwargs,
         )
 
     def test_marker_becomes_transcript_ids(self, monkeypatch):
