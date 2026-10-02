@@ -405,3 +405,39 @@ def _first_lora_b_tensor(model):
         if "lora_B" in name and buf.dim() == 4:
             return buf.detach()
     return None
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "ibm-granite/granite-4.0-micro",
+        "ibm-granite/granite-4.1-3b",
+        "ibm-granite/granite-4.2-3b",  # ChatML family
+    ],
+)
+def test_classifier_drops_generation_prompt(base):
+    """A classifier render ignores ``add_generation_prompt=True``.
+
+    The verdict is read at the marker, so the assistant generation prompt must
+    never follow it. vLLM's chat endpoint defaults the flag to True, so the
+    template forces it off instead of relying on the caller.
+    """
+    from granite_switch.composer.tokenizer_setup import (
+        add_control_tokens,
+        configure_chat_template,
+    )
+
+    tokenizer = _tokenizer(base)
+    discovered = [(None, "safety", "classifier", None)]
+    add_control_tokens(tokenizer, discovered)
+    configure_chat_template(tokenizer, discovered)
+    messages = [{"role": "user", "content": "Is this text safe?"}]
+
+    def render(gen, **kwargs):
+        return tokenizer.apply_chat_template(
+            messages, add_generation_prompt=gen, tokenize=False, **kwargs
+        )
+
+    assert render(True, adapter_name="safety") == render(False, adapter_name="safety")
+    # Base renders still honor the flag.
+    assert render(True) != render(False)

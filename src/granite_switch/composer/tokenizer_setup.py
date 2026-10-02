@@ -1047,6 +1047,12 @@ def configure_chat_template(
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
+{#- A classifier reads its verdict at the marker, so nothing may follow it:
+    drop the generation prompt even when the caller asks for one. -#}
+{%- set classifier_mode = adapter_type == 'classifier' %}
+{%- if classifier_mode %}
+{%- set add_generation_prompt = false %}
+{%- endif %}
 
 """
 
