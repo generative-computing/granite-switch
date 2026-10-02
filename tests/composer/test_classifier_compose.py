@@ -125,8 +125,8 @@ def _winning_head(num_labels, hidden, winner, dtype=torch.float32):
 def _classifier_prompt_ids(tokenizer, control_token_id):
     """`<some prompt><control>` as a batch of input ids for a detect forward.
 
-    End-locator layout, matching what the chat template emits: the control token
-    (marker) goes AFTER the last content token, and is itself the read point.
+    The control token (marker) is the last token, as in a chat-template render,
+    and is itself the read point.
     """
     body = tokenizer.encode("Is this text safe?", add_special_tokens=False)
     ids = [*body, control_token_id]
@@ -189,7 +189,7 @@ def test_classifier_only_compose_loads_trained_head(tmp_path):
 
     # A control token id for the single classifier slot. Any spare vocab id
     # works for construction; the switch fires on this id, which the prompt
-    # helper places after the content (end-locator layout).
+    # helper places last, as the chat template does.
     control_id = tokenizer.vocab_size - 5
 
     model = GraniteSwitchComposer.from_base_and_adapters(
@@ -441,3 +441,46 @@ def test_classifier_drops_generation_prompt(base):
     assert render(True, adapter_name="safety") == render(False, adapter_name="safety")
     # Base renders still honor the flag.
     assert render(True) != render(False)
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "ibm-granite/granite-4.0-micro",
+        "ibm-granite/granite-4.1-3b",
+        "ibm-granite/granite-4.2-3b",  # ChatML family
+    ],
+)
+def test_classifier_marker_is_last_token(base):
+    """The marker is the very last token, after the last turn's close.
+
+    Everything before it is byte-identical to a no-adapter render without a
+    generation prompt, so the decoder sees exactly the base transcript.
+    """
+    from granite_switch.composer.tokenizer_setup import (
+        add_control_tokens,
+        configure_chat_template,
+    )
+
+    tokenizer = _tokenizer(base)
+    discovered = [(None, "safety", "classifier", None)]
+    (control_id,), _ = add_control_tokens(tokenizer, discovered)
+    configure_chat_template(tokenizer, discovered)
+    messages = [
+        {"role": "user", "content": "Is this text safe?"},
+        {"role": "assistant", "content": "It looks fine."},
+        {"role": "user", "content": "And this one?"},
+    ]
+
+    plain = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=False, tokenize=False
+    )
+    ids = tokenizer.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True, adapter_name="safety"
+    )
+    if not isinstance(ids, list):  # BatchEncoding on newer transformers
+        ids = ids["input_ids"]
+
+    assert ids[-1] == control_id
+    assert ids.count(control_id) == 1
+    assert tokenizer.decode(ids[:-1]) == plain

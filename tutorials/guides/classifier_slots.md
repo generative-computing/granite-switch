@@ -236,15 +236,17 @@ python -m vllm.entrypoints.openai.api_server \
   --port 8000
 ```
 
-Fire a classifier by placing its control token in the prompt — one token per slot, `<|safety|>` for
-the `safety` slot, `<|faithfulness|>` for the other. The completion is the emitted label word:
+Fire a classifier by placing its control token at the very end of the prompt, after the last turn's
+close — one token per slot, `<|safety|>` for the `safety` slot, `<|faithfulness|>` for the other. The
+verdict is read at the control token, so leave out the generation prompt. The completion is the
+emitted label word:
 
 ```bash
 curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "./granite-switch-detect",
-    "prompt": "<|safety|>Is this text safe? The weather is nice today.",
+    "prompt": "<|start_of_role|>user<|end_of_role|>Is this text safe? The weather is nice today.<|end_of_text|>\n<|safety|>",
     "max_tokens": 1
   }'
 ```
@@ -261,7 +263,8 @@ two labels for a 2-label slot, three for a 3-label slot.
 ### Firing via the chat template (optional)
 
 Instead of placing `<|safety|>` by hand, you can let the composed model's chat template place it for
-you by passing `adapter_name` — a classifier slot is activated exactly like any other adapter:
+you by passing `adapter_name` — a classifier slot is activated exactly like any other adapter. The
+template appends the control token after the last turn:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -283,7 +286,7 @@ curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "./granite-switch-detect",
-    "prompt": "<|safety|>Is this text safe? ...",
+    "prompt": "<|start_of_role|>user<|end_of_role|>Is this text safe? ...<|end_of_text|>\n<|safety|>",
     "max_tokens": 1,
     "logprobs": 5
   }'
