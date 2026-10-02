@@ -16,15 +16,6 @@ from tests.shared.granite4_equivalence import (
     make_active_adapter_input,
 )
 
-_UPSTREAM_EAGER_CONFIGS = {"4.0-h-350m"}
-
-
-def _eager_kwargs_if_needed(model_name):
-    if model_name in _UPSTREAM_EAGER_CONFIGS:
-        return {"enforce_eager": True}
-    return {}
-
-
 _CUDA_AVAILABLE = torch.cuda.is_available()
 
 
@@ -61,7 +52,6 @@ class TestGranite4FamilyEquivalence:
             cfg,
             seq_len=16,
             tmpdir=tmp_path,
-            **_eager_kwargs_if_needed(model_name),
         )
 
         # ULP-equivalent, not bit-exact: the inert switch runs its projections
@@ -87,7 +77,6 @@ class TestGranite4FamilyEquivalence:
             cfg,
             seq_len=64,
             tmpdir=tmp_path,
-            **_eager_kwargs_if_needed(model_name),
         )
 
         # ULP-equivalent, not bit-exact (see get_tolerances / test_logits_short).
@@ -115,7 +104,6 @@ class TestZeroAdapterNoHiding:
             use_control_tokens=False,
             seq_len=16,
             tmpdir=tmp_path,
-            **_eager_kwargs_if_needed(model_name),
         )
 
         # Skinned + no control token = inert switch. ULP-equivalent to upstream,
@@ -147,7 +135,6 @@ class TestZeroAdapterEquivalence:
             cfg,
             seq_len=seq_len,
             tmpdir=tmp_path,
-            **_eager_kwargs_if_needed(model_name),
         )
 
         input_ids = make_active_adapter_input(1, seq_len, seed=42)
@@ -183,7 +170,6 @@ class TestZeroAdapterEquivalence:
             cfg,
             seq_len=seq_len,
             tmpdir=tmp_path,
-            **_eager_kwargs_if_needed(model_name),
         )
 
         input_ids = make_active_adapter_input(1, seq_len, seed=42)

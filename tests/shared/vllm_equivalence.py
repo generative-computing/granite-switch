@@ -22,6 +22,8 @@ import tempfile
 
 import torch
 
+from tests.shared.vllm_gpu_mem import gpu_mem_util
+
 # ── Model creation (kept for other tests) ─────────────────────────
 
 
@@ -242,6 +244,29 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
 
     # Allow requesting logprobs for all vocab tokens
     llm_kwargs.setdefault("max_logprobs", vocab_size)
+
+    # Every equivalence runner funnels both engines through here with the same
+    # llm_kwargs, so defaults set here apply symmetrically. setdefault, so an
+    # explicit caller value still wins.
+    #
+    # enforce_eager: an equivalence test compares two MODELS. Leaving the compiler
+    # in measures the compiler too, and the two sides do not necessarily compile
+    # the same way.
+    llm_kwargs.setdefault("enforce_eager", True)
+    # enable_prefix_caching: upstream's GraniteMoeHybridForCausalLM declares
+    # IsHybrid and GraniteSwitchForCausalLM deliberately does not (declaring it
+    # would size the KV cache for zero attention layers), so the two sides resolve
+    # DIFFERENT prefix-caching defaults — an asymmetry in a test whose whole job is
+    # to have one variable. It also kills a vLLM 0.28-only crash in upstream's
+    # model: with prefix caching on, 0.28 logs "Mamba cache mode is set to 'align'"
+    # and then asserts "no mamba layers in the model" (v1/worker/mamba_utils.py).
+    llm_kwargs.setdefault("enable_prefix_caching", False)
+    # gpu_memory_utilization: vLLM's default is a fraction of TOTAL memory, which
+    # assumes an idle card. These runners start engines back to back and the
+    # previous one is often still releasing. See tests/shared/vllm_gpu_mem.py.
+    mem_util = gpu_mem_util()
+    if mem_util is not None:
+        llm_kwargs.setdefault("gpu_memory_utilization", mem_util)
 
     llm = LLM(
         model=model_dir,
