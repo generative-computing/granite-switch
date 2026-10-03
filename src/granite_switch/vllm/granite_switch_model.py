@@ -458,28 +458,23 @@ class GraniteSwitchModel(nn.Module):
         classifier_indices: torch.Tensor,
         hidden_states: torch.Tensor,
         input_ids: torch.Tensor | None,
-    ) -> tuple[torch.Tensor, torch.Tensor] | None:
-        """Per-request (hidden_state, slot_index) for the classifier verdict.
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int] | None:
+        """``(rows, hidden, slots, num_reqs)`` for this pass's classifier markers.
 
-        The chat template emits the marker immediately after the last content
-        token, so the read point is ``marker``.
-
-        The marker is the LAST classifier control token in a request's slice,
-        matched by id in ``input_ids``; ``classifier_indices`` is nonzero from any
-        classifier marker onward, so the index alone does not say which slot a
-        position belongs to. Read point and slot id both come from that position.
-
-        Per request slice ``[start, end)``, two states:
-
-        * marker present: read its row.
-        * no marker: the marker was in an earlier chunk, so that pass's resolved
-          verdict is carried forward (vLLM consumes the verdict only on the pass it
-          samples); or there is none at all and the request gets slot 0, whose zero
-          verdict the exit's ``is_classifier`` gate discards.
-
-        Returns ``None`` when there is no request metadata (e.g. the startup
-        profiling forward), so the caller emits no verdict.
+        Each marker must be its request's last token, so it reports to that
+        request's logit row. ``None`` when the pass holds no marker.
         """
+        if input_ids is None:
+            raise RuntimeError("Classifier requests need input_ids, not inputs_embeds.")
+        marker_ids = torch.tensor(
+            self.config.classifier_control_token_ids,
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
+        is_marker = torch.isin(input_ids, marker_ids)  # [total_tokens]
+        if not bool(is_marker.any()):
+            return None
+
         from vllm.forward_context import get_forward_context
 
         attn_metadata = get_forward_context().attn_metadata
@@ -493,71 +488,17 @@ class GraniteSwitchModel(nn.Module):
         if query_start_loc is None:
             return None
 
-        qsl = query_start_loc.tolist()
-        seq_lens = attn_metadata.seq_lens.tolist()
-
-        # A request's marker is the LAST classifier control token in its slice:
-        # ``classifier_indices`` is nonzero from any classifier marker onward, so
-        # with several classifier slots the index alone does not say which slot's
-        # marker a position belongs to.
-        if input_ids is None:
+        pos = is_marker.nonzero(as_tuple=True)[0]  # [num_markers]
+        ends = query_start_loc[1:].long()
+        # The request whose slice [start, end) holds each marker = its logit row.
+        rows = torch.searchsorted(ends, pos, right=True)
+        misplaced = pos != ends[rows] - 1
+        if bool(misplaced.any()):
+            reqs = sorted(set(rows[misplaced].tolist()))
             raise RuntimeError(
-                "A classifier request needs input_ids to locate its control token, "
-                "but only inputs_embeds was provided. Classifier slots classify a "
-                "text prompt; pass input_ids."
+                f"Classifier request(s) {reqs}: control token is not their last token."
             )
-        marker_ids = torch.tensor(
-            self.config.classifier_control_token_ids,
-            device=input_ids.device,
-            dtype=input_ids.dtype,
-        )
-        is_marker = torch.isin(input_ids, marker_ids)  # [total_tokens]
-
-        resolved = getattr(self, "_classifier_resolved_verdict", None) or {}
-        req_hidden_rows = []
-        req_slots = []
-        new_resolved: dict[int, tuple[torch.Tensor, int]] = {}
-        for i in range(len(qsl) - 1):
-            start, end = qsl[i], qsl[i + 1]
-            hits = is_marker[start:end].nonzero(as_tuple=True)[0]
-            if hits.numel() == 0:
-                # No marker in this slice
-                carried = resolved.get(seq_lens[i] - (end - start))
-                if carried is not None:
-                    row, slot = carried
-                    new_resolved[seq_lens[i]] = (row, slot)
-                    req_hidden_rows.append(row)
-                    req_slots.append(slot)
-                    continue
-                req_hidden_rows.append(hidden_states[end - 1])
-                req_slots.append(0)
-                continue
-
-            # One verdict per request: the exit rewrites a single logit row, so a
-            # request naming two different classifier slots has no way to report
-            # both. Repeated markers of the SAME slot are fine (a multi-turn prompt
-            # carries them from earlier turns); the last one wins.
-            distinct = torch.unique(input_ids[start:end][hits])
-            if distinct.numel() > 1:
-                raise RuntimeError(
-                    "A classifier request may name only one classifier slot; "
-                    f"request {i} carries control tokens "
-                    f"{sorted(int(t) for t in distinct)}. The verdict exit rewrites "
-                    "one logit row, so only one slot can report."
-                )
-
-            marker = start + int(hits[-1])  # last id match: this slice's marker
-            slot = int(classifier_indices[marker])
-            row = hidden_states[marker]
-            new_resolved[seq_lens[i]] = (row, slot)
-            req_slots.append(slot)
-            req_hidden_rows.append(row)
-
-        self._classifier_resolved_verdict = new_resolved
-        return (
-            torch.stack(req_hidden_rows, dim=0),
-            torch.tensor(req_slots, dtype=torch.long, device=hidden_states.device),
-        )
+        return rows, hidden_states[pos], classifier_indices[pos].long(), len(ends)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -760,11 +701,11 @@ class GraniteSwitchForCausalLM(
                     classifier_indices, hidden_states, input_ids
                 )
                 if read is not None:
-                    req_hidden, req_classifier_indices = read
+                    rows, marker_hidden, slots, num_reqs = read
                     verdict = classifier_head(
-                        req_hidden, req_classifier_indices
-                    )  # [num_reqs, num_labels]
-                    self._pending_verdict = (verdict, req_classifier_indices)
+                        marker_hidden, slots
+                    )  # [num_markers, max_labels]
+                    self._pending_verdict = (rows, verdict, slots, num_reqs)
 
         return hidden_states
 
@@ -802,30 +743,22 @@ class GraniteSwitchForCausalLM(
             return logits
         # Consume it so a same-step prompt_logprobs pass re-applies nothing.
         self._pending_verdict = None
-        verdict, req_indices = pending
+        rows, verdict, slots, num_reqs = pending
 
-        per_slot_label_ids = self.config.classifier_label_token_ids
-
-        if verdict.shape[0] != logits.shape[0]:
+        if logits.shape[0] != num_reqs:
             raise RuntimeError(
-                f"classifier verdict rows ({verdict.shape[0]}) do not match "
-                f"logits rows ({logits.shape[0]}); per-request alignment broke."
+                f"logits rows ({logits.shape[0]}) do not match the forward's "
+                f"{num_reqs} requests; per-request alignment broke."
             )
 
-        is_classifier = req_indices > 0  # [num_reqs]
-        if not bool(is_classifier.any()):
-            return logits
-
-        # Each request writes only its own slot's label ids and only that slot's
-        # real label count (verdict[:, :n]); padded columns are never read.
-        rows = is_classifier.nonzero(as_tuple=True)[0]  # [num_classifier_reqs]
+        # Each marker writes only its own slot's label ids and only that slot's
+        # real label count (verdict[i, :n]); padded columns are never read.
+        per_slot_label_ids = self.config.classifier_label_token_ids
         logits[rows] = float("-inf")
-        for r in rows.tolist():
-            slot = int(req_indices[r])
+        for i, (r, slot) in enumerate(zip(rows.tolist(), slots.tolist())):
             ids = per_slot_label_ids[slot - 1]
-            n = len(ids)
             label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
-            logits[r, label_ids] = verdict[r, :n].to(logits.dtype)
+            logits[r, label_ids] = verdict[i, : len(ids)].to(logits.dtype)
         return logits
 
     def sample(
