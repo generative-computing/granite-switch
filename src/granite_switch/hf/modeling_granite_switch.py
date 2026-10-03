@@ -678,69 +678,50 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         # Classifier heads read the final post-norm hidden state (the same
-        # representation the LM head consumes) and emit one verdict per request
-        # when routed to a classifier. A detect request is prefill-only: it
-        # classifies the prompt and ships the verdict as the replacements to
-        # rewrite that request's logit row into its label word. Reading the
-        # final state is the initial supported read point; earlier layers can
-        # be added later.
-
-        # Per-request gate so a mixed model still serves LoRA/base generation.
-        active_classifier = self.classifier_head is not None and bool(
-            (classifier_indices > 0).any()
-        )
-        if active_classifier:
-            if cache_position[0] != 0:
-                raise RuntimeError(
-                    "Classifier requests are detect-only (prefill, no "
-                    "generation); got a cached decode step "
-                    f"(cache_position starts at {int(cache_position[0])})."
-                )
-            # The marker is the LAST classifier control token in the original
-            # input_ids: ``classifier_indices`` is nonzero from any classifier
-            # marker onward, so with several classifier slots the index alone does
-            # not say which slot's marker a position belongs to. A multi-turn prompt
-            # can also carry markers from earlier turns.
+        # representation the LM head consumes), only at classifier markers. Each
+        # marker must be its row's last real token, where the exit rewrites that
+        # row's logits into a label word.
+        self._last_classifier_verdict = None
+        if self.classifier_head is not None:
             if input_ids is None:
-                raise RuntimeError(
-                    "A classifier request needs input_ids to locate its control "
-                    "token, but only inputs_embeds was provided. Classifier slots "
-                    "classify a text prompt; pass input_ids."
-                )
-            marker_ids = torch.tensor(
-                self.config.classifier_control_token_ids,
-                device=input_ids.device,
-                dtype=input_ids.dtype,
-            )
-            is_marker = torch.isin(input_ids, marker_ids)  # [batch, seq_len]
-            # One verdict per request: the exit rewrites a single logit row, so a
-            # request naming two different classifier slots has no way to report
-            # both. Repeated markers of the SAME slot are fine -- a multi-turn
-            # prompt carries them from earlier turns and the last one wins.
-            marked = torch.where(is_marker, input_ids, -1)  # [batch, seq_len]
-            for row in range(batch_size):
-                distinct = torch.unique(marked[row])
-                distinct = distinct[distinct >= 0]
-                if distinct.numel() > 1:
+                if bool((classifier_indices > 0).any()):
                     raise RuntimeError(
-                        "A classifier request may name only one classifier slot; "
-                        f"request {row} carries control tokens "
-                        f"{sorted(int(t) for t in distinct)}. The verdict exit "
-                        "rewrites one logit row, so only one slot can report."
+                        "Classifier requests need input_ids, not inputs_embeds."
                     )
-            pos = torch.arange(seq_length, device=input_ids.device)
-            marker_idx = torch.where(is_marker, pos, -1).max(dim=1).values.clamp(min=0)
-            # A row without one (a plain LM request in a mixed batch) has no read
-            # point; the clamp parks it on index 0 and it carries slot 0, so the
-            # exit's is_classifier gate discards its zero verdict.
-            batch_ar = torch.arange(batch_size, device=hidden_states.device)
-            req_hidden = hidden_states[batch_ar, marker_idx, :]  # [batch, hidden]
-            req_slot = classifier_indices[batch_ar, marker_idx]  # [batch]
-            self._last_classifier_logits = self.classifier_head(req_hidden, req_slot)
-            self._last_req_classifier_indices = req_slot
-        else:
-            self._last_classifier_logits = None
-            self._last_req_classifier_indices = None
+            else:
+                marker_ids = torch.tensor(
+                    self.config.classifier_control_token_ids,
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+                is_marker = torch.isin(input_ids, marker_ids)  # [batch, seq_len]
+                if bool(is_marker.any()):
+                    rows, pos = is_marker.nonzero(as_tuple=True)
+                    # Last real token of each row among this step's tokens.
+                    if attention_mask is not None and attention_mask.dim() == 2:
+                        real = attention_mask[:, -seq_length:].long()
+                        cols = torch.arange(seq_length, device=real.device)
+                        last = (real * cols).max(dim=1).values
+                    else:
+                        last = torch.full(
+                            (batch_size,), seq_length - 1, device=input_ids.device
+                        )
+                    misplaced = pos != last[rows]
+                    if bool(misplaced.any()):
+                        bad = sorted(set(rows[misplaced].tolist()))
+                        raise RuntimeError(
+                            f"Classifier request(s) {bad}: control token is not "
+                            "their last token."
+                        )
+                    slots = classifier_indices[rows, pos]
+                    verdict = self.classifier_head(hidden_states[rows, pos], slots)
+                    self._last_classifier_verdict = (
+                        rows,
+                        pos,
+                        verdict,
+                        slots,
+                        seq_length,
+                    )
 
         if not return_dict:
             return tuple(
@@ -882,38 +863,31 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
         )
 
     def _apply_classifier_verdict(self, logits: torch.Tensor) -> torch.Tensor:
-        """Rewrite classifier requests' last logit row to emit their label word.
+        """Rewrite each classifier marker's logit row to emit its label word.
 
-        For each classifier request set the whole vocab to ``-inf`` at the last
-        prompt position, place the per-label verdict scores on each label word's
-        token id (``classifier_label_token_ids``) so decoding emits that word.
-        Non-classifier rows keep their normal LM logits.
+        The row is blanked to ``-inf`` and the slot's per-label verdict scores are
+        placed on its label token ids (``classifier_label_token_ids``).
         """
-        verdict = getattr(self.model, "_last_classifier_logits", None)
-        req_slot = getattr(self.model, "_last_req_classifier_indices", None)
-        if verdict is None or req_slot is None:
+        pending = getattr(self.model, "_last_classifier_verdict", None)
+        if pending is None:
             return logits
+        rows, pos, verdict, slots, seq_length = pending
 
-        per_slot_label_ids = self.config.classifier_label_token_ids
-
-        if verdict.shape[0] != logits.shape[0]:
+        # logits keeps the last logits.shape[1] positions (logits_to_keep).
+        cols = pos - (seq_length - logits.shape[1])
+        if bool((cols < 0).any()):
             raise RuntimeError(
-                f"classifier verdict rows ({verdict.shape[0]}) do not match "
-                f"logits rows ({logits.shape[0]}); per-request alignment broke."
+                "A classifier marker's logits were not kept (logits_to_keep)."
             )
 
-        is_classifier = req_slot > 0  # [batch]
-        if not bool(is_classifier.any()):
-            return logits
-
-        # Each request writes only its own slot's label ids and only that slot's
-        # real label count (verdict[:, :n]); padded columns are never read.
-        rows = is_classifier.nonzero(as_tuple=True)[0]  # [num_classifier_reqs]
-        logits[rows, -1, :] = float("-inf")
-        for r in rows.tolist():
-            slot = int(req_slot[r])
+        # Each marker writes only its own slot's label ids and only that slot's
+        # real label count (verdict[i, :n]); padded columns are never read.
+        per_slot_label_ids = self.config.classifier_label_token_ids
+        logits[rows, cols, :] = float("-inf")
+        for i, (r, c, slot) in enumerate(
+            zip(rows.tolist(), cols.tolist(), slots.tolist())
+        ):
             ids = per_slot_label_ids[slot - 1]
-            n = len(ids)
             label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
-            logits[r, -1, label_ids] = verdict[r, :n].to(logits.dtype)
+            logits[r, c, label_ids] = verdict[i, : len(ids)].to(logits.dtype)
         return logits
