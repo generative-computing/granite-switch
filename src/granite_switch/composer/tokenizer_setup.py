@@ -836,6 +836,7 @@ def build_substitute_token_ids(
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
     lora_substitute_id: int,
     base_reset: bool = False,
+    classifier_substitute_id: int | None = None,
 ) -> list[int]:
     """Build the token-exchange substitute ids, index-aligned with the control tokens.
 
@@ -849,12 +850,14 @@ def build_substitute_token_ids(
       * base-reset: ``lora_substitute_id`` as well. The token is placed at a turn
         boundary, where the role-open marker is exactly what the decoder expects
         at that position.
+      * classifier: ``classifier_substitute_id``, the base's role-open marker.
 
     Args:
         discovered_adapters: ``(adapter_path, adapter_name, technology, source)`` tuples.
         lora_substitute_id: Probed sequence-start token id.
         base_reset: When True, prepend the base-reset slot's substitute so the
             list stays aligned with ``add_control_tokens(base_reset=True)``.
+        classifier_substitute_id: The base's role-open marker id.
 
     Returns:
         One substitute id per control token, in the same order.
@@ -863,6 +866,10 @@ def build_substitute_token_ids(
     for adapter_path, _name, technology, _source in discovered_adapters:
         if technology == "alora":
             substitute_ids.append(get_alora_first_invocation_token_id(adapter_path))
+        elif technology == "classifier":
+            if classifier_substitute_id is None:
+                raise ValueError("A classifier slot needs classifier_substitute_id.")
+            substitute_ids.append(classifier_substitute_id)
         else:
             substitute_ids.append(lora_substitute_id)
     return substitute_ids

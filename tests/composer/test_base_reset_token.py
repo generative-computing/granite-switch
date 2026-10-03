@@ -22,6 +22,9 @@ from .test_tokenizer_setup import MockTokenizer
 _PROBE = (
     "granite_switch.composer.compose_granite_switch._probe_lora_substitute_token_id"
 )
+_CLASSIFIER_SUB = (
+    "granite_switch.composer.compose_granite_switch._classifier_substitute_token_id"
+)
 _ALORA = "granite_switch.composer.tokenizer_setup.get_alora_first_invocation_token_id"
 
 
@@ -50,7 +53,11 @@ class TestBuildControlTokenLists:
 
     def _run(self, base_reset):
         tokenizer = MockTokenizer(initial_vocab_size=500)
-        with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
+        with (
+            patch(_PROBE, return_value=42),
+            patch(_CLASSIFIER_SUB, return_value=43),
+            patch(_ALORA, return_value=77),
+        ):
             return build_control_token_lists(tokenizer, self._ADAPTERS, base_reset)
 
     def test_base_reset_grows_both_lists_and_leads_with_base(self):
@@ -84,7 +91,11 @@ class TestBuildControlTokenLists:
         from .test_tokenizer_setup import MockTokenizer as _Tok
 
         tokenizer = _Tok(initial_vocab_size=500)
-        with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
+        with (
+            patch(_PROBE, return_value=42),
+            patch(_CLASSIFIER_SUB, return_value=43),
+            patch(_ALORA, return_value=77),
+        ):
             token_ids, _special, _subs = build_control_token_lists(
                 tokenizer, self._ADAPTERS, base_reset=True
             )
@@ -125,7 +136,11 @@ class TestBuildControlTokenLists:
         from .test_tokenizer_setup import MockTokenizer as _Tok
 
         tokenizer = _Tok(initial_vocab_size=500)
-        with patch(_PROBE, return_value=42), patch(_ALORA, return_value=77):
+        with (
+            patch(_PROBE, return_value=42),
+            patch(_CLASSIFIER_SUB, return_value=43),
+            patch(_ALORA, return_value=77),
+        ):
             token_ids, _special, _subs = build_control_token_lists(
                 tokenizer, self._ADAPTERS, base_reset=False
             )

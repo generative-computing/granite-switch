@@ -50,7 +50,12 @@ size. That is the whole artifact — a single linear layer that maps a base-mode
 logit per label.
 
 Train the head however you like (a frozen base model plus a trainable linear layer over the last
-hidden state is the usual recipe). Here is a helper that writes a **synthetic** head.
+hidden state is the usual recipe). At serving time the head reads the final hidden state of the
+control token, which the model embeds as the base's role-open marker: `<|start_of_role|>` on
+Granite 4.0/4.1, `<|im_start|>` on 4.2. So train on the chat-rendered prompt with no generation
+prompt, with that marker appended, and read the hidden state there.
+
+Here is a helper that writes a **synthetic** head.
 
 ```python
 from pathlib import Path

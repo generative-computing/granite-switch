@@ -484,3 +484,25 @@ def test_classifier_marker_is_last_token(base):
     assert ids[-1] == control_id
     assert ids.count(control_id) == 1
     assert tokenizer.decode(ids[:-1]) == plain
+
+
+@pytest.mark.parametrize(
+    "base, role_open",
+    [
+        ("ibm-granite/granite-4.0-micro", "<|start_of_role|>"),
+        ("ibm-granite/granite-4.1-3b", "<|start_of_role|>"),
+        ("ibm-granite/granite-4.2-3b", "<|im_start|>"),
+    ],
+)
+def test_classifier_substitute_is_the_bases_role_open_marker(base, role_open):
+    from granite_switch.composer.compose_granite_switch import (
+        build_control_token_lists,
+    )
+
+    tokenizer = _tokenizer(base)
+    discovered = [(None, "safety", "classifier", None)]
+    _, _, substitutes = build_control_token_lists(
+        tokenizer, discovered, base_reset=False
+    )
+
+    assert substitutes == [tokenizer.convert_tokens_to_ids(role_open)]

@@ -344,6 +344,21 @@ class TestBuildSubstituteTokenIds:
 
         assert subs == [42]
 
+    def test_classifier_uses_its_own_substitute(self):
+        adapters = [("/b", "code", "lora", None), (None, "safety", "classifier", None)]
+
+        subs = build_substitute_token_ids(
+            adapters, lora_substitute_id=42, classifier_substitute_id=9
+        )
+
+        assert subs == [42, 9]
+
+    def test_classifier_without_its_substitute_raises(self):
+        adapters = [(None, "safety", "classifier", None)]
+
+        with pytest.raises(ValueError, match="classifier_substitute_id"):
+            build_substitute_token_ids(adapters, lora_substitute_id=42)
+
 
 class TestConfigureChatTemplate:
     """Structural tests for configure_chat_template — verify template assembly."""

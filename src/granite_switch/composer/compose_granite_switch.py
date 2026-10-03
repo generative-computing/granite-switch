@@ -76,6 +76,7 @@ from granite_switch.composer.tokenizer_setup import (
     build_substitute_token_ids,
     configure_audio_chat_template,
     configure_chat_template,
+    detect_template_format,
     find_reserved_never_emitted_token_id,
     load_activation_anchor,
     resolve_label_token_ids,
@@ -121,8 +122,24 @@ def build_control_token_lists(tokenizer, all_discovered, base_reset):
         all_discovered,
         _probe_lora_substitute_token_id(tokenizer),
         base_reset=base_reset,
+        classifier_substitute_id=_classifier_substitute_token_id(tokenizer),
     )
     return adapter_token_ids, special_tokens, adapter_substitute_token_ids
+
+
+def _classifier_substitute_token_id(tokenizer) -> int:
+    """The base's role-open marker id, which follows the last turn's close."""
+    fmt = detect_template_format(tokenizer.chat_template)
+    if fmt is None:
+        raise ValueError(
+            "Unrecognized chat template; cannot pick the classifier substitute."
+        )
+    ids = tokenizer.encode(fmt.role_open_marker, add_special_tokens=False)
+    if len(ids) != 1:
+        raise ValueError(
+            f"Role-open marker {fmt.role_open_marker!r} encodes to {len(ids)} tokens."
+        )
+    return ids[0]
 
 
 def _probe_lora_substitute_token_id(tokenizer) -> int:
