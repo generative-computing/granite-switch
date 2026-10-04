@@ -188,6 +188,10 @@ def generate(python: str, harness_root: Path, jobs_path: Path, spec: dict) -> di
     jobs_path.write_text(json.dumps(spec, indent=2))
     env = dict(os.environ)
     env["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    # vLLM 0.26 samples with FlashInfer, which compiles its kernel on first use
+    # and needs the ninja build tool, absent from the pod image. Earlier vLLM
+    # sampled natively, as this keeps it; greedy decoding picks the same tokens.
+    env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
     env["PYTHONPATH"] = os.pathsep.join(
         p for p in (str(harness_root), env.get("PYTHONPATH")) if p
     )

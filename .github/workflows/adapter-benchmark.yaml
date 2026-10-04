@@ -188,6 +188,12 @@ jobs:
           elif [[ $rc -eq 0 && -n "$results" ]]; then
             echo "outcome=ran" >> "$GITHUB_OUTPUT"
             echo "results=$results" >> "$GITHUB_OUTPUT"
+            errors="$(uv run --quiet --no-project python -c '
+          import json, sys
+          cells = json.load(open(sys.argv[1]))["cells"]
+          print(sum("error" in c for by in cells.values() for c in by.values()))' "$results")"
+            echo "errors=$errors" >> "$GITHUB_OUTPUT"
+            echo "error cells: $errors"
           else
             echo "outcome=failed" >> "$GITHUB_OUTPUT"
             echo "::error::the benchmark failed (exit $rc); its log is on the runner"
@@ -249,8 +255,11 @@ jobs:
           REPO: ${{ github.repository }}
           OUTCOME: ${{ steps.run.outputs.outcome || 'failed' }}
           PUBLISHED: ${{ steps.run.outputs.outcome != 'ran' || job.status == 'success' }}
+          ERRORS: ${{ steps.run.outputs.errors || '0' }}
         run: |
-          if [[ "$OUTCOME" == "ran" && "$PUBLISHED" == "true" ]]; then
+          if [[ "$OUTCOME" == "ran" && "$PUBLISHED" == "true" && "$ERRORS" != "0" ]]; then
+            state=failure desc="Published, but $ERRORS cells failed" url="$PAGE_URL#$MODEL_ID"
+          elif [[ "$OUTCOME" == "ran" && "$PUBLISHED" == "true" ]]; then
             state=success desc="Published to the results page" url="$PAGE_URL#$MODEL_ID"
           elif [[ "$OUTCOME" == "cached" ]]; then
             state=success desc="Already benchmarked (cached row)" url="$PAGE_URL#$MODEL_ID"
