@@ -127,10 +127,14 @@ A few points matter:
 Each (intrinsic, technology) pair is one cell. A cell is one of:
 
 ```json
-{"accuracy": 0.867, "n": 450}
+{"accuracy": 0.867, "n": 450, "score_version": 1}
 {"skipped": "adapter not staged"}
 {"error": "generation failed"}
 ```
+
+`score_version` is the version of the intrinsic's scoring that produced the
+numbers (see [Re-scoring saved answers](#re-scoring-saved-answers)). Cells
+from before it existed count as version 1.
 
 Metrics are stored as fractions and shown as percentages (`86.7`). On the
 page:
@@ -262,6 +266,7 @@ Everything goes through
 | `submit.sh stage [--replace]` | Copies the picks in `local/selection.json` into the bench root. |
 | `submit.sh bench <ref> [flags]` | Benchmarks one commit and publishes its row. |
 | `submit.sh reference [flags]` | Computes the reference columns and publishes them. |
+| `submit.sh rescore [--only a,b]` | Scores saved answers again after a scoring change, and publishes the new scores. Generates nothing. |
 | `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
 | `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
 
@@ -472,6 +477,44 @@ The reference columns follow the same rules, with both versions. They are a
 hit when their `bench_version` and `reference_version` match `adapters.yaml`
 and every cell is present, with no error cells.
 
+## Re-scoring saved answers
+
+A commit's run generates only its own columns, the granite-switch (vLLM)
+ones. The HF + PEFT and Base columns are the reference: computed once per
+model, and again only when their version changes. Every run also keeps its
+answers on the storage volume.
+
+So each kind of change re-runs only what it affects. Three versions in
+`adapters.yaml` say what changed:
+
+| What changed | Bump | What runs again |
+|---|---|---|
+| Generation for every column: an eval set, the prompts, generation settings, a checkpoint | the model's `bench_version` | every commit's row, and the reference |
+| Only the reference columns (see [above](#when-the-reference-is-re-computed)) | `reference_version` | the reference only |
+| Only how one intrinsic is scored | that intrinsic's `score_version` | nothing is generated: the saved answers are scored again |
+
+For a scoring change:
+
+1. Change the scorer and bump the intrinsic's `score_version`.
+2. Run `submit.sh rescore`, once per model (`--model <id>`). It lists the
+   scored cells whose `score_version` is older, then runs one small pod.
+   The pod reads each cell's saved answers and scores them with the new
+   scorer. It takes minutes, not hours.
+3. The new scores replace the old ones on the page. The row's run details
+   record which cells were scored again.
+
+`--only a,b` scores those intrinsics again whatever their version, e.g. after
+a scorer bug fix that kept the version.
+
+Only rows of the current `bench_version` and the current reference are
+scored again; older rows stay as they were. Some cells are left as they are:
+
+- error cells, which have no answers. They need generating (`bench --only`).
+- a cell whose saved answers are not found. The log names it, and the next
+  `rescore` tries it again.
+- a cell whose row ran again in the meantime. Its new run already used the
+  new scorer.
+
 ## Adding an intrinsic or an adapter
 
 1. Add an entry to
@@ -482,9 +525,10 @@ and every cell is present, with no error cells.
 3. Add the new picks to `local/selection.json` and run `submit.sh stage`.
    Existing cells are kept; `--replace` overwrites them.
 4. Bump `bench_version` if the change alters existing numbers. That covers a
-   new eval set, a changed scorer, new generation settings, or a replaced
-   checkpoint. A pure addition does not need a bump: run the new intrinsic
-   with `--only`.
+   new eval set, new generation settings, or a replaced checkpoint. A
+   scoring change alone bumps the intrinsic's `score_version` instead (see
+   [Re-scoring saved answers](#re-scoring-saved-answers)). A pure addition
+   does not need a bump: run the new intrinsic with `--only`.
 
 ## Local folder layout
 
@@ -502,7 +546,8 @@ local/
   selection.draft.json   suggested picks from `discover`
   jobs/<job>.env         what `fetch` needs to resume a job
   logs/<job>.log         full pod logs
-  results/<job>.json     results blocks from bench and reference runs
+  results/<job>.json     results blocks from bench, reference and rescore runs
+  rescore/targets.json   the cells the last `rescore` scored again
   stage/<job>.json       stage reports
 .rendered/               rendered Helm values and job specs
 ```

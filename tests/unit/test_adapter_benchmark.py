@@ -34,6 +34,7 @@ from benchmarks.adapter_eval import (
     prompts,
     publish,
     reference,
+    rescore,
     run_benchmark,
     stage,
     staged,
@@ -206,6 +207,10 @@ def test_spec_loads_and_covers_every_compose_group():
     for intrinsic in SPEC.intrinsics:
         get_scorer(intrinsic.scorer)  # every intrinsic has a scorer
         assert intrinsic.max_new_tokens > 0
+
+
+def test_every_intrinsic_has_a_score_version():
+    assert all(i.score_version >= 1 for i in SPEC.intrinsics)
 
 
 def test_spec_select():
@@ -893,6 +898,168 @@ def test_summary_for_the_pr_comment():
 
     failed = publish.summary(data, SPEC, SHA_B, "ran", "https://run")
     assert "failed, so nothing was published" in failed  # no row for SHA_B
+
+
+# --- rescoring ---------------------------------------------------------------
+
+
+def with_score_version(spec, intrinsic_id: str, version: int):
+    from dataclasses import replace
+
+    return replace(
+        spec,
+        intrinsics=tuple(
+            replace(i, score_version=version) if i.id == intrinsic_id else i
+            for i in spec.intrinsics
+        ),
+    )
+
+
+def test_rescore_targets_are_the_cells_scored_with_an_older_version():
+    row = results_for(cells=cells_for(SPEC, 0.5), finished="2026-10-01T10:00:00Z")
+    row["cells"]["answerability"]["sr"] = common.error("generation failed")
+    old = results_for(SHA_B)  # another benchmark version: kept as it was
+    old["bench_version"] = SPEC.bench_version - 1
+    ref = reference_for(finished="2026-10-01T11:00:00Z", run_ts="20261001T1100Z")
+    data = page_data(row, old, reference=ref)
+
+    assert publish.rescore_targets(data, SPEC) == []  # every cell is current
+    bumped = with_score_version(SPEC, "answerability", 2)
+    targets = publish.rescore_targets(data, bumped)
+    assert [(t["kind"], t["column"]) for t in targets] == [
+        ("row", "alora"),
+        ("row", "lora"),
+        ("reference", "alora"),
+        ("reference", "base"),
+        ("reference", "lora"),
+        ("reference", "sr"),
+    ]  # the row's error cell needs generating, not scoring
+    assert targets[0] == {
+        "kind": "row",
+        "intrinsic": "answerability",
+        "column": "alora",
+        "finished": "2026-10-01T10:00:00Z",
+        "sha": SHA_A,
+    }
+    assert targets[2]["run_ts"] == "20261001T1100Z"
+    # --only scores an intrinsic again whatever its version.
+    forced = publish.rescore_targets(data, SPEC, ["guardian_core"])
+    assert {t["intrinsic"] for t in forced} == {"guardian_core"}
+
+
+def test_cell_run_follows_only_updates():
+    ref = reference_for(finished="T1")
+    ref["updates"] = [{"only": ["answerability/sr"], "finished": "T2", "run_ts": "R2"}]
+    assert publish.cell_run(ref, "answerability", "sr")["finished"] == "T2"
+    assert publish.cell_run(ref, "answerability", "lora")["finished"] == "T1"
+
+
+def test_merge_rescore_replaces_scores_and_keeps_generation_counts():
+    row = results_for(finished="T1")
+    row["cells"]["answerability"]["lora"] = {"accuracy": 0.1, "n": 10, "truncated": 3}
+    data = page_data(row, reference=reference_for(finished="T9"))
+    block = {
+        "model": SPEC.model_id,
+        "run": {"finished": "T5"},
+        "cells": [
+            {"kind": "row", "sha": SHA_A, "finished": "T1", "intrinsic": "answerability",
+             "column": "lora", "cell": {"accuracy": 0.8, "n": 10, "score_version": 2}},
+            # Its row has been run again since: not this run's cell any more.
+            {"kind": "reference", "finished": "T0", "intrinsic": "answerability",
+             "column": "base", "cell": {"accuracy": 0.7, "n": 10, "score_version": 2}},
+            {"kind": "row", "sha": SHA_A, "finished": "T1", "intrinsic": "answerability",
+             "column": "alora", "error": "saved answers not found"},
+        ],
+    }  # fmt: skip
+
+    outcome = publish.merge_rescore(data, block, SPEC)
+    cell = data["rows"][0]["cells"]["answerability"]["lora"]
+    assert cell == {"accuracy": 0.8, "n": 10, "score_version": 2, "truncated": 3}
+    assert len(outcome["merged"]) == 1 and len(outcome["skipped"]) == 2
+    assert data["rows"][0]["updates"] == [
+        {"rescored": ["answerability/lora"], "finished": "T5"}
+    ]
+    assert (
+        data["references"][SPEC.model_id]["cells"]["answerability"]["base"]["accuracy"]
+        == 0.5
+    )
+
+
+def write_run(work: Path, parts: tuple[str, ...], record: str, finished: str) -> Path:
+    """A saved run folder: its record and its answerability answers."""
+    folder = work.joinpath(*parts)
+    folder.mkdir(parents=True)
+    (folder / record).write_text(json.dumps({"run": {"finished": finished}}))
+    staged.write_jsonl(
+        folder / "predictions" / "answerability" / "lora.jsonl",
+        [
+            {"ground_truth": "answerable", "generated_content": "answerable"},
+            {"ground_truth": "unanswerable", "generated_content": '"unanswerable"'},
+        ],
+    )
+    return folder
+
+
+def test_find_run_dir(tmp_path):
+    model, sha12 = SPEC.model_id, SHA_A[:12]
+    by_ts = write_run(tmp_path, (model, sha12, "R1"), "results.json", "T1")
+    by_time = write_run(tmp_path, (model, sha12, "R2"), "results.json", "T2")
+    legacy = write_run(tmp_path, (sha12, "R0"), "results.json", "T0")
+    ref = write_run(tmp_path, ("reference", model, "R3"), "reference.json", "T3")
+    row = {"kind": "row", "sha": SHA_A}
+    assert rescore.find_run_dir(tmp_path, {**row, "run_ts": "R1"}, SPEC) == by_ts
+    assert rescore.find_run_dir(tmp_path, {**row, "finished": "T2"}, SPEC) == by_time
+    # The first model's runs from before there were several models.
+    assert rescore.find_run_dir(tmp_path, {**row, "finished": "T0"}, SPEC) == legacy
+    other = SPEC.for_model(SPEC.models[1].id)
+    assert rescore.find_run_dir(tmp_path, {**row, "finished": "T0"}, other) is None
+    assert (
+        rescore.find_run_dir(tmp_path, {"kind": "reference", "finished": "T3"}, SPEC)
+        == ref
+    )
+
+
+def test_rescore_scores_saved_answers_again(tmp_path, capsys):
+    work = tmp_path / "work"
+    write_run(work, (SPEC.model_id, SHA_A[:12], "R1"), "results.json", "T1")
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    targets = tmp_path / "targets.json"
+    targets.write_text(json.dumps([
+        {"kind": "row", "sha": SHA_A, "finished": "T1", "intrinsic": "answerability",
+         "column": "lora"},
+        {"kind": "row", "sha": SHA_A, "finished": "T1", "intrinsic": "answerability",
+         "column": "sr"},
+    ]))  # fmt: skip
+    argv = [
+        "--targets",
+        str(targets),
+        "--work-root",
+        str(work),
+        "--bench-root",
+        str(bench),
+    ]
+    assert rescore.main(argv) == 0
+
+    block = common.extract_block(
+        capsys.readouterr().out, common.RESCORE_BEGIN, common.RESCORE_END
+    )
+    lora, sr = block["cells"]
+    # Both answers count since v2, quoted or not.
+    assert lora["cell"]["accuracy"] == 1.0 and lora["cell"]["score_version"] == 1
+    assert sr["error"] == "saved answers not found"
+    assert block["model"] == SPEC.model_id
+
+
+def test_cli_rescore_targets(tmp_path, capsys):
+    data = tmp_path / "data.json"
+    data.write_text(json.dumps(page_data(results_for(finished="T1"))))
+    out = tmp_path / "targets.json"
+    cli = ["--data", str(data), "rescore-targets", "--out", str(out)]
+    assert publish.main(cli) == publish.NOTHING_TO_RESCORE  # nothing stale
+    assert "0 granite-4.1-3b cells to score again" in capsys.readouterr().out
+    assert publish.main([*cli, "--only", "answerability"]) == 0
+    assert {t["intrinsic"] for t in json.loads(out.read_text())} == {"answerability"}
 
 
 def write_answerability_eval(bench: Path, n: int = 3) -> None:
@@ -2246,6 +2413,30 @@ def test_job_values_take_the_key_from_a_secret(tmp_path, monkeypatch):
     monkeypatch.delenv("WORK_ROOT")
     with pytest.raises(SystemExit):
         render_job.main([*argv, "--sha", SHA_A])
+
+
+def test_rescore_job_ships_its_targets(tmp_path, monkeypatch):
+    render_job = load_render_job()
+    monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))
+    for k in ("NAMESPACE", "CONTAINER_IMAGE", "IMAGE_PULL_SECRET", "PVC_NAME"):
+        monkeypatch.setenv(k, "x")
+    for k, v in {"PVC_MOUNT": "/m", "BENCH_ROOT": "/m/b", "WORK_ROOT": "/m/r"}.items():
+        monkeypatch.setenv(k, v)
+    targets = tmp_path / "targets.json"
+    targets.write_text("[]")
+    out = tmp_path / "values.json"
+    argv = ["--mode", "rescore", "--job-name", "j", "--run-ts", "T", "--out", str(out)]
+    with pytest.raises(SystemExit):  # the targets are required
+        render_job.main(argv)
+
+    assert render_job.main([*argv, "--targets", str(targets)]) == 0
+    values = json.loads(out.read_text())
+    assert values["numGpusPerPod"] == 1
+    job_env = {e["name"]: e.get("value") for e in values["environmentVariables"]}
+    assert "ADAPTER_BENCH_COMMIT" not in job_env
+    payload = base64.b64decode(job_env["ADAPTER_BENCH_HARNESS_TGZ"])
+    with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
+        assert tar.extractfile("extra/targets.json").read() == b"[]"
 
 
 def test_script_job_ships_the_script(tmp_path, monkeypatch):

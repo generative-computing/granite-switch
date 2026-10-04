@@ -11,6 +11,8 @@
 #                       [--extra-args "..."]
 #                                  the HF + PEFT and base-model columns, computed
 #                                  once per benchmark version (4 GPUs)
+#   submit.sh rescore [--only a,b]  score saved answers again after a scoring
+#                                  change (score_version); no generation
 #   submit.sh script <ref> <file.py> [--extra-args "..."]
 #                                  run one local Python file on a GPU pod, with
 #                                  the commit installed (one-off checks)
@@ -29,7 +31,7 @@ LOCAL_DIR=$HERE/local
 RENDERED=$HERE/.rendered
 
 usage() {
-    sed -n '4,21p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,23p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 say() { echo "[submit] $*"; }
@@ -84,7 +86,7 @@ fetch)
     JOB=$1
     shift
     ;;
-discover | stage | reference) ;;
+discover | stage | reference | rescore) ;;
 *) usage ;;
 esac
 while [[ $# -gt 0 ]]; do
@@ -185,6 +187,10 @@ json.dump(d["draft_selection"], open(sys.argv[2], "w"), indent=2, sort_keys=True
         publish extract "$LOG" --kind reference --out "$out"
         publish_run merge-reference "$out" reference
         ;;
+    rescore)
+        publish extract "$LOG" --kind rescore --out "$out"
+        publish_run merge-rescore "$out" "rescore $MODEL"
+        ;;
     esac
 }
 
@@ -268,6 +274,20 @@ elif [[ "$MODE" == reference ]]; then
     if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
     if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
     if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
+elif [[ "$MODE" == rescore ]]; then
+    mkdir -p "$LOCAL_DIR/rescore"
+    TARGETS=$LOCAL_DIR/rescore/targets$SUFFIX.json
+    targets_args=(--model "$MODEL" --out "$TARGETS")
+    if [[ -n "$ONLY" ]]; then targets_args+=(--only "$ONLY"); fi
+    status=0
+    publish rescore-targets "${targets_args[@]}" || status=$?
+    if ((status == 3)); then
+        say "nothing to score again"
+        exit 0
+    fi
+    ((status == 0)) || die "could not list the cells to score again"
+    JOB="$JOB_PREFIX-rescore$MODEL_TAG-$STAMP"
+    render_args+=(--targets "$TARGETS")
 elif [[ "$MODE" == script ]]; then
     SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}") || die "unknown ref $REF"
     JOB="$JOB_PREFIX-script-${SHA:0:8}$MODEL_TAG-$STAMP"

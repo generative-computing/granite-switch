@@ -386,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
             cells[intrinsic_id][column] = error(f"scoring failed ({type(e).__name__})")
             continue
         cell = dict(metrics)
+        cell["score_version"] = spec.intrinsic(intrinsic_id).score_version
         cell["truncated"] = st.get("truncated", 0)
         if st.get("too_long"):
             cell["too_long"] = st["too_long"]
@@ -409,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
             "max_batch": args.max_batch,
             "base_model_local_copy": base_model != spec.base_model,
             "harness_sha": os.environ.get("ADAPTER_BENCH_HARNESS_SHA"),
+            # The run's folder under the work root, where its answers stay.
+            "run_ts": os.environ.get("RUN_TS"),
             "harness_dirty": os.environ.get("ADAPTER_BENCH_HARNESS_DIRTY") == "1",
             "sr_ref": os.environ.get("ADAPTER_BENCH_SR_REF"),
             "gpu": gpu,

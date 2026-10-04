@@ -11,6 +11,8 @@ Runs locally, not on the pod::
     python -m benchmarks.adapter_eval.publish merge-reference reference.json
     python -m benchmarks.adapter_eval.publish render
     python -m benchmarks.adapter_eval.publish summary <sha> [--model <id>]  # PR comment
+    python -m benchmarks.adapter_eval.publish rescore-targets --out targets.json
+    python -m benchmarks.adapter_eval.publish merge-rescore rescore.json
 
 The page data (``docs/benchmarks/data.json``) holds one row per (commit,
 model), each row being the results block ``run_benchmark.py`` printed. A
@@ -28,6 +30,11 @@ error.
 
 Blocks and data from before there were several models name only the base
 model; they are read as the model with that base model.
+
+A scored cell records its intrinsic's ``score_version``. When that version is
+bumped (only the scoring changed), the cell's saved answers are scored again
+(``rescore-targets``, ``rescore.py``, ``merge-rescore``) instead of generated
+again; a cell without a ``score_version`` was scored with version 1.
 """
 
 from __future__ import annotations
@@ -47,6 +54,8 @@ from .common import (
     REFERENCE_COLUMNS,
     REFERENCE_END,
     REFERENCE_LIBRARIES,
+    RESCORE_BEGIN,
+    RESCORE_END,
     Spec,
     extract_block,
     is_error,
@@ -60,9 +69,13 @@ DATA_PATH = REPO_ROOT / "docs" / "benchmarks" / "data.json"
 PAGE_PATH = REPO_ROOT / "docs" / "benchmarks" / "index.html"
 COMMIT_URL = "https://github.com/generative-computing/granite-switch/commit/{sha}"
 PAGE_URL = "https://generative-computing.github.io/granite-switch/benchmarks/"
+# rescore-targets' exit status when no cell needs scoring again (a crash is 1).
+NOTHING_TO_RESCORE = 3
+
 BLOCKS = {
     "results": (BEGIN_MARKER, END_MARKER),
     "reference": (REFERENCE_BEGIN, REFERENCE_END),
+    "rescore": (RESCORE_BEGIN, RESCORE_END),
     "discovery": (stage.DISCOVERY_BEGIN, stage.DISCOVERY_END),
     "stage": (stage.STAGE_BEGIN, stage.STAGE_END),
 }
@@ -223,6 +236,106 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
         return old
     data["references"][spec.model_id] = reference
     return reference
+
+
+# --- rescoring ---------------------------------------------------------------
+
+
+def cell_run(holder: dict, intrinsic_id: str, column: str) -> dict:
+    """The run that produced a stored cell of a row or reference.
+
+    That is the last ``--only`` run that covered the cell, else the holder's
+    own run.
+    """
+    for update in reversed(holder.get("updates", [])):
+        only = update.get("only") or []
+        if intrinsic_id in only or f"{intrinsic_id}/{column}" in only:
+            return update
+    return holder["run"]
+
+
+def rescore_targets(
+    data: dict, spec: Spec, only: list[str] | None = None
+) -> list[dict]:
+    """The model's scored cells to score again, as ``rescore.py`` targets.
+
+    A cell is a target when it was scored with an older ``score_version`` than
+    its intrinsic's, or, with ``only``, whenever its intrinsic is listed. Only
+    rows and references of the model's current ``bench_version`` count: older
+    ones are kept as they were.
+    """
+    holders = [
+        ("row", r)
+        for r in data["rows"]
+        if r["model"] == spec.model_id and r.get("bench_version") == spec.bench_version
+    ]
+    reference = data["references"].get(spec.model_id)
+    if reference_current(reference, spec):
+        holders.append(("reference", reference))
+    targets = []
+    for kind, holder in holders:
+        for intrinsic in spec.intrinsics:
+            for column, cell in sorted(holder["cells"].get(intrinsic.id, {}).items()):
+                stale = cell.get("score_version", 1) < intrinsic.score_version
+                if not is_scored(cell) or not (
+                    stale or (only and intrinsic.id in only)
+                ):
+                    continue
+                run = cell_run(holder, intrinsic.id, column)
+                target = {
+                    "kind": kind,
+                    "intrinsic": intrinsic.id,
+                    "column": column,
+                    "finished": run["finished"],
+                }
+                if run.get("run_ts"):
+                    target["run_ts"] = run["run_ts"]
+                if kind == "row":
+                    target["sha"] = holder["commit"]["sha"]
+                targets.append(target)
+    return targets
+
+
+def merge_rescore(data: dict, block: dict, spec: Spec) -> dict[str, list[str]]:
+    """Put a rescore run's cells into ``data``; returns the merged and skipped.
+
+    A cell is replaced only while it still comes from the run that was scored
+    again; it keeps the generation counts (``truncated``, ``too_long``) of
+    the cell it replaces.
+    """
+    spec = spec.for_model(spec.model_of(block))
+    merged: list[str] = []
+    skipped: list[str] = []
+    touched: dict[int, tuple[dict, list[str]]] = {}
+    for entry in block["cells"]:
+        name = f"{entry['kind']} {entry.get('sha', '')[:8]} {entry['intrinsic']}/{entry['column']}"
+        if "cell" not in entry:
+            skipped.append(f"{name}: {entry.get('error', 'not scored')}")
+            continue
+        if entry["kind"] == "row":
+            holder = find_row(data, entry["sha"], spec.model_id)
+        else:
+            holder = data["references"].get(spec.model_id)
+        if holder is None or (
+            cell_run(holder, entry["intrinsic"], entry["column"])["finished"]
+            != entry["finished"]
+        ):
+            skipped.append(f"{name}: the stored cell comes from another run now")
+            continue
+        by_column = holder["cells"].setdefault(entry["intrinsic"], {})
+        old = by_column.get(entry["column"], {})
+        cell = dict(entry["cell"])
+        cell.update({k: old[k] for k in ("truncated", "too_long") if k in old})
+        by_column[entry["column"]] = cell
+        merged.append(name)
+        touched.setdefault(id(holder), (holder, []))[1].append(
+            f"{entry['intrinsic']}/{entry['column']}"
+        )
+    for holder, cells in touched.values():
+        holder.setdefault("updates", []).append(
+            {"rescored": cells, "finished": block["run"]["finished"]}
+        )
+    return {"merged": merged, "skipped": skipped}
 
 
 # --- page ------------------------------------------------------------------
@@ -982,6 +1095,17 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--model", default=None, help="default: the first model")
     s.add_argument("--outcome", choices=("ran", "cached", "failed"), default="ran")
     s.add_argument("--run-url", default=None)
+    rt = sub.add_parser(
+        "rescore-targets",
+        help=f"list the cells to score again; exit {NOTHING_TO_RESCORE} if none",
+    )
+    rt.add_argument("--model", default=None, help="default: the first model")
+    rt.add_argument(
+        "--only", default=None, help="comma-separated intrinsics to score again anyway"
+    )
+    rt.add_argument("--out", type=Path, required=True)
+    ms = sub.add_parser("merge-rescore", help="add a rescore run to the page data")
+    ms.add_argument("rescore", type=Path)
     args = p.parse_args(argv)
 
     spec = load_spec()
@@ -998,7 +1122,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     data = load_data(args.data, spec)
-    if args.cmd in ("check", "check-reference", "summary"):
+    if args.cmd in ("check", "check-reference", "summary", "rescore-targets"):
         spec = spec.for_model(args.model)
     if args.cmd == "check":
         row = find_row(data, args.sha, spec.model_id)
@@ -1049,6 +1173,22 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "summary":
         print(summary(data, spec, args.sha, args.outcome, args.run_url))
+        return 0
+    if args.cmd == "rescore-targets":
+        only = [i.strip() for i in args.only.split(",")] if args.only else None
+        if only:
+            spec.select(only)  # raises on an unknown intrinsic
+        targets = rescore_targets(data, spec, only)
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(json.dumps(targets, indent=2) + "\n")
+        print(f"{len(targets)} {spec.model_id} cells to score again")
+        return 0 if targets else NOTHING_TO_RESCORE
+    if args.cmd == "merge-rescore":
+        outcome = merge_rescore(data, json.loads(args.rescore.read_text()), spec)
+        save_data(args.data, data, spec)
+        print(f"rescored {len(outcome['merged'])} cells into {args.data}")
+        for line in outcome["skipped"]:
+            print(f"  skipped {line}")
         return 0
     return 2
 

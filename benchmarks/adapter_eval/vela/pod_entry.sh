@@ -12,6 +12,8 @@
 #             virtualenv, then run reference.py (no commit involved)
 #   script    clone + install the commit, then run the Python file shipped as
 #             extra/script.py (a one-off check, e.g. from scratch/)
+#   rescore   score saved answers again (the cells in extra/targets.json), with
+#             no commit and no generation
 set -euo pipefail
 
 HARNESS=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -112,6 +114,12 @@ reference)
     # shellcheck disable=SC2086
     cd "$HARNESS" && /workspace/refenv/bin/python -m benchmarks.adapter_eval.reference \
         "${args[@]}" ${ADAPTER_BENCH_EXTRA_ARGS:-}
+    ;;
+rescore)
+    harness_py -m benchmarks.adapter_eval.rescore \
+        --targets "$HARNESS/extra/targets.json" \
+        --work-root "${ADAPTER_BENCH_WORK_ROOT:?}" \
+        --bench-root "${ADAPTER_BENCH_ROOT:?}" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ;;
 script)
     install_commit

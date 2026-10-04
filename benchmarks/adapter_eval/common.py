@@ -21,6 +21,8 @@ BEGIN_MARKER = "=== ADAPTER_BENCH_RESULTS_BEGIN ==="
 END_MARKER = "=== ADAPTER_BENCH_RESULTS_END ==="
 REFERENCE_BEGIN = "=== ADAPTER_BENCH_REFERENCE_BEGIN ==="
 REFERENCE_END = "=== ADAPTER_BENCH_REFERENCE_END ==="
+RESCORE_BEGIN = "=== ADAPTER_BENCH_RESCORE_BEGIN ==="
+RESCORE_END = "=== ADAPTER_BENCH_RESCORE_END ==="
 
 # Technologies composed into the same checkpoint. SR is a whole-checkpoint
 # dual-stream mode and the composer refuses to mix it with LoRA / aLoRA.
@@ -70,6 +72,9 @@ class Intrinsic:
     headline: str
     headline_label: str
     max_new_tokens: int
+    # Bumped when only this intrinsic's scoring changes: its saved answers are
+    # scored again (rescore.py) instead of generated again.
+    score_version: int = 1
 
 
 @dataclass(frozen=True)

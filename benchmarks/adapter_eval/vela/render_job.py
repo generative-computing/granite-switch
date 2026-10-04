@@ -52,6 +52,8 @@ RESOURCES = {
     # reference.py spreads its cells over every GPU of the pod.
     "reference": (4, 32, "256Gi"),
     "script": (1, 16, "128Gi"),
+    # Scoring only, no generation; the GPU node is for the storage mount.
+    "rescore": (1, 4, "16Gi"),
 }
 
 
@@ -130,6 +132,8 @@ def build(args) -> dict:
             extra["judge_prompt.txt"] = Path(os.environ["JUDGE_PROMPT_FILE"])
     if mode == "script":
         extra["script.py"] = Path(args.script)
+    if mode == "rescore":
+        extra["targets.json"] = Path(args.targets)
     if mode == "reference":
         extra["base_instructions.json"] = Path(need("BASE_INSTRUCTIONS_FILE"))
     for path in extra.values():
@@ -174,6 +178,9 @@ def build(args) -> dict:
                 },
             }
         )
+    if mode == "rescore":
+        need("BENCH_ROOT")
+        need("WORK_ROOT")
     if mode in ("bench", "reference", "script"):
         need("BENCH_ROOT")
         need("WORK_ROOT")
@@ -236,10 +243,13 @@ def main(argv: list[str] | None = None) -> int:
         "--extra-args", help="bench, reference, script: extra flags for the program"
     )
     p.add_argument("--script", help="script: local Python file to run in the pod")
+    p.add_argument("--targets", help="rescore: the cells to score again (JSON)")
     p.add_argument("--replace", action="store_true", help="stage: overwrite cells")
     args = p.parse_args(argv)
     if args.mode in ("bench", "script") and not args.sha:
         fail(f"--sha is required for {args.mode}")
+    if args.mode == "rescore" and not args.targets:
+        fail("--targets is required for rescore")
     if args.mode == "script" and not args.script:
         fail("--script is required for script")
     values = build(args)

@@ -13,9 +13,13 @@
 # a scorer under scorers/ if none fits, and stage its folders.
 #
 # Bump a model's bench_version when a change here or in the harness would
-# change its numbers (eval set, scorer, generation settings, adapter
-# checkpoints). Rows with an older version stay on the page but are not cache
-# hits. A change for every model bumps each of them.
+# change its numbers (eval set, generation settings, adapter checkpoints).
+# Rows with an older version stay on the page but are not cache hits. A change
+# for every model bumps each of them.
+#
+# A change to how one intrinsic is scored bumps only its score_version
+# (default 1): every run kept its answers, so `submit.sh rescore` scores them
+# again without generating.
 #
 # The reference columns run the same checkpoints without granite-switch (HF +
 # PEFT), plus the base model with no adapter. They do not depend on the

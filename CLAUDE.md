@@ -95,6 +95,7 @@ granite-switch/
 │       ├── staged.py                    # Staged adapter / eval-set layout and format checks
 │       ├── stage.py                     # Discover source checkpoints and stage the chosen ones
 │       ├── publish.py                   # Cache check, merge results into the page data, render the page
+│       ├── rescore.py                   # In-pod: score saved answers again after a scoring change
 │       ├── common.py                    # Spec loading, cell helpers, results-block format
 │       ├── scorers/                     # One scorer per intrinsic
 │       └── vela/                        # Vela job rendering + submit.sh (settings in gitignored local/)
