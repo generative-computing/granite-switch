@@ -22,7 +22,7 @@ import tempfile
 
 import torch
 
-from tests.shared.vllm_gpu_mem import gpu_mem_util
+from tests.shared.vllm_gpu_mem import gpu_mem_util, shutdown_llm
 
 # ── Model creation (kept for other tests) ─────────────────────────
 
@@ -216,9 +216,8 @@ def dump_model_params(model_dir, dump_path):
 
     torch.save(checksums, dump_path)
 
+    shutdown_llm(llm)
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
@@ -286,9 +285,12 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
 
     logprobs_tensor = extract_logprobs_tensor(outputs, vocab_size)
 
+    # Synchronous, and waits for the card. Every equivalence runner calls this
+    # function twice in a row, so the next engine's gpu_mem_util() measurement is
+    # taken after this returns -- which is only meaningful if the previous
+    # EngineCore child has actually exited by then. See shutdown_llm.
+    shutdown_llm(llm)
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
 
     return logprobs_tensor
 
