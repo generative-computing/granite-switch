@@ -576,6 +576,196 @@
       "cells": {
         "answerability": {
           "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "error": "generation failed"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "error": "generation failed"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "error": "generation failed"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "error": "generation failed"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "error": "generation failed"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        }
+      },
+      "commit": {
+        "date": "2026-09-30T16:28:52+03:00",
+        "sha": "b7e54212f5d73b9d971c00ba2cb58b6612178f33",
+        "subject": "Default ASR to Granite Speech TurboCTC, and raise transformers to 5.16 (#130)"
+      },
+      "model": "granite-4.1-3b",
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:27Z",
+            "weights_sha256": "3eef7a1ab5e03123b4855cba0381c03626baf4106bb1a609424343ad78904f55"
+          },
+          "answerability/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:33Z",
+            "weights_sha256": "3a4a5896b8bb1ac2e6c7a6e832434ae9a37104c4f78dbee84152a0bb7c4eb925"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:40Z",
+            "weights_sha256": "b1507f14ca9c0f9406cf4322c34207fc330f43796bcbc4e0d0164a966c75af5c"
+          },
+          "guardian_core/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:46Z",
+            "weights_sha256": "be9c33a55f224a54d0c1e7fc98e6111fec7501a1a7132f44878e165b441a0361"
+          },
+          "guardian_core/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:51Z",
+            "weights_sha256": "ac82a4d63e4611deb3dc433a76d087d32d5d7ac41726cb57e8ecdecc11b79929"
+          },
+          "guardian_core/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:57Z",
+            "weights_sha256": "6fc83f8f40a958df521fb3dfe4c019ae660a85ecb7405f72e91ae079e15b9c54"
+          },
+          "query_clarification/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:31Z",
+            "weights_sha256": "27a1e51b5a5014a2277ccb9869d9d44ec22108b2a0472d59b9afa6625a77aebd"
+          },
+          "query_clarification/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:36Z",
+            "weights_sha256": "0f5f5bb14f74fe61c0c621c25b63270ccfc9ffc978b4a7f97be7f199ca6d26e0"
+          },
+          "query_clarification/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:42Z",
+            "weights_sha256": "0ba24f445e25bbc747fed3eb78859e404f806bf037569bb913c4b5e3dd177d11"
+          },
+          "query_rewrite/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:48Z",
+            "weights_sha256": "e9c4bd8a1cb048ab9b355c040481f693a981ce58d5a8afce25ca9396d39f4e07"
+          },
+          "query_rewrite/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:54Z",
+            "weights_sha256": "ec30859fdaf4d0dd1b937eda7ebd6a4ca66018f5c310caea2d62479e985ed0d4"
+          },
+          "query_rewrite/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:00Z",
+            "weights_sha256": "25a5ea8ef63237099a9a5f6ce5e3923983d448a02d88f44be4f209ea7f715ee0"
+          },
+          "requirement_check/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:06Z",
+            "weights_sha256": "246a59878bea77e981d54ba76807f65cfd2ce3b0d77c3428adb784e030a93f39"
+          },
+          "requirement_check/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:39:13Z",
+            "weights_sha256": "bf3f93e05a77731227df970bc025590834579d06fd5109e537a6290e9f661330"
+          },
+          "requirement_check/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:18Z",
+            "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
+          }
+        },
+        "base_model_local_copy": false,
+        "enforce_eager": false,
+        "finished": "2026-10-04T10:06:43Z",
+        "gpu": null,
+        "harness_dirty": false,
+        "harness_sha": "e5335704d93a6175bad211db2c9feacf069f4a2d",
+        "limit": null,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [
+          "answerability/lora",
+          "answerability/alora",
+          "query_rewrite/lora",
+          "query_rewrite/alora",
+          "query_clarification/lora",
+          "query_clarification/alora",
+          "guardian_core/lora",
+          "guardian_core/alora",
+          "requirement_check/lora",
+          "requirement_check/alora",
+          "answerability/sr",
+          "query_rewrite/sr",
+          "query_clarification/sr",
+          "guardian_core/sr",
+          "requirement_check/sr"
+        ],
+        "only": null,
+        "prefix_caching": false,
+        "scheduler": null,
+        "sr_anchor_converted": [
+          "answerability",
+          "query_rewrite",
+          "query_clarification",
+          "guardian_core",
+          "requirement_check"
+        ],
+        "started": "2026-10-04T09:55:39Z",
+        "torch": "2.11.0",
+        "transformers": "5.17.0",
+        "vllm": null
+      }
+    },
+    {
+      "base_model": "ibm-granite/granite-4.1-3b",
+      "bench_version": 2,
+      "cells": {
+        "answerability": {
+          "alora": {
             "accuracy": 0.8370266479663394,
             "answerable_f1": 0.8772727272727273,
             "n": 3565,
