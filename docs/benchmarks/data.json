@@ -470,196 +470,6 @@
   },
   "rows": [
     {
-      "base_model": "ibm-granite/granite-4.1-3b",
-      "bench_version": 2,
-      "cells": {
-        "answerability": {
-          "alora": {
-            "error": "generation failed"
-          },
-          "lora": {
-            "error": "generation failed"
-          },
-          "sr": {
-            "error": "generation failed"
-          }
-        },
-        "guardian_core": {
-          "alora": {
-            "error": "generation failed"
-          },
-          "lora": {
-            "error": "generation failed"
-          },
-          "sr": {
-            "error": "generation failed"
-          }
-        },
-        "query_clarification": {
-          "alora": {
-            "error": "generation failed"
-          },
-          "lora": {
-            "error": "generation failed"
-          },
-          "sr": {
-            "error": "generation failed"
-          }
-        },
-        "query_rewrite": {
-          "alora": {
-            "error": "generation failed"
-          },
-          "lora": {
-            "error": "generation failed"
-          },
-          "sr": {
-            "error": "generation failed"
-          }
-        },
-        "requirement_check": {
-          "alora": {
-            "error": "generation failed"
-          },
-          "lora": {
-            "error": "generation failed"
-          },
-          "sr": {
-            "error": "generation failed"
-          }
-        }
-      },
-      "commit": {
-        "date": "2026-09-30T16:28:52+03:00",
-        "sha": "b7e54212f5d73b9d971c00ba2cb58b6612178f33",
-        "subject": "Default ASR to Granite Speech TurboCTC, and raise transformers to 5.16 (#130)"
-      },
-      "model": "granite-4.1-3b",
-      "run": {
-        "adapters": {
-          "answerability/alora": {
-            "rank": 32,
-            "staged_at": "2026-09-29T18:37:27Z",
-            "weights_sha256": "3eef7a1ab5e03123b4855cba0381c03626baf4106bb1a609424343ad78904f55"
-          },
-          "answerability/lora": {
-            "rank": 16,
-            "staged_at": "2026-09-29T18:37:33Z",
-            "weights_sha256": "3a4a5896b8bb1ac2e6c7a6e832434ae9a37104c4f78dbee84152a0bb7c4eb925"
-          },
-          "answerability/sr": {
-            "cross_rank": 32,
-            "rank": 32,
-            "staged_at": "2026-09-29T18:37:40Z",
-            "weights_sha256": "b1507f14ca9c0f9406cf4322c34207fc330f43796bcbc4e0d0164a966c75af5c"
-          },
-          "guardian_core/alora": {
-            "rank": 32,
-            "staged_at": "2026-09-29T18:37:46Z",
-            "weights_sha256": "be9c33a55f224a54d0c1e7fc98e6111fec7501a1a7132f44878e165b441a0361"
-          },
-          "guardian_core/lora": {
-            "rank": 16,
-            "staged_at": "2026-09-29T18:37:51Z",
-            "weights_sha256": "ac82a4d63e4611deb3dc433a76d087d32d5d7ac41726cb57e8ecdecc11b79929"
-          },
-          "guardian_core/sr": {
-            "cross_rank": 32,
-            "rank": 32,
-            "staged_at": "2026-09-29T18:37:57Z",
-            "weights_sha256": "6fc83f8f40a958df521fb3dfe4c019ae660a85ecb7405f72e91ae079e15b9c54"
-          },
-          "query_clarification/alora": {
-            "rank": 32,
-            "staged_at": "2026-09-29T18:38:31Z",
-            "weights_sha256": "27a1e51b5a5014a2277ccb9869d9d44ec22108b2a0472d59b9afa6625a77aebd"
-          },
-          "query_clarification/lora": {
-            "rank": 16,
-            "staged_at": "2026-09-29T18:38:36Z",
-            "weights_sha256": "0f5f5bb14f74fe61c0c621c25b63270ccfc9ffc978b4a7f97be7f199ca6d26e0"
-          },
-          "query_clarification/sr": {
-            "cross_rank": 32,
-            "rank": 32,
-            "staged_at": "2026-09-29T18:38:42Z",
-            "weights_sha256": "0ba24f445e25bbc747fed3eb78859e404f806bf037569bb913c4b5e3dd177d11"
-          },
-          "query_rewrite/alora": {
-            "rank": 32,
-            "staged_at": "2026-09-29T18:38:48Z",
-            "weights_sha256": "e9c4bd8a1cb048ab9b355c040481f693a981ce58d5a8afce25ca9396d39f4e07"
-          },
-          "query_rewrite/lora": {
-            "rank": 16,
-            "staged_at": "2026-09-29T18:38:54Z",
-            "weights_sha256": "ec30859fdaf4d0dd1b937eda7ebd6a4ca66018f5c310caea2d62479e985ed0d4"
-          },
-          "query_rewrite/sr": {
-            "cross_rank": 32,
-            "rank": 32,
-            "staged_at": "2026-09-29T18:39:00Z",
-            "weights_sha256": "25a5ea8ef63237099a9a5f6ce5e3923983d448a02d88f44be4f209ea7f715ee0"
-          },
-          "requirement_check/alora": {
-            "rank": 32,
-            "staged_at": "2026-09-29T18:39:06Z",
-            "weights_sha256": "246a59878bea77e981d54ba76807f65cfd2ce3b0d77c3428adb784e030a93f39"
-          },
-          "requirement_check/lora": {
-            "rank": 16,
-            "staged_at": "2026-09-29T18:39:13Z",
-            "weights_sha256": "bf3f93e05a77731227df970bc025590834579d06fd5109e537a6290e9f661330"
-          },
-          "requirement_check/sr": {
-            "cross_rank": 32,
-            "rank": 32,
-            "staged_at": "2026-09-29T18:39:18Z",
-            "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
-          }
-        },
-        "base_model_local_copy": false,
-        "enforce_eager": false,
-        "finished": "2026-10-04T10:06:43Z",
-        "gpu": null,
-        "harness_dirty": false,
-        "harness_sha": "e5335704d93a6175bad211db2c9feacf069f4a2d",
-        "limit": null,
-        "max_model_len": 32768,
-        "mlp_keys_renamed": [
-          "answerability/lora",
-          "answerability/alora",
-          "query_rewrite/lora",
-          "query_rewrite/alora",
-          "query_clarification/lora",
-          "query_clarification/alora",
-          "guardian_core/lora",
-          "guardian_core/alora",
-          "requirement_check/lora",
-          "requirement_check/alora",
-          "answerability/sr",
-          "query_rewrite/sr",
-          "query_clarification/sr",
-          "guardian_core/sr",
-          "requirement_check/sr"
-        ],
-        "only": null,
-        "prefix_caching": false,
-        "scheduler": null,
-        "sr_anchor_converted": [
-          "answerability",
-          "query_rewrite",
-          "query_clarification",
-          "guardian_core",
-          "requirement_check"
-        ],
-        "started": "2026-10-04T09:55:39Z",
-        "torch": "2.11.0",
-        "transformers": "5.17.0",
-        "vllm": null
-      }
-    },
-    {
       "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
       "bench_version": 2,
       "cells": {
@@ -769,6 +579,284 @@
           "answerability"
         ],
         "started": "2026-10-04T12:04:08Z",
+        "torch": "2.11.0",
+        "transformers": "5.17.0",
+        "vllm": "0.26.0"
+      }
+    },
+    {
+      "base_model": "ibm-granite/granite-4.1-3b",
+      "bench_version": 2,
+      "cells": {
+        "answerability": {
+          "alora": {
+            "accuracy": 0.832258064516129,
+            "answerable_f1": 0.8728382502543235,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8224852071005917,
+            "weighted_f1": 0.8153784135358482
+          },
+          "lora": {
+            "accuracy": 0.8457223001402524,
+            "answerable_f1": 0.8884015594541911,
+            "n": 3565,
+            "truncated": 2,
+            "unanswerable_f1": 0.8318213538032101,
+            "weighted_f1": 0.8278781250130152
+          },
+          "sr": {
+            "accuracy": 0.838429172510519,
+            "answerable_f1": 0.8784669692385275,
+            "n": 3565,
+            "truncated": 0,
+            "unanswerable_f1": 0.8291223404255319,
+            "weighted_f1": 0.8211466548199761
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "accuracy": 0.8109626106365775,
+            "accuracy_pooled": 0.836080021150965,
+            "balanced_accuracy": 0.8083756758641327,
+            "f1": 0.780203962404456,
+            "n": 11347,
+            "parse_failures": 0,
+            "truncated": 0
+          },
+          "lora": {
+            "accuracy": 0.8153053125307338,
+            "accuracy_pooled": 0.838812020798449,
+            "balanced_accuracy": 0.8165594758896791,
+            "f1": 0.7875653490583423,
+            "n": 11347,
+            "parse_failures": 0,
+            "truncated": 0
+          },
+          "sr": {
+            "accuracy": 0.7993892893177802,
+            "accuracy_pooled": 0.8351106019212127,
+            "balanced_accuracy": 0.7967834277925416,
+            "f1": 0.7693252864412156,
+            "n": 11347,
+            "parse_failures": 1,
+            "truncated": 0
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "clear_hard_accuracy": 0.86,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.921146953405018,
+            "truncated": 1,
+            "underspecified_accuracy": 0.810126582278481
+          },
+          "lora": {
+            "clear_hard_accuracy": 0.84,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.9247311827956989,
+            "truncated": 0,
+            "underspecified_accuracy": 0.8354430379746836
+          },
+          "sr": {
+            "clear_hard_accuracy": 0.96,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.931899641577061,
+            "truncated": 1,
+            "underspecified_accuracy": 0.7848101265822784
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "accuracy_over_total": 0.8403041825095057,
+            "accuracy_over_valid": 0.870935960591133,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 2,
+            "ungraded": 37
+          },
+          "lora": {
+            "accuracy_over_total": 0.8403041825095057,
+            "accuracy_over_valid": 0.8658178256611165,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 1,
+            "ungraded": 31
+          },
+          "sr": {
+            "accuracy_over_total": 0.844106463878327,
+            "accuracy_over_valid": 0.8663414634146341,
+            "judge_errors": 0,
+            "n": 1052,
+            "truncated": 1,
+            "ungraded": 27
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "accuracy": 0.6787048567870486,
+            "balanced_accuracy": 0.6728062609613055,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5869797225186766,
+            "truncated": 0,
+            "weighted_f1": 0.6846246174905101,
+            "yes_f1": 0.7370923913043478
+          },
+          "lora": {
+            "accuracy": 0.6811955168119551,
+            "balanced_accuracy": 0.6716985722449511,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5839653304442036,
+            "truncated": 0,
+            "weighted_f1": 0.6864954125695513,
+            "yes_f1": 0.7415881561238223
+          },
+          "sr": {
+            "accuracy": 0.6679119966791199,
+            "balanced_accuracy": 0.6667080992016152,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5824634655532359,
+            "truncated": 0,
+            "weighted_f1": 0.6747431680165442,
+            "yes_f1": 0.7243280496209511
+          }
+        }
+      },
+      "commit": {
+        "date": "2026-09-30T16:28:52+03:00",
+        "sha": "b7e54212f5d73b9d971c00ba2cb58b6612178f33",
+        "subject": "Default ASR to Granite Speech TurboCTC, and raise transformers to 5.16 (#130)"
+      },
+      "model": "granite-4.1-3b",
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:27Z",
+            "weights_sha256": "3eef7a1ab5e03123b4855cba0381c03626baf4106bb1a609424343ad78904f55"
+          },
+          "answerability/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:33Z",
+            "weights_sha256": "3a4a5896b8bb1ac2e6c7a6e832434ae9a37104c4f78dbee84152a0bb7c4eb925"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:40Z",
+            "weights_sha256": "b1507f14ca9c0f9406cf4322c34207fc330f43796bcbc4e0d0164a966c75af5c"
+          },
+          "guardian_core/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:46Z",
+            "weights_sha256": "be9c33a55f224a54d0c1e7fc98e6111fec7501a1a7132f44878e165b441a0361"
+          },
+          "guardian_core/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:37:51Z",
+            "weights_sha256": "ac82a4d63e4611deb3dc433a76d087d32d5d7ac41726cb57e8ecdecc11b79929"
+          },
+          "guardian_core/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:37:57Z",
+            "weights_sha256": "6fc83f8f40a958df521fb3dfe4c019ae660a85ecb7405f72e91ae079e15b9c54"
+          },
+          "query_clarification/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:31Z",
+            "weights_sha256": "27a1e51b5a5014a2277ccb9869d9d44ec22108b2a0472d59b9afa6625a77aebd"
+          },
+          "query_clarification/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:36Z",
+            "weights_sha256": "0f5f5bb14f74fe61c0c621c25b63270ccfc9ffc978b4a7f97be7f199ca6d26e0"
+          },
+          "query_clarification/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:42Z",
+            "weights_sha256": "0ba24f445e25bbc747fed3eb78859e404f806bf037569bb913c4b5e3dd177d11"
+          },
+          "query_rewrite/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:38:48Z",
+            "weights_sha256": "e9c4bd8a1cb048ab9b355c040481f693a981ce58d5a8afce25ca9396d39f4e07"
+          },
+          "query_rewrite/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:38:54Z",
+            "weights_sha256": "ec30859fdaf4d0dd1b937eda7ebd6a4ca66018f5c310caea2d62479e985ed0d4"
+          },
+          "query_rewrite/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:00Z",
+            "weights_sha256": "25a5ea8ef63237099a9a5f6ce5e3923983d448a02d88f44be4f209ea7f715ee0"
+          },
+          "requirement_check/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:06Z",
+            "weights_sha256": "246a59878bea77e981d54ba76807f65cfd2ce3b0d77c3428adb784e030a93f39"
+          },
+          "requirement_check/lora": {
+            "rank": 16,
+            "staged_at": "2026-09-29T18:39:13Z",
+            "weights_sha256": "bf3f93e05a77731227df970bc025590834579d06fd5109e537a6290e9f661330"
+          },
+          "requirement_check/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-29T18:39:18Z",
+            "weights_sha256": "fa9ac1800e87cdc9ed288783a1e2329b934e496602757f909963d259057cfb1e"
+          }
+        },
+        "base_model_local_copy": false,
+        "enforce_eager": false,
+        "finished": "2026-10-04T12:51:43Z",
+        "gpu": "NVIDIA A100-SXM4-80GB",
+        "harness_dirty": false,
+        "harness_sha": "fb144e1ac71c1ce295b164f22b519651a4c28c2d",
+        "limit": null,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [
+          "answerability/lora",
+          "answerability/alora",
+          "query_rewrite/lora",
+          "query_rewrite/alora",
+          "query_clarification/lora",
+          "query_clarification/alora",
+          "guardian_core/lora",
+          "guardian_core/alora",
+          "requirement_check/lora",
+          "requirement_check/alora",
+          "answerability/sr",
+          "query_rewrite/sr",
+          "query_clarification/sr",
+          "guardian_core/sr",
+          "requirement_check/sr"
+        ],
+        "only": null,
+        "prefix_caching": false,
+        "scheduler": {
+          "chunked_prefill": true,
+          "max_num_batched_tokens": 8192,
+          "max_num_seqs": 256
+        },
+        "sr_anchor_converted": [
+          "answerability",
+          "query_rewrite",
+          "query_clarification",
+          "guardian_core",
+          "requirement_check"
+        ],
+        "started": "2026-10-04T12:01:39Z",
         "torch": "2.11.0",
         "transformers": "5.17.0",
         "vllm": "0.26.0"
