@@ -470,6 +470,107 @@
   },
   "rows": [
     {
+      "base_model": "ibm-research/granite-4.2-3b-prerelease-r260622a",
+      "bench_version": 2,
+      "cells": {
+        "answerability": {
+          "alora": {
+            "error": "generation failed"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "error": "generation failed"
+          }
+        },
+        "guardian_core": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_clarification": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "query_rewrite": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        },
+        "requirement_check": {
+          "alora": {
+            "skipped": "adapter not staged"
+          },
+          "lora": {
+            "skipped": "adapter not staged"
+          },
+          "sr": {
+            "skipped": "adapter not staged"
+          }
+        }
+      },
+      "commit": {
+        "date": "2026-09-30T16:28:52+03:00",
+        "sha": "b7e54212f5d73b9d971c00ba2cb58b6612178f33",
+        "subject": "Default ASR to Granite Speech TurboCTC, and raise transformers to 5.16 (#130)"
+      },
+      "model": "granite-4.2-3b",
+      "run": {
+        "adapters": {
+          "answerability/alora": {
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:22Z",
+            "weights_sha256": "a32b4f4a9c48434080bf58ca661a059735a69e568330aa1fc38a242059a3031c"
+          },
+          "answerability/sr": {
+            "cross_rank": 32,
+            "rank": 32,
+            "staged_at": "2026-09-30T21:00:28Z",
+            "weights_sha256": "937022a0862ec932a20fcaee38be849188f5d9f2db669d77399a0b2f27482198"
+          }
+        },
+        "base_model_local_copy": true,
+        "enforce_eager": false,
+        "finished": "2026-10-04T10:04:24Z",
+        "gpu": null,
+        "harness_dirty": false,
+        "harness_sha": "e5335704d93a6175bad211db2c9feacf069f4a2d",
+        "limit": null,
+        "max_model_len": 32768,
+        "mlp_keys_renamed": [],
+        "only": null,
+        "prefix_caching": false,
+        "scheduler": null,
+        "sr_anchor_converted": [
+          "answerability"
+        ],
+        "started": "2026-10-04T09:55:34Z",
+        "torch": "2.11.0",
+        "transformers": "5.17.0",
+        "vllm": null
+      }
+    },
+    {
       "base_model": "ibm-granite/granite-4.1-3b",
       "bench_version": 2,
       "cells": {
