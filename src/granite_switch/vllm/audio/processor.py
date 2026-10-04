@@ -485,10 +485,31 @@ class GraniteSwitchASRMultiModalProcessor(
             e = int(starts[item_idx + 1])
             return [int(t) for t in all_ids[s:e]]
 
+        # TARGET IS A TOKEN-ID LIST, NOT THE MARKER STRING.  vLLM narrowed the
+        # accepted target type at 0.29:
+        #
+        #     0.26 - 0.28   UpdateTarget = PromptSeq | PromptIndex   # str allowed
+        #     0.29 - 0.30   UpdateTarget = list[int] | PromptIndex   # str dropped
+        #
+        # A ``list[int]`` is legal on every one of those lines, so this needs no
+        # version branch -- only ``str`` stopped being legal.
+        #
+        # Passing the string on 0.29+ does not fail loudly where it is given.
+        # Token matching simply finds nothing, which sends vLLM into
+        # ``_apply_prompt_updates_via_text`` -- a fallback that only exists from
+        # 0.29 -- and that calls ``tokenizer.decode(target)`` on the raw string.
+        # The resulting error surfaces far away and looks like a tokenizer bug:
+        # ``TypeError: Can't extract `str` to `Vec``` from the Rust tokenizer,
+        # killing EngineCore during init rather than rejecting the request.
+        #
+        # ``_marker_id()`` cannot answer -1 here: ``_validate_marker_count``
+        # already requires one marker per audio item, and ``_count_markers``
+        # reports 0 for an unregistered marker, so a prompt that reached this
+        # point with audio items has a registered marker.
         return [
             PromptReplacement(
                 modality="audio",
-                target=AUDIO_MARKER,
+                target=[self._marker_id()],
                 replacement=replacement,
             )
         ]
