@@ -11,8 +11,9 @@ Each scorer takes prediction rows — an eval row plus the model output under
 
 The parsing and metric rules are ports of the internal
 ``scripts/score_*_predictions.py`` scorers, so numbers are comparable with the
-internal results page. They are kept exact on purpose — change them only
-together with ``BENCH_VERSION``.
+internal results page. They are kept exact on purpose: change one only
+together with its intrinsic's ``score_version`` in ``adapters.yaml``, so its
+saved answers are scored again.
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ class ScoreResult:
 
 
 Scorer = Callable[[list[dict], ScoreContext], ScoreResult]
+
+# Scorers that call the LLM judge: only jobs that run one get its API key.
+JUDGE_SCORERS = frozenset({"query_rewrite"})
 
 
 def get_scorer(name: str) -> Scorer:

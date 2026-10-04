@@ -1265,12 +1265,6 @@
         "name": "Answerability"
       },
       {
-        "headline": "accuracy_over_valid",
-        "headline_label": "Judge accuracy",
-        "id": "query_rewrite",
-        "name": "Query rewrite"
-      },
-      {
         "headline": "overall_accuracy",
         "headline_label": "Accuracy",
         "id": "query_clarification",

@@ -595,8 +595,13 @@ def cmd_apply(args) -> int:
         json.dumps({"model": spec.model_id, "name": spec.base_model}, indent=2)
     )
 
+    # Picks of an intrinsic left out of adapters.yaml stay in the selection,
+    # for when it comes back, but are not staged.
+    known = {i.id for i in spec.intrinsics}
     for intrinsic_id, by_tech in selection.get("adapters", {}).items():
-        spec.intrinsic(intrinsic_id)
+        if intrinsic_id not in known:
+            print(f"[stage] adapters {intrinsic_id}: not in adapters.yaml; skipped")
+            continue
         for tech_id, src in by_tech.items():
             src = Path(src)
             key = f"{intrinsic_id}/{tech_id}"
@@ -634,7 +639,9 @@ def cmd_apply(args) -> int:
                 print(f"[stage] adapter {key}: FAILED {e}")
 
     for intrinsic_id, src in selection.get("eval", {}).items():
-        spec.intrinsic(intrinsic_id)
+        if intrinsic_id not in known:
+            print(f"[stage] eval {intrinsic_id}: not in adapters.yaml; skipped")
+            continue
         src = Path(src)
         try:
             rows = check_eval_rows(src)

@@ -159,8 +159,6 @@ def build(args) -> dict:
         "ADAPTER_SOURCE_ROOTS": "ADAPTER_BENCH_ADAPTER_SOURCES",
         "EVAL_SOURCE_ROOTS": "ADAPTER_BENCH_EVAL_SOURCES",
         "UV_SYNC_ARGS": "ADAPTER_BENCH_UV_SYNC_ARGS",
-        "JUDGE_URL": "ADAPTER_BENCH_JUDGE_URL",
-        "JUDGE_MODEL": "ADAPTER_BENCH_JUDGE_MODEL",
     }
     for local_name, pod_name in optional.items():
         if os.environ.get(local_name):
@@ -168,16 +166,24 @@ def build(args) -> dict:
     # submit.sh has already resolved the model's own settings (BENCH_ROOT, ...).
     if args.model:
         env.append(env_var("ADAPTER_BENCH_MODEL", args.model))
-    if os.environ.get("JUDGE_SECRET_NAME"):
-        env.append(
-            {
-                "name": "RITS_API_KEY",
-                "secret": {
-                    "name": os.environ["JUDGE_SECRET_NAME"],
-                    "key": need("JUDGE_SECRET_KEY"),
-                },
-            }
-        )
+    # Only jobs that score with the LLM judge get its endpoint and API key.
+    if args.judge:
+        for local_name, pod_name in (
+            ("JUDGE_URL", "ADAPTER_BENCH_JUDGE_URL"),
+            ("JUDGE_MODEL", "ADAPTER_BENCH_JUDGE_MODEL"),
+        ):
+            if os.environ.get(local_name):
+                env.append(env_var(pod_name, os.environ[local_name]))
+        if os.environ.get("JUDGE_SECRET_NAME"):
+            env.append(
+                {
+                    "name": "RITS_API_KEY",
+                    "secret": {
+                        "name": os.environ["JUDGE_SECRET_NAME"],
+                        "key": need("JUDGE_SECRET_KEY"),
+                    },
+                }
+            )
     if mode == "rescore":
         need("BENCH_ROOT")
         need("WORK_ROOT")
@@ -244,6 +250,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--script", help="script: local Python file to run in the pod")
     p.add_argument("--targets", help="rescore: the cells to score again (JSON)")
+    p.add_argument(
+        "--judge",
+        action="store_true",
+        help="bench, reference, rescore: give the pod the LLM judge's endpoint and key",
+    )
     p.add_argument("--replace", action="store_true", help="stage: overwrite cells")
     args = p.parse_args(argv)
     if args.mode in ("bench", "script") and not args.sha:

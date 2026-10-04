@@ -209,6 +209,28 @@ def test_spec_loads_and_covers_every_compose_group():
         assert intrinsic.max_new_tokens > 0
 
 
+# Query rewrite, left out of adapters.yaml; its scorer and staging remain.
+QUERY_REWRITE = common.Intrinsic(
+    id="query_rewrite",
+    name="Query rewrite",
+    scorer="query_rewrite",
+    headline="accuracy_over_valid",
+    headline_label="Judge accuracy",
+    max_new_tokens=120,
+)
+
+
+def with_query_rewrite(spec):
+    from dataclasses import replace
+
+    return replace(spec, intrinsics=(*spec.intrinsics, QUERY_REWRITE))
+
+
+def test_only_a_judge_scored_intrinsic_needs_the_judge():
+    assert not SPEC.needs_judge
+    assert with_query_rewrite(SPEC).needs_judge
+
+
 def test_every_intrinsic_has_a_score_version():
     assert all(i.score_version >= 1 for i in SPEC.intrinsics)
 
@@ -2218,14 +2240,14 @@ def test_discover_takes_eval_rows_from_the_picked_runs(tmp_path, capsys, monkeyp
     os.utime(newer / staged.WEIGHTS_FILE, (t, t))
 
     report = discover(
-        tmp_path, capsys, monkeypatch, "--adapter-root", f"query_rewrite={root}"
+        tmp_path, capsys, monkeypatch, "--adapter-root", f"query_clarification={root}"
     )
     draft = report["draft_selection"]
     assert draft["adapters"] == {
-        "query_rewrite": {"lora": str(lora), "alora": str(alora), "sr": str(sr)}
+        "query_clarification": {"lora": str(lora), "alora": str(alora), "sr": str(sr)}
     }
-    assert draft["eval"] == {"query_rewrite": str(lora / stage.PREDICTIONS_FILE)}
-    assert "different rows" in draft["notes"]["query_rewrite"]
+    assert draft["eval"] == {"query_clarification": str(lora / stage.PREDICTIONS_FILE)}
+    assert "different rows" in draft["notes"]["query_clarification"]
     preds = {e["run"]: e for e in report["evals"]}
     assert preds[str(lora)]["rows_hash"] == preds[str(alora)]["rows_hash"]
     assert preds[str(lora)]["rows_hash"] != preds[str(sr)]["rows_hash"]
@@ -2298,15 +2320,14 @@ def test_apply_stages_the_selection(tmp_path, capsys):
     argv = ["apply", "--selection", str(selection), "--bench-root", str(bench)]
 
     assert stage.main([*argv, "--judge-prompt", str(prompt)]) == 1
-    report = common.extract_block(
-        capsys.readouterr().out, stage.STAGE_BEGIN, stage.STAGE_END
-    )
+    out = capsys.readouterr().out
+    report = common.extract_block(out, stage.STAGE_BEGIN, stage.STAGE_END)
     assert "looks like lora" in report["adapters"]["answerability/alora"]["error"]
     assert report["adapters"]["answerability/sr"]["cross_rank"] == 32
     assert report["adapters"]["answerability/sr"]["shared_kv"] is True
-    assert (
-        staged.eval_path(bench, "query_rewrite").parent / "judge_prompt.txt"
-    ).is_file()
+    # Query rewrite is left out of adapters.yaml: its pick is skipped.
+    assert "eval query_rewrite: not in adapters.yaml; skipped" in out
+    assert "query_rewrite" not in report["eval"]
 
     cells = {(c.intrinsic, c.tech): c.skip_reason for c in staged.discover(bench, SPEC)}
     assert cells["answerability", "lora"] is None
@@ -2323,6 +2344,25 @@ def test_apply_stages_the_selection(tmp_path, capsys):
     # Another model's cells never go into this root.
     with pytest.raises(ValueError, match="staged for"):
         stage.main([*argv, "--model", SPEC.models[1].id])
+
+
+def test_apply_ships_the_judge_prompt_with_query_rewrite(tmp_path, monkeypatch):
+    def spec_with_query_rewrite(model=None):
+        return with_query_rewrite(common.load_spec(model=model))
+
+    monkeypatch.setattr(stage, "load_spec", spec_with_query_rewrite)
+    prompt = tmp_path / "prompt.txt"
+    prompt.write_text(JUDGE_TEMPLATE)
+    selection = tmp_path / "selection.json"
+    selection.write_text(
+        json.dumps({"eval": {"query_rewrite": str(write_eval(tmp_path / "qr.jsonl"))}})
+    )
+    bench = tmp_path / "bench"
+    argv = ["apply", "--selection", str(selection), "--bench-root", str(bench)]
+
+    assert stage.main([*argv, "--judge-prompt", str(prompt)]) == 0
+    staged_eval = staged.eval_path(bench, "query_rewrite").parent
+    assert (staged_eval / "judge_prompt.txt").is_file()
 
 
 def test_apply_refuses_an_sr_run_without_shared_kv(tmp_path, capsys):
@@ -2391,9 +2431,14 @@ def test_job_values_take_the_key_from_a_secret(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
     out = tmp_path / "values.json"
     argv = ["--mode", "bench", "--job-name", "j", "--run-ts", "T", "--out", str(out)]
+    argv += ["--sha", SHA_A]
+    # Without --judge (no intrinsic is judge-scored) the key stays out.
+    assert render_job.main(argv) == 0
+    names = {e["name"] for e in json.loads(out.read_text())["environmentVariables"]}
+    assert "RITS_API_KEY" not in names
     # submit.sh passes extra args with "=", since they start with "--".
     extra = "--extra-args=--no-chunked-prefill --enforce-eager"
-    assert render_job.main([*argv, "--sha", SHA_A, "--limit", "20", extra]) == 0
+    assert render_job.main([*argv, "--judge", "--limit", "20", extra]) == 0
 
     values = json.loads(out.read_text())
     job_env = {e["name"]: e for e in values["environmentVariables"]}

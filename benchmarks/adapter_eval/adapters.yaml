@@ -75,6 +75,18 @@ technologies:
 # Hallucination detection is left out: its scorer skips outputs it cannot
 # parse, so a model that rarely produces its format (the base model) is scored
 # on a handful of rows. Its scorer is kept for when that changes.
+#
+# Query rewrite is left out too: an LLM judge grades it and leaves 12-17% of
+# rows ungraded, a different set each run, so the same answers score 1-3
+# points apart between runs, more than the changes between commits the page
+# is meant to show. Its scorer and judge settings are kept for a steadier
+# judge. Its entry was:
+#   - id: query_rewrite
+#     name: Query rewrite
+#     scorer: query_rewrite
+#     headline: accuracy_over_valid
+#     headline_label: Judge accuracy
+#     max_new_tokens: 120
 intrinsics:
   - id: answerability
     name: Answerability
@@ -82,12 +94,6 @@ intrinsics:
     headline: accuracy
     headline_label: Accuracy
     max_new_tokens: 200
-  - id: query_rewrite
-    name: Query rewrite
-    scorer: query_rewrite
-    headline: accuracy_over_valid
-    headline_label: Judge accuracy
-    max_new_tokens: 120
   - id: query_clarification
     name: Query clarification
     scorer: query_clarification

@@ -251,6 +251,16 @@ say "model $MODEL"
 STAMP=$(date -u +%m%d%H%M)
 RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
 render_args=(--mode "$MODE" --run-ts "$RUN_TS" --model "$MODEL")
+# Only jobs that score with the LLM judge get its endpoint and key.
+case "$MODE" in
+bench | reference | rescore)
+    if local_py -c 'import sys
+from benchmarks.adapter_eval.common import load_spec
+sys.exit(0 if load_spec(model=sys.argv[1]).needs_judge else 1)' "$MODEL"; then
+        render_args+=(--judge)
+    fi
+    ;;
+esac
 if [[ "$MODE" == bench ]]; then
     SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}") || die "unknown ref $REF"
     if ! git -C "$REPO" branch -r --contains "$SHA" 2>/dev/null | grep -q .; then

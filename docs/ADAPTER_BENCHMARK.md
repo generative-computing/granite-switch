@@ -530,6 +530,11 @@ scored again; older rows stay as they were. Some cells are left as they are:
    [Re-scoring saved answers](#re-scoring-saved-answers)). A pure addition
    does not need a bump: run the new intrinsic with `--only`.
 
+To remove an intrinsic, delete its entry from `adapters.yaml`, with a comment
+saying why. The page stops showing it, and no version changes: its cells stay
+in the page data, and `stage` skips its picks, for when it comes back.
+Hallucination detection and query rewrite are left out this way.
+
 ## Local folder layout
 
 All under `benchmarks/adapter_eval/vela/`, all gitignored:
@@ -588,8 +593,10 @@ exercised by a real run.
   and SR's activation, are converted as described above. Moving to
   shadow-residual trainer checkpoints for SR later replaces checkpoints, so
   it needs a `bench_version` bump.
-- **Query rewrite needs its judge.** Without a judge endpoint and key, that
-  intrinsic is skipped.
+- **Query rewrite is left out.** An LLM judge grades it, and it leaves a
+  different 12–17% of rows ungraded each run, so the same answers score 1–3
+  points apart. Its scorer and judge settings stay, for a steadier judge.
+  Only jobs that score with the judge get its key, so for now none do.
 - **No throughput yet.** Cells are dictionaries, so more metrics can be added
   without breaking old rows.
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .prompts import DOCUMENT_STYLES
+from .scorers import JUDGE_SCORERS
 
 HARNESS_DIR = Path(__file__).resolve().parent
 SPEC_PATH = HARNESS_DIR / "adapters.yaml"
@@ -98,6 +99,11 @@ class Spec:
     @property
     def base_model(self) -> str:
         return self.model.name
+
+    @property
+    def needs_judge(self) -> bool:
+        """Whether an intrinsic is scored by the LLM judge, so jobs need its key."""
+        return any(i.scorer in JUDGE_SCORERS for i in self.intrinsics)
 
     def get_model(self, model_id: str) -> Model:
         for m in self.models:
