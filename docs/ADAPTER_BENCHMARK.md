@@ -582,16 +582,23 @@ GitHub dispatches a workflow from a branch other than `main` only once it has
 run there. A push that changes the workflow file runs a small job that does
 just that.
 
-### What the GPU runner needs
+### What it needs
 
-The runner's owner sets these up; nothing of it is in the repository.
+- **The private settings:** the repository secret `ADAPTER_BENCH_LOCAL_ENV`,
+  holding a `local.env` like the one in `vela/local/`, for every model it
+  should run. A repository admin sets it, from a local copy:
 
-- `oc`, logged in with rights to create and follow the jobs in the
-  benchmark's namespace, including its storage volume and the judge's secret.
-- `helm`, with the repository that provides `mlbatch/pytorchjob-generator`.
-- `git`, and network access to GitHub. The workflow installs `uv` itself.
-- The private settings in `/opt/gsw/adapter-bench/`: a `local.env` like the
-  one in `vela/local/`, for every model it should run.
+  ```bash
+  gh secret set ADAPTER_BENCH_LOCAL_ENV --repo generative-computing/granite-switch < benchmarks/adapter_eval/vela/local/local.env
+  ```
+
+  Without the secret, the workflow reads `/opt/gsw/adapter-bench/` on the
+  runner. Like every repository secret, it is readable by a workflow that
+  someone with write access writes.
+- **The GPU runner online**, with `oc` logged in with rights to create and
+  follow jobs in the benchmark's namespace (the GPU tests' jobs run in the
+  same one), `helm` and `git`. The workflow adds the job chart's `helm`
+  repository and installs `uv` itself.
 
 ### What stays manual
 

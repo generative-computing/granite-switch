@@ -21,9 +21,11 @@
 # Same rules as gpu-tests.yaml:
 #   - The runner image's role gate (/opt/gsw/check_role.sh) is the first step.
 #   - Nothing internal reaches this PUBLIC log. The private settings (cluster,
-#     storage, secret names) come from the runner, at /opt/gsw/adapter-bench/, and
-#     the pod log (which names internal storage paths) goes to a file on the
-#     runner, never to the console. Only submit.sh's status lines are printed.
+#     storage, secret names: the vela/local/local.env of a local run) come from
+#     the ADAPTER_BENCH_LOCAL_ENV repository secret, else from the runner at
+#     /opt/gsw/adapter-bench/. The pod log (which names internal storage paths)
+#     goes to a file on the runner, never to the console. Only submit.sh's status
+#     lines are printed.
 #   - The commit under test runs only inside the cluster pod.
 # The workflow itself comes from this branch: whoever can push to it can change
 # what runs on the GPU runner, so the branch should be protected.
@@ -133,13 +135,29 @@ jobs:
           echo "model: $id"
 
       - name: Install the private settings
+        env:
+          LOCAL_ENV: ${{ secrets.ADAPTER_BENCH_LOCAL_ENV }}
         run: |
           set -euo pipefail
-          if [[ ! -r "$SETTINGS_DIR/local.env" ]]; then
-            echo "::error::this runner has no adapter-benchmark settings"; exit 1
+          dest=benchmarks/adapter_eval/vela/local
+          mkdir -p "$dest"
+          if [[ -n "$LOCAL_ENV" ]]; then
+            printf '%s\n' "$LOCAL_ENV" > "$dest/local.env"
+          elif [[ -r "$SETTINGS_DIR/local.env" ]]; then
+            cp -R "$SETTINGS_DIR"/. "$dest"/
+          else
+            echo "::error::no adapter-benchmark settings: set the ADAPTER_BENCH_LOCAL_ENV secret"
+            exit 1
           fi
-          mkdir -p benchmarks/adapter_eval/vela/local
-          cp -R "$SETTINGS_DIR"/. benchmarks/adapter_eval/vela/local/
+
+      # The job chart, from the repository submit.sh's helm template reads.
+      - name: Make sure helm has the job chart
+        run: |
+          set -euo pipefail
+          if ! helm repo list 2>/dev/null | grep -q '^mlbatch[[:space:]]'; then
+            helm repo add mlbatch https://project-codeflare.github.io/mlbatch >/dev/null
+          fi
+          helm repo update >/dev/null
 
       - name: Post pending status
         env:
