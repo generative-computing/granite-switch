@@ -281,6 +281,20 @@ def get_tolerances(layer_types, long_sequence=False, has_kv_hidden=False):
         # ~20x the measured 4.77e-7 worst case (comfortable margin) yet ~1000x
         # tighter than the adapter-path tolerance, so a real logit regression
         # still trips it.
+        #
+        # CAVEAT: 4.77e-7 was measured at num_adapters=0 AND COMPILED, and it is
+        # only that tight there. Callers that pass has_kv_hidden=False with the
+        # ADAPTER TIER LIVE -- TestZeroAdapterNoHiding, via
+        # save_zero_adapter_model's num_adapters=2 with the LoRA weights zeroed --
+        # get a much larger reduction-order difference, because the projection
+        # runs the fused SWITCH kernel plus a zero-valued shrink/expand instead of
+        # the plain base linear. Measured eager on vLLM 0.26.0
+        # (test_logs/floor-eager): 9.9182e-04 / 1.9522e-03 / 5.0116e-04 for
+        # 4.0-{1b,350m,micro}, with each engine bit-exact against a second
+        # instance of itself over all 3840 elements -- deterministic, not noise.
+        # torch.compile lowers both op sequences to equivalent kernels and brings
+        # it back under 1e-5, which is why those tests must not be run eager; see
+        # tests/shared/vllm_equivalence.py::run_vllm_logprobs.
         return (1e-5, 1e-5)
     else:
         # Substitute-embedding propagates through attention to visible
