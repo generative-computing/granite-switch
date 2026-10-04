@@ -65,14 +65,16 @@ def _doubled_padding_mask(m: int):
     than a workaround: adapter row ``i`` is the same token as base row ``i``, so it
     is padding exactly when the base row is.
 
-    Inert where there is nothing to match: no forward context (unit tests), no mask
-    (``VLLM_MOE_SKIP_PADDING=0``, or any vLLM 0.26 where no kernel consumes it), or
-    a mask whose length is not ``m`` — in that last case the premise of the
-    doubling does not hold, and failing loudly in the kernel beats silently
-    masking the wrong rows.
+    Inert where there is nothing to match: no forward context (unit tests), no
+    ``is_padding`` field at all (``ForwardContext`` gained it at 0.25.1 — absent at
+    0.24.0, which is why this is ``getattr`` and not attribute access), no mask
+    (``VLLM_MOE_SKIP_PADDING=0``, or 0.25/0.26 where the field exists but no kernel
+    consumes it), or a mask whose length is not ``m`` — in that last case the
+    premise of the doubling does not hold, and failing loudly in the kernel beats
+    silently masking the wrong rows.
     """
     ctx = get_forward_context() if is_forward_context_available() else None
-    mask = ctx.is_padding if ctx is not None else None
+    mask = getattr(ctx, "is_padding", None) if ctx is not None else None
     if mask is None or mask.shape[0] != m:
         yield
         return
