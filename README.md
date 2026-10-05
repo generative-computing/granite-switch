@@ -57,7 +57,8 @@ Requires Python 3.11+ and PyTorch 2.11+.
 > transformers-5.13+ `full_attention` layer-type rename. One tree serves all five lines —
 > where their APIs differ, the backend checks for the capability rather than the version. All
 > of them require PyTorch 2.11+ (CUDA 13+). To pin a single line for development, use the
-> `vllm26` / `vllm27` dependency *groups*.
+> `vllm26` / `vllm30` dependency *groups* — the two ends of the range, which is also what CI
+> tests on every GPU run.
 
 ### Compose a Model
 
