@@ -84,6 +84,13 @@ ENGINE_LABEL = "granite-switch (vLLM)"
 REFERENCE_LABEL = "HF + PEFT"
 BASE_LABEL = "Base"
 RATIO_LABEL = "Gain ratio"
+THROUGHPUT_LABEL = "Decode throughput"
+NATIVE_LABEL = "PEFT (vLLM)"
+SPEEDUP_LABEL = "Speedup"
+# A row's throughput per technology: granite-switch's and stock vLLM's.
+ENGINES = {"gs": ENGINE_LABEL, "native": NATIVE_LABEL}
+# The --only entry of a throughput run (run_benchmark.py).
+THROUGHPUT = "throughput"
 
 
 # --- data ------------------------------------------------------------------
@@ -121,14 +128,40 @@ def find_row(data: dict, sha: str, model_id: str) -> dict | None:
     return matches[0] if matches else None
 
 
+def tokens_per_s(row: dict, tech_id: str, engine: str, spec: Spec) -> float | None:
+    """A row's decode throughput for one technology and engine, measured with
+    the current settings, or None."""
+    measured = ((row.get("throughput") or {}).get(tech_id) or {}).get(engine)
+    if not isinstance(measured, dict) or not spec.throughput.matches(measured):
+        return None
+    value = measured.get("tokens_per_s")
+    return value if isinstance(value, int | float) else None
+
+
+def throughput_done(row: dict, spec: Spec) -> bool:
+    """Whether every technology's throughput is measured, or has no adapter."""
+    for tech in spec.technologies:
+        entry = (row.get("throughput") or {}).get(tech.id)
+        if entry is None or is_error(entry):
+            return False
+        if "skipped" not in entry and any(
+            tokens_per_s(row, tech.id, e, spec) is None for e in ENGINES
+        ):
+            return False
+    return True
+
+
 def missing_cells(row: dict, spec: Spec) -> list[str]:
-    """Cells that keep ``row`` from being a cache hit, as ``intrinsic/tech``."""
+    """What keeps ``row`` from being a cache hit: ``intrinsic/tech`` cells,
+    and ``throughput``."""
     out = []
     for intrinsic in spec.intrinsics:
         for tech in spec.technologies:
             cell = row["cells"].get(intrinsic.id, {}).get(tech.id)
             if cell is None or is_error(cell):
                 out.append(f"{intrinsic.id}/{tech.id}")
+    if not throughput_done(row, spec):
+        out.append(THROUGHPUT)
     return out
 
 
@@ -144,8 +177,8 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     """Put a run's results into ``data`` and return the stored row.
 
     A full run replaces the commit's row for its model. An ``--only`` run
-    replaces just those intrinsics inside the existing row of the same
-    ``bench_version``.
+    replaces just those intrinsics, and the throughput if it ran it, inside
+    the existing row of the same ``bench_version``.
     """
     spec = spec.for_model(spec.model_of(results))
     results["model"] = spec.model_id
@@ -160,8 +193,11 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     sha = results["commit"]["sha"]
     old = find_row(data, sha, spec.model_id)
     if run.get("only") and old and old.get("bench_version") == spec.bench_version:
-        for intrinsic_id in run["only"]:
-            old["cells"][intrinsic_id] = results["cells"][intrinsic_id]
+        for picked in run["only"]:
+            if picked == THROUGHPUT:
+                old[THROUGHPUT] = results[THROUGHPUT]
+            else:
+                old["cells"][picked] = results["cells"][picked]
         old.setdefault("updates", []).append(run)
         return old
     if old:
@@ -347,6 +383,9 @@ GROUP_LABELS = {
     "base": BASE_LABEL,
     "ratio": RATIO_LABEL,
 }
+# The Show toggles: the groups above, and the throughput block (its three
+# groups: granite-switch, HF + PEFT, speedup).
+TOGGLE_LABELS = {**GROUP_LABELS, "thr": "Throughput"}
 # A gain ratio divides by the adapter's gain over the base under HF + PEFT;
 # below this gain the ratio mostly measures noise, so it is not shown.
 MIN_GAIN = 0.01
@@ -396,6 +435,8 @@ table.bench { border-collapse: collapse; }
 .bench td.grp-ref, .bench td.grp-base { background: #f5f8fc; }
 .bench th.grp-ratio { background: #efece3; }
 .bench td.grp-ratio { background: #fbfaf6; }
+.bench th.grp-thr { background: #e5efe7; }
+.bench td.grp-thr { background: #f6faf7; }
 .bench .start { border-left: 2px solid #b0b0b0; }
 .bench .i-start { border-left: 2px solid #6b6b6b; }
 .bench .commit { position: sticky; left: 0; z-index: 1; background: #fff;
@@ -410,7 +451,7 @@ table.bench { border-collapse: collapse; }
 .bench td.err { color: #b3261e; text-align: center; }
 .bench tr.old td { color: #8a8a8a; }
 table.hide-gs .grp-gs, table.hide-ref .grp-ref, table.hide-base .grp-base,
-table.hide-ratio .grp-ratio { display: none; }
+table.hide-ratio .grp-ratio, table.hide-thr .grp-thr { display: none; }
 button.info { width: 1.45em; height: 1.45em; padding: 0; margin-left: 5px;
               font: italic 600 12px/1 Georgia, serif; vertical-align: 1px;
               border: 1px solid #b8b8b8; border-radius: 999px; background: #fff;
@@ -458,7 +499,9 @@ PAGE_SCRIPT = """
     document.querySelectorAll("table.bench").forEach(t => boxes.forEach(b =>
       t.classList.toggle("hide-" + b.dataset.group, !b.checked)));
     document.querySelectorAll("th.i").forEach(th => {
-      th.colSpan = on.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
+      const span = on.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
+      th.colSpan = Math.max(span, 1);
+      th.hidden = span === 0;
     });
   }
   boxes.forEach(b => b.addEventListener("change", columns));
@@ -548,6 +591,71 @@ def _cell_html(
         value = cell[headline]
         cls = "num best" if value == best else "num"
         title, text = _cell_title(cell), f"{value * 100:.1f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _speed_title(measured: dict) -> str:
+    runs = measured.get("runs_s") or []
+    parts = [
+        f"{measured['tokens_per_s']:,.0f} tokens/s",
+        f"batch {measured['batch']} of {measured['prompt_tokens']}-token prompts, "
+        f"{measured['generated_tokens']} tokens generated each",
+    ]
+    if measured.get("adapters"):
+        parts.append(f"{measured['adapters']} adapters, one per request")
+    parts.append(
+        f"median of {len(runs)} timed runs, {measured['median_s']:.2f} s"
+        + (f" (from {min(runs):.2f} to {max(runs):.2f} s)" if runs else "")
+    )
+    if measured.get("gpu"):
+        parts.append(measured["gpu"])
+    return "; ".join(parts)
+
+
+def _throughput_html(
+    row: dict, tech_id: str, engine: str, extra: str, spec: Spec
+) -> str:
+    """One engine's throughput ``<td>`` for one technology."""
+    entry = (row.get("throughput") or {}).get(tech_id)
+    measured = (entry or {}).get(engine)
+    if row.get("throughput") is None:
+        cls, title, text = "skip", "not measured: the run predates throughput", "·"
+    elif entry is None:
+        cls, title, text = "skip", "not measured", "·"
+    elif "skipped" in entry:
+        cls, title, text = "skip", entry["skipped"], "—"
+    elif not isinstance(measured, dict):
+        cls, title, text = "skip", "not measured", "·"
+    elif is_error(measured):
+        cls, title, text = "err", measured["error"], "error"
+    elif tokens_per_s(row, tech_id, engine, spec) is None:
+        cls, title, text = "skip", "measured with other settings", "·"
+    else:
+        cls, title = "num", _speed_title(measured)
+        text = f"{measured['tokens_per_s']:,.0f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def speedup(row: dict, tech_id: str, spec: Spec) -> float | None:
+    """granite-switch's decode throughput over stock vLLM's, from one run."""
+    gs, native = (tokens_per_s(row, tech_id, e, spec) for e in ENGINES)
+    return None if gs is None or native is None else gs / native
+
+
+def _speedup_html(row: dict, tech_id: str, extra: str, spec: Spec) -> str:
+    entry = (row.get("throughput") or {}).get(tech_id) or {}
+    ratio = speedup(row, tech_id, spec)
+    if "skipped" in entry:
+        cls, title, text = "skip", entry["skipped"], "—"
+    elif ratio is None:
+        cls, title, text = "skip", "needs both engines' throughput", "·"
+    else:
+        gs, native = (tokens_per_s(row, tech_id, e, spec) for e in ENGINES)
+        cls, text = "num", f"{ratio:.1f}&times;"
+        title = (
+            f"{ENGINE_LABEL}: {gs:,.0f} tokens/s; {NATIVE_LABEL}: {native:,.0f} "
+            "tokens/s; the same GPU, one after the other"
+        )
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
 
@@ -647,6 +755,16 @@ def _adapters_line(fingerprints: dict, spec: Spec) -> str:
     return " · ".join(parts)
 
 
+def _throughput_settings(run: dict) -> str:
+    t = run.get("throughput")
+    if not t:
+        return ""
+    return (
+        f"batch {t['batch']}, {t['generated_tokens']} tokens generated, median of "
+        f"{t['timed_runs']} runs after {t['warmup_runs']} warm-up"
+    )
+
+
 def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> str:
     """The run-details box of a row, as HTML."""
 
@@ -693,6 +811,7 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
                     else "",
                 ),
                 ("CUDA graphs", "off" if run.get("enforce_eager") else "on"),
+                ("throughput", _esc(_throughput_settings(run))),
                 ("benchmark", f"v{row.get('bench_version')}"),
                 ("benchmark code", code(run)),
             ]
@@ -774,9 +893,10 @@ def _details_text(row: dict) -> str:
 
 def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     techs = spec.technologies
-    sizes = {"gs": len(techs), "ref": len(techs), "base": 1, "ratio": len(techs)}
+    n = len(techs)
+    sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
     width = sum(sizes.values())
-    data_attrs = " ".join(f'data-{g}="{n}"' for g, n in sizes.items())
+    data_attrs = " ".join(f'data-{g}="{size}"' for g, size in sizes.items())
     head = [
         [
             '<th class="commit" rowspan="3">Commit</th>',
@@ -802,6 +922,16 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                 head[2].append(
                     f"<th{_classes(f'grp-{group}', first)}>{_esc(tech.label)}</th>"
                 )
+    # One throughput block per row, per technology rather than per intrinsic.
+    head[0].append(
+        f'<th class="grp-thr i-start" colspan="{3 * n}">{_esc(THROUGHPUT_LABEL)}<br>'
+        "<small>tokens/s</small></th>"
+    )
+    for label in (*ENGINES.values(), SPEEDUP_LABEL):
+        head[1].append(f'<th class="grp-thr start" colspan="{n}">{_esc(label)}</th>')
+        for k, tech in enumerate(techs):
+            first = "start" if k == 0 else ""
+            head[2].append(f"<th{_classes('grp-thr', first)}>{_esc(tech.label)}</th>")
 
     body = []
     for row in rows:
@@ -867,12 +997,20 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                         f"{BASE_LABEL} scores",
                     )
                 )
+        for e, engine in enumerate(ENGINES):
+            for k, tech in enumerate(techs):
+                start = ("start i-start" if e == 0 else "start") if k == 0 else ""
+                extra = f"grp-thr {start}".strip()
+                cells.append(_throughput_html(row, tech.id, engine, extra, spec))
+        for k, tech in enumerate(techs):
+            extra = "grp-thr start" if k == 0 else "grp-thr"
+            cells.append(_speedup_html(row, tech.id, extra, spec))
         old = row.get("bench_version") != spec.bench_version
         body.append(f"<tr{_classes('old' if old else '')}>" + "".join(cells) + "</tr>")
     if not body:
         body.append(
             f'<tr><td class="commit" colspan="2">no commit benchmarked yet</td>'
-            f'<td colspan="{width * len(spec.intrinsics)}"></td></tr>'
+            f'<td colspan="{width * len(spec.intrinsics) + 3 * n}"></td></tr>'
         )
     return (
         '<div class="wrap"><table class="bench"><thead>'
@@ -890,7 +1028,8 @@ checkpoints, staged once per base model</span></div><div class="arrow">&rarr;</d
 <div class="step gs"><b>2. Compose</b><span>the commit's composer builds one
 checkpoint holding every adapter</span></div><div class="arrow">&rarr;</div>
 <div class="step gs"><b>3. Evaluate</b><span>its vLLM backend answers each eval
-set; a scorer grades the answers</span></div><div class="arrow">&rarr;</div>
+set and a scorer grades the answers; decoding is timed against stock vLLM</span></div>
+<div class="arrow">&rarr;</div>
 <div class="result gs">{ENGINE_LABEL}</div></div>
 <div class="lane"><div class="tag">Once per model</div>
 <div class="step ref"><b>Same adapters, no granite-switch</b><span>Hugging Face
@@ -931,8 +1070,9 @@ def render(data: dict, spec: Spec) -> str:
         )
     toggles = "".join(
         f'<label><input type="checkbox" data-group="{g}" checked> {_esc(label)}</label>'
-        for g, label in GROUP_LABELS.items()
+        for g, label in TOGGLE_LABELS.items()
     )
+    t = spec.throughput
     tech_notes = "".join(
         f"<li><b>{_esc(t.label)}</b>: {_esc(t.source)}</li>" for t in spec.technologies
     )
@@ -950,7 +1090,8 @@ def render(data: dict, spec: Spec) -> str:
 <h1>Granite Switch adapter benchmark</h1>
 <p class="lede">How well trained intrinsic adapters work through each
 granite-switch commit, next to the same adapters without granite-switch and
-the base model alone. Greedy decoding; values are percentages.</p>
+the base model alone. Greedy decoding. Accuracy is in percent, decode
+throughput in tokens per second.</p>
 {FLOW}
 <nav class="tabs" role="tablist" aria-label="Base model">{"".join(tabs)}</nav>
 <div class="controls">Show: {toggles}</div>
@@ -975,6 +1116,24 @@ model that granite-switch keeps. <b>n/a</b>: the adapter gains under
 divide by.</li>
 <li><b>—</b> no adapter or eval set for this cell; <b>·</b> not run;
 <b>error</b> the run failed. Greyed rows used an older benchmark version.</li>
+<li><b>{_esc(THROUGHPUT_LABEL)}</b>, per technology: tokens per second while
+decoding, measured by the switch benchmark's own driver, as in its batch-decode
+figure but at one batch size. A batch of {t.batch}
+one-token prompts, each request on one of the technology's adapters (all of the
+model's, drawn at random, the same draw for both engines), exactly
+{t.generated_tokens} tokens generated each, the median of {t.timed_runs} timed
+runs after {t.warmup_runs} warm-up runs, no prefix caching. Both engines run on
+the same GPU, one after the other, in each commit's run.</li>
+<li><b>{_esc(ENGINE_LABEL)}</b> (throughput): the technology's adapters composed
+into a checkpoint of their own; a request's prompt is its adapter's control
+token.</li>
+<li><b>{_esc(NATIVE_LABEL)}</b>: the same adapter checkpoints served by stock
+vLLM's multi-LoRA support, without granite-switch (the switch benchmark's
+native-lora arm, lora-vllm in its figures). An aLoRA is served active from the
+first token, the way it decodes once on; SR without its cross-stream weights,
+which stock vLLM cannot run (its native-sr arm).</li>
+<li><b>{_esc(SPEEDUP_LABEL)}</b>: {_esc(ENGINE_LABEL)}'s decode throughput
+divided by {_esc(NATIVE_LABEL)}'s.</li>
 <li>The <b>i</b> next to a commit opens its run details: library versions,
 GPU, the adapter checkpoints and the reference run.</li>
 <li>Granite 4.2 prompts turn reasoning off and carry their documents as tool
@@ -1061,6 +1220,18 @@ def summary(
         )
     if gap:
         lines += ["", f"No {REFERENCE_LABEL} and {BASE_LABEL} columns yet: {gap}."]
+
+    def speeds(engine: str) -> str:
+        values = [tokens_per_s(row, t.id, engine, spec) for t in techs]
+        return " / ".join("·" if v is None else f"{v:,.0f}" for v in values)
+
+    ratios = [speedup(row, t.id, spec) for t in techs]
+    lines += [
+        "",
+        f"{THROUGHPUT_LABEL}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
+        f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
+        + " / ".join("·" if r is None else f"{r:.1f}x" for r in ratios),
+    ]
     return "\n".join(lines)
 
 

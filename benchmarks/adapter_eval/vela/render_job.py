@@ -37,6 +37,13 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 EXCLUDE_DIRS = {"local", ".rendered", "__pycache__"}
+# Tools that run only on the submitting machine. Left out of the harness
+# payload, which must fit in one environment string (MAX_PAYLOAD).
+LOCAL_ONLY = {
+    "benchmarks/adapter_eval/publish.py",
+    "benchmarks/adapter_eval/vela/render_job.py",
+    "benchmarks/adapter_eval/vela/submit.sh",
+}
 # The SR model package inside a shadow-residual checkout.
 SR_CODE_DIR = "src/shadow_residual/shadow_residual"
 # One environment string must stay below Linux's 128 KiB MAX_ARG_STRLEN.
@@ -74,7 +81,11 @@ def harness_payload(extra: dict[str, Path]) -> str:
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
         for path in sorted((REPO / "benchmarks").rglob("*")):
             rel = path.relative_to(REPO)
-            if path.is_file() and not EXCLUDE_DIRS & set(rel.parts):
+            if (
+                path.is_file()
+                and not EXCLUDE_DIRS & set(rel.parts)
+                and str(rel) not in LOCAL_ONLY
+            ):
                 tar.add(path, arcname=str(rel))
         for name, path in extra.items():
             tar.add(path, arcname=f"extra/{name}")

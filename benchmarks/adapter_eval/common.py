@@ -79,6 +79,26 @@ class Intrinsic:
 
 
 @dataclass(frozen=True)
+class Throughput:
+    """How decode throughput is measured (``throughput`` in adapters.yaml)."""
+
+    batch: int = 32
+    generated_tokens: int = 128
+    warmup_runs: int = 2
+    timed_runs: int = 5
+
+    def settings(self) -> dict:
+        return vars(self).copy()
+
+    def matches(self, measured: dict) -> bool:
+        """Whether a cell's throughput was measured with these settings."""
+        return (
+            measured.get("batch") == self.batch
+            and measured.get("generated_tokens") == self.generated_tokens
+        )
+
+
+@dataclass(frozen=True)
 class Spec:
     """The benchmark definition, for one of its models (``model_id``)."""
 
@@ -87,6 +107,7 @@ class Spec:
     technologies: tuple[Technology, ...]
     intrinsics: tuple[Intrinsic, ...]
     model_id: str
+    throughput: Throughput = field(default_factory=Throughput)
 
     @property
     def model(self) -> Model:
@@ -160,6 +181,7 @@ class Spec:
                 }
                 for i in self.intrinsics
             ],
+            "throughput": self.throughput.settings(),
         }
 
 
@@ -185,7 +207,13 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         technologies=tuple(Technology(**t) for t in raw["technologies"]),
         intrinsics=tuple(Intrinsic(**i) for i in raw["intrinsics"]),
         model_id=ids[0],
+        throughput=Throughput(**raw.get("throughput", {})),
     )
+    if any(
+        not isinstance(v, int) or v < (0 if k == "warmup_runs" else 1)
+        for k, v in spec.throughput.settings().items()
+    ):
+        raise ValueError(f"bad throughput settings {spec.throughput.settings()}")
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:
         raise ValueError(f"technologies must be exactly {sorted(grouped)}")

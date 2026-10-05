@@ -41,6 +41,18 @@ Each intrinsic has 10 columns on the page, in four groups:
 | Base | one | the base model with no adapter, told the answer format | no |
 | Gain ratio | LoRA, aLoRA, SR | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
 
+After the intrinsics, each row ends with one **throughput block** of 9
+columns, per technology rather than per intrinsic:
+
+| Group | Columns | What it shows |
+|---|---|---|
+| granite-switch (vLLM) | LoRA, aLoRA, SR | decode tokens per second, the technology's adapters composed with the commit |
+| native vLLM | LoRA, aLoRA, SR | the same adapters served by stock vLLM as PEFT LoRAs |
+| Speedup | LoRA, aLoRA, SR | granite-switch's tokens per second ÷ native vLLM's |
+
+Both are measured in each commit's run. See
+[Decode throughput](#decode-throughput).
+
 HF + PEFT and Base are the **reference columns**. They show what the
 checkpoints score outside granite-switch, and what the base model scores
 alone. They do not depend on the commit, so they are computed once and
@@ -57,7 +69,8 @@ HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
 
 - **One tab per base model.** The link remembers the tab, e.g.
   `.../benchmarks/#granite-4.2-3b`.
-- **Show** switches hide or show each column group.
+- **Show** switches hide or show each column group; **Throughput** switches
+  the whole throughput block.
 - **The `i` next to a commit** opens its run details: the commit, the library
   versions (vLLM, torch, transformers), the GPU, each adapter checkpoint (ranks
   and the start of its weights checksum, never its storage path), and the
@@ -135,6 +148,23 @@ Each (intrinsic, technology) pair is one cell. A cell is one of:
 `score_version` is the version of the intrinsic's scoring that produced the
 numbers (see [Re-scoring saved answers](#re-scoring-saved-answers)). Cells
 from before it existed count as version 1.
+
+A row also holds its decode throughput, per technology and engine:
+
+```json
+"throughput": {
+  "lora": {"gs": {"tokens_per_s": 3984.2, "median_s": 1.028,
+                  "runs_s": [1.03, 1.028, 1.027, 1.031, 1.026],
+                  "batch": 32, "generated_tokens": 128, "prompt_tokens": 1,
+                  "adapters": 4, "requests_per_adapter": {...},
+                  "gpu": "NVIDIA A100-SXM4-80GB",
+                  "preflight": {...}, "provenance": {...}},
+           "native": {...}},
+  "sr": {"skipped": "no adapter staged"}
+}
+```
+
+An engine that failed holds `{"error": ...}`, e.g. a refused gate.
 
 Metrics are stored as fractions and shown as percentages (`86.7`). On the
 page:
@@ -279,7 +309,7 @@ also takes `--model <id>`, for a model other than the first (see
 | Flag | Effect |
 |---|---|
 | `--limit N` | Only the first N rows of each eval set. For smoke runs; never published. |
-| `--only a,b` | Only these intrinsics. The results merge into the commit's existing row. |
+| `--only a,b` | Only these intrinsics. The results merge into the commit's existing row. `throughput` is the throughput block: alone, it measures just that. |
 | `--no-cache` | Runs even if the commit already has a complete row. |
 | `--no-publish` | Keeps the results in `local/results/` without touching the page. |
 | `--extra-args "..."` | Passes flags to the in-pod driver, e.g. `--enforce-eager`. |
@@ -458,8 +488,9 @@ before there were several models counts as the first model's.
 
 A commit is a **cache hit** when its row has:
 
-- the current `bench_version` from `adapters.yaml`, and
-- every cell present, with no error cells. Skipped cells count as done.
+- the current `bench_version` from `adapters.yaml`,
+- every cell present, with no error cells. Skipped cells count as done, and
+- its throughput, measured with the current settings.
 
 On a hit, `bench` prints the row and submits nothing. Some examples:
 
@@ -476,6 +507,72 @@ Publishing refuses a `--limit` run and a run whose version differs from
 The reference columns follow the same rules, with both versions. They are a
 hit when their `bench_version` and `reference_version` match `adapters.yaml`
 and every cell is present, with no error cells.
+
+## Decode throughput
+
+The throughput block is measured by the switch benchmark's own driver,
+[`benchmarks/bench_switch_repro.py`](../benchmarks/bench_switch_repro.py),
+copied unchanged from the staging repository's `feature/switch-benchmark`
+branch but for one internal link. Copy it again to update it; never edit it
+here. [throughput.py](../benchmarks/adapter_eval/throughput.py) only builds
+its command line for this benchmark's adapters and reads its record back.
+
+It measures the cell of that benchmark's batch-decode figure (throughput for
+generating 128 tokens with one adapter active, no switching): granite-switch
+against stock vLLM serving the same adapters, at one batch size. Per
+technology, two of its arms, on the model's staged adapters (N of them):
+
+| | granite-switch (vLLM) | PEFT (vLLM): stock vLLM |
+|---|---|---|
+| LoRA | `gs-lora-vllm`: a checkpoint of the LoRA adapters | `native-lora`: the same LoRA checkpoints |
+| aLoRA | `gs-lora-vllm`: a checkpoint of the aLoRA adapters | `native-lora`: the aLoRA checkpoints without their invocation tokens |
+| SR | `gs-sr-vllm`: a checkpoint of the SR adapters | `native-sr`: the SR checkpoints, their cross-stream weights skipped at load |
+
+The checkpoints are composed with the commit's composer; stock vLLM loads all
+N adapters (`max_loras` = N).
+
+**The cell**, its prompt-1 decode cell:
+
+- a batch of **32** one-token prompts: the adapter's control token under
+  granite-switch, one filler token with its `LoRARequest` under stock vLLM;
+  each request on one of the N adapters, by its seeded draw (the same for
+  both engines);
+- exactly **128 tokens generated** for each (`min_tokens` = `max_tokens`);
+- **2 warm-up runs, then 5 timed runs**; tok/s = batch × tokens ÷ the median
+  run's seconds, its formula;
+- its pinned engine: no prefix caching, a 4,096-token context, 8,192 batched
+  tokens, 256 sequences, CUDA graphs up to batch 1,024, 90% of GPU memory,
+  vLLM's engine in its own process;
+- its gates first (prefix caching and the CUDA-graph size resolved as asked,
+  the adapter count, `max_loras` covering N, the first adapter live); a
+  failed gate shows as an error cell.
+
+**How it is run**, as its sweep runs each block (`run_switch_repro_sweep.sh`,
+`run_block`): one process per engine, the two one after the other on the
+commit's GPU, the compile caches (vLLM, Triton, FlashInfer, TorchInductor)
+cleared before each; which engine goes first alternates by technology.
+
+**Where it differs from that benchmark**, each on purpose:
+
+- one batch size, 32, where its figure sweeps 1 to 64;
+- this model's trained adapters, N per technology, where it uses 12
+  synthetic rank-32 adapters per checkpoint; throughput falls as N grows, so
+  the numbers compare across commits, not with its figure;
+- an aLoRA row, which it leaves out because granite-switch serves aLoRA and
+  LoRA alike: ours have their own rank. Stock vLLM gets the aLoRA weights
+  without the invocation tokens, which would keep them off after a
+  one-token prompt; an active aLoRA decodes as a LoRA;
+- only adapter-active cells (100%), not its idle (0%) ones, and no drift
+  anchors, since a commit's engines run within minutes, not a sweep's hours.
+
+The settings are `throughput` in `adapters.yaml`. A row counts as done only
+with every technology's throughput measured with the current batch and
+generated length, so rows from before throughput existed are cache misses.
+`submit.sh bench <ref> --only throughput` measures just the throughput of a
+row, without its accuracy run.
+
+Running it adds about 20 minutes to a commit's run: a checkpoint per
+technology, and an engine start per engine and technology.
 
 ## Re-scoring saved answers
 
@@ -597,8 +694,9 @@ exercised by a real run.
   different 12–17% of rows ungraded each run, so the same answers score 1–3
   points apart. Its scorer and judge settings stay, for a steadier judge.
   Only jobs that score with the judge get its key, so for now none do.
-- **No throughput yet.** Cells are dictionaries, so more metrics can be added
-  without breaking old rows.
+- **Throughput is measured at one batch size.** The switch benchmark sweeps
+  batch sizes; this page shows batch 32, its standard point, to keep one
+  number per cell.
 
 ## Running it from GitHub
 

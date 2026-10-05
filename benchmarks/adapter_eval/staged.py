@@ -148,13 +148,16 @@ def sr_anchor_copy(src: Path, dest: Path, anchor: tuple[str, int]) -> dict | Non
 
 
 def peft_sr_copy(src: Path, dest: Path) -> dict | None:
-    """Make an invocation-token SR checkpoint load as plain LoRA with PEFT.
+    """Make an invocation-token checkpoint load as plain LoRA.
 
-    For the reference columns (``reference.py``): PEFT reads
+    For the reference columns (``reference.py``), an SR checkpoint: PEFT reads
     ``alora_invocation_tokens`` as aLoRA and would turn the LoRA weights off
     before the invocation sequence. The shadow-residual model needs no
     activation point: its adapter stream runs at every position, and, as in
     ``sr_anchor_copy``, generated tokens do not depend on where it turns on.
+
+    For the throughput's stock-vLLM engine, an aLoRA: after a one-token prompt
+    it would never turn on, where an active aLoRA decodes as a plain LoRA.
 
     Writes ``dest`` with the config without the invocation tokens and links
     to the other files; ``src`` is left as staged. Returns what changed, or

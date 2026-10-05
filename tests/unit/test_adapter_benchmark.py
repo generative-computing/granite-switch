@@ -39,6 +39,7 @@ from benchmarks.adapter_eval import (
     stage,
     staged,
 )
+from benchmarks.adapter_eval import throughput as switch_bench
 from benchmarks.adapter_eval.scorers import (
     ScoreContext,
     ScorerUnavailable,
@@ -165,6 +166,26 @@ def write_eval(path: Path, n: int = 2) -> Path:
     return path
 
 
+def timed(tokens_per_s: float = 3300.0, **extra) -> dict:
+    """One engine's throughput entry, measured with the current settings."""
+    return {
+        "tokens_per_s": tokens_per_s,
+        "median_s": 1.24,
+        "runs_s": [1.24] * SPEC.throughput.timed_runs,
+        "batch": SPEC.throughput.batch,
+        "generated_tokens": SPEC.throughput.generated_tokens,
+        "prompt_tokens": 1,
+        "adapters": 4,
+        "gpu": "A100",
+        **extra,
+    }
+
+
+def throughput_for(spec, gs: float = 3300.0, native: float = 1900.0) -> dict:
+    """A row's throughput: both engines for every technology."""
+    return {t.id: {"gs": timed(gs), "native": timed(native)} for t in spec.technologies}
+
+
 def cells_for(spec, value: float = 0.5) -> dict:
     return {
         i.id: {t.id: {i.headline: value, "n": 10} for t in spec.technologies}
@@ -185,6 +206,7 @@ def results_for(
         "commit": {"sha": sha, "date": date, "subject": "subject"},
         "run": {"limit": None, "only": None, **run},
         "cells": cells if cells is not None else cells_for(SPEC),
+        "throughput": throughput_for(SPEC),
     }
 
 
@@ -787,13 +809,25 @@ def test_render_reference_columns():
 
     page = publish.render(page_data(row, old, reference=ref), SPEC)
 
-    # Every model has its table: 10 columns per intrinsic, in four groups.
+    # Every model has its table: 10 columns per intrinsic, in four groups,
+    # then one throughput block of 9 columns, in three.
     n = len(SPEC.intrinsics) * len(SPEC.models)
+    tables = len(SPEC.models)
     assert page.count('colspan="10"') == n
-    assert page.count(f">{publish.ENGINE_LABEL}</th>") == n
+    assert page.count(f">{publish.ENGINE_LABEL}</th>") == n + tables
     assert page.count(f">{publish.REFERENCE_LABEL}</th>") == n
     assert page.count(f'rowspan="2">{publish.BASE_LABEL}</th>') == n
     assert page.count(f">{publish.RATIO_LABEL}</th>") == n
+    assert page.count(f">{publish.NATIVE_LABEL}</th>") == tables
+    assert page.count(f">{publish.SPEEDUP_LABEL}</th>") == tables
+    head = f">{publish.THROUGHPUT_LABEL}<br><small>tokens/s</small></th>"
+    assert page.count(head) == tables
+    # 3,300 tokens/s under granite-switch, 1,900 under stock vLLM.
+    assert (
+        '<td class="num grp-thr start i-start" title="3,300 tokens/s; batch 32' in page
+    )
+    assert '<td class="num grp-thr start" title="1,900 tokens/s; batch 32' in page
+    assert ">1.7&times;</td>" in page
     # The best of the 7 accuracy columns can be a reference column.
     best = '<td class="num best grp-ref" title="accuracy=0.9000, n=10">90.0</td>'
     assert best in page
@@ -891,6 +925,52 @@ def test_render_run_details():
     assert 'title="vllm 0.19.1, torch 2.10.0, transformers 5.8.1; NVIDIA' in page
 
 
+def test_throughput_block_and_speedup():
+    row = results_for()
+    row["throughput"]["lora"]["native"] = {"error": "refused: adapter 0 not loaded"}
+    row["throughput"]["alora"]["gs"] = timed(batch=8)  # other settings
+    row["throughput"]["sr"] = common.skipped("no adapter staged")
+    old = results_for(SHA_B)
+    del old["throughput"]  # a run from before throughput
+    page = publish.render(page_data(row, old, reference=reference_for()), SPEC)
+
+    assert 'title="refused: adapter 0 not loaded">error</td>' in page
+    assert 'title="measured with other settings">·</td>' in page
+    assert 'title="no adapter staged">—</td>' in page
+    assert 'title="not measured: the run predates throughput">·</td>' in page
+    assert 'title="needs both engines&#x27; throughput">·</td>' in page
+    assert 'data-group="thr" checked> Throughput' in page
+    assert publish.speedup(results_for(), "lora", SPEC) == 3300.0 / 1900.0
+    assert publish.speedup(row, "lora", SPEC) is None
+
+
+def test_a_row_needs_its_throughput():
+    row = results_for()
+    assert publish.cache_hit(row, SPEC)
+    row["throughput"]["sr"] = common.skipped("no adapter staged")
+    assert publish.cache_hit(row, SPEC)  # nothing to measure
+    for broken in (
+        {"error": "throughput run failed"},
+        {"gs": timed(), "native": {"error": "throughput run failed"}},
+        {"gs": timed(), "native": timed(generated_tokens=64)},
+    ):
+        row["throughput"]["lora"] = broken
+        assert publish.missing_cells(row, SPEC) == [publish.THROUGHPUT]
+    del row["throughput"]
+    assert publish.missing_cells(row, SPEC) == [publish.THROUGHPUT]
+
+
+def test_merge_an_only_throughput_run_keeps_the_cells():
+    row = results_for(cells=cells_for(SPEC, 0.7))
+    del row["throughput"]
+    data = page_data(row)
+    run = results_for(cells={}, only=[publish.THROUGHPUT])
+    stored = publish.merge(data, run, SPEC)
+    assert stored["cells"] == cells_for(SPEC, 0.7)
+    assert stored["throughput"] == throughput_for(SPEC)
+    assert publish.cache_hit(stored, SPEC)
+
+
 def test_render_marks_a_model_with_no_rows():
     page = publish.render(page_data(), SPEC)
     assert page.count("no commit benchmarked yet") == len(SPEC.models)
@@ -915,6 +995,12 @@ def test_summary_for_the_pr_comment():
     assert answerability == (
         "| Answerability | 80.0 / 80.0 / — | 90.0 / 90.0 / 90.0 | 50.0 "
         "| 0.75 / 0.75 / · |"
+    )
+    # Then the decode throughput, per technology.
+    assert lines[-1] == (
+        "Decode throughput, tokens/s, LoRA / aLoRA / SR: granite-switch (vLLM) "
+        "3,300 / 3,300 / 3,300; PEFT (vLLM) 1,900 / 1,900 / 1,900; "
+        "speedup 1.7x / 1.7x / 1.7x"
     )
     assert "(cached result)" in publish.summary(data, SPEC, SHA_A, "cached")
 
@@ -1808,6 +1894,243 @@ def test_modules_missing_from_base(tmp_path):
     assert staged.modules_missing_from_base(tmp_path / "renamed", base) == []
 
 
+SETTINGS = {"batch": 4, "generated_tokens": 8, "warmup_runs": 1, "timed_runs": 3}
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_driver_command_is_the_sweeps_block(tmp_path):
+    dump = tmp_path / "d.jsonl"
+    cell = [
+        "--decode-sweep", "--batch-sizes", "4", "--adapter-fractions", "100",
+        "--decode-tokens", "8", "--input-tokens", "1", "--max-model-len", "4096",
+        "--tensor-parallel-size", "1", "--num-runs", "3", "--warmup-runs", "1",
+        "--cudagraph-capture-size", "1024",
+    ]  # fmt: skip
+    gs = switch_bench.command("alora", "gs", "/m/ckpt", ["a", "b"], SETTINGS, dump)
+    assert gs == [
+        "--arm", "gs-lora-vllm", "--model", "/m/ckpt", "--num-adapters", "2",
+        *cell, "--tag", "gs-lora-vllm_N2", "--dump-iters", str(dump),
+    ]  # fmt: skip
+    native = switch_bench.command("sr", "native", "base", ["a", "b"], SETTINGS, dump)
+    assert native[:8] == [
+        "--arm", "native-sr", "--model", "base", "--num-adapters", "2",
+        "--lora-path", "a,b",
+    ]  # fmt: skip
+    assert native[8:10] == ["--lora-skip-prefixes", "cross_stream"]
+
+
+def test_every_flag_the_command_passes_is_the_drivers():
+    # The copied driver, unchanged: its help needs no vLLM.
+    out = subprocess.run(
+        [sys.executable, str(REPO_ROOT / switch_bench.DRIVER), "--help"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    args = switch_bench.command("sr", "native", "b", ["a"], SETTINGS, Path("d"))
+    for flag in (a for a in args if a.startswith("--")):
+        assert flag in out, flag
+    for arm in set(switch_bench.ARMS.values()):
+        assert arm in out, arm
+
+
+def driver_record(**extra) -> dict:
+    """A decode record shaped like the driver's dump."""
+    return {
+        "phase": "decode",
+        "batch": 4,
+        "frac": 100,
+        "decode_tokens": 8,
+        "input_tokens": 1,
+        "iters_ms": [20.0, 16.0, 18.0],
+        "prompt_tokens_realized": 4,
+        "arm": "gs-lora-vllm",
+        "N": 2,
+        "provenance": {"gpu_name": "A100", "hostname": "pod-0", "vllm": "0.26.0"},
+        "preflight": {"checked": True, "preflight_jsd": 0.01},
+        **extra,
+    }
+
+
+def test_read_entry_takes_the_drivers_record(tmp_path):
+    dump = tmp_path / "d.jsonl"
+    idle = driver_record(frac=0, iters_ms=[1.0])
+    dump.write_text(json.dumps(idle) + "\n" + json.dumps(driver_record()) + "\n")
+    entry = switch_bench.read_entry(dump, SETTINGS)
+    # That benchmark's formula: batch x tokens / the median run.
+    assert entry["tokens_per_s"] == round(4 * 8 / 0.018, 1)
+    assert (entry["median_s"], entry["runs_s"]) == (0.018, [0.02, 0.016, 0.018])
+    assert (entry["adapters"], entry["arm"], entry["gpu"]) == (
+        2,
+        "gs-lora-vllm",
+        "A100",
+    )
+    assert "hostname" not in entry["provenance"]
+    dump.write_text(json.dumps(idle) + "\n")
+    assert switch_bench.read_entry(dump, SETTINGS) == common.error(
+        "the driver wrote no decode record"
+    )
+
+
+def fake_driver(root: Path, body: str) -> None:
+    script = root / switch_bench.DRIVER
+    script.parent.mkdir(parents=True, exist_ok=True)
+    script.write_text("import json, sys\nargs = sys.argv[1:]\n" + body)
+
+
+def test_time_engine_runs_the_driver(tmp_path, capsys):
+    fake_driver(
+        tmp_path,
+        "dump = args[args.index('--dump-iters') + 1]\n"
+        "print('measuring')\n"
+        f"open(dump, 'w').write(json.dumps({driver_record()!r}) + '\\n')\n",
+    )
+    spec = {
+        "technology": "lora",
+        "engine": "gs",
+        "model": "m",
+        "paths": ["a", "b"],
+        "settings": SETTINGS,
+        "dump": str(tmp_path / "out" / "lora_gs.jsonl"),
+    }
+    entry = run_benchmark.time_engine(sys.executable, tmp_path, spec)
+    assert entry["tokens_per_s"] == round(4 * 8 / 0.018, 1)
+    assert "measuring" in capsys.readouterr().out  # its output reaches the log
+
+    fake_driver(
+        tmp_path,
+        "print('FATAL preflight: adapter-active distribution is "
+        "indistinguishable from base. The adapter is not firing')\n"
+        "sys.exit(1)\n",
+    )
+    assert run_benchmark.time_engine(sys.executable, tmp_path, spec) == common.error(
+        "refused: preflight: adapter-active distribution is indistinguishable from base"
+    )
+
+
+def test_clear_compile_caches_leaves_other_caches(tmp_path, monkeypatch):
+    for name in ("VLLM_CACHE_ROOT", "TRITON_CACHE_DIR", "TORCHINDUCTOR_CACHE_DIR"):
+        monkeypatch.setenv(name, str(tmp_path / name))
+        (tmp_path / name).mkdir()
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "xdg" / "flashinfer").mkdir(parents=True)
+    (tmp_path / "xdg" / "huggingface").mkdir()
+    run_benchmark.clear_compile_caches()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["xdg"]
+    assert [p.name for p in (tmp_path / "xdg").iterdir()] == ["huggingface"]
+
+
+def bench_with_lora_and_alora(tmp_path, monkeypatch) -> tuple[list, list, list]:
+    """A bench root with answerability's LoRA and aLoRA, and every step faked
+    but staging and the throughput plan; returns the composes, the engines
+    timed and the cache clears."""
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    make_adapter(
+        staged.adapter_dir(bench, "answerability", "lora"),
+        "lora",
+        modules=QKVO_MLP,
+        flat_mlp=True,
+    )
+    make_adapter(staged.adapter_dir(bench, "answerability", "alora"), "alora")
+    monkeypatch.setattr(
+        run_benchmark,
+        "commit_info",
+        lambda repo: {"sha": SHA_A, "date": "2026-09-01", "subject": "s"},
+    )
+    monkeypatch.setattr(run_benchmark, "composer_flags", lambda *a: set())
+    composes, engines, clears = [], [], []
+
+    def fake_compose(python, repo_dir, manifest, manifest_path, base, model_dir, flags):
+        composes.append((model_dir.name, sorted(manifest)))
+        return True
+
+    def fake_generate(python, harness_root, jobs_path, spec):
+        for job in spec["jobs"]:
+            rows = staged.read_jsonl(Path(job["eval_path"]))
+            staged.write_jsonl(
+                Path(job["out_path"]),
+                [{**r, "generated_content": '"answerable"'} for r in rows],
+            )
+        ok = {"ok": True, "n_generated": 3, "truncated": 0}
+        return {"jobs": {j["key"]: dict(ok) for j in spec["jobs"]}}
+
+    def fake_time_engine(python, harness_root, spec):
+        engines.append(spec)
+        return timed(3300.0 if spec["engine"] == "gs" else 1900.0)
+
+    monkeypatch.setattr(run_benchmark, "compose", fake_compose)
+    monkeypatch.setattr(run_benchmark, "generate", fake_generate)
+    monkeypatch.setattr(run_benchmark, "time_engine", fake_time_engine)
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: clears.append(1))
+    return composes, engines, clears
+
+
+def bench_argv(tmp_path, *extra) -> list[str]:
+    return [
+        "--bench-root", str(tmp_path / "bench"),
+        "--work-dir", str(tmp_path / "work"),
+        "--repo-dir", str(tmp_path),
+        "--base-model", str(write_base(tmp_path / "base")),
+        *extra,
+    ]  # fmt: skip
+
+
+def test_run_times_each_technology_against_stock_vllm(tmp_path, monkeypatch):
+    composes, engines, clears = bench_with_lora_and_alora(tmp_path, monkeypatch)
+    assert run_benchmark.main(bench_argv(tmp_path)) == 0
+
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert results["throughput"] == {
+        "lora": {"gs": timed(3300.0), "native": timed(1900.0)},
+        "alora": {"gs": timed(3300.0), "native": timed(1900.0)},
+        "sr": common.skipped("no adapter staged"),
+    }
+    # The accuracy checkpoint, then one checkpoint per technology.
+    assert composes == [
+        ("single_stream", ["answerability_alora", "answerability_lora"]),
+        ("throughput_lora", ["answerability_lora"]),
+        ("throughput_alora", ["answerability_alora"]),
+    ]
+    # Which engine goes first alternates; the caches are cleared before each.
+    assert [(e["technology"], e["engine"]) for e in engines] == [
+        ("lora", "gs"),
+        ("lora", "native"),
+        ("alora", "native"),
+        ("alora", "gs"),
+    ]
+    assert len(clears) == 4
+    assert engines[0]["settings"] == SPEC.throughput.settings()
+    assert engines[1]["model"] == str(tmp_path / "base")
+    # Both engines get the composer's folder, but stock vLLM gets the aLoRA
+    # without its invocation tokens.
+    copies = tmp_path / "work" / "models" / "adapters" / "throughput"
+    assert engines[1]["paths"] == [str(copies / "answerability" / "lora")]
+    native = Path(engines[2]["paths"][0])
+    config = json.loads((native / staged.CONFIG_FILE).read_text())
+    assert "alora_invocation_tokens" not in config
+    run = results["run"]["throughput"]
+    assert (
+        run["driver"] == switch_bench.DRIVER and run["cudagraph_capture_size"] == 1024
+    )
+
+
+def test_only_throughput_runs_no_accuracy(tmp_path, monkeypatch):
+    composes, engines, _ = bench_with_lora_and_alora(tmp_path, monkeypatch)
+    assert run_benchmark.main(bench_argv(tmp_path, "--only", "throughput")) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert results["cells"] == {}
+    assert results["run"]["only"] == ["throughput"]
+    assert set(results["throughput"]) == {"lora", "alora", "sr"}
+    assert [c[0] for c in composes] == ["throughput_lora", "throughput_alora"]
+
+    # An intrinsic alone measures no throughput.
+    engines.clear()
+    assert run_benchmark.main(bench_argv(tmp_path, "--only", "answerability")) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert "throughput" not in results and not engines
+
+
 def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypatch):
     bench = tmp_path / "bench"
     write_eval(staged.eval_path(bench, "answerability"))
@@ -2407,7 +2730,9 @@ def test_harness_payload_ships_no_local_files(tmp_path):
         names = tar.getnames()
     assert "benchmarks/adapter_eval/common.py" in names
     assert "benchmarks/adapter_eval/vela/pod_entry.sh" in names
+    assert switch_bench.DRIVER in names  # the switch benchmark's driver
     assert "extra/selection.json" in names
+    assert not render_job.LOCAL_ONLY & set(names)
     for name in names:
         parts = set(Path(name).parts)
         assert not parts & render_job.EXCLUDE_DIRS, name

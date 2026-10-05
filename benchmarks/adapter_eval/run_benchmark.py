@@ -36,9 +36,13 @@ kept under ``--work-dir``.
 from __future__ import annotations
 
 import argparse
+import collections
 import datetime as dt
+import functools
+import getpass
 import json
 import os
+import shutil
 import subprocess
 import sys
 import traceback
@@ -46,6 +50,7 @@ from importlib import metadata
 from pathlib import Path
 
 from . import staged
+from . import throughput as switch_bench
 from .common import (
     COMPOSE_GROUPS,
     adapter_name,
@@ -59,6 +64,8 @@ from .common import (
 from .scorers import ScoreContext, ScorerUnavailable, get_scorer
 
 COMPOSER_MODULE = "granite_switch.composer.compose_granite_switch"
+# The --only entry that measures decode throughput (with intrinsics, or alone).
+THROUGHPUT = "throughput"
 
 
 def now() -> str:
@@ -204,6 +211,179 @@ def generate(python: str, harness_root: Path, jobs_path: Path, spec: dict) -> di
     return json.loads(status_path.read_text())
 
 
+def clear_compile_caches() -> None:
+    """Remove vLLM's, Triton's, FlashInfer's and TorchInductor's caches.
+
+    As the switch benchmark's sweep does before each engine (its
+    ``clear_caches``), so a warm autotune cache cannot favour the engine that
+    runs later. The folders follow the cache variables, which this pod sets.
+    """
+    home = Path.home()
+    xdg = Path(os.environ.get("XDG_CACHE_HOME") or home / ".cache")
+    try:
+        user = getpass.getuser()
+    except Exception:  # no passwd entry, as in some containers
+        user = "user"
+    for folder in (
+        Path(os.environ.get("VLLM_CACHE_ROOT") or xdg / "vllm"),
+        Path(os.environ.get("TRITON_CACHE_DIR") or home / ".triton" / "cache"),
+        xdg / "flashinfer",
+        Path(os.environ.get("TORCHINDUCTOR_CACHE_DIR") or f"/tmp/torchinductor_{user}"),
+    ):
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def time_engine(python: str, harness_root: Path, spec: dict) -> dict:
+    """One engine's throughput entry from the switch benchmark's driver, or an error.
+
+    ``spec``: the technology, the engine, the model, the adapter folders, the
+    settings and the dump file (``throughput.command``).
+    """
+    dump = Path(spec["dump"])
+    dump.parent.mkdir(parents=True, exist_ok=True)
+    dump.unlink(missing_ok=True)
+    cmd = [
+        python,
+        str(harness_root / switch_bench.DRIVER),
+        *switch_bench.command(
+            spec["technology"],
+            spec["engine"],
+            spec["model"],
+            spec["paths"],
+            spec["settings"],
+            dump,
+        ),
+    ]
+    env = dict(os.environ)
+    # Unlike generation, vLLM keeps its engine in its own process, as a server
+    # and that benchmark do; its sweep also samples natively (see generate()).
+    env.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
+    env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
+    print(f"[throughput] {' '.join(cmd)}", flush=True)
+    tail: collections.deque[str] = collections.deque(maxlen=50)
+    with subprocess.Popen(
+        cmd,
+        cwd=harness_root,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    ) as proc:
+        for line in proc.stdout:  # into the pod log as it comes
+            print(line, end="", flush=True)
+            tail.append(line.rstrip())
+    if proc.returncode != 0 or not dump.is_file():
+        return error(switch_bench.failure(list(tail)))
+    return switch_bench.read_entry(dump, spec["settings"])
+
+
+def throughput_fleets(
+    bench_root: Path, spec, base_model: str, copies: Path, sr_anchor
+) -> tuple[dict[str, list[dict]], list[str]]:
+    """Per technology, the adapters both throughput engines serve.
+
+    Every staged adapter of the model, whatever ``--only`` picked, so a
+    technology's fleet is the same on every run. Each is converted as for the
+    accuracy run (SR anchor, MLP names), and both engines get that folder, as
+    that benchmark gives both its arms the same files; stock vLLM gets an aLoRA
+    without its invocation tokens, which would keep it off after a one-token
+    prompt (``staged.peft_sr_copy``). An adapter whose conversion fails, or that
+    names modules the base model lacks, is left out and named in the second
+    value. ``sr_anchor`` returns the SR anchor.
+    """
+    fleets: dict[str, list[dict]] = {t.id: [] for t in spec.technologies}
+    left_out: list[str] = []
+    base_modules: set[str] | None = None
+    for cell in staged.discover(bench_root, spec, None):
+        if cell.skip_reason:
+            continue
+        key = f"{cell.intrinsic}/{cell.tech}"
+        dest = copies / "throughput" / cell.intrinsic / cell.tech
+        native = copies / "native" / cell.intrinsic / cell.tech
+        path = cell.adapter_dir
+        try:
+            if cell.tech == "sr" and staged.sr_anchor_copy(path, dest, sr_anchor()):
+                path = dest
+            if staged.mlp_key_copy(path, dest):
+                path = dest
+            if base_modules is None:
+                base_modules = staged.model_modules(base_model_dir(base_model))
+            if staged.modules_missing_from_base(path, base_modules):
+                raise ValueError("it names modules the base model lacks")
+            if not (cell.tech == "alora" and staged.peft_sr_copy(path, native)):
+                native = path
+        except Exception as e:
+            print(f"[throughput] {key}: left out ({e})", flush=True)
+            left_out.append(key)
+            continue
+        fleets[cell.tech].append({"cell": cell, "compose": path, "native": native})
+    return fleets, left_out
+
+
+def run_throughput(
+    args, spec, harness_root: Path, work: Path, model_root: Path, base_model: str,
+    flags: set[str], fleets: dict[str, list[dict]], composed: dict[str, set[str]],
+) -> dict:  # fmt: skip
+    """Per technology, granite-switch's decode throughput and stock vLLM's.
+
+    The switch benchmark's comparison: one technology's adapters composed into
+    a checkpoint of their own, against the same adapters on stock vLLM, the two
+    engines one after the other on this GPU, which one goes first alternating
+    by technology. ``composed`` names the adapters of each checkpoint the
+    accuracy run composed; one with exactly a fleet's adapters is reused.
+    """
+    out: dict[str, dict] = {}
+    for k, tech in enumerate(spec.technologies):
+        fleet = fleets[tech.id]
+        if not fleet:
+            out[tech.id] = skipped("no adapter staged")
+            continue
+        cells = [f["cell"] for f in fleet]
+        names = {adapter_name(c.intrinsic, tech.id) for c in cells}
+        group = compose_group(tech.id)
+        if COMPOSE_GROUPS[group] == (tech.id,) and composed.get(group) == names:
+            checkpoint, ready = model_root / group, True
+        else:
+            checkpoint = model_root / f"throughput_{tech.id}"
+            ready = compose(
+                args.python,
+                args.repo_dir,
+                compose_manifest(
+                    cells, {(f["cell"].intrinsic, tech.id): f["compose"] for f in fleet}
+                ),
+                work / "manifests" / f"throughput_{tech.id}.yaml",
+                base_model,
+                checkpoint,
+                flags,
+            )
+        entries = {}
+        for engine in ("gs", "native") if k % 2 == 0 else ("native", "gs"):
+            if engine == "gs" and not ready:
+                entries[engine] = error("compose failed")
+                continue
+            clear_compile_caches()
+            entries[engine] = time_engine(
+                args.python,
+                harness_root,
+                {
+                    "technology": tech.id,
+                    "engine": engine,
+                    "model": str(checkpoint if engine == "gs" else base_model),
+                    "paths": [str(f["native"]) for f in fleet],
+                    "settings": spec.throughput.settings(),
+                    "dump": str(work / "throughput" / f"{tech.id}_{engine}.jsonl"),
+                },
+            )
+        out[tech.id] = {"gs": entries["gs"], "native": entries["native"]}
+        print(f"[throughput] {tech.id}: {json.dumps(speeds(out[tech.id]))}", flush=True)
+    return out
+
+
+def speeds(entry: dict) -> dict:
+    """An entry's tokens/s per engine, for the log."""
+    return {e: entry[e].get("tokens_per_s", entry[e].get("error")) for e in entry}
+
+
 def score_cell(scorer_name: str, pred_path: Path, eval_dir: Path, out_path: Path):
     rows = staged.read_jsonl(pred_path)
     result = get_scorer(scorer_name)(
@@ -278,6 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     spec = load_spec(model=args.model)
     staged.check_bench_root(args.bench_root, spec)
     only = [s.strip() for s in args.only.split(",")] if args.only else None
+    measure_speed = only is None or THROUGHPUT in only
+    picked = None if only is None else [o for o in only if o != THROUGHPUT]
     work = args.work_dir.resolve()
     model_root = (args.model_dir or work / "models").resolve()
     copies = model_root / "adapters"
@@ -289,7 +471,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cells: dict[str, dict[str, dict]] = {}
     runnable: dict[str, list[staged.StagedCell]] = {g: [] for g in COMPOSE_GROUPS}
-    for cell in staged.discover(args.bench_root, spec, only):
+    for cell in staged.discover(args.bench_root, spec, picked) if picked != [] else []:
         cells.setdefault(cell.intrinsic, {})
         if cell.skip_reason:
             cells[cell.intrinsic][cell.tech] = skipped(cell.skip_reason)
@@ -318,6 +500,7 @@ def main(argv: list[str] | None = None) -> int:
         },
     }
     base_modules: set[str] | None = None
+    composed: dict[str, set[str]] = {}
     for group, group_cells in runnable.items():
         paths = {(c.intrinsic, c.tech): c.adapter_dir for c in group_cells}
         for c in [c for c in group_cells if c.tech == "sr"]:
@@ -381,6 +564,7 @@ def main(argv: list[str] | None = None) -> int:
             for c in group_cells:
                 cells[c.intrinsic][c.tech] = error("compose failed")
             continue
+        composed[group] = {adapter_name(c.intrinsic, c.tech) for c in group_cells}
 
         jobs = []
         for c in group_cells:
@@ -456,6 +640,23 @@ def main(argv: list[str] | None = None) -> int:
                 cell["too_long"] = st["too_long"]
             cells[c.intrinsic][c.tech] = cell
 
+    throughput = None
+    if measure_speed:
+
+        @functools.cache
+        def sr_anchor():
+            return anchor or generation_prompt_anchor(
+                base_model, spec.model.prompt_for("sr")["chat_template_kwargs"]
+            )
+
+        fleets, run_meta["throughput_left_out"] = throughput_fleets(
+            args.bench_root, spec, base_model, copies, sr_anchor
+        )
+        throughput = run_throughput(
+            args, spec, harness_root, work, model_root, base_model, flags, fleets,
+            composed,
+        )  # fmt: skip
+
     results = {
         "model": spec.model_id,
         "bench_version": spec.bench_version,
@@ -475,9 +676,16 @@ def main(argv: list[str] | None = None) -> int:
             # The run's folder under the work root, where its answers stay.
             "run_ts": os.environ.get("RUN_TS"),
             "harness_dirty": os.environ.get("ADAPTER_BENCH_HARNESS_DIRTY") == "1",
+            "throughput": {
+                **spec.throughput.settings(),
+                **switch_bench.PINNED,
+                "driver": switch_bench.DRIVER,
+            },
             **run_meta,
         },
     }
+    if throughput is not None:
+        results["throughput"] = throughput
     print_table(cells, spec)
     out = args.results_out or work / "results.json"
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -68,6 +68,21 @@ technologies:
     label: SR
     source: "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)"
 
+# Decode throughput, the Throughput columns: per technology, granite-switch
+# against stock vLLM serving the same adapters (native-lora), measured by the
+# switch benchmark's own driver (benchmarks/bench_switch_repro.py, copied from
+# the staging repository's feature/switch-benchmark branch), its batch-decode
+# cell at one batch: `batch` one-token prompts, each request on one of the
+# technology's adapters, exactly `generated_tokens` new tokens each, the median
+# of `timed_runs` after `warmup_runs`, the two engines one after the other on
+# the commit's GPU. A row measured with another batch or length counts as not
+# measured, so changing these measures every commit again.
+throughput:
+  batch: 32
+  generated_tokens: 128
+  warmup_runs: 2
+  timed_runs: 5
+
 # max_new_tokens comes from each intrinsic's training config.
 # headline is the metric the results page shows; it matches the internal
 # results page so numbers can be compared.

@@ -85,10 +85,12 @@ granite-switch/
 │   └── shared/                          # Shared test utilities and parametrized cases
 │
 ├── benchmarks/                          # Benchmarks run against a commit (not part of the package)
+│   ├── bench_switch_repro.py            # The switch benchmark's throughput driver, copied unchanged
 │   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
 │       ├── adapters.yaml                # Benchmark definition: models, intrinsics, technologies, versions
 │       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block
 │       ├── generate.py                  # vLLM generation for one composed checkpoint
+│       ├── throughput.py                # Runs the switch benchmark's driver per engine; reads its records
 │       ├── reference.py                 # In-pod driver for the HF + PEFT and base-model columns
 │       ├── hf_generate.py               # HF + PEFT generation for one reference cell
 │       ├── prompts.py                   # Per-model prompt building (documents, chat-template options)
