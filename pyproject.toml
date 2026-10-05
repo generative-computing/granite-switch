@@ -58,13 +58,20 @@ markers = [
 ]
 
 [dependency-groups]
+# THE TWO ENDS OF THE SUPPORTED RANGE, which is why these two and not two others.
+# The `vllm` extra above claims 0.26-0.30, and the two bounds are where a break
+# actually lands: a deleted API shows up at the ceiling and an API that does not
+# exist yet shows up at the floor. 0.27/0.28/0.29 sit strictly between two tested
+# lines, so they add install time without adding a failure mode the ends would miss.
+# All five lines were verified together out of band (five-leg GPU matrix, every
+# suite green); these groups are what CI re-checks on every run.
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
-vllm27     = ["vllm>=0.27.0,<0.28.0"]
+vllm30     = ["vllm>=0.30.0,<0.31.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
-dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
+dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
@@ -74,10 +81,10 @@ default-groups = ["vllm26"]
 # which is what made `uv sync` unsatisfiable while the extra said 0.30-only and the
 # default group said 0.26.
 conflicts = [
-    [{ group = "vllm26" },     { group = "vllm27" }],
-    [{ group = "dev" },        { group = "vllm27" }],
-    [{ group = "dev" },        { group = "dev-vllm27" }],
-    [{ group = "dev-vllm27" }, { group = "vllm26" }],
+    [{ group = "vllm26" },     { group = "vllm30" }],
+    [{ group = "dev" },        { group = "vllm30" }],
+    [{ group = "dev" },        { group = "dev-vllm30" }],
+    [{ group = "dev-vllm30" }, { group = "vllm26" }],
 ]
 
 [tool.coverage.run]
