@@ -860,7 +860,449 @@
         "torch": "2.11.0",
         "transformers": "5.17.0",
         "vllm": "0.26.0"
-      }
+      },
+      "throughput": {
+        "alora": {
+          "gs": {
+            "adapters": 4,
+            "arm": "gs-lora-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.1,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 0.0005637695915723117,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-lora-vllm",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": false,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 4,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 46793,
+              "num_hidden_layers": 42,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100356
+            },
+            "runs_s": [
+              1.101,
+              1.1004,
+              1.1,
+              1.0997,
+              1.0994
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "46",
+              "297.49 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "45",
+              "293.55 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 3723.7
+          },
+          "native": {
+            "adapters": 4,
+            "arm": "native-lora",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.5316,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 0.0003022591686650995,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-lora",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 52213,
+              "num_hidden_layers": 40,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              1.5368,
+              1.5316,
+              1.5318,
+              1.5312,
+              1.5312
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "48",
+              "277.75 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "44",
+              "270.83 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 2674.3
+          }
+        },
+        "lora": {
+          "gs": {
+            "adapters": 4,
+            "arm": "gs-lora-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.072,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 6.50899422895316e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-lora-vllm",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": false,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 4,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 47142,
+              "num_hidden_layers": 42,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100356
+            },
+            "runs_s": [
+              1.0729,
+              1.072,
+              1.0721,
+              1.0714,
+              1.072
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "47",
+              "296.56 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "45",
+              "290.47 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 3820.8
+          },
+          "native": {
+            "adapters": 4,
+            "arm": "native-lora",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.4333,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 1.8838540983203924e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-lora",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 52441,
+              "num_hidden_layers": 40,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              1.4377,
+              1.4335,
+              1.4333,
+              1.4332,
+              1.4333
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "47",
+              "256.58 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "45",
+              "235.03 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 2857.7
+          }
+        },
+        "sr": {
+          "gs": {
+            "adapters": 4,
+            "arm": "gs-sr-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.2536,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 0.4464947401484447,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-sr-vllm",
+              "cross_stream_rank": 32,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": true,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 4,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 46293,
+              "num_hidden_layers": 42,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100356
+            },
+            "runs_s": [
+              1.2546,
+              1.2529,
+              1.2536,
+              1.2538,
+              1.2536
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "49",
+              "298.36 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "46",
+              "139.75 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 3267.5
+          },
+          "native": {
+            "adapters": 4,
+            "arm": "native-sr",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 1.5322,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 4.9360163972469454e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-sr",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": "cross_stream",
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 4,
+              "num_gpu_blocks_frontend": 52213,
+              "num_hidden_layers": 40,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.11.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.6.0",
+              "vllm": "0.26.0",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              1.5339,
+              1.5323,
+              1.5322,
+              1.5319,
+              1.5319
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "47",
+              "258.97 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "43",
+              "197.49 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 2673.3
+          }
+        }
+      },
+      "updates": [
+        {
+          "adapters": {},
+          "base_model_local_copy": false,
+          "enforce_eager": false,
+          "finished": "2026-10-05T07:00:56Z",
+          "gpu": null,
+          "harness_dirty": false,
+          "harness_sha": "1434149fc40b877bb840fef87ca173e09df44a66",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "throughput"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261005T063702Z",
+          "scheduler": null,
+          "sr_anchor_converted": [],
+          "started": "2026-10-05T06:38:06Z",
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "throughput_left_out": [],
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": null
+        }
+      ]
     },
     {
       "base_model": "ibm-granite/granite-4.1-3b",
@@ -1324,6 +1766,12 @@
         "label": "SR",
         "source": "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)"
       }
-    ]
+    ],
+    "throughput": {
+      "batch": 32,
+      "generated_tokens": 128,
+      "timed_runs": 5,
+      "warmup_runs": 2
+    }
   }
 }
