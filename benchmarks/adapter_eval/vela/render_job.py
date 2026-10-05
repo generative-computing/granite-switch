@@ -37,6 +37,12 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 EXCLUDE_DIRS = {"local", ".rendered", "__pycache__"}
+# The test helpers the switch benchmark's fleet builder imports.
+SWITCH_HELPERS = (
+    "tests/shared/__init__.py",
+    "tests/shared/base_models.py",
+    "tests/shared/synthetic_adapters.py",
+)
 # Tools that run only on the submitting machine. Left out of the harness
 # payload, which must fit in one environment string (MAX_PAYLOAD).
 LOCAL_ONLY = {
@@ -76,23 +82,43 @@ def need(name: str) -> str:
     return value
 
 
-def harness_payload(extra: dict[str, Path]) -> str:
+def tarball(files: dict[str, Path], what: str) -> str:
+    """``files`` (archive name -> path) as a base64 gzipped tarball, within MAX_PAYLOAD."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for path in sorted((REPO / "benchmarks").rglob("*")):
-            rel = path.relative_to(REPO)
-            if (
-                path.is_file()
-                and not EXCLUDE_DIRS & set(rel.parts)
-                and str(rel) not in LOCAL_ONLY
-            ):
-                tar.add(path, arcname=str(rel))
-        for name, path in extra.items():
-            tar.add(path, arcname=f"extra/{name}")
+        for name, path in files.items():
+            tar.add(path, arcname=name)
     payload = base64.b64encode(buf.getvalue()).decode()
     if len(payload) > MAX_PAYLOAD:
-        fail(f"harness payload is {len(payload)} bytes, limit {MAX_PAYLOAD}")
+        fail(f"{what} payload is {len(payload)} bytes, limit {MAX_PAYLOAD}")
     return payload
+
+
+def harness_payload(extra: dict[str, Path]) -> str:
+    """This benchmark's code (benchmarks/adapter_eval) and the job's extra files."""
+    files = {}
+    for path in sorted((REPO / "benchmarks" / "adapter_eval").rglob("*")):
+        rel = path.relative_to(REPO)
+        if (
+            path.is_file()
+            and not EXCLUDE_DIRS & set(rel.parts)
+            and str(rel) not in LOCAL_ONLY
+        ):
+            files[str(rel)] = path
+    files.update({f"extra/{name}": path for name, path in extra.items()})
+    return tarball(files, "harness")
+
+
+def switch_payload() -> str:
+    """The switch benchmark's copied scripts (benchmarks/*.py) and the test helpers
+    its fleet builder imports, in a payload of their own: with this benchmark's
+    code they would not fit in one environment string."""
+    files = {
+        str(path.relative_to(REPO)): path
+        for path in sorted((REPO / "benchmarks").glob("*.py"))
+    }
+    files.update({rel: REPO / rel for rel in SWITCH_HELPERS})
+    return tarball(files, "switch benchmark")
 
 
 def sr_payload() -> tuple[str, str]:
@@ -218,6 +244,7 @@ def build(args) -> dict:
         if args.replace:
             env.append(env_var("ADAPTER_BENCH_STAGE_REPLACE", "1"))
     env.append(env_var("ADAPTER_BENCH_HARNESS_TGZ", harness_payload(extra)))
+    env.append(env_var("ADAPTER_BENCH_SWITCH_TGZ", switch_payload()))
 
     return {
         "namespace": need("NAMESPACE"),
@@ -241,6 +268,7 @@ def build(args) -> dict:
         "setupCommands": [
             "mkdir -p /workspace/harness && cd /workspace/harness"
             ' && printf %s "$ADAPTER_BENCH_HARNESS_TGZ" | base64 -d | tar xzf -'
+            ' && printf %s "$ADAPTER_BENCH_SWITCH_TGZ" | base64 -d | tar xzf -'
             " && bash benchmarks/adapter_eval/vela/pod_entry.sh"
         ],
     }

@@ -40,6 +40,7 @@ import collections
 import datetime as dt
 import functools
 import getpass
+import hashlib
 import json
 import os
 import shutil
@@ -49,7 +50,7 @@ import traceback
 from importlib import metadata
 from pathlib import Path
 
-from . import staged
+from . import staged, switching
 from . import throughput as switch_bench
 from .common import (
     COMPOSE_GROUPS,
@@ -66,6 +67,8 @@ from .scorers import ScoreContext, ScorerUnavailable, get_scorer
 COMPOSER_MODULE = "granite_switch.composer.compose_granite_switch"
 # The --only entry that measures decode throughput (with intrinsics, or alone).
 THROUGHPUT = "throughput"
+# The --only entry that measures agents switching adapters.
+SWITCHING = "switching"
 
 
 def now() -> str:
@@ -254,27 +257,152 @@ def time_engine(python: str, harness_root: Path, spec: dict) -> dict:
             dump,
         ),
     ]
+    returncode, tail = run_streamed(cmd, harness_root, "throughput")
+    if returncode != 0 or not dump.is_file():
+        return error(switch_bench.failure(tail))
+    return switch_bench.read_entry(dump, spec["settings"])
+
+
+def run_streamed(cmd: list[str], cwd: Path, tag: str) -> tuple[int, list[str]]:
+    """Run one of the switch benchmark's scripts, its output into the pod log as
+    it comes; returns its exit code and last lines."""
     env = dict(os.environ)
     # Unlike generation, vLLM keeps its engine in its own process, as a server
-    # and that benchmark do; its sweep also samples natively (see generate()).
+    # and that benchmark do; its sweeps also sample natively (see generate()).
     env.pop("VLLM_ENABLE_V1_MULTIPROCESSING", None)
     env["VLLM_USE_FLASHINFER_SAMPLER"] = "0"
-    print(f"[throughput] {' '.join(cmd)}", flush=True)
+    env["PYTHONPATH"] = os.pathsep.join(
+        p for p in (str(cwd), env.get("PYTHONPATH")) if p
+    )
+    print(f"[{tag}] {' '.join(cmd)}", flush=True)
     tail: collections.deque[str] = collections.deque(maxlen=50)
     with subprocess.Popen(
         cmd,
-        cwd=harness_root,
+        cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     ) as proc:
-        for line in proc.stdout:  # into the pod log as it comes
+        for line in proc.stdout:
             print(line, end="", flush=True)
             tail.append(line.rstrip())
-    if proc.returncode != 0 or not dump.is_file():
-        return error(switch_bench.failure(list(tail)))
-    return switch_bench.read_entry(dump, spec["settings"])
+    return proc.returncode, list(tail)
+
+
+def synthetic_fleet(
+    python: str, harness_root: Path, cache: Path, base: str, tech: str, settings: dict,
+    target: str,
+) -> Path | None:  # fmt: skip
+    """The switch benchmark's synthetic adapters of one flavor, built once per
+    builder version and settings and kept in ``cache``; None if building failed."""
+    builder = hashlib.sha256((harness_root / switching.FLEET_SCRIPT).read_bytes())
+    fleet = cache / (
+        f"{switching.FLAVORS[tech][0]}_n{settings['adapters']}_r{settings['rank']}"
+        f"_{builder.hexdigest()[:8]}"
+    )
+    if (fleet / ".verified").is_file():
+        return fleet
+    shutil.rmtree(fleet, ignore_errors=True)
+    cmd = [python, *switching.fleet_command(base, fleet, tech, settings, target)]
+    if run_streamed(cmd, harness_root, "switching")[0] != 0:
+        return None
+    built = switching.leaves(fleet, tech, target, settings["adapters"])
+    if not all((leaf / staged.CONFIG_FILE).is_file() for leaf in built):
+        print(f"[switching] {tech}: the fleet lacks some of its adapters", flush=True)
+        return None
+    (fleet / ".verified").write_text(json.dumps(settings))
+    return fleet
+
+
+def run_switching(
+    args, spec, harness_root: Path, work: Path, model_root: Path, base_model: str,
+    cache: Path,
+) -> dict:  # fmt: skip
+    """Per technology, the p95 time for agents switching adapters to complete,
+    granite-switch's and stock vLLM's (``switching.py``)."""
+    settings = spec.switching.settings()
+    target = spec.model_id
+    grid = work / "switching" / "grid"
+    grid_file = grid / f"grid_c{settings['concurrency']}_s{settings['span']}.jsonl"
+    grid.mkdir(parents=True, exist_ok=True)
+    if run_streamed(
+        [args.python, *switching.grid_command(settings, grid_file)],
+        harness_root,
+        "switching",
+    )[0]:
+        return {t.id: error("workload generation failed") for t in spec.technologies}
+    # The fleet builder reads the base weights from a local folder, not a repo id.
+    base_dir = base_model_dir(base_model)
+    vocab = json.loads((base_dir / "config.json").read_text())["vocab_size"]
+    out: dict[str, dict] = {}
+    for k, tech in enumerate(spec.technologies):
+        fleet = synthetic_fleet(
+            args.python, harness_root, cache, str(base_dir), tech.id, settings, target
+        )
+        if fleet is None:
+            out[tech.id] = error("synthetic adapters failed")
+            continue
+        checkpoint = model_root / f"switching_{tech.id}"
+        composed = (
+            run_streamed(
+                [
+                    args.python, "-m", COMPOSER_MODULE,
+                    *switching.compose_args(
+                        base_model, fleet, tech.id, target, settings["adapters"], checkpoint
+                    ),
+                ],
+                harness_root,
+                "switching",
+            )[0]
+            == 0
+            and run_streamed(
+                [args.python, *switching.verify_command(checkpoint, tech.id, settings, vocab)],
+                harness_root,
+                "switching",
+            )[0]
+            == 0
+        )  # fmt: skip
+        native_root = fleet
+        if tech.id == "alora":  # stock vLLM gets it without its invocation tokens
+            native_root = work / "switching" / "native_alora"
+            for leaf in switching.leaves(fleet, tech.id, target, settings["adapters"]):
+                dest = native_root / leaf.relative_to(fleet)
+                if not staged.peft_sr_copy(leaf, dest):
+                    staged.link_others(leaf, dest, "")
+        engines = switching.ENGINES[tech.id]
+        entries = {}
+        for engine in engines if k % 2 == 0 else engines[::-1]:
+            if engine == "gs" and not composed:
+                entries[engine] = error("compose failed")
+                continue
+            clear_compile_caches()
+            rows = work / "switching" / f"{tech.id}_{engine}.jsonl"
+            rows.unlink(missing_ok=True)
+            cmd = [
+                args.python,
+                *switching.arm_command(
+                    tech.id,
+                    engine,
+                    str(checkpoint) if engine == "gs" else base_model,
+                    grid,
+                    native_root,
+                    settings,
+                    rows,
+                ),
+            ]
+            returncode, tail = run_streamed(cmd, harness_root, "switching")
+            entries[engine] = (
+                switching.read_entry(rows, settings)
+                if returncode == 0 and rows.is_file()
+                else error(switch_bench.failure(tail))
+            )
+        out[tech.id] = entries
+        print(
+            f"[switching] {tech.id}: {json.dumps({e: v.get('p95_s', v.get('error')) for e, v in entries.items()})}",
+            flush=True,
+        )
+    return out
 
 
 def throughput_fleets(
@@ -454,6 +582,13 @@ def main(argv: list[str] | None = None) -> int:
         "defaults to --max-model-len",
     )
     p.add_argument("--python", default=sys.executable)
+    p.add_argument(
+        "--switching-cache",
+        type=Path,
+        default=None,
+        help="where the switching runs keep their synthetic adapters, kept across "
+        "runs (default: the work dir)",
+    )
     args = p.parse_args(argv)
 
     started = now()
@@ -461,7 +596,10 @@ def main(argv: list[str] | None = None) -> int:
     staged.check_bench_root(args.bench_root, spec)
     only = [s.strip() for s in args.only.split(",")] if args.only else None
     measure_speed = only is None or THROUGHPUT in only
-    picked = None if only is None else [o for o in only if o != THROUGHPUT]
+    measure_switching = only is None or SWITCHING in only
+    picked = (
+        None if only is None else [o for o in only if o not in (THROUGHPUT, SWITCHING)]
+    )
     work = args.work_dir.resolve()
     model_root = (args.model_dir or work / "models").resolve()
     copies = model_root / "adapters"
@@ -659,6 +797,13 @@ def main(argv: list[str] | None = None) -> int:
             composed,
         )  # fmt: skip
 
+    switching_results = None
+    if measure_switching:
+        switching_results = run_switching(
+            args, spec, harness_root, work, model_root, base_model,
+            (args.switching_cache or work / "synthetic").resolve(),
+        )  # fmt: skip
+
     results = {
         "model": spec.model_id,
         "bench_version": spec.bench_version,
@@ -688,6 +833,9 @@ def main(argv: list[str] | None = None) -> int:
     }
     if throughput is not None:
         results["throughput"] = throughput
+    if switching_results is not None:
+        results["switching"] = switching_results
+        results["run"]["switching"] = spec.switching.settings()
     print_table(cells, spec)
     out = args.results_out or work / "results.json"
     out.parent.mkdir(parents=True, exist_ok=True)

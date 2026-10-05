@@ -99,6 +99,25 @@ class Throughput:
 
 
 @dataclass(frozen=True)
+class Switching:
+    """How agents switching adapters are measured (``switching`` in adapters.yaml)."""
+
+    concurrency: int = 8
+    decode_tokens: int = 512
+    span: int = 32
+    adapters: int = 64
+    rank: int = 32
+    min_agents: int = 16
+
+    def settings(self) -> dict:
+        return vars(self).copy()
+
+    def matches(self, measured: dict) -> bool:
+        """Whether a cell was measured with these settings."""
+        return all(measured.get(k) == v for k, v in self.settings().items())
+
+
+@dataclass(frozen=True)
 class Spec:
     """The benchmark definition, for one of its models (``model_id``)."""
 
@@ -108,6 +127,7 @@ class Spec:
     intrinsics: tuple[Intrinsic, ...]
     model_id: str
     throughput: Throughput = field(default_factory=Throughput)
+    switching: Switching = field(default_factory=Switching)
 
     @property
     def model(self) -> Model:
@@ -182,6 +202,7 @@ class Spec:
                 for i in self.intrinsics
             ],
             "throughput": self.throughput.settings(),
+            "switching": self.switching.settings(),
         }
 
 
@@ -208,12 +229,16 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         intrinsics=tuple(Intrinsic(**i) for i in raw["intrinsics"]),
         model_id=ids[0],
         throughput=Throughput(**raw.get("throughput", {})),
+        switching=Switching(**raw.get("switching", {})),
     )
     if any(
         not isinstance(v, int) or v < (0 if k == "warmup_runs" else 1)
         for k, v in spec.throughput.settings().items()
     ):
         raise ValueError(f"bad throughput settings {spec.throughput.settings()}")
+    sw = spec.switching
+    if min(sw.settings().values()) < 1 or sw.decode_tokens % sw.span:
+        raise ValueError(f"bad switching settings {sw.settings()}")
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:
         raise ValueError(f"technologies must be exactly {sorted(grouped)}")

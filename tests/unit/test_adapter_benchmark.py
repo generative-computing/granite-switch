@@ -31,6 +31,7 @@ pytest.importorskip("yaml")
 
 from benchmarks.adapter_eval import (
     common,
+    gs_switch,
     hf_generate,
     prompts,
     publish,
@@ -39,6 +40,7 @@ from benchmarks.adapter_eval import (
     run_benchmark,
     stage,
     staged,
+    switching,
 )
 from benchmarks.adapter_eval import throughput as switch_bench
 from benchmarks.adapter_eval.scorers import (
@@ -191,6 +193,33 @@ def throughput_for(spec, gs: float = 3300.0, native: float = 1900.0) -> dict:
     }
 
 
+def waited(p95: float = 40.0, **extra) -> dict:
+    """One engine's switching entry, measured with the current settings."""
+    return {
+        "p95_s": p95,
+        "median_s": round(p95 * 0.8, 2),
+        "agents": 16,
+        "waves": 2,
+        "elapsed_s": [p95] * 16,
+        "switches": 256,
+        "tool_calls": 16,
+        "prefill_recomputed": 123456,
+        "prefill_cached": 0,
+        "arm": "native-lora",
+        **SPEC.switching.settings(),
+        **extra,
+    }
+
+
+def switching_for(spec, gs: float = 40.0, native: float = 60.0) -> dict:
+    """A row's switching entries: every engine of every technology."""
+    return {
+        t.id: {"gs": waited(gs)}
+        | ({"native": waited(native)} if publish.has_engine(t.id, "native") else {})
+        for t in spec.technologies
+    }
+
+
 def cells_for(spec, value: float = 0.5) -> dict:
     return {
         i.id: {t.id: {i.headline: value, "n": 10} for t in spec.technologies}
@@ -212,6 +241,7 @@ def results_for(
         "run": {"limit": None, "only": None, **run},
         "cells": cells if cells is not None else cells_for(SPEC),
         "throughput": throughput_for(SPEC),
+        "switching": switching_for(SPEC),
     }
 
 
@@ -814,19 +844,28 @@ def test_render_reference_columns():
 
     page = publish.render(page_data(row, old, reference=ref), SPEC)
 
-    # Every model has its table: 10 columns per intrinsic, in four groups,
-    # then one throughput block of 9 columns, in three.
+    # Every model has its table: Task Quality, 10 columns per intrinsic in four
+    # groups; then Serving Quality, two throughput blocks of 9 columns.
     n = len(SPEC.intrinsics) * len(SPEC.models)
     tables = len(SPEC.models)
     assert page.count('colspan="10"') == n
-    assert page.count(f">{publish.ENGINE_LABEL}</th>") == n + tables
+    assert page.count(f">{publish.TASK_LABEL}</th>") == tables
+    assert page.count(f">{publish.SERVING_LABEL}</th>") == tables
+    assert page.count(f">{publish.ENGINE_LABEL}</th>") == n + 2 * tables
     assert page.count(f">{publish.REFERENCE_LABEL}</th>") == n
     assert page.count(f'rowspan="2">{publish.BASE_LABEL}</th>') == n
     assert page.count(f">{publish.RATIO_LABEL}</th>") == n
-    assert page.count(f">{publish.NATIVE_LABEL}</th>") == tables
-    assert page.count(f">{publish.SPEEDUP_LABEL}</th>") == tables
-    head = f">{publish.THROUGHPUT_LABEL}<br><small>tokens/s</small></th>"
-    assert page.count(head) == tables
+    assert page.count(f">{publish.NATIVE_LABEL}</th>") == 2 * tables
+    assert page.count(f">{publish.SPEEDUP_LABEL}</th>") == 2 * tables
+    decode = ">Decode 128 tokens, no switching, batch 32<br><small>tokens/s</small>"
+    switching = (
+        ">Decode 512 tokens, switch size 32, concurrency 8<br>"
+        "<small>p95 seconds to complete</small>"
+    )
+    assert page.count(decode) == page.count(switching) == tables
+    # Agents finish in 40 s under granite-switch, 60 under stock vLLM: 1.5 times sooner.
+    assert '<td class="num grp-thr start i-start" title="p95 40.0 s, median' in page
+    assert ">+50%</td>" in page
     # 3,300 tokens/s under granite-switch, 1,900 under stock vLLM.
     assert (
         '<td class="num grp-thr start i-start" title="3,300 tokens/s; batch 32' in page
@@ -975,6 +1014,25 @@ def test_sr_runs_on_granite_switch_only(tmp_path, monkeypatch):
     assert out["lora"] == common.skipped("no adapter staged")
 
 
+def test_switching_cells_and_rule():
+    row = results_for()
+    row["switching"]["lora"]["native"] = {"error": "refused: out of KV cache"}
+    old = results_for(SHA_B)
+    del old["switching"]
+    page = publish.render(page_data(row, old, reference=reference_for()), SPEC)
+    assert 'title="refused: out of KV cache">error</td>' in page
+    assert 'title="not measured: the run predates this experiment">·</td>' in page
+    assert publish.missing_cells(old, SPEC) == [publish.SWITCHING]
+    assert publish.switching_speedup(results_for(), "lora", SPEC) == 1.5
+    assert publish.switching_speedup(results_for(), "sr", SPEC) is None
+    row = results_for()
+    row["switching"]["sr"]["gs"] = waited(decode_tokens=1024)  # other settings
+    assert publish.missing_cells(row, SPEC) == [publish.SWITCHING]
+    # A row needs no stock-vLLM SR.
+    row["switching"]["sr"] = {"gs": waited()}
+    assert publish.cache_hit(row, SPEC)
+
+
 def test_a_row_needs_its_throughput():
     row = results_for()
     assert publish.cache_hit(row, SPEC)
@@ -1027,11 +1085,16 @@ def test_summary_for_the_pr_comment():
         "| Answerability | 80.0 / 80.0 / — | 90.0 / 90.0 / 90.0 | 50.0 "
         "| 0.75 / 0.75 / · |"
     )
-    # Then the decode throughput, per technology.
-    assert lines[-1] == (
-        "Decode throughput, tokens/s, LoRA / aLoRA / SR: granite-switch (vLLM) "
-        "3,300 / 3,300 / 3,300; PEFT (vLLM) 1,900 / 1,900 / —; "
+    # Then both throughput blocks, per technology.
+    assert lines[-3] == (
+        "Decode 128 tokens, no switching, batch 32, tokens/s, LoRA / aLoRA / SR: "
+        "granite-switch (vLLM) 3,300 / 3,300 / 3,300; PEFT (vLLM) 1,900 / 1,900 / —; "
         "speedup +74% / +74% / —"
+    )
+    assert lines[-1] == (
+        "Decode 512 tokens, switch size 32, concurrency 8, p95 seconds to complete, "
+        "LoRA / aLoRA / SR: granite-switch (vLLM) 40 / 40 / 40; "
+        "PEFT (vLLM) 60 / 60 / —; speedup +50% / +50% / —"
     )
     assert "(cached result)" in publish.summary(data, SPEC, SHA_A, "cached")
 
@@ -2095,6 +2158,12 @@ def bench_with_lora_and_alora(tmp_path, monkeypatch) -> tuple[list, list, list]:
     monkeypatch.setattr(run_benchmark, "generate", fake_generate)
     monkeypatch.setattr(run_benchmark, "time_engine", fake_time_engine)
     monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: clears.append(1))
+    monkeypatch.setattr(
+        run_benchmark,
+        "run_switching",
+        lambda *a: engines.append({"technology": "*", "engine": "switching"})
+        or switching_for(SPEC),
+    )
     return composes, engines, clears
 
 
@@ -2130,8 +2199,11 @@ def test_run_times_each_technology_against_stock_vllm(tmp_path, monkeypatch):
         ("lora", "native"),
         ("alora", "native"),
         ("alora", "gs"),
+        ("*", "switching"),  # then the agents switching adapters
     ]
     assert len(clears) == 4
+    assert results["switching"] == switching_for(SPEC)
+    assert results["run"]["switching"] == SPEC.switching.settings()
     assert engines[0]["settings"] == SPEC.throughput.settings()
     assert engines[1]["model"] == str(tmp_path / "base")
     # Both engines get the composer's folder, but stock vLLM gets the aLoRA
@@ -2161,6 +2233,197 @@ def test_only_throughput_runs_no_accuracy(tmp_path, monkeypatch):
     assert run_benchmark.main(bench_argv(tmp_path, "--only", "answerability")) == 0
     results = json.loads((tmp_path / "work" / "results.json").read_text())
     assert "throughput" not in results and not engines
+
+
+def test_only_switching_runs_just_it(tmp_path, monkeypatch):
+    _, engines, _ = bench_with_lora_and_alora(tmp_path, monkeypatch)
+    assert run_benchmark.main(bench_argv(tmp_path, "--only", "switching")) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert [e["engine"] for e in engines] == ["switching"]
+    assert results["cells"] == {} and "throughput" not in results
+    assert results["switching"] == switching_for(SPEC)
+
+
+def test_switching_commands_follow_their_scripts(tmp_path):
+    sw = SPEC.switching.settings()
+    out, grid, root = tmp_path / "o.jsonl", tmp_path / "grid", tmp_path / "fleet"
+    common_args = ["--cells", "8:32", "--fleet-dir", str(grid), "--out", str(out)]
+    assert switching.arm_command("lora", "native", "base", grid, root, sw, out) == [
+        switching.DRIVER, "--arm", "native-lora", "--base-model", "base",
+        "--lora-root", str(root), "--lora-rank", "32", *common_args,
+    ]  # fmt: skip
+    assert switching.arm_command("sr", "gs", "ckpt", grid, None, sw, out) == [
+        switching.DRIVER, "--arm", "shadow-residual", "--sr-checkpoint", "ckpt",
+        *common_args,
+    ]  # fmt: skip
+    assert switching.arm_command("alora", "gs", "ckpt", grid, None, sw, out) == [
+        "-m", switching.GS_DRIVER, "--checkpoint", "ckpt", *common_args,
+    ]  # fmt: skip
+    compose = switching.compose_args("base", root, "sr", "granite-4.1-3b", 3, out)
+    assert compose[compose.index("--technology") + 1] == "alora"  # SR from its weights
+    assert compose[compose.index("--include-adapters") + 1 :][:3] == [
+        "adapter_00",
+        "adapter_01",
+        "adapter_02",
+    ]
+    assert "--expect-kv" in switching.verify_command(out, "lora", sw, 100352)
+    assert "--expect-kv" not in switching.verify_command(out, "sr", sw, 100352)
+    grid_args = switching.grid_command(sw, grid / "g.jsonl")
+    assert grid_args[grid_args.index("--decode") + 1] == "512"
+
+
+def test_their_scripts_take_every_flag_given(tmp_path):
+    sw = SPEC.switching.settings()
+    out = tmp_path / "o"
+    given = {
+        switching.DRIVER: switching.arm_command(
+            "lora", "native", "b", out, out, sw, out
+        )
+        + switching.arm_command("sr", "gs", "b", out, None, sw, out),
+        switching.GRID_SCRIPT: switching.grid_command(sw, out),
+        switching.FLEET_SCRIPT: switching.fleet_command("b", out, "lora", sw, "t"),
+        switching.VERIFY_SCRIPT: switching.verify_command(out, "lora", sw, 1),
+    }
+    for script, args in given.items():
+        help_text = subprocess.run(
+            [sys.executable, str(REPO_ROOT / script), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for flag in (a for a in args if a.startswith("--")):
+            assert flag in help_text, (script, flag)
+    gs_args = switching.arm_command("lora", "gs", "c", out, None, sw, out)[2:]
+    with pytest.raises(SystemExit) as done:
+        gs_switch.main([*gs_args, "--help"])
+    assert done.value.code == 0
+
+
+def test_switching_entry_takes_their_p95(tmp_path):
+    rows = [
+        {"elapsed_s": float(k), "wave": k % 2, "switches": 16, "tool_calls": 1}
+        for k in range(1, 17)
+    ]
+    entry = switching.entry(rows, SPEC.switching.settings())
+    # Nearest rank over 16 agents: the 15th fastest.
+    assert (entry["p95_s"], entry["median_s"], entry["agents"]) == (15.0, 8.5, 16)
+    assert (entry["waves"], entry["switches"], entry["tool_calls"]) == (2, 256, 16)
+    assert SPEC.switching.matches(entry)
+    assert switching.entry([], {}) == common.error("the driver wrote no agents")
+
+
+def test_gs_switch_names_the_adapter_by_control_token(tmp_path, monkeypatch):
+    inputs = types.ModuleType("vllm.inputs")
+    inputs.TokensPrompt = lambda **kw: kw
+    monkeypatch.setitem(sys.modules, "vllm", types.ModuleType("vllm"))
+    monkeypatch.setitem(sys.modules, "vllm.inputs", inputs)
+    seen = []
+
+    class Engine:
+        def generate(self, prompt, params, request_id, **kw):
+            seen.append((prompt["prompt_token_ids"], kw))
+            return "stream"
+
+        def reset_prefix_cache(self):
+            return True
+
+    proxy = gs_switch.ControlTokenEngine(Engine())
+    adapter = gs_switch.ControlToken("ad1", 100353)
+    assert (
+        proxy.generate({"prompt_token_ids": [5, 6]}, None, "r", lora_request=adapter)
+        == "stream"
+    )
+    proxy.generate({"prompt_token_ids": [5, 6]}, None, "r")
+    # The adapter goes first in the prompt, and no LoRARequest reaches the engine.
+    assert seen == [([100353, 5, 6], {}), ([5, 6], {})]
+    assert proxy.reset_prefix_cache() is True
+
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "adapter_names": ["adapter_01", "adapter_00"],
+                "adapter_token_ids": [101, 100],
+            }
+        )
+    )
+    assert gs_switch.control_tokens(tmp_path) == {"ad0": 100, "ad1": 101}
+
+
+def test_run_switching_runs_their_scripts_per_technology(tmp_path, monkeypatch):
+    sw = SPEC.switching
+    base = tmp_path / "base"
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps({"vocab_size": 100352}))
+    monkeypatch.setattr(run_benchmark, "base_model_dir", lambda b: base)
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: None)
+    calls = []
+
+    def fake_run(cmd, cwd, tag):
+        calls.append(cmd)
+        args = cmd[1:]
+        if args[0] == switching.GRID_SCRIPT:
+            Path(args[args.index("--out") + 1]).write_text("{}\n")
+        elif args[0] == switching.FLEET_SCRIPT:
+            out, flavor = (
+                Path(args[args.index("--output") + 1]),
+                args[args.index("--flavor") + 1],
+            )
+            tech = {"lora": "lora", "alora": "alora", "sr": "sr"}[flavor]
+            for leaf in switching.leaves(out, tech, SPEC.model_id, sw.adapters):
+                leaf.mkdir(parents=True)
+                config = {"r": 32} | (
+                    {"alora_invocation_tokens": [1]} if flavor == "alora" else {}
+                )
+                (leaf / staged.CONFIG_FILE).write_text(json.dumps(config))
+        elif "--out" in args and "--cells" in args:  # an engine's run
+            rows = [
+                {
+                    "elapsed_s": 30.0 if "gs_switch" in " ".join(args) else 45.0,
+                    "wave": 0,
+                }
+            ]
+            Path(args[args.index("--out") + 1]).write_text(json.dumps(rows[0]) + "\n")
+        return 0, []
+
+    monkeypatch.setattr(run_benchmark, "run_streamed", fake_run)
+    args = types.SimpleNamespace(python="py")
+    cache = tmp_path / "cache"
+    out = run_benchmark.run_switching(
+        args,
+        SPEC,
+        REPO_ROOT,
+        tmp_path / "work",
+        tmp_path / "models",
+        "ibm-granite/granite-4.1-3b",
+        cache,
+    )
+    assert set(out["lora"]) == {"gs", "native"} and set(out["sr"]) == {"gs"}
+    # The fleet builder gets the base model's local folder, even for a repo id.
+    fleet = next(c for c in calls if switching.FLEET_SCRIPT in c)
+    assert fleet[fleet.index("--base") + 1] == str(base)
+    assert out["lora"]["gs"]["p95_s"] == 30.0 and out["lora"]["native"]["p95_s"] == 45.0
+    engines = [c for c in calls if "--cells" in c]
+    # Which engine goes first alternates by technology, as for decoding.
+    assert [("native" if "native-lora" in c else "gs") for c in engines] == [
+        "gs", "native", "native", "gs", "gs",
+    ]  # fmt: skip
+    composes = [c for c in calls if run_benchmark.COMPOSER_MODULE in c]
+    assert len(composes) == 3 and composes[0][-3:-2] == ["adapter_63"]
+    native = tmp_path / "work" / "switching" / "native_alora"
+    config = json.loads(next(native.rglob(staged.CONFIG_FILE)).read_text())
+    assert "alora_invocation_tokens" not in config
+    # The synthetic adapters are kept: a second run builds none.
+    calls.clear()
+    run_benchmark.run_switching(
+        args,
+        SPEC,
+        REPO_ROOT,
+        tmp_path / "work",
+        tmp_path / "models",
+        "ibm-granite/granite-4.1-3b",
+        cache,
+    )
+    assert not [c for c in calls if switching.FLEET_SCRIPT in c]
 
 
 def test_run_renames_mlp_weights_and_refuses_unknown_modules(tmp_path, monkeypatch):
@@ -2762,12 +3025,19 @@ def test_harness_payload_ships_no_local_files(tmp_path):
         names = tar.getnames()
     assert "benchmarks/adapter_eval/common.py" in names
     assert "benchmarks/adapter_eval/vela/pod_entry.sh" in names
-    assert switch_bench.DRIVER in names  # the switch benchmark's driver
     assert "extra/selection.json" in names
     assert not render_job.LOCAL_ONLY & set(names)
     for name in names:
         parts = set(Path(name).parts)
         assert not parts & render_job.EXCLUDE_DIRS, name
+    # The switch benchmark's scripts travel in a payload of their own.
+    payload = render_job.switch_payload()
+    with tarfile.open(fileobj=io.BytesIO(base64.b64decode(payload))) as tar:
+        theirs = tar.getnames()
+    for script in (switch_bench.DRIVER, switching.DRIVER, switching.FLEET_SCRIPT):
+        assert script in theirs and script not in names
+    assert set(render_job.SWITCH_HELPERS) <= set(theirs)
+    assert len(payload) <= render_job.MAX_PAYLOAD
 
 
 def test_job_values_take_the_key_from_a_secret(tmp_path, monkeypatch):

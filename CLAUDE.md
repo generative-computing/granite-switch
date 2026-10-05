@@ -86,11 +86,15 @@ granite-switch/
 │
 ├── benchmarks/                          # Benchmarks run against a commit (not part of the package)
 │   ├── bench_switch_repro.py            # The switch benchmark's throughput driver, copied unchanged
+│   ├── make_synth_fleet.py, verify_composed.py, gen_switching_grid.py,
+│   │   bench_switching_grid.py, bench_agent_sim.py  # Its switching experiment, copied unchanged
 │   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
 │       ├── adapters.yaml                # Benchmark definition: models, intrinsics, technologies, versions
 │       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block
 │       ├── generate.py                  # vLLM generation for one composed checkpoint
 │       ├── throughput.py                # Runs the switch benchmark's driver per engine; reads its records
+│       ├── switching.py                 # Runs its switching experiment's scripts; reads their rows
+│       ├── gs_switch.py                 # The granite-switch LoRA/aLoRA switching arm, on its code
 │       ├── reference.py                 # In-pod driver for the HF + PEFT and base-model columns
 │       ├── hf_generate.py               # HF + PEFT generation for one reference cell
 │       ├── prompts.py                   # Per-model prompt building (documents, chat-template options)

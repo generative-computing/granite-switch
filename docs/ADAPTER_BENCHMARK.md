@@ -32,7 +32,8 @@ The base model, the intrinsics and their headline metrics are listed in
 
 ### Columns
 
-Each intrinsic has 10 columns on the page, in four groups:
+The table has two sections. **Task Quality** is how well the adapters do
+their tasks: per intrinsic, 10 columns in four groups:
 
 | Group | Columns | What it shows | Per commit |
 |---|---|---|---|
@@ -41,17 +42,24 @@ Each intrinsic has 10 columns on the page, in four groups:
 | Base | one | the base model with no adapter, told the answer format | no |
 | Gain ratio | LoRA, aLoRA, SR | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
 
-After the intrinsics, each row ends with one **throughput block** of 9
-columns, per technology rather than per intrinsic:
+**Serving Quality - Throughput** is how fast they are served, per
+technology rather than per intrinsic, in two blocks of 9 columns:
+
+| Block | Each cell |
+|---|---|
+| Decode 128 tokens, no switching, batch 32 | decode tokens per second ([Decode throughput](#decode-throughput)) |
+| Decode 512 tokens, switch size 32, concurrency 8 | the p95 seconds for an agent switching adapters to finish ([Agents switching adapters](#agents-switching-adapters)) |
+
+Each block has the same three groups:
 
 | Group | Columns | What it shows |
 |---|---|---|
-| granite-switch (vLLM) | LoRA, aLoRA, SR | decode tokens per second, the technology's adapters composed with the commit |
+| granite-switch (vLLM) | LoRA, aLoRA, SR | the technology's adapters composed with the commit |
 | PEFT (vLLM) | LoRA, aLoRA | the same adapters served by stock vLLM as PEFT LoRAs; SR shows `—`, as stock vLLM has no SR |
-| Speedup | LoRA, aLoRA | how much faster granite-switch decodes, in whole percent (+34% is 1.34 times the tokens per second); SR shows `—` |
+| Speedup | LoRA, aLoRA | how much faster granite-switch is, in whole percent (+34% is 1.34 times the tokens per second, or agents done in 1/1.34 of the time); SR shows `—` |
 
-Both are measured in each commit's run. See
-[Decode throughput](#decode-throughput).
+Both blocks are measured in each commit's run, both engines on the same GPU,
+by the switch benchmark's own scripts, copied unchanged into `benchmarks/`.
 
 HF + PEFT and Base are the **reference columns**. They show what the
 checkpoints score outside granite-switch, and what the base model scores
@@ -165,6 +173,10 @@ A row also holds its decode throughput, per technology and engine:
 ```
 
 An engine that failed holds `{"error": ...}`, e.g. a refused gate.
+
+And its switching run, the same way: per technology and engine, the p95 and
+median seconds to complete, the agents and waves, the switches, tool calls and
+re-prefilled prompt tokens summed over the agents, and the settings.
 
 Metrics are stored as fractions and shown as percentages (`86.7`). On the
 page:
@@ -574,10 +586,70 @@ The settings are `throughput` in `adapters.yaml`. A row counts as done only
 with every technology's throughput measured with the current batch and
 generated length, so rows from before throughput existed are cache misses.
 `submit.sh bench <ref> --only throughput` measures just the throughput of a
-row, without its accuracy run.
+row, without its accuracy run (`--only switching`, the switching block).
 
 Running it adds about 20 minutes to a commit's run: a checkpoint per
 technology, and an engine start per engine and technology.
+
+## Agents switching adapters
+
+The second throughput block is one cell of the switch benchmark's
+concurrency-by-switching grid (its `grid_concurrency` figure), measured by its
+own scripts, copied unchanged from the staging repository's
+`feature/switch-benchmark` branch:
+
+| Script | Its part |
+|---|---|
+| `benchmarks/make_synth_fleet.py` | its synthetic adapters (it needs `tests/shared/base_models.py` and `synthetic_adapters.py`, shipped with it) |
+| `benchmarks/verify_composed.py` | its check of a composed checkpoint |
+| `benchmarks/gen_switching_grid.py` | the agents' workload |
+| `benchmarks/bench_switching_grid.py` | the run of one engine over the cell |
+| `benchmarks/bench_agent_sim.py` | the agent loop, engine, gates and timing it uses |
+
+[switching.py](../benchmarks/adapter_eval/switching.py) builds their command
+lines and reads their rows back.
+
+**The workload**, its, at one cell: **8 agents** at a time, 16 in all (two
+waves, so the p95 is over 16 agents, as in its grid). Each agent has a prompt
+of its own, log-spaced from 256 to 16,384 tokens, generates **512 tokens**,
+and switches adapter **every 32 tokens**, picking adapters it has not used
+yet first, with tool calls (and their latencies) at its rate between runs.
+The figure runs 1,024 tokens over concurrency 1 to 64; the settings are
+`switching` in `adapters.yaml`.
+
+**The adapters**: its **64 synthetic adapters** of rank 32 per technology
+(`lora`, `alora`, `sr`), as in its figure. Their timing does not depend on
+their weights, and the cost being measured grows with their number: a first
+visit to an adapter re-prefills the agent's whole context. They are built
+once per model and builder version, and kept on the storage volume.
+
+**The engines**, per technology:
+
+| | granite-switch (vLLM) | PEFT (vLLM): stock vLLM |
+|---|---|---|
+| LoRA | a checkpoint of the 64 LoRA adapters, composed by the commit and checked by `verify_composed.py`; switching like stock vLLM, by control token (below) | its `native-lora` arm: a new request at every switch, with the adapter's LoRARequest |
+| aLoRA | the same, with the 64 aLoRA adapters | the same, the aLoRA adapters without their invocation tokens |
+| SR | its `shadow-residual` arm on a checkpoint of the 64 SR adapters: one adapter for the whole task, since SR switches without a re-prefill | none |
+
+Both re-prefill at a switch: the agent's prompt and everything it generated,
+under the new adapter. With prefix caching on, stock vLLM's cache is keyed on
+the LoRA and a revisit reuses what that adapter computed before; under
+granite-switch the control token is the first token, so the cache does the
+same.
+
+**The granite-switch LoRA and aLoRA arm** is the one thing not in that
+benchmark, which has a granite-switch arm for SR only.
+[gs_switch.py](../benchmarks/adapter_eval/gs_switch.py) runs its cell loop,
+agent loop (as its native-lora arm), engine, gates and timing unchanged,
+through an engine that names each request's adapter by its control token
+rather than a LoRARequest.
+
+**The cell** is its figure's: the p95 time for an agent to finish, by nearest
+rank. The speedup is stock vLLM's p95 over granite-switch's, in whole percent.
+
+Running it adds roughly 30 to 45 minutes to a commit's run: three
+64-adapter checkpoints to compose and check, and five engines.
+`submit.sh bench <ref> --only switching` measures just this block.
 
 ## Re-scoring saved answers
 

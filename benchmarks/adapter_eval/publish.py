@@ -85,13 +85,29 @@ ENGINE_LABEL = "granite-switch (vLLM)"
 REFERENCE_LABEL = "HF + PEFT"
 BASE_LABEL = "Base"
 RATIO_LABEL = "Gain ratio"
-THROUGHPUT_LABEL = "Decode throughput"
 NATIVE_LABEL = "PEFT (vLLM)"
 SPEEDUP_LABEL = "Speedup"
 # A row's throughput per technology: granite-switch's and stock vLLM's.
 ENGINES = {"gs": ENGINE_LABEL, "native": NATIVE_LABEL}
-# The --only entry of a throughput run (run_benchmark.py).
+# The --only entries of the throughput runs (run_benchmark.py).
 THROUGHPUT = "throughput"
+SWITCHING = "switching"
+# The page's two sections.
+TASK_LABEL = "Task Quality"
+SERVING_LABEL = "Serving Quality - Throughput"
+
+
+def decode_label(spec: Spec) -> str:
+    t = spec.throughput
+    return f"Decode {t.generated_tokens} tokens, no switching, batch {t.batch}"
+
+
+def switching_label(spec: Spec) -> str:
+    sw = spec.switching
+    return (
+        f"Decode {sw.decode_tokens} tokens, switch size {sw.span}, "
+        f"concurrency {sw.concurrency}"
+    )
 
 
 # --- data ------------------------------------------------------------------
@@ -159,9 +175,42 @@ def throughput_done(row: dict, spec: Spec) -> bool:
     return True
 
 
+def p95_seconds(row: dict, tech_id: str, engine: str, spec: Spec) -> float | None:
+    """A row's p95 time for agents switching adapters to complete, for one
+    technology and engine, measured with the current settings, or None."""
+    measured = ((row.get(SWITCHING) or {}).get(tech_id) or {}).get(engine)
+    if not isinstance(measured, dict) or not spec.switching.matches(measured):
+        return None
+    value = measured.get("p95_s")
+    return value if isinstance(value, int | float) else None
+
+
+def switching_done(row: dict, spec: Spec) -> bool:
+    """Whether every technology's switching run is measured, on every engine it has."""
+    for tech in spec.technologies:
+        entry = (row.get(SWITCHING) or {}).get(tech.id)
+        if entry is None or is_error(entry):
+            return False
+        if "skipped" not in entry and any(
+            p95_seconds(row, tech.id, e, spec) is None
+            for e in ENGINES
+            if has_engine(tech.id, e)
+        ):
+            return False
+    return True
+
+
+def switching_speedup(row: dict, tech_id: str, spec: Spec) -> float | None:
+    """How many times sooner granite-switch's agents finish than stock vLLM's."""
+    if not has_engine(tech_id, "native"):
+        return None
+    gs, native = (p95_seconds(row, tech_id, e, spec) for e in ENGINES)
+    return None if not gs or native is None else native / gs
+
+
 def missing_cells(row: dict, spec: Spec) -> list[str]:
     """What keeps ``row`` from being a cache hit: ``intrinsic/tech`` cells,
-    and ``throughput``."""
+    ``throughput`` and ``switching``."""
     out = []
     for intrinsic in spec.intrinsics:
         for tech in spec.technologies:
@@ -170,6 +219,8 @@ def missing_cells(row: dict, spec: Spec) -> list[str]:
                 out.append(f"{intrinsic.id}/{tech.id}")
     if not throughput_done(row, spec):
         out.append(THROUGHPUT)
+    if not switching_done(row, spec):
+        out.append(SWITCHING)
     return out
 
 
@@ -202,8 +253,8 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     old = find_row(data, sha, spec.model_id)
     if run.get("only") and old and old.get("bench_version") == spec.bench_version:
         for picked in run["only"]:
-            if picked == THROUGHPUT:
-                old[THROUGHPUT] = results[THROUGHPUT]
+            if picked in (THROUGHPUT, SWITCHING):
+                old[picked] = results[picked]
             else:
                 old["cells"][picked] = results["cells"][picked]
         old.setdefault("updates", []).append(run)
@@ -444,6 +495,7 @@ table.bench { border-collapse: collapse; }
 .bench th.grp-ratio { background: #efece3; }
 .bench td.grp-ratio { background: #fbfaf6; }
 .bench th.grp-thr { background: #e5efe7; }
+.bench th.section { font-size: 15px; letter-spacing: .02em; }
 .bench td.grp-thr { background: #f6faf7; }
 .bench .start { border-left: 2px solid #b0b0b0; }
 .bench .i-start { border-left: 2px solid #6b6b6b; }
@@ -674,6 +726,55 @@ def _speedup_html(row: dict, tech_id: str, extra: str, spec: Spec) -> str:
         title = (
             f"{ratio:.2f}x: {ENGINE_LABEL} {gs:,.0f} tokens/s, {NATIVE_LABEL} "
             f"{native:,.0f} tokens/s; the same GPU, one after the other"
+        )
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _switching_title(measured: dict) -> str:
+    parts = [
+        f"p95 {measured['p95_s']:.1f} s, median {measured['median_s']:.1f} s, "
+        f"over {measured['agents']} agents in {measured['waves']} waves",
+        f"{measured['switches']} adapter switches and {measured['tool_calls']} tool "
+        f"calls in all; {measured['prefill_recomputed']:,} prompt tokens re-prefilled",
+        f"{measured['adapters']} synthetic adapters of rank {measured['rank']}",
+    ]
+    return "; ".join(parts)
+
+
+def _switching_html(
+    row: dict, tech_id: str, engine: str, extra: str, spec: Spec
+) -> str:
+    """One engine's switching ``<td>`` for one technology: its p95 seconds."""
+    entry = (row.get(SWITCHING) or {}).get(tech_id)
+    measured = (entry or {}).get(engine)
+    if not has_engine(tech_id, engine):
+        cls, title, text = "skip", "stock vLLM has no SR implementation", "—"
+    elif row.get(SWITCHING) is None:
+        cls, title, text = "skip", "not measured: the run predates this experiment", "·"
+    elif entry is None or not isinstance(measured, dict):
+        cls, title, text = "skip", "not measured", "·"
+    elif is_error(measured):
+        cls, title, text = "err", measured["error"], "error"
+    elif p95_seconds(row, tech_id, engine, spec) is None:
+        cls, title, text = "skip", "measured with other settings", "·"
+    else:
+        cls, title = "num", _switching_title(measured)
+        text = f"{measured['p95_s']:,.0f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _switching_speedup_html(row: dict, tech_id: str, extra: str, spec: Spec) -> str:
+    ratio = switching_speedup(row, tech_id, spec)
+    if not has_engine(tech_id, "native"):
+        cls, title, text = "skip", "no stock-vLLM SR to compare with", "—"
+    elif ratio is None:
+        cls, title, text = "skip", "needs both engines' times", "·"
+    else:
+        gs, native = (p95_seconds(row, tech_id, e, spec) for e in ENGINES)
+        cls, text = "num", percent_faster(ratio)
+        title = (
+            f"{ratio:.2f}x sooner: {ENGINE_LABEL} {gs:.1f} s, {NATIVE_LABEL} "
+            f"{native:.1f} s at p95; the same GPU, one after the other"
         )
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
@@ -916,16 +1017,23 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
     width = sum(sizes.values())
     data_attrs = " ".join(f'data-{g}="{size}"' for g, size in sizes.items())
+    count = len(spec.intrinsics)
+    task_attrs = " ".join(f'data-{g}="{size * count}"' for g, size in sizes.items())
     head = [
         [
-            '<th class="commit" rowspan="3">Commit</th>',
-            '<th rowspan="3">Subject</th>',
+            '<th class="commit" rowspan="4">Commit</th>',
+            '<th rowspan="4">Subject</th>',
+            f'<th class="i section i-start" colspan="{width * count}" {task_attrs}>'
+            f"{_esc(TASK_LABEL)}</th>",
+            f'<th class="grp-thr section i-start" colspan="{6 * n}">'
+            f"{_esc(SERVING_LABEL)}</th>",
         ],
+        [],
         [],
         [],
     ]
     for intrinsic in spec.intrinsics:
-        head[0].append(
+        head[1].append(
             f'<th class="i i-start" colspan="{width}" {data_attrs}>'
             f"{_esc(intrinsic.name)}<br>"
             f"<small>{_esc(intrinsic.headline_label)}</small></th>"
@@ -933,24 +1041,32 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
         for group, label in GROUP_LABELS.items():
             span = 'rowspan="2"' if group == "base" else f'colspan="{sizes[group]}"'
             start = "start i-start" if group == "gs" else "start"
-            head[1].append(f'<th class="grp-{group} {start}" {span}>{_esc(label)}</th>')
+            head[2].append(f'<th class="grp-{group} {start}" {span}>{_esc(label)}</th>')
             if group == "base":
                 continue
             for k, tech in enumerate(techs):
                 first = start if k == 0 else ""
-                head[2].append(
+                head[3].append(
                     f"<th{_classes(f'grp-{group}', first)}>{_esc(tech.label)}</th>"
                 )
-    # One throughput block per row, per technology rather than per intrinsic.
-    head[0].append(
-        f'<th class="grp-thr i-start" colspan="{3 * n}">{_esc(THROUGHPUT_LABEL)}<br>'
-        "<small>tokens/s</small></th>"
-    )
-    for label in (*ENGINES.values(), SPEEDUP_LABEL):
-        head[1].append(f'<th class="grp-thr start" colspan="{n}">{_esc(label)}</th>')
-        for k, tech in enumerate(techs):
-            first = "start" if k == 0 else ""
-            head[2].append(f"<th{_classes('grp-thr', first)}>{_esc(tech.label)}</th>")
+    # The two throughput blocks, per technology rather than per intrinsic.
+    for block, unit in (
+        (decode_label(spec), "tokens/s"),
+        (switching_label(spec), "p95 seconds to complete"),
+    ):
+        head[1].append(
+            f'<th class="grp-thr i-start" colspan="{3 * n}">{_esc(block)}<br>'
+            f"<small>{_esc(unit)}</small></th>"
+        )
+        for label in (*ENGINES.values(), SPEEDUP_LABEL):
+            head[2].append(
+                f'<th class="grp-thr start" colspan="{n}">{_esc(label)}</th>'
+            )
+            for k, tech in enumerate(techs):
+                first = "start" if k == 0 else ""
+                head[3].append(
+                    f"<th{_classes('grp-thr', first)}>{_esc(tech.label)}</th>"
+                )
 
     body = []
     for row in rows:
@@ -1024,12 +1140,20 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
         for k, tech in enumerate(techs):
             extra = "grp-thr start" if k == 0 else "grp-thr"
             cells.append(_speedup_html(row, tech.id, extra, spec))
+        for e, engine in enumerate(ENGINES):
+            for k, tech in enumerate(techs):
+                start = ("start i-start" if e == 0 else "start") if k == 0 else ""
+                extra = f"grp-thr {start}".strip()
+                cells.append(_switching_html(row, tech.id, engine, extra, spec))
+        for k, tech in enumerate(techs):
+            extra = "grp-thr start" if k == 0 else "grp-thr"
+            cells.append(_switching_speedup_html(row, tech.id, extra, spec))
         old = row.get("bench_version") != spec.bench_version
         body.append(f"<tr{_classes('old' if old else '')}>" + "".join(cells) + "</tr>")
     if not body:
         body.append(
             f'<tr><td class="commit" colspan="2">no commit benchmarked yet</td>'
-            f'<td colspan="{width * len(spec.intrinsics) + 3 * n}"></td></tr>'
+            f'<td colspan="{width * len(spec.intrinsics) + 6 * n}"></td></tr>'
         )
     return (
         '<div class="wrap"><table class="bench"><thead>'
@@ -1091,7 +1215,7 @@ def render(data: dict, spec: Spec) -> str:
         f'<label><input type="checkbox" data-group="{g}" checked> {_esc(label)}</label>'
         for g, label in TOGGLE_LABELS.items()
     )
-    t = spec.throughput
+    t, sw = spec.throughput, spec.switching
     tech_notes = "".join(
         f"<li><b>{_esc(t.label)}</b>: {_esc(t.source)}</li>" for t in spec.technologies
     )
@@ -1135,14 +1259,25 @@ model that granite-switch keeps. <b>n/a</b>: the adapter gains under
 divide by.</li>
 <li><b>—</b> no adapter or eval set for this cell; <b>·</b> not run;
 <b>error</b> the run failed. Greyed rows used an older benchmark version.</li>
-<li><b>{_esc(THROUGHPUT_LABEL)}</b>, per technology: tokens per second while
-decoding, measured by the switch benchmark's own driver, as in its batch-decode
-figure but at one batch size. A batch of {t.batch}
+<li><b>{_esc(TASK_LABEL)}</b> is how well the adapters do their tasks;
+<b>{_esc(SERVING_LABEL)}</b> how fast they are served, per technology rather
+than per intrinsic, both engines on the same GPU one after the other in each
+commit's run, measured by the switch benchmark's own scripts.</li>
+<li><b>{_esc(decode_label(spec))}</b>: tokens per second while decoding, as in
+the switch benchmark's batch-decode figure but at one batch size: {t.batch}
 one-token prompts, each request on one of the technology's adapters (all of the
 model's, drawn at random, the same draw for both engines), exactly
 {t.generated_tokens} tokens generated each, the median of {t.timed_runs} timed
-runs after {t.warmup_runs} warm-up runs, no prefix caching. Both engines run on
-the same GPU, one after the other, in each commit's run.</li>
+runs after {t.warmup_runs} warm-up runs, no prefix caching.</li>
+<li><b>{_esc(switching_label(spec))}</b>: the p95 time for an agent to
+finish, in seconds, as in its grid-concurrency figure but at one cell:
+{sw.concurrency} agents at a time ({sw.min_agents} in all), each generating
+{sw.decode_tokens} tokens over a prompt of its own, switching adapter every
+{sw.span} tokens over {sw.adapters} synthetic adapters, with tool calls between
+runs. Stock vLLM re-issues the request at every switch, re-prefilling the
+context (cached for an adapter it saw before), and so does granite-switch LoRA
+and aLoRA, by control token; granite-switch SR switches without a re-prefill,
+so its agents run uninterrupted but for the tool calls.</li>
 <li><b>{_esc(ENGINE_LABEL)}</b> (throughput): the technology's adapters composed
 into a checkpoint of their own; a request's prompt is its adapter's control
 token.</li>
@@ -1151,9 +1286,9 @@ vLLM's multi-LoRA support, without granite-switch (the switch benchmark's
 native-lora arm, lora-vllm in its figures). An aLoRA is served active from the
 first token, the way it decodes once on. Stock vLLM has no SR implementation,
 so SR has no number here (<b>—</b>).</li>
-<li><b>{_esc(SPEEDUP_LABEL)}</b>: how much faster {_esc(ENGINE_LABEL)} decodes
+<li><b>{_esc(SPEEDUP_LABEL)}</b>: how much faster {_esc(ENGINE_LABEL)} is
 than {_esc(NATIVE_LABEL)}, in whole percent: +34% is 1.34 times the tokens per
-second. None for SR.</li>
+second, or agents finishing in 1/1.34 of the time. None for SR.</li>
 <li>The <b>i</b> next to a commit opens its run details: library versions,
 GPU, the adapter checkpoints and the reference run.</li>
 <li>Granite 4.2 prompts turn reasoning off and carry their documents as tool
@@ -1253,19 +1388,36 @@ def summary(
             for v in values
         )
 
-    ratios = [speedup(row, t.id, spec) for t in techs]
-    lines += [
-        "",
-        f"{THROUGHPUT_LABEL}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
-        f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
-        + " / ".join(
+    def seconds(engine: str) -> str:
+        return " / ".join(
+            "—"
+            if not has_engine(t.id, engine)
+            else "·"
+            if (v := p95_seconds(row, t.id, engine, spec)) is None
+            else f"{v:,.0f}"
+            for t in techs
+        )
+
+    def percents(ratios: list[float | None]) -> str:
+        return " / ".join(
             "—"
             if not has_engine(t.id, "native")
             else "·"
             if r is None
             else percent_faster(r)
             for t, r in zip(techs, ratios, strict=True)
-        ),
+        )
+
+    lines += [
+        "",
+        f"{decode_label(spec)}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
+        f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
+        + percents([speedup(row, t.id, spec) for t in techs]),
+        "",
+        f"{switching_label(spec)}, p95 seconds to complete, {labels}: "
+        f"{ENGINE_LABEL} {seconds('gs')}; {NATIVE_LABEL} {seconds('native')}; "
+        f"{SPEEDUP_LABEL.lower()} "
+        + percents([switching_speedup(row, t.id, spec) for t in techs]),
     ]
     return "\n".join(lines)
 

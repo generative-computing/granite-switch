@@ -83,6 +83,23 @@ throughput:
   warmup_runs: 2
   timed_runs: 5
 
+# Agents switching adapters, the second Throughput block, measured by the
+# switch benchmark's own scripts (benchmarks/gen_switching_grid.py,
+# bench_switching_grid.py, bench_agent_sim.py), one cell of its
+# grid_concurrency figure: `concurrency` agents released together, each
+# generating `decode_tokens` and switching adapter every `span` tokens, with
+# tool calls at its rate, on `adapters` synthetic adapters of rank `rank`
+# (make_synth_fleet.py), at least `min_agents` agents in waves. The cell is
+# the p95 time to complete. Rows measured with other settings count as not
+# measured.
+switching:
+  concurrency: 8
+  decode_tokens: 512
+  span: 32
+  adapters: 64
+  rank: 32
+  min_agents: 16
+
 # max_new_tokens comes from each intrinsic's training config.
 # headline is the metric the results page shows; it matches the internal
 # results page so numbers can be compared.

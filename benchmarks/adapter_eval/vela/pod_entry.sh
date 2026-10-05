@@ -72,6 +72,8 @@ bench)
         --bench-root "${ADAPTER_BENCH_ROOT:?}"
         --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}"
         --model-dir /workspace/models
+        # The switching runs' synthetic adapters, built once per model.
+        --switching-cache "${ADAPTER_BENCH_WORK_ROOT:?}/synthetic/${MODEL:-default}"
     )
     if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
