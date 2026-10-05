@@ -110,12 +110,19 @@ jobs:
     # conflicting groups), so each gets its own cluster pod. Only the dev* groups
     # used because the bare vllm26/vllm27 groups omit pytest. The label encodes
     # the vLLM minor the leg installs (the GPU harness asserts it matches).
+    #
+    # `dep_group` MUST be a `dev-vllmNN` name, never the bare `dev`: the harness
+    # derives the version it asserts from this string, and maps `dev` to a frozen
+    # 0.19.x expectation ("dep group: dev (job tag v19, expect vllm 0.19.x)"). With
+    # `dev` on the 0.26 line since #130, this leg installed 0.26 correctly and then
+    # died on that guard before pytest ran -- "FATAL expected vllm 0.19.x for group
+    # dev but got 0.26.0" -- which is why the leg has been red on every run since.
     strategy:
       fail-fast: false   # a vllm26 failure must not hide the vllm27 result
       matrix:
         include:
           - label: vllm26
-            dep_group: dev
+            dep_group: dev-vllm26
           - label: vllm27
             dep_group: dev-vllm27
     runs-on: [self-hosted, gpu]

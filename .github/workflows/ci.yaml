@@ -60,7 +60,12 @@ jobs:
           enable-cache: true
           python-version: ${{ matrix.python-version }}
 
-      - run: uv sync --frozen --group dev --extra hf --extra compose
+      # `dev-vllm26`, not `dev`: the dev groups are now named after the vLLM line
+      # they install, because the GPU harness derives the version it asserts from
+      # the group name (see the comment in pyproject.toml). Nothing in this job is
+      # vLLM-version-specific -- it only needs pytest plus the CPU deps -- but there
+      # is one dev group per line and this is the one the lockfile resolves.
+      - run: uv sync --frozen --group dev-vllm26 --extra hf --extra compose
 
       - name: Run CPU tests
         run: |

@@ -30,7 +30,7 @@ with an `--asr-model` your installed transformers supports (for example
 uv sync --extra vllm --extra audio     # or --extra vllm27 --extra audio
 
 # Development / running the test suite (the dev groups include audio already)
-uv sync --group dev                    # vLLM 0.26.x
+uv sync --group dev-vllm26             # vLLM 0.26.x
 uv sync --group dev-vllm27             # vLLM 0.27.x
 ```
 

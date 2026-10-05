@@ -58,26 +58,45 @@ markers = [
 [dependency-groups]
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
 vllm27     = ["vllm>=0.27.0,<0.28.0"]
+# EVERY DEV GROUP MUST BE NAMED `dev-vllmNN`, NEVER A BARE `dev`. The GPU cluster
+# harness derives the vLLM line it asserts against from the group NAME it is handed
+# (`--dep-group`), and it maps the bare name `dev` to a frozen 0.19.x expectation:
+#
+#     dep group: dev          (job tag v19, expect vllm 0.19.x)
+#     dep group: dev-vllm20   (job tag v20, expect vllm 0.20.x)
+#
+# So once #130 moved `dev` onto the 0.26 line, the leg installed 0.26 correctly and
+# then died on the harness's own guard, before pytest ever started:
+#
+#     torch 2.11.0+cu130 vllm 0.26.0
+#     FATAL expected vllm 0.19.x for group dev but got 0.26.0
+#
+# This is a rename, not a new group: `dev` is gone rather than aliased, so the name
+# that silently means "0.19.x" cannot be passed by accident. Adding a parallel
+# `dev-vllm26` and keeping `dev` was tried and rejected -- an extra conflicting
+# group multiplies uv's resolution-marker space (+3093 net lines of uv.lock for an
+# identical 275-package resolution), whereas the rename is diff-balanced.
+#
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
-dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
+dev-vllm26 = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
 dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
-test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
+test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev-vllm26" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
 conflicts = [
     # group-vs-group
     [{ group = "vllm26" },     { group = "vllm27" }],
-    [{ group = "dev" },        { group = "vllm27" }],
-    [{ group = "dev" },        { group = "dev-vllm27" }],
+    [{ group = "dev-vllm26" }, { group = "vllm27" }],
+    [{ group = "dev-vllm26" }, { group = "dev-vllm27" }],
     [{ group = "dev-vllm27" }, { group = "vllm26" }],
     # group-vs-extra
     [{ group = "vllm26" },     { extra = "vllm27" }],
     [{ group = "vllm27" },     { extra = "vllm" }],
     [{ group = "vllm27" },     { extra = "tutorials" }],
-    [{ group = "dev" },        { extra = "vllm27" }],
+    [{ group = "dev-vllm26" }, { extra = "vllm27" }],
     [{ group = "dev-vllm27" }, { extra = "vllm" }],
     [{ group = "dev-vllm27" }, { extra = "tutorials" }],
     # extra-vs-extra
