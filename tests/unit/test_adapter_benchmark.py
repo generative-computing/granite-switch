@@ -21,6 +21,7 @@ import struct
 import subprocess
 import sys
 import tarfile
+import types
 import urllib.error
 from pathlib import Path
 
@@ -182,8 +183,12 @@ def timed(tokens_per_s: float = 3300.0, **extra) -> dict:
 
 
 def throughput_for(spec, gs: float = 3300.0, native: float = 1900.0) -> dict:
-    """A row's throughput: both engines for every technology."""
-    return {t.id: {"gs": timed(gs), "native": timed(native)} for t in spec.technologies}
+    """A row's throughput: every engine of every technology (no stock-vLLM SR)."""
+    return {
+        t.id: {"gs": timed(gs)}
+        | ({"native": timed(native)} if publish.has_engine(t.id, "native") else {})
+        for t in spec.technologies
+    }
 
 
 def cells_for(spec, value: float = 0.5) -> dict:
@@ -827,7 +832,10 @@ def test_render_reference_columns():
         '<td class="num grp-thr start i-start" title="3,300 tokens/s; batch 32' in page
     )
     assert '<td class="num grp-thr start" title="1,900 tokens/s; batch 32' in page
-    assert ">1.7&times;</td>" in page
+    assert ">+74%</td>" in page  # 3,300 / 1,900 = 1.74
+    # Stock vLLM has no SR: no number and no speedup.
+    assert 'title="stock vLLM has no SR implementation">—</td>' in page
+    assert 'title="no stock-vLLM SR to compare with">—</td>' in page
     # The best of the 7 accuracy columns can be a reference column.
     best = '<td class="num best grp-ref" title="accuracy=0.9000, n=10">90.0</td>'
     assert best in page
@@ -944,6 +952,29 @@ def test_throughput_block_and_speedup():
     assert publish.speedup(row, "lora", SPEC) is None
 
 
+def test_sr_runs_on_granite_switch_only(tmp_path, monkeypatch):
+    engines = []
+    monkeypatch.setattr(run_benchmark, "compose", lambda *a: True)
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: None)
+    monkeypatch.setattr(
+        run_benchmark,
+        "time_engine",
+        lambda python, root, spec: engines.append(spec["engine"]) or timed(),
+    )
+    cell = staged.StagedCell("answerability", "sr", tmp_path / "sr", None, None)
+    fleets = {t.id: [] for t in SPEC.technologies}
+    fleets["sr"] = [
+        {"cell": cell, "compose": tmp_path / "sr", "native": tmp_path / "sr"}
+    ]
+    args = types.SimpleNamespace(python="python", repo_dir=tmp_path)
+    out = run_benchmark.run_throughput(
+        args, SPEC, tmp_path, tmp_path, tmp_path, "base", set(), fleets, {}
+    )
+    assert engines == ["gs"]
+    assert out["sr"] == {"gs": timed()}
+    assert out["lora"] == common.skipped("no adapter staged")
+
+
 def test_a_row_needs_its_throughput():
     row = results_for()
     assert publish.cache_hit(row, SPEC)
@@ -999,8 +1030,8 @@ def test_summary_for_the_pr_comment():
     # Then the decode throughput, per technology.
     assert lines[-1] == (
         "Decode throughput, tokens/s, LoRA / aLoRA / SR: granite-switch (vLLM) "
-        "3,300 / 3,300 / 3,300; PEFT (vLLM) 1,900 / 1,900 / 1,900; "
-        "speedup 1.7x / 1.7x / 1.7x"
+        "3,300 / 3,300 / 3,300; PEFT (vLLM) 1,900 / 1,900 / —; "
+        "speedup +74% / +74% / —"
     )
     assert "(cached result)" in publish.summary(data, SPEC, SHA_A, "cached")
 
@@ -1911,12 +1942,13 @@ def test_driver_command_is_the_sweeps_block(tmp_path):
         "--arm", "gs-lora-vllm", "--model", "/m/ckpt", "--num-adapters", "2",
         *cell, "--tag", "gs-lora-vllm_N2", "--dump-iters", str(dump),
     ]  # fmt: skip
-    native = switch_bench.command("sr", "native", "base", ["a", "b"], SETTINGS, dump)
-    assert native[:8] == [
-        "--arm", "native-sr", "--model", "base", "--num-adapters", "2",
-        "--lora-path", "a,b",
+    native = switch_bench.command("lora", "native", "base", ["a", "b"], SETTINGS, dump)
+    assert native[:9] == [
+        "--arm", "native-lora", "--model", "base", "--num-adapters", "2",
+        "--lora-path", "a,b", "--decode-sweep",
     ]  # fmt: skip
-    assert native[8:10] == ["--lora-skip-prefixes", "cross_stream"]
+    # Stock vLLM has no SR: there is no engine to build a command for.
+    assert ("sr", "native") not in switch_bench.ARMS
 
 
 def test_every_flag_the_command_passes_is_the_drivers():
@@ -1927,7 +1959,7 @@ def test_every_flag_the_command_passes_is_the_drivers():
         text=True,
         check=True,
     ).stdout
-    args = switch_bench.command("sr", "native", "b", ["a"], SETTINGS, Path("d"))
+    args = switch_bench.command("lora", "native", "b", ["a"], SETTINGS, Path("d"))
     for flag in (a for a in args if a.startswith("--")):
         assert flag in out, flag
     for arm in set(switch_bench.ARMS.values()):

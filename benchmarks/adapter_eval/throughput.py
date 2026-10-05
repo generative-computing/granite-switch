@@ -8,7 +8,7 @@ engine, one after the other on the same GPU, with the compile caches cleared
 before each, as that benchmark's sweep does (``run_switch_repro_sweep.sh``,
 its ``run_block``).
 
-Per technology, two of its arms, on this model's staged adapters (N of them):
+Per technology, its arms on this model's staged adapters (N of them):
 
 ======== ============================== ==========================================
 tech     granite-switch                 stock vLLM
@@ -17,8 +17,9 @@ lora     ``gs-lora-vllm``: a checkpoint  ``native-lora``: the same LoRA checkpoi
          of the LoRA adapters
 alora    ``gs-lora-vllm``: a checkpoint  ``native-lora``: the aLoRA checkpoints
          of the aLoRA adapters           without their invocation tokens
-sr       ``gs-sr-vllm``: a checkpoint    ``native-sr``: the SR checkpoints, their
-         of the SR adapters              ``cross_stream`` skipped at load
+sr       ``gs-sr-vllm``: a checkpoint    none: stock vLLM has no SR (its
+         of the SR adapters              ``native-sr`` arm serves SR's weights as
+                                         a plain LoRA, a control, not SR)
 ======== ============================== ==========================================
 
 and its prompt-1 decode cell, the one its batch_decode figure plots: one-token
@@ -49,14 +50,13 @@ PINNED = {
     "cudagraph_capture_size": 1024,
     "tensor_parallel_size": 1,
 }
-# Its arm for each (technology, engine).
+# Its arm for each (technology, engine). SR has no stock-vLLM engine.
 ARMS = {
     ("lora", "gs"): "gs-lora-vllm",
     ("lora", "native"): "native-lora",
     ("alora", "gs"): "gs-lora-vllm",
     ("alora", "native"): "native-lora",
     ("sr", "gs"): "gs-sr-vllm",
-    ("sr", "native"): "native-sr",
 }
 # Recorded by the driver, but not for a public page.
 PRIVATE_PROVENANCE = ("hostname",)
@@ -71,8 +71,6 @@ def command(
     args = ["--arm", arm, "--model", model, "--num-adapters", str(n)]
     if engine == "native":
         args += ["--lora-path", ",".join(paths)]
-        if tech == "sr":  # stock vLLM has no module for SR's shunt
-            args += ["--lora-skip-prefixes", "cross_stream"]
     return [
         *args,
         "--decode-sweep",

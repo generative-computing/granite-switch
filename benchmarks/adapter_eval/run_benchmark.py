@@ -327,10 +327,11 @@ def run_throughput(
     """Per technology, granite-switch's decode throughput and stock vLLM's.
 
     The switch benchmark's comparison: one technology's adapters composed into
-    a checkpoint of their own, against the same adapters on stock vLLM, the two
-    engines one after the other on this GPU, which one goes first alternating
-    by technology. ``composed`` names the adapters of each checkpoint the
-    accuracy run composed; one with exactly a fleet's adapters is reused.
+    a checkpoint of their own, against the same adapters on stock vLLM (not for
+    SR, which stock vLLM cannot run), the two engines one after the other on
+    this GPU, which one goes first alternating by technology. ``composed`` names
+    the adapters of each checkpoint the accuracy run composed; one with exactly
+    a fleet's adapters is reused.
     """
     out: dict[str, dict] = {}
     for k, tech in enumerate(spec.technologies):
@@ -357,7 +358,8 @@ def run_throughput(
                 flags,
             )
         entries = {}
-        for engine in ("gs", "native") if k % 2 == 0 else ("native", "gs"):
+        engines = [e for e in ("gs", "native") if (tech.id, e) in switch_bench.ARMS]
+        for engine in engines if k % 2 == 0 else engines[::-1]:
             if engine == "gs" and not ready:
                 entries[engine] = error("compose failed")
                 continue
@@ -374,7 +376,7 @@ def run_throughput(
                     "dump": str(work / "throughput" / f"{tech.id}_{engine}.jsonl"),
                 },
             )
-        out[tech.id] = {"gs": entries["gs"], "native": entries["native"]}
+        out[tech.id] = entries
         print(f"[throughput] {tech.id}: {json.dumps(speeds(out[tech.id]))}", flush=True)
     return out
 

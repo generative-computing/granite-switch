@@ -47,8 +47,8 @@ columns, per technology rather than per intrinsic:
 | Group | Columns | What it shows |
 |---|---|---|
 | granite-switch (vLLM) | LoRA, aLoRA, SR | decode tokens per second, the technology's adapters composed with the commit |
-| native vLLM | LoRA, aLoRA, SR | the same adapters served by stock vLLM as PEFT LoRAs |
-| Speedup | LoRA, aLoRA, SR | granite-switch's tokens per second ÷ native vLLM's |
+| PEFT (vLLM) | LoRA, aLoRA | the same adapters served by stock vLLM as PEFT LoRAs; SR shows `—`, as stock vLLM has no SR |
+| Speedup | LoRA, aLoRA | how much faster granite-switch decodes, in whole percent (+34% is 1.34 times the tokens per second); SR shows `—` |
 
 Both are measured in each commit's run. See
 [Decode throughput](#decode-throughput).
@@ -526,7 +526,12 @@ technology, two of its arms, on the model's staged adapters (N of them):
 |---|---|---|
 | LoRA | `gs-lora-vllm`: a checkpoint of the LoRA adapters | `native-lora`: the same LoRA checkpoints |
 | aLoRA | `gs-lora-vllm`: a checkpoint of the aLoRA adapters | `native-lora`: the aLoRA checkpoints without their invocation tokens |
-| SR | `gs-sr-vllm`: a checkpoint of the SR adapters | `native-sr`: the SR checkpoints, their cross-stream weights skipped at load |
+| SR | `gs-sr-vllm`: a checkpoint of the SR adapters | none |
+
+Stock vLLM has no SR implementation, so SR has no PEFT (vLLM) number and no
+speedup. That benchmark's `native-sr` arm serves SR's weights as a plain LoRA,
+without SR's second stream; it is a control there, not SR, and is not run
+here.
 
 The checkpoints are composed with the commit's composer; stock vLLM loads all
 N adapters (`max_loras` = N).

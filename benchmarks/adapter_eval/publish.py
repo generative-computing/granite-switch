@@ -63,6 +63,7 @@ from .common import (
     iter_cells,
     load_spec,
 )
+from .throughput import ARMS
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = REPO_ROOT / "docs" / "benchmarks" / "data.json"
@@ -138,6 +139,11 @@ def tokens_per_s(row: dict, tech_id: str, engine: str, spec: Spec) -> float | No
     return value if isinstance(value, int | float) else None
 
 
+def has_engine(tech_id: str, engine: str) -> bool:
+    """Whether the technology runs on the engine: stock vLLM has no SR."""
+    return (tech_id, engine) in ARMS
+
+
 def throughput_done(row: dict, spec: Spec) -> bool:
     """Whether every technology's throughput is measured, or has no adapter."""
     for tech in spec.technologies:
@@ -145,7 +151,9 @@ def throughput_done(row: dict, spec: Spec) -> bool:
         if entry is None or is_error(entry):
             return False
         if "skipped" not in entry and any(
-            tokens_per_s(row, tech.id, e, spec) is None for e in ENGINES
+            tokens_per_s(row, tech.id, e, spec) is None
+            for e in ENGINES
+            if has_engine(tech.id, e)
         ):
             return False
     return True
@@ -618,7 +626,9 @@ def _throughput_html(
     """One engine's throughput ``<td>`` for one technology."""
     entry = (row.get("throughput") or {}).get(tech_id)
     measured = (entry or {}).get(engine)
-    if row.get("throughput") is None:
+    if not has_engine(tech_id, engine):
+        cls, title, text = "skip", "stock vLLM has no SR implementation", "—"
+    elif row.get("throughput") is None:
         cls, title, text = "skip", "not measured: the run predates throughput", "·"
     elif entry is None:
         cls, title, text = "skip", "not measured", "·"
@@ -638,23 +648,32 @@ def _throughput_html(
 
 def speedup(row: dict, tech_id: str, spec: Spec) -> float | None:
     """granite-switch's decode throughput over stock vLLM's, from one run."""
+    if not has_engine(tech_id, "native"):
+        return None
     gs, native = (tokens_per_s(row, tech_id, e, spec) for e in ENGINES)
     return None if gs is None or native is None else gs / native
+
+
+def percent_faster(ratio: float) -> str:
+    """A speedup as a whole percentage: 1.34 is +34%."""
+    return f"{(ratio - 1) * 100:+.0f}%"
 
 
 def _speedup_html(row: dict, tech_id: str, extra: str, spec: Spec) -> str:
     entry = (row.get("throughput") or {}).get(tech_id) or {}
     ratio = speedup(row, tech_id, spec)
-    if "skipped" in entry:
+    if not has_engine(tech_id, "native"):
+        cls, title, text = "skip", "no stock-vLLM SR to compare with", "—"
+    elif "skipped" in entry:
         cls, title, text = "skip", entry["skipped"], "—"
     elif ratio is None:
         cls, title, text = "skip", "needs both engines' throughput", "·"
     else:
         gs, native = (tokens_per_s(row, tech_id, e, spec) for e in ENGINES)
-        cls, text = "num", f"{ratio:.1f}&times;"
+        cls, text = "num", percent_faster(ratio)
         title = (
-            f"{ENGINE_LABEL}: {gs:,.0f} tokens/s; {NATIVE_LABEL}: {native:,.0f} "
-            "tokens/s; the same GPU, one after the other"
+            f"{ratio:.2f}x: {ENGINE_LABEL} {gs:,.0f} tokens/s, {NATIVE_LABEL} "
+            f"{native:,.0f} tokens/s; the same GPU, one after the other"
         )
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
@@ -1130,10 +1149,11 @@ token.</li>
 <li><b>{_esc(NATIVE_LABEL)}</b>: the same adapter checkpoints served by stock
 vLLM's multi-LoRA support, without granite-switch (the switch benchmark's
 native-lora arm, lora-vllm in its figures). An aLoRA is served active from the
-first token, the way it decodes once on; SR without its cross-stream weights,
-which stock vLLM cannot run (its native-sr arm).</li>
-<li><b>{_esc(SPEEDUP_LABEL)}</b>: {_esc(ENGINE_LABEL)}'s decode throughput
-divided by {_esc(NATIVE_LABEL)}'s.</li>
+first token, the way it decodes once on. Stock vLLM has no SR implementation,
+so SR has no number here (<b>—</b>).</li>
+<li><b>{_esc(SPEEDUP_LABEL)}</b>: how much faster {_esc(ENGINE_LABEL)} decodes
+than {_esc(NATIVE_LABEL)}, in whole percent: +34% is 1.34 times the tokens per
+second. None for SR.</li>
 <li>The <b>i</b> next to a commit opens its run details: library versions,
 GPU, the adapter checkpoints and the reference run.</li>
 <li>Granite 4.2 prompts turn reasoning off and carry their documents as tool
@@ -1222,15 +1242,30 @@ def summary(
         lines += ["", f"No {REFERENCE_LABEL} and {BASE_LABEL} columns yet: {gap}."]
 
     def speeds(engine: str) -> str:
-        values = [tokens_per_s(row, t.id, engine, spec) for t in techs]
-        return " / ".join("·" if v is None else f"{v:,.0f}" for v in values)
+        values = [
+            "—"
+            if not has_engine(t.id, engine)
+            else tokens_per_s(row, t.id, engine, spec)
+            for t in techs
+        ]
+        return " / ".join(
+            "·" if v is None else v if isinstance(v, str) else f"{v:,.0f}"
+            for v in values
+        )
 
     ratios = [speedup(row, t.id, spec) for t in techs]
     lines += [
         "",
         f"{THROUGHPUT_LABEL}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
         f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
-        + " / ".join("·" if r is None else f"{r:.1f}x" for r in ratios),
+        + " / ".join(
+            "—"
+            if not has_engine(t.id, "native")
+            else "·"
+            if r is None
+            else percent_faster(r)
+            for t, r in zip(techs, ratios, strict=True)
+        ),
     ]
     return "\n".join(lines)
 
