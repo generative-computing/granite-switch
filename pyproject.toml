@@ -58,19 +58,32 @@ markers = [
 ]
 
 [dependency-groups]
-# THE TWO ENDS OF THE SUPPORTED RANGE, which is why these two and not two others.
-# The `vllm` extra above claims 0.26-0.30, and the two bounds are where a break
-# actually lands: a deleted API shows up at the ceiling and an API that does not
-# exist yet shows up at the floor. 0.27/0.28/0.29 sit strictly between two tested
-# lines, so they add install time without adding a failure mode the ends would miss.
-# All five lines were verified together out of band (five-leg GPU matrix, every
-# suite green); these groups are what CI re-checks on every run.
+# vllm26 AND vllm30 ARE THE TWO CI LEGS -- the ends of the supported range, which
+# is why these two and not two others. The `vllm` extra above claims 0.26-0.30,
+# and the two bounds are where a break actually lands: a deleted API shows up at
+# the ceiling and an API that does not exist yet shows up at the floor.
+# 0.27/0.28/0.29 sit strictly between two tested lines, so they add install time
+# without adding a failure mode the ends would miss. All five lines were verified
+# together out of band (five-leg GPU matrix, every suite green); these two are
+# what CI re-checks on every run.
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
 vllm30     = ["vllm>=0.30.0,<0.31.0"]
+# vllm27 IS NOT A CI LEG -- it exists so the GPU workflow stays dispatchable
+# during this transition. `workflow_dispatch` always executes the workflow file
+# from the DEFAULT BRANCH, so until the 0.26/0.30 matrix lands on main, a
+# `/gpu-test` run uses main's matrix (legs vllm26 -> dev and vllm27 ->
+# dev-vllm27) while checking out the PR's commit. Deleting dev-vllm27 here made
+# that leg unresolvable against this tree -- `uv sync --group dev-vllm27` has no
+# such group -- and the leg died before pytest started. Keeping the group costs
+# nothing and is not a fiction: the `vllm` extra claims 0.26-0.30, so 0.27 is a
+# supported line that simply isn't worth its own per-run leg. Removable once the
+# matrix rename is on main.
+vllm27     = ["vllm>=0.27.0,<0.28.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
+dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
 dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
@@ -80,11 +93,28 @@ default-groups = ["vllm26"]
 # 0.26-0.30, so it overlaps every group and no longer conflicts with any of them --
 # which is what made `uv sync` unsatisfiable while the extra said 0.30-only and the
 # default group said 0.26.
+# Every pair that would pull two different vLLM lines into one venv. Three lines
+# are declared (0.26 / 0.27 / 0.30) with a bare and a dev- flavour each, so the
+# 26-side {vllm26, dev}, the 27-side {vllm27, dev-vllm27} and the 30-side
+# {vllm30, dev-vllm30} give 3 x (2 x 2) = 12 cross-line pairs. `test` is absent
+# deliberately: it reaches vllm26 through `include-group = "dev"` and uv derives
+# that transitively -- main's two-line version listed it nowhere either.
 conflicts = [
+    # 0.26 vs 0.27
+    [{ group = "vllm26" },     { group = "vllm27" }],
+    [{ group = "vllm26" },     { group = "dev-vllm27" }],
+    [{ group = "dev" },        { group = "vllm27" }],
+    [{ group = "dev" },        { group = "dev-vllm27" }],
+    # 0.26 vs 0.30
     [{ group = "vllm26" },     { group = "vllm30" }],
+    [{ group = "vllm26" },     { group = "dev-vllm30" }],
     [{ group = "dev" },        { group = "vllm30" }],
     [{ group = "dev" },        { group = "dev-vllm30" }],
-    [{ group = "dev-vllm30" }, { group = "vllm26" }],
+    # 0.27 vs 0.30
+    [{ group = "vllm27" },     { group = "vllm30" }],
+    [{ group = "vllm27" },     { group = "dev-vllm30" }],
+    [{ group = "dev-vllm27" }, { group = "vllm30" }],
+    [{ group = "dev-vllm27" }, { group = "dev-vllm30" }],
 ]
 
 [tool.coverage.run]
