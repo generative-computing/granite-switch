@@ -82,8 +82,16 @@ jobs:
             -v -s --tb=short -x \
             --cov=granite_switch --cov-report=xml
 
+      # COVERAGE REPORTING MUST NOT GATE A PR. `fail_ci_if_error: false` already
+      # declared that intent, but v4 can fail the step *before* it consults that
+      # flag -- it exits nonzero on a token/rate-limit problem of its own, which is
+      # what turns a fully green CPU suite red (the "Run CPU tests" step passes on
+      # both 3.11 and 3.12; only this step fails). `continue-on-error` enforces the
+      # intent at the workflow level, where the action cannot override it. v5 is the
+      # supported line; v4 is deprecated.
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage.xml
