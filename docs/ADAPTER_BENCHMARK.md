@@ -77,8 +77,10 @@ HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
 
 - **One tab per base model.** The link remembers the tab, e.g.
   `.../benchmarks/#granite-4.2-3b`.
-- **Show** switches hide or show each column group; **Throughput** switches
-  the whole throughput block.
+- **Filters** above the table, for every tab: **Show** picks the sections
+  (Task Quality, Serving Quality); **Adapters** picks the intrinsics shown in
+  Task Quality, and **Columns** its column groups. Those two grey out while Task
+  Quality is hidden, and the page keeps at least one column on show.
 - **The `i` next to a commit** opens its run details: the commit, the library
   versions (vLLM, torch, transformers), the GPU, each adapter checkpoint (ranks
   and the start of its weights checksum, never its storage path), and the

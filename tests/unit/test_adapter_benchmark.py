@@ -690,10 +690,13 @@ def test_render_cells_and_escaping():
     assert "<script>alert" not in page
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in page
     assert 'title="adapter &quot;x&quot; not staged">—</td>' in page
-    assert 'class="err grp-gs start i-start" title="generate failed">error</td>' in page
+    assert (
+        'class="err grp-gs start i-start in-guardian_core" title="generate failed">'
+        in page
+    )
     assert ">?</td>" in page
     assert 'title="not run">·</td>' in page
-    assert 'class="num best grp-gs"' in page and ">70.0</td>" in page
+    assert 'class="num best grp-gs in-answerability"' in page and ">70.0</td>" in page
     assert '<tr class="old">' in page
     for intrinsic in SPEC.intrinsics:
         assert intrinsic.name in page
@@ -876,9 +879,12 @@ def test_render_reference_columns():
     assert 'title="stock vLLM has no SR implementation">—</td>' in page
     assert 'title="no stock-vLLM SR to compare with">—</td>' in page
     # The best of the 7 accuracy columns can be a reference column.
-    best = '<td class="num best grp-ref" title="accuracy=0.9000, n=10">90.0</td>'
+    best = (
+        '<td class="num best grp-ref in-answerability" title="accuracy=0.9000, n=10">'
+        "90.0</td>"
+    )
     assert best in page
-    assert '<td class="skip grp-base start" title="not run">·</td>' in page
+    assert '<td class="skip grp-base start in-answerability" title="not run">·' in page
     # A row of another benchmark version shows no reference.
     assert 'title="no reference for this benchmark version">·</td>' in page
     assert "on 2026-09-30 with torch 2.10.0, transformers 5.8.1, peft 0.19.1" in page
@@ -913,7 +919,7 @@ def test_render_gain_ratio_cells():
     page = publish.render(page_data(results_for(cells=cells), reference=ref), SPEC)
 
     gains = "over Base: granite-switch (vLLM) +30.0 points, HF + PEFT +40.0"
-    assert f'class="num grp-ratio start" title="{gains}">0.75</td>' in page
+    assert f'class="num grp-ratio start in-answerability" title="{gains}">0.75' in page
     assert ">n/a</td>" in page  # aLoRA gains half a point under HF + PEFT
     # SR has no granite-switch cell.
     assert (
@@ -923,7 +929,7 @@ def test_render_gain_ratio_cells():
     # A technology with no adapter shows the reason in its ratio column too.
     cells["answerability"]["sr"] = common.skipped("adapter not staged")
     page = publish.render(page_data(results_for(cells=cells), reference=ref), SPEC)
-    assert 'class="skip grp-ratio" title="adapter not staged">—</td>' in page
+    assert 'class="skip grp-ratio in-answerability" title="adapter not staged">' in page
 
 
 def test_render_has_a_tab_per_model_with_its_own_rows():
@@ -941,6 +947,31 @@ def test_render_has_a_tab_per_model_with_its_own_rows():
     for group in publish.GROUP_LABELS:
         assert f'data-group="{group}"' in page
     assert 'data-gs="3" data-ref="3" data-base="1" data-ratio="3"' in page
+
+
+def test_page_filters():
+    page = publish.render(page_data(results_for()), SPEC)
+    controls = page.split('<div class="controls">')[1].split("</div>")[0]
+    # The two sections, then Task Quality's intrinsics and column groups.
+    for key, label in publish.SECTION_LABELS.items():
+        assert f'data-section="{key}" checked> {label}</label>' in controls
+    for group, label in publish.GROUP_LABELS.items():
+        assert (
+            f'data-group="{group}" checked> {publish._esc(label)}</label>' in controls
+        )
+    assert controls.count('class="boxes task-only"') == 2
+    row = next(tr for tr in page.split("<tr") if SHA_A[:8] in tr)
+    for intrinsic in SPEC.intrinsics:
+        mark = f"in-{intrinsic.id}"
+        assert f'data-intrinsic="{intrinsic.id}" checked> {intrinsic.name}' in controls
+        # Its filter hides every cell marked with it: its header names it, and
+        # each of its 10 columns in a row carries the mark.
+        assert f"table.hide-{mark} .{mark} {{ display: none; }}" in page
+        assert f'{mark}" colspan="10"' in page
+        assert f'data-intrinsic="{intrinsic.id}">{intrinsic.name}<br>' in page
+        assert row.count(f'{mark}"') == 3 * len(SPEC.technologies) + 1
+    # Task Quality's header is sized by the script, to what is left under it.
+    assert page.count('<th class="task-head section i-start"') == len(SPEC.models)
 
 
 def test_render_run_details():
@@ -986,7 +1017,7 @@ def test_throughput_block_and_speedup():
     assert 'title="no adapter staged">—</td>' in page
     assert 'title="not measured: the run predates throughput">·</td>' in page
     assert 'title="needs both engines&#x27; throughput">·</td>' in page
-    assert 'data-group="thr" checked> Throughput' in page
+    assert 'data-section="thr" checked> Serving Quality' in page
     assert publish.speedup(results_for(), "lora", SPEC) == 3300.0 / 1900.0
     assert publish.speedup(row, "lora", SPEC) is None
 

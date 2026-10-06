@@ -442,9 +442,9 @@ GROUP_LABELS = {
     "base": BASE_LABEL,
     "ratio": RATIO_LABEL,
 }
-# The Show toggles: the groups above, and the throughput block (its three
-# groups: granite-switch, HF + PEFT, speedup).
-TOGGLE_LABELS = {**GROUP_LABELS, "thr": "Throughput"}
+# The page's filters: its two sections; then, within Task Quality, each
+# intrinsic and the column groups above.
+SECTION_LABELS = {"task": TASK_LABEL, "thr": "Serving Quality"}
 # A gain ratio divides by the adapter's gain over the base under HF + PEFT;
 # below this gain the ratio mostly measures noise, so it is not shown.
 MIN_GAIN = 0.01
@@ -481,9 +481,14 @@ code { font-size: 13px; }
                border-radius: 999px; background: #fff; cursor: pointer; }
 .tabs button[aria-selected="true"] { background: #1b1b1b; border-color: #1b1b1b;
                                      color: #fff; }
-.js .controls { display: flex; gap: 1em; align-items: center; flex-wrap: wrap;
-                margin-bottom: .4em; color: #444; }
-.controls label { cursor: pointer; }
+.js .controls { display: grid; grid-template-columns: max-content 1fr;
+                gap: .3em 1em; align-items: baseline; margin-bottom: .6em;
+                color: #444; }
+.controls .name { color: #666; }
+.controls .boxes { display: flex; gap: .4em 1em; flex-wrap: wrap; }
+.controls label { cursor: pointer; white-space: nowrap; }
+.controls .off { opacity: .45; }
+.controls .off label { cursor: default; }
 .js section.model { display: none; }
 .js section.model.active { display: block; }
 .wrap { overflow-x: auto; }
@@ -552,19 +557,46 @@ PAGE_SCRIPT = """
   addEventListener("hashchange", () => show(decodeURIComponent(location.hash.slice(1))));
   show(decodeURIComponent(location.hash.slice(1)));
 
+  // Filters: data-section (task, thr), data-intrinsic and data-group (the
+  // column groups of Task Quality).
   const boxes = [...document.querySelectorAll(".controls input")];
-  function columns(event) {
-    if (!boxes.some(b => b.checked)) event.target.checked = true;  // keep one group
-    const on = boxes.filter(b => b.checked).map(b => b.dataset.group);
-    document.querySelectorAll("table.bench").forEach(t => boxes.forEach(b =>
-      t.classList.toggle("hide-" + b.dataset.group, !b.checked)));
-    document.querySelectorAll("th.i").forEach(th => {
-      const span = on.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
-      th.colSpan = Math.max(span, 1);
-      th.hidden = span === 0;
+  const kind = k => boxes.filter(b => k in b.dataset);
+  const on = k => kind(k).filter(b => b.checked).map(b => b.dataset[k]);
+  function showsSomething() {
+    const sections = on("section");
+    return sections.includes("thr") || (sections.includes("task") &&
+      on("intrinsic").length > 0 && on("group").length > 0);
+  }
+  function filter(event) {
+    if (event && !showsSomething()) event.target.checked = true;
+    const task = on("section").includes("task");
+    const serving = on("section").includes("thr");
+    const groups = on("group"), intrinsics = on("intrinsic");
+    document.querySelectorAll(".controls .task-only").forEach(e => {
+      e.classList.toggle("off", !task);
+      e.querySelectorAll("input").forEach(i => { i.disabled = !task; });
+    });
+    document.querySelectorAll("table.bench").forEach(t => {
+      t.classList.toggle("hide-thr", !serving);
+      kind("group").forEach(b =>
+        t.classList.toggle("hide-" + b.dataset.group, !task || !b.checked));
+      kind("intrinsic").forEach(b =>
+        t.classList.toggle("hide-in-" + b.dataset.intrinsic, !b.checked));
+      // Headers span what is left under them.
+      let total = 0;
+      t.querySelectorAll("th.i").forEach(th => {
+        const span = groups.reduce((n, g) => n + Number(th.dataset[g] || 0), 0);
+        const shown = task && span > 0 && intrinsics.includes(th.dataset.intrinsic);
+        th.colSpan = Math.max(span, 1);
+        th.hidden = !shown;
+        if (shown) total += span;
+      });
+      const head = t.querySelector("th.task-head");
+      if (head) { head.colSpan = Math.max(total, 1); head.hidden = total === 0; }
     });
   }
-  boxes.forEach(b => b.addEventListener("change", columns));
+  boxes.forEach(b => b.addEventListener("change", filter));
+  filter();  // a reload may restore unchecked boxes
 
   const tip = document.getElementById("tip");
   let pinned = null, timer = null;
@@ -610,8 +642,12 @@ def _esc(text) -> str:
     return html.escape(str(text), quote=True)
 
 
+def _join(*names: str) -> str:
+    return " ".join(n for n in names if n)
+
+
 def _classes(*names: str) -> str:
-    joined = " ".join(n for n in names if n)
+    joined = _join(*names)
     return f' class="{joined}"' if joined else ""
 
 
@@ -1022,12 +1058,11 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     width = sum(sizes.values())
     data_attrs = " ".join(f'data-{g}="{size}"' for g, size in sizes.items())
     count = len(spec.intrinsics)
-    task_attrs = " ".join(f'data-{g}="{size * count}"' for g, size in sizes.items())
     head = [
         [
             '<th class="commit" rowspan="4">Commit</th>',
             '<th rowspan="4">Subject</th>',
-            f'<th class="i section i-start" colspan="{width * count}" {task_attrs}>'
+            f'<th class="task-head section i-start" colspan="{width * count}">'
             f"{_esc(TASK_LABEL)}</th>",
             f'<th class="grp-thr section i-start" colspan="{6 * n}">'
             f"{_esc(SERVING_LABEL)}</th>",
@@ -1037,21 +1072,25 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
         [],
     ]
     for intrinsic in spec.intrinsics:
+        mark = f"in-{intrinsic.id}"  # what its filter hides
         head[1].append(
-            f'<th class="i i-start" colspan="{width}" {data_attrs}>'
+            f'<th class="i i-start {mark}" colspan="{width}" {data_attrs} '
+            f'data-intrinsic="{_esc(intrinsic.id)}">'
             f"{_esc(intrinsic.name)}<br>"
             f"<small>{_esc(intrinsic.headline_label)}</small></th>"
         )
         for group, label in GROUP_LABELS.items():
             span = 'rowspan="2"' if group == "base" else f'colspan="{sizes[group]}"'
             start = "start i-start" if group == "gs" else "start"
-            head[2].append(f'<th class="grp-{group} {start}" {span}>{_esc(label)}</th>')
+            head[2].append(
+                f'<th class="grp-{group} {start} {mark}" {span}>{_esc(label)}</th>'
+            )
             if group == "base":
                 continue
             for k, tech in enumerate(techs):
                 first = start if k == 0 else ""
                 head[3].append(
-                    f"<th{_classes(f'grp-{group}', first)}>{_esc(tech.label)}</th>"
+                    f"<th{_classes(f'grp-{group}', first, mark)}>{_esc(tech.label)}</th>"
                 )
     # The two throughput blocks, per technology rather than per intrinsic.
     for block, unit in (
@@ -1090,6 +1129,7 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
         ]
         for intrinsic in spec.intrinsics:
             headline = intrinsic.headline
+            mark = f"in-{intrinsic.id}"
             by_tech = row["cells"].get(intrinsic.id, {})
             by_column = {} if gap else reference["cells"].get(intrinsic.id, {})
             gs = [by_tech.get(t.id) for t in techs]
@@ -1105,24 +1145,26 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
             for k, cell in enumerate(gs):
                 start = "start i-start" if k == 0 else ""
                 cells.append(
-                    _cell_html(cell, headline, best, f"grp-gs {start}".strip())
+                    _cell_html(cell, headline, best, _join("grp-gs", start, mark))
                 )
             for k, cell in enumerate(ref):
                 start = "start" if k == 0 else ""
                 cells.append(
                     _cell_html(
-                        cell, headline, best, f"grp-ref {start}".strip(), ref_missing
+                        cell, headline, best, _join("grp-ref", start, mark), ref_missing
                     )
                 )
             cells.append(
-                _cell_html(base, headline, best, "grp-base start", ref_missing)
+                _cell_html(
+                    base, headline, best, _join("grp-base start", mark), ref_missing
+                )
             )
             for k in range(len(techs)):
                 start = "start" if k == 0 else ""
                 # No adapter for this technology: the ratio cell says so too.
                 skip = next((c for c in (gs[k], ref[k]) if c and "skipped" in c), None)
                 if skip:
-                    extra = f"grp-ratio {start}".strip()
+                    extra = _join("grp-ratio", start, mark)
                     cells.append(_cell_html(skip, headline, None, extra))
                     continue
                 cells.append(
@@ -1130,7 +1172,7 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                         _headline(gs[k], headline),
                         _headline(ref[k], headline),
                         _headline(base, headline),
-                        f"grp-ratio {start}".strip(),
+                        _join("grp-ratio", start, mark),
                         gap
                         or f"needs the {ENGINE_LABEL}, {REFERENCE_LABEL} and "
                         f"{BASE_LABEL} scores",
@@ -1215,9 +1257,26 @@ def render(data: dict, spec: Spec) -> str:
             + _model_table(rows, reference, model_spec)
             + "</section>"
         )
-    toggles = "".join(
-        f'<label><input type="checkbox" data-group="{g}" checked> {_esc(label)}</label>'
-        for g, label in TOGGLE_LABELS.items()
+    # Every model's intrinsics, in spec order: the filters apply to every tab.
+    intrinsics = {i.id: i for m in spec.models for i in spec.for_model(m.id).intrinsics}
+
+    def boxes(kind: str, items) -> str:
+        return "".join(
+            f'<label><input type="checkbox" data-{kind}="{_esc(key)}" checked> '
+            f"{_esc(label)}</label>"
+            for key, label in items
+        )
+
+    filters = (
+        '<span class="name">Show</span>'
+        f'<span class="boxes">{boxes("section", SECTION_LABELS.items())}</span>'
+        '<span class="name task-only">Adapters</span><span class="boxes task-only">'
+        + boxes("intrinsic", ((i.id, i.name) for i in intrinsics.values()))
+        + '</span><span class="name task-only">Columns</span>'
+        f'<span class="boxes task-only">{boxes("group", GROUP_LABELS.items())}</span>'
+    )
+    hide_intrinsics = "".join(
+        f"table.hide-in-{i} .in-{i} {{ display: none; }}\n" for i in intrinsics
     )
     t, sw = spec.throughput, spec.switching
     tech_notes = "".join(
@@ -1231,7 +1290,7 @@ def render(data: dict, spec: Spec) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Granite Switch adapter benchmark</title>
-<style>{PAGE_STYLE}</style>
+<style>{PAGE_STYLE}{hide_intrinsics}</style>
 </head>
 <body>
 <h1>Granite Switch adapter benchmark</h1>
@@ -1241,7 +1300,7 @@ the base model alone. Greedy decoding. Accuracy is in percent, decode
 throughput in tokens per second, agents' time to finish in seconds.</p>
 {FLOW}
 <nav class="tabs" role="tablist" aria-label="Base model">{"".join(tabs)}</nav>
-<div class="controls">Show: {toggles}</div>
+<div class="controls">{filters}</div>
 {chr(10).join(sections)}
 <section class="notes">
 <h2>Reading the table</h2>
