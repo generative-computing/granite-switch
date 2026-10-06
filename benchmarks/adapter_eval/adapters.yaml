@@ -90,8 +90,10 @@ throughput:
 # generating `decode_tokens` and switching adapter every `span` tokens, with
 # tool calls at its rate, on `adapters` synthetic adapters of rank `rank`
 # (make_synth_fleet.py), at least `min_agents` agents in waves. The cell is
-# the p95 time to complete. Rows measured with other settings count as not
-# measured.
+# the p95 time to complete, after `warmup_runs` untimed runs of it in the same
+# engine: that figure's sweep runs 49 cells per engine, so all but its first
+# find the adapters loaded and the kernels compiled. Rows measured with other
+# settings count as not measured.
 switching:
   concurrency: 8
   decode_tokens: 512
@@ -99,6 +101,7 @@ switching:
   adapters: 64
   rank: 32
   min_agents: 16
+  warmup_runs: 1
 
 # max_new_tokens comes from each intrinsic's training config.
 # headline is the metric the results page shows; it matches the internal

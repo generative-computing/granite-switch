@@ -1031,6 +1031,11 @@ def test_switching_cells_and_rule():
     # A row needs no stock-vLLM SR.
     row["switching"]["sr"] = {"gs": waited()}
     assert publish.cache_hit(row, SPEC)
+    # One measured without the warm-up run is measured again.
+    cold = waited()
+    del cold["warmup_runs"]
+    row["switching"]["lora"]["gs"] = cold
+    assert publish.missing_cells(row, SPEC) == [publish.SWITCHING]
 
 
 def test_a_row_needs_its_throughput():
@@ -2247,7 +2252,8 @@ def test_only_switching_runs_just_it(tmp_path, monkeypatch):
 def test_switching_commands_follow_their_scripts(tmp_path):
     sw = SPEC.switching.settings()
     out, grid, root = tmp_path / "o.jsonl", tmp_path / "grid", tmp_path / "fleet"
-    common_args = ["--cells", "8:32", "--fleet-dir", str(grid), "--out", str(out)]
+    # The cell twice: a warm-up run, then the timed one, in the same engine.
+    common_args = ["--cells", "8:32,8:32", "--fleet-dir", str(grid), "--out", str(out)]
     assert switching.arm_command("lora", "native", "base", grid, root, sw, out) == [
         switching.DRIVER, "--arm", "native-lora", "--base-model", "base",
         "--lora-root", str(root), "--lora-rank", "32", *common_args,
@@ -2270,6 +2276,11 @@ def test_switching_commands_follow_their_scripts(tmp_path):
     assert "--expect-kv" not in switching.verify_command(out, "sr", sw, 100352)
     grid_args = switching.grid_command(sw, grid / "g.jsonl")
     assert grid_args[grid_args.index("--decode") + 1] == "512"
+    sr = switching.fleet_command("b", out, "sr", sw, "t", ("</think>", 100275))
+    assert sr[sr.index("--last-context-token") + 1] == "</think>:100275"
+    assert "--last-context-token" not in switching.fleet_command(
+        "b", out, "lora", sw, "t"
+    )
 
 
 def test_their_scripts_take_every_flag_given(tmp_path):
@@ -2281,7 +2292,9 @@ def test_their_scripts_take_every_flag_given(tmp_path):
         )
         + switching.arm_command("sr", "gs", "b", out, None, sw, out),
         switching.GRID_SCRIPT: switching.grid_command(sw, out),
-        switching.FLEET_SCRIPT: switching.fleet_command("b", out, "lora", sw, "t"),
+        switching.FLEET_SCRIPT: switching.fleet_command(
+            "b", out, "sr", sw, "t", ("<|end_of_role|>", 100265)
+        ),
         switching.VERIFY_SCRIPT: switching.verify_command(out, "lora", sw, 1),
     }
     for script, args in given.items():
@@ -2300,16 +2313,32 @@ def test_their_scripts_take_every_flag_given(tmp_path):
 
 
 def test_switching_entry_takes_their_p95(tmp_path):
-    rows = [
-        {"elapsed_s": float(k), "wave": k % 2, "switches": 16, "tool_calls": 1}
-        for k in range(1, 17)
-    ]
-    entry = switching.entry(rows, SPEC.switching.settings())
+    def run(offset):
+        return [
+            {
+                "agent_id": k,
+                "elapsed_s": float(k + 1 + offset),
+                "wave": k % 2,
+                "switches": 16,
+                "tool_calls": 1,
+            }
+            for k in range(16)
+        ]
+
+    # The warm-up run's rows come first, then the timed run's.
+    entry = switching.entry(run(100) + run(0), SPEC.switching.settings())
     # Nearest rank over 16 agents: the 15th fastest.
     assert (entry["p95_s"], entry["median_s"], entry["agents"]) == (15.0, 8.5, 16)
     assert (entry["waves"], entry["switches"], entry["tool_calls"]) == (2, 256, 16)
+    assert entry["warmup_p95_s"] == [115.0]
     assert SPEC.switching.matches(entry)
     assert switching.entry([], {}) == common.error("the driver wrote no agents")
+    assert "not 2 passes" in switching.entry(run(0), SPEC.switching.settings())["error"]
+    other_agents = [r | {"agent_id": r["agent_id"] + 16} for r in run(0)]
+    assert (
+        "not 2 passes"
+        in switching.entry(run(100) + other_agents, SPEC.switching.settings())["error"]
+    )
 
 
 def test_gs_switch_names_the_adapter_by_control_token(tmp_path, monkeypatch):
@@ -2376,13 +2405,16 @@ def test_run_switching_runs_their_scripts_per_technology(tmp_path, monkeypatch):
                 )
                 (leaf / staged.CONFIG_FILE).write_text(json.dumps(config))
         elif "--out" in args and "--cells" in args:  # an engine's run
+            timed = 30.0 if "gs_switch" in " ".join(args) else 45.0
+            passes = args[args.index("--cells") + 1].split(",")
+            # One agent per pass; the warm-up passes are slower.
             rows = [
-                {
-                    "elapsed_s": 30.0 if "gs_switch" in " ".join(args) else 45.0,
-                    "wave": 0,
-                }
+                {"agent_id": 0, "elapsed_s": timed + 10 * (len(passes) - 1 - k)}
+                for k in range(len(passes))
             ]
-            Path(args[args.index("--out") + 1]).write_text(json.dumps(rows[0]) + "\n")
+            Path(args[args.index("--out") + 1]).write_text(
+                "".join(json.dumps(r) + "\n" for r in rows)
+            )
         return 0, []
 
     monkeypatch.setattr(run_benchmark, "run_streamed", fake_run)
@@ -2396,12 +2428,23 @@ def test_run_switching_runs_their_scripts_per_technology(tmp_path, monkeypatch):
         tmp_path / "models",
         "ibm-granite/granite-4.1-3b",
         cache,
+        lambda: ("<|end_of_role|>", 100265),
     )
     assert set(out["lora"]) == {"gs", "native"} and set(out["sr"]) == {"gs"}
     # The fleet builder gets the base model's local folder, even for a repo id.
     fleet = next(c for c in calls if switching.FLEET_SCRIPT in c)
     assert fleet[fleet.index("--base") + 1] == str(base)
     assert out["lora"]["gs"]["p95_s"] == 30.0 and out["lora"]["native"]["p95_s"] == 45.0
+    assert out["lora"]["gs"]["warmup_p95_s"] == [40.0]
+    # Only the SR fleet gets the SR anchor.
+    anchors = {
+        c[c.index("--flavor") + 1]: c[c.index("--last-context-token") + 1]
+        if "--last-context-token" in c
+        else None
+        for c in calls
+        if switching.FLEET_SCRIPT in c
+    }
+    assert anchors == {"lora": None, "alora": None, "sr": "<|end_of_role|>:100265"}
     engines = [c for c in calls if "--cells" in c]
     # Which engine goes first alternates by technology, as for decoding.
     assert [("native" if "native-lora" in c else "gs") for c in engines] == [
@@ -2422,6 +2465,7 @@ def test_run_switching_runs_their_scripts_per_technology(tmp_path, monkeypatch):
         tmp_path / "models",
         "ibm-granite/granite-4.1-3b",
         cache,
+        lambda: ("<|end_of_role|>", 100265),
     )
     assert not [c for c in calls if switching.FLEET_SCRIPT in c]
 

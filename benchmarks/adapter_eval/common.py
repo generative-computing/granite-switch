@@ -108,6 +108,7 @@ class Switching:
     adapters: int = 64
     rank: int = 32
     min_agents: int = 16
+    warmup_runs: int = 1
 
     def settings(self) -> dict:
         return vars(self).copy()
@@ -231,13 +232,17 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         throughput=Throughput(**raw.get("throughput", {})),
         switching=Switching(**raw.get("switching", {})),
     )
-    if any(
-        not isinstance(v, int) or v < (0 if k == "warmup_runs" else 1)
-        for k, v in spec.throughput.settings().items()
-    ):
+
+    def bad(settings: dict) -> bool:
+        return any(
+            not isinstance(v, int) or v < (0 if k == "warmup_runs" else 1)
+            for k, v in settings.items()
+        )
+
+    if bad(spec.throughput.settings()):
         raise ValueError(f"bad throughput settings {spec.throughput.settings()}")
     sw = spec.switching
-    if min(sw.settings().values()) < 1 or sw.decode_tokens % sw.span:
+    if bad(sw.settings()) or sw.decode_tokens % sw.span:
         raise ValueError(f"bad switching settings {sw.settings()}")
     grouped = {t for techs in COMPOSE_GROUPS.values() for t in techs}
     if {t.id for t in spec.technologies} != grouped:

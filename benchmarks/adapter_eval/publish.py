@@ -738,6 +738,10 @@ def _switching_title(measured: dict) -> str:
         f"calls in all; {measured['prefill_recomputed']:,} prompt tokens re-prefilled",
         f"{measured['adapters']} synthetic adapters of rank {measured['rank']}",
     ]
+    if warmups := measured.get("warmup_p95_s"):
+        parts.append(
+            "untimed warm-up first: p95 " + ", ".join(f"{w:.1f} s" for w in warmups)
+        )
     return "; ".join(parts)
 
 
@@ -1274,7 +1278,10 @@ finish, in seconds, as in its grid-concurrency figure but at one cell:
 {sw.concurrency} agents at a time ({sw.min_agents} in all), each generating
 {sw.decode_tokens} tokens over a prompt of its own, switching adapter every
 {sw.span} tokens over {sw.adapters} synthetic adapters, with tool calls between
-runs. Stock vLLM re-issues the request at every switch, re-prefilling the
+runs, timed after {sw.warmup_runs} untimed run{"" if sw.warmup_runs == 1 else "s"}
+of the same cell in the same engine, so adapters are loaded and kernels
+compiled, as for all but the first cell of that figure. Stock vLLM re-issues
+the request at every switch, re-prefilling the
 context (cached for an adapter it saw before), and so does granite-switch LoRA
 and aLoRA, by control token; granite-switch SR switches without a re-prefill,
 so its agents run uninterrupted but for the tool calls.</li>

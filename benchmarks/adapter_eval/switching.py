@@ -25,7 +25,11 @@ sr       its ``shadow-residual`` arm: one      none: stock vLLM has no SR
 ======== ===================================== ==================================
 
 A cell's value is its figure's: the p95 time for an agent to complete, by
-nearest rank over the cell's agents.
+nearest rank over the cell's agents. Each engine runs the cell ``warmup_runs``
+times untimed first, in the same engine: that figure's sweep walks 49 cells per
+engine, so all but its first cell find the adapters loaded and the kernels
+compiled, and one cell measured cold would charge those one-off costs (stock
+vLLM reads each adapter from storage on first use) to the cell.
 """
 
 from __future__ import annotations
@@ -58,8 +62,12 @@ def names(n: int) -> list[str]:
 
 
 def fleet_command(
-    base: str, out: Path, tech: str, settings: dict, target: str
-) -> list[str]:
+    base: str, out: Path, tech: str, settings: dict, target: str,
+    anchor: tuple[str, int] | None = None,
+) -> list[str]:  # fmt: skip
+    """The builder's command line. ``anchor`` is the SR anchor the accuracy run
+    gives the real SR adapters: the builder's own renders without the SR prompt
+    options, and on Granite 4.2 ends on a newline it cannot use."""
     flavor = FLAVORS[tech][0]
     return [
         FLEET_SCRIPT,
@@ -69,6 +77,7 @@ def fleet_command(
         "--num-adapters", str(settings["adapters"]),
         "--rank", str(settings["rank"]),
         "--target-model", target,
+        *(["--last-context-token", f"{anchor[0]}:{anchor[1]}"] if anchor else []),
     ]  # fmt: skip
 
 
@@ -122,8 +131,12 @@ def grid_command(settings: dict, out: Path) -> list[str]:
     ]  # fmt: skip
 
 
-def cell(settings: dict) -> str:
-    return f"{settings['concurrency']}:{settings['span']}"
+def cells(settings: dict) -> str:
+    """The cell once per pass. The driver runs a job's cells in order in one
+    engine, resetting the prefix cache before each, so the passes before the
+    last only warm the engine up."""
+    cell = f"{settings['concurrency']}:{settings['span']}"
+    return ",".join([cell] * (settings["warmup_runs"] + 1))
 
 
 def arm_command(
@@ -134,7 +147,7 @@ def arm_command(
     granite-switch LoRA and aLoRA."""
     common = [
         "--cells",
-        cell(settings),
+        cells(settings),
         "--fleet-dir",
         str(fleet_dir),
         "--out",
@@ -158,25 +171,42 @@ def p95(values: list[float]) -> float:
 
 
 def entry(rows: list[dict], settings: dict) -> dict:
-    """A cell's entry from the driver's per-agent rows, or an error."""
+    """A cell's entry from the driver's per-agent rows, or an error.
+
+    The rows hold one pass after another (``cells``); the entry is the last
+    pass's, with each warm-up pass's p95 kept beside it.
+    """
     if not rows:
         return error("the driver wrote no agents")
-    elapsed = [r["elapsed_s"] for r in rows]
+    passes = settings["warmup_runs"] + 1
+    size = len(rows) // passes
+    runs = [rows[k * size : (k + 1) * size] for k in range(passes)]
+    if len(rows) % passes or any(
+        sorted(r.get("agent_id", 0) for r in run)
+        != sorted(r.get("agent_id", 0) for r in runs[-1])
+        for run in runs
+    ):
+        return error(f"the driver's {len(rows)} rows are not {passes} passes")
+    timed = runs[-1]
+    elapsed = [r["elapsed_s"] for r in timed]
 
     def total(key):
-        return sum(r.get(key, 0) for r in rows)
+        return sum(r.get(key, 0) for r in timed)
 
     return {
         "p95_s": round(p95(elapsed), 2),
         "median_s": round(statistics.median(elapsed), 2),
-        "agents": len(rows),
-        "waves": len({r.get("wave") for r in rows}),
+        "agents": len(timed),
+        "waves": len({r.get("wave") for r in timed}),
         "elapsed_s": [round(e, 2) for e in sorted(elapsed)],
         "switches": total("switches"),
         "tool_calls": total("tool_calls"),
         "prefill_recomputed": total("prefill_recomputed"),
         "prefill_cached": total("prefill_cached"),
-        "arm": rows[0].get("arm"),
+        "arm": timed[0].get("arm"),
+        "warmup_p95_s": [
+            round(p95([r["elapsed_s"] for r in run]), 2) for run in runs[:-1]
+        ],
         **settings,
     }
 

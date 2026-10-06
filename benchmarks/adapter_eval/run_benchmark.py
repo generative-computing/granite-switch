@@ -292,10 +292,11 @@ def run_streamed(cmd: list[str], cwd: Path, tag: str) -> tuple[int, list[str]]:
 
 def synthetic_fleet(
     python: str, harness_root: Path, cache: Path, base: str, tech: str, settings: dict,
-    target: str,
+    target: str, anchor: tuple[str, int] | None = None,
 ) -> Path | None:  # fmt: skip
     """The switch benchmark's synthetic adapters of one flavor, built once per
-    builder version and settings and kept in ``cache``; None if building failed."""
+    builder version and settings and kept in ``cache``; None if building failed.
+    An SR fleet is built with ``anchor``, the anchor the real SR adapters get."""
     builder = hashlib.sha256((harness_root / switching.FLEET_SCRIPT).read_bytes())
     fleet = cache / (
         f"{switching.FLAVORS[tech][0]}_n{settings['adapters']}_r{settings['rank']}"
@@ -304,7 +305,10 @@ def synthetic_fleet(
     if (fleet / ".verified").is_file():
         return fleet
     shutil.rmtree(fleet, ignore_errors=True)
-    cmd = [python, *switching.fleet_command(base, fleet, tech, settings, target)]
+    cmd = [
+        python,
+        *switching.fleet_command(base, fleet, tech, settings, target, anchor),
+    ]
     if run_streamed(cmd, harness_root, "switching")[0] != 0:
         return None
     built = switching.leaves(fleet, tech, target, settings["adapters"])
@@ -317,10 +321,11 @@ def synthetic_fleet(
 
 def run_switching(
     args, spec, harness_root: Path, work: Path, model_root: Path, base_model: str,
-    cache: Path,
+    cache: Path, sr_anchor,
 ) -> dict:  # fmt: skip
     """Per technology, the p95 time for agents switching adapters to complete,
-    granite-switch's and stock vLLM's (``switching.py``)."""
+    granite-switch's and stock vLLM's (``switching.py``). ``sr_anchor`` returns
+    the SR anchor."""
     settings = spec.switching.settings()
     target = spec.model_id
     grid = work / "switching" / "grid"
@@ -337,9 +342,16 @@ def run_switching(
     vocab = json.loads((base_dir / "config.json").read_text())["vocab_size"]
     out: dict[str, dict] = {}
     for k, tech in enumerate(spec.technologies):
+        try:
+            anchor = sr_anchor() if tech.id == "sr" else None
+        except Exception as e:
+            traceback.print_exc()
+            out[tech.id] = error(f"SR anchor failed ({type(e).__name__})")
+            continue
         fleet = synthetic_fleet(
-            args.python, harness_root, cache, str(base_dir), tech.id, settings, target
-        )
+            args.python, harness_root, cache, str(base_dir), tech.id, settings, target,
+            anchor,
+        )  # fmt: skip
         if fleet is None:
             out[tech.id] = error("synthetic adapters failed")
             continue
@@ -780,15 +792,14 @@ def main(argv: list[str] | None = None) -> int:
                 cell["too_long"] = st["too_long"]
             cells[c.intrinsic][c.tech] = cell
 
+    @functools.cache
+    def sr_anchor():
+        return anchor or generation_prompt_anchor(
+            base_model, spec.model.prompt_for("sr")["chat_template_kwargs"]
+        )
+
     throughput = None
     if measure_speed:
-
-        @functools.cache
-        def sr_anchor():
-            return anchor or generation_prompt_anchor(
-                base_model, spec.model.prompt_for("sr")["chat_template_kwargs"]
-            )
-
         fleets, run_meta["throughput_left_out"] = throughput_fleets(
             args.bench_root, spec, base_model, copies, sr_anchor
         )
@@ -801,7 +812,7 @@ def main(argv: list[str] | None = None) -> int:
     if measure_switching:
         switching_results = run_switching(
             args, spec, harness_root, work, model_root, base_model,
-            (args.switching_cache or work / "synthetic").resolve(),
+            (args.switching_cache or work / "synthetic").resolve(), sr_anchor,
         )  # fmt: skip
 
     results = {

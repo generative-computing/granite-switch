@@ -621,7 +621,12 @@ The figure runs 1,024 tokens over concurrency 1 to 64; the settings are
 (`lora`, `alora`, `sr`), as in its figure. Their timing does not depend on
 their weights, and the cost being measured grows with their number: a first
 visit to an adapter re-prefills the agent's whole context. They are built
-once per model and builder version, and kept on the storage volume.
+once per model and builder version, and kept on the storage volume. The SR
+ones get the SR anchor the accuracy run gives the real SR adapters, through
+the builder's `--last-context-token`: the builder's own renders the chat
+template without the SR prompt options, which on Granite 4.2 ends on a newline
+it rejects. The two agree on 4.1 (`<|end_of_role|>`); on 4.2 it is
+`</think>`.
 
 **The engines**, per technology:
 
@@ -647,7 +652,19 @@ rather than a LoRARequest.
 **The cell** is its figure's: the p95 time for an agent to finish, by nearest
 rank. The speedup is stock vLLM's p95 over granite-switch's, in whole percent.
 
-Running it adds roughly 30 to 45 minutes to a commit's run: three
+**A warm-up run first.** Each engine runs the cell twice and only the second
+run is timed (`warmup_runs`; the first run's p95 is kept beside it). Their
+driver runs a job's cells in order in one engine and resets the prefix cache
+before each, so listing the cell twice is all it takes. Their figure's sweep
+runs 49 cells per engine, so all but its first cell find the adapters loaded
+and the kernels compiled; a single cell measured cold would charge those
+one-off costs to the cell. They are not small next to the gap being measured:
+cold, stock vLLM reads each adapter from the storage volume on its first use.
+Measured cold on b7e54212, its first wave of agents finished 14 to 22 seconds
+after granite-switch's, while its second wave, with every adapter loaded,
+finished level with granite-switch's or ahead of it.
+
+Running it adds roughly 35 to 50 minutes to a commit's run: three
 64-adapter checkpoints to compose and check, and five engines.
 `submit.sh bench <ref> --only switching` measures just this block.
 
