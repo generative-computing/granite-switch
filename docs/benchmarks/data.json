@@ -583,6 +583,209 @@
         "transformers": "5.17.0",
         "vllm": "0.26.0"
       },
+      "switching": {
+        "alora": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              33.66,
+              34.1,
+              34.28,
+              35.69,
+              35.86,
+              35.92,
+              36.17,
+              37.41,
+              61.91,
+              63.48,
+              64.54,
+              65.84,
+              65.88,
+              65.94,
+              65.98,
+              66.01
+            ],
+            "median_s": 49.66,
+            "min_agents": 16,
+            "p95_s": 65.98,
+            "prefill_cached": 94720,
+            "prefill_recomputed": 1036528,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              65.83
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              32.42,
+              32.81,
+              32.96,
+              34.13,
+              34.33,
+              34.45,
+              34.67,
+              35.64,
+              53.86,
+              55.16,
+              56.03,
+              56.9,
+              56.94,
+              57.0,
+              57.03,
+              57.04
+            ],
+            "median_s": 44.75,
+            "min_agents": 16,
+            "p95_s": 57.03,
+            "prefill_cached": 98224,
+            "prefill_recomputed": 1033024,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              82.91
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "lora": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              33.74,
+              34.18,
+              34.36,
+              35.77,
+              35.95,
+              36.0,
+              36.25,
+              37.5,
+              62.03,
+              63.6,
+              64.47,
+              65.96,
+              66.0,
+              66.06,
+              66.1,
+              66.13
+            ],
+            "median_s": 49.76,
+            "min_agents": 16,
+            "p95_s": 66.1,
+            "prefill_cached": 94720,
+            "prefill_recomputed": 1036528,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              65.9
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              32.08,
+              32.46,
+              32.61,
+              33.78,
+              33.98,
+              34.1,
+              34.32,
+              35.29,
+              53.79,
+              55.11,
+              55.99,
+              56.85,
+              56.89,
+              56.95,
+              56.98,
+              56.99
+            ],
+            "median_s": 44.54,
+            "min_agents": 16,
+            "p95_s": 56.98,
+            "prefill_cached": 98224,
+            "prefill_recomputed": 1033024,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              60.0
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "sr": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "shadow-residual",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              12.21,
+              12.25,
+              12.26,
+              12.26,
+              12.26,
+              12.29,
+              12.39,
+              12.39,
+              15.94,
+              16.0,
+              16.01,
+              16.03,
+              16.03,
+              16.04,
+              16.05,
+              16.12
+            ],
+            "median_s": 14.17,
+            "min_agents": 16,
+            "p95_s": 16.05,
+            "prefill_cached": 70880,
+            "prefill_recomputed": 66974,
+            "rank": 32,
+            "span": 32,
+            "switches": 0,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              32.45
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        }
+      },
       "throughput": {
         "alora": {
           "gs": {
@@ -823,6 +1026,93 @@
             "warmup_runs": 2
           },
           "throughput_left_out": [],
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": null
+        },
+        {
+          "adapters": {},
+          "base_model_local_copy": true,
+          "enforce_eager": false,
+          "finished": "2026-10-06T07:59:54Z",
+          "gpu": null,
+          "harness_dirty": false,
+          "harness_sha": "0a83e68adb9e87f26a6f4d835904824cfee67104",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "switching"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261006T070752Z",
+          "scheduler": null,
+          "sr_anchor_converted": [],
+          "started": "2026-10-06T07:09:00Z",
+          "switching": {
+            "adapters": 64,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32
+          },
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": null
+        },
+        {
+          "adapters": {},
+          "base_model_local_copy": true,
+          "enforce_eager": false,
+          "finished": "2026-10-06T09:51:22Z",
+          "gpu": null,
+          "harness_dirty": false,
+          "harness_sha": "b209e056e7c8ea656a65fd769826f17111c439e5",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "switching"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261006T085136Z",
+          "scheduler": null,
+          "sr_anchor_converted": [],
+          "started": "2026-10-06T08:52:37Z",
+          "switching": {
+            "adapters": 64,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32,
+            "warmup_runs": 1
+          },
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
           "torch": "2.11.0",
           "transformers": "5.17.0",
           "vllm": null
@@ -1105,6 +1395,209 @@
         "torch": "2.11.0",
         "transformers": "5.17.0",
         "vllm": "0.26.0"
+      },
+      "switching": {
+        "alora": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              33.38,
+              33.82,
+              33.99,
+              35.38,
+              35.56,
+              35.61,
+              35.86,
+              37.09,
+              61.14,
+              62.68,
+              63.73,
+              65.02,
+              65.05,
+              65.11,
+              65.15,
+              65.18
+            ],
+            "median_s": 49.12,
+            "min_agents": 16,
+            "p95_s": 65.15,
+            "prefill_cached": 94720,
+            "prefill_recomputed": 1036528,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              65.17
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              32.72,
+              33.07,
+              33.22,
+              33.36,
+              34.38,
+              34.55,
+              34.77,
+              35.86,
+              53.72,
+              55.0,
+              55.88,
+              56.74,
+              56.78,
+              56.84,
+              56.87,
+              56.88
+            ],
+            "median_s": 44.79,
+            "min_agents": 16,
+            "p95_s": 56.87,
+            "prefill_cached": 98224,
+            "prefill_recomputed": 1033024,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              66.69
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "lora": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              33.36,
+              33.8,
+              33.97,
+              35.36,
+              35.54,
+              35.59,
+              35.84,
+              37.07,
+              61.14,
+              62.67,
+              63.72,
+              65.01,
+              65.05,
+              65.11,
+              65.13,
+              65.17
+            ],
+            "median_s": 49.1,
+            "min_agents": 16,
+            "p95_s": 65.13,
+            "prefill_cached": 94720,
+            "prefill_recomputed": 1036528,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              65.08
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              32.15,
+              32.49,
+              32.64,
+              32.79,
+              33.8,
+              33.96,
+              34.18,
+              35.27,
+              53.52,
+              54.81,
+              55.68,
+              56.55,
+              56.59,
+              56.65,
+              56.68,
+              56.69
+            ],
+            "median_s": 44.4,
+            "min_agents": 16,
+            "p95_s": 56.68,
+            "prefill_cached": 98224,
+            "prefill_recomputed": 1033024,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              66.03
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "sr": {
+          "gs": {
+            "adapters": 64,
+            "agents": 16,
+            "arm": "shadow-residual",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              12.15,
+              12.18,
+              12.2,
+              12.2,
+              12.21,
+              12.22,
+              12.33,
+              12.33,
+              15.8,
+              15.86,
+              15.87,
+              15.89,
+              15.89,
+              15.9,
+              15.92,
+              15.99
+            ],
+            "median_s": 14.07,
+            "min_agents": 16,
+            "p95_s": 15.92,
+            "prefill_cached": 70880,
+            "prefill_recomputed": 66974,
+            "rank": 32,
+            "span": 32,
+            "switches": 0,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              32.05
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        }
       },
       "throughput": {
         "alora": {
@@ -1477,6 +1970,93 @@
             "warmup_runs": 2
           },
           "throughput_left_out": [],
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": null
+        },
+        {
+          "adapters": {},
+          "base_model_local_copy": false,
+          "enforce_eager": false,
+          "finished": "2026-10-05T20:28:06Z",
+          "gpu": null,
+          "harness_dirty": false,
+          "harness_sha": "0a83e68adb9e87f26a6f4d835904824cfee67104",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "switching"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261005T191443Z",
+          "scheduler": null,
+          "sr_anchor_converted": [],
+          "started": "2026-10-05T19:15:55Z",
+          "switching": {
+            "adapters": 64,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32
+          },
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": null
+        },
+        {
+          "adapters": {},
+          "base_model_local_copy": false,
+          "enforce_eager": false,
+          "finished": "2026-10-06T09:36:33Z",
+          "gpu": null,
+          "harness_dirty": false,
+          "harness_sha": "b209e056e7c8ea656a65fd769826f17111c439e5",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "switching"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261006T084343Z",
+          "scheduler": null,
+          "sr_anchor_converted": [],
+          "started": "2026-10-06T08:44:45Z",
+          "switching": {
+            "adapters": 64,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32,
+            "warmup_runs": 1
+          },
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
           "torch": "2.11.0",
           "transformers": "5.17.0",
           "vllm": null
@@ -1929,6 +2509,15 @@
       }
     ],
     "reference_version": 2,
+    "switching": {
+      "adapters": 64,
+      "concurrency": 8,
+      "decode_tokens": 512,
+      "min_agents": 16,
+      "rank": 32,
+      "span": 32,
+      "warmup_runs": 1
+    },
     "technologies": [
       {
         "id": "lora",
