@@ -1238,7 +1238,7 @@ def render(data: dict, spec: Spec) -> str:
 <p class="lede">How well trained intrinsic adapters work through each
 granite-switch commit, next to the same adapters without granite-switch and
 the base model alone. Greedy decoding. Accuracy is in percent, decode
-throughput in tokens per second.</p>
+throughput in tokens per second, agents' time to finish in seconds.</p>
 {FLOW}
 <nav class="tabs" role="tablist" aria-label="Base model">{"".join(tabs)}</nav>
 <div class="controls">Show: {toggles}</div>
@@ -1295,7 +1295,9 @@ first token, the way it decodes once on. Stock vLLM has no SR implementation,
 so SR has no number here (<b>—</b>).</li>
 <li><b>{_esc(SPEEDUP_LABEL)}</b>: how much faster {_esc(ENGINE_LABEL)} is
 than {_esc(NATIVE_LABEL)}, in whole percent: +34% is 1.34 times the tokens per
-second, or agents finishing in 1/1.34 of the time. None for SR.</li>
+second, or agents finishing in 1/1.34 of the time; a negative value is slower,
+-13% being 0.87 times the tokens per second, or agents taking 1/0.87 of the
+time. None for SR.</li>
 <li>The <b>i</b> next to a commit opens its run details: library versions,
 GPU, the adapter checkpoints and the reference run.</li>
 <li>Granite 4.2 prompts turn reasoning off and carry their documents as tool

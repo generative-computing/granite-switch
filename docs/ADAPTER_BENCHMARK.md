@@ -56,7 +56,7 @@ Each block has the same three groups:
 |---|---|---|
 | granite-switch (vLLM) | LoRA, aLoRA, SR | the technology's adapters composed with the commit |
 | PEFT (vLLM) | LoRA, aLoRA | the same adapters served by stock vLLM as PEFT LoRAs; SR shows `—`, as stock vLLM has no SR |
-| Speedup | LoRA, aLoRA | how much faster granite-switch is, in whole percent (+34% is 1.34 times the tokens per second, or agents done in 1/1.34 of the time); SR shows `—` |
+| Speedup | LoRA, aLoRA | how much faster granite-switch is, in whole percent (+34% is 1.34 times the tokens per second, or agents done in 1/1.34 of the time; a negative value is slower, -13% being agents done in 1/0.87 of the time); SR shows `—` |
 
 Both blocks are measured in each commit's run, both engines on the same GPU,
 by the switch benchmark's own scripts, copied unchanged into `benchmarks/`.
