@@ -206,8 +206,10 @@ def cmd_build(args):
     assert cfg["model_type"] == "granite_switch"
     print(f"  dual_stream={cfg['dual_stream']} cross_stream_rank={cfg['cross_stream_rank']}")
 
-    # Deterministic shared prefix (prefix-cacheable) in the plain-token range,
-    # plus the per-adapter suffixes used to drive one decode each.
+    # Deterministic shared prefix (prefix-cacheable) in the plain-token range.
+    # The per-adapter continuation and the "allowed set" are NOT hardcoded here:
+    # they are defined by the REFERENCE run's actual output (see cmd_run), so
+    # "in-set" means "matches the known-good reference", not an arbitrary range.
     torch.manual_seed(7)
     plain_max = min(VOCAB_SIZE - 20, 300)
     shared_prefix = torch.randint(3, plain_max, (48,)).tolist()
@@ -216,7 +218,6 @@ def cmd_build(args):
             {
                 "shared_prefix": shared_prefix,
                 "adapter_token_ids": ADAPTER_TOKEN_IDS,
-                "allowed_sets": _allowed_sets(plain_max),
                 "plain_max": plain_max,
             },
             f,
@@ -224,21 +225,6 @@ def cmd_build(args):
     del model
     print("  build complete")
     return 0
-
-
-def _allowed_sets(plain_max):
-    """A per-adapter allowed-output set, mirroring the game's constrained decode.
-
-    The bug surfaces as a token OUTSIDE the adapter's allowed set (token 0),
-    which raises a KeyError downstream. We model that constraint explicitly: a
-    correctly-scheduled run only emits ids inside the set; the FA3-mis-scheduled
-    run emits out-of-set garbage (notably id 0).
-    """
-    # Disjoint, well inside the plain-token range; never includes 0.
-    return {
-        str(ADAPTER_TOKEN_IDS[0]): list(range(10, 40)),
-        str(ADAPTER_TOKEN_IDS[1]): list(range(40, 70)),
-    }
 
 
 # ── run mode (GPU) ─────────────────────────────────────────────────────────
@@ -288,8 +274,38 @@ def _dists_over(llm, seq):
     ]
 
 
+def _probe_fa_version():
+    """Log the FlashAttention version actually selected (3 => FULL cudagraph works).
+
+    The #139 bug only exists under FA3 + FULL. FA3 requires an SM90 (Hopper) GPU
+    AND a vllm_flash_attn build whose FA3 kernel loads for the installed
+    torch/CUDA. When FA3 is absent, vLLM falls back to FA2, whose cudagraph
+    support is UNIFORM_BATCH, so cudagraph_mode=FULL is silently downgraded to
+    FULL_AND_PIECEWISE and the bug cannot reproduce. Printing this makes a moot
+    run obvious instead of a misleading pass/fail.
+    """
+    try:
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+        v = get_flash_attn_version()
+        print(f"  FA_VERSION={v}  (FULL cudagraph requires FA_VERSION=3)")
+        if v != 3:
+            print("  WARNING: FA_VERSION != 3 — cudagraph_mode=FULL will DOWNGRADE; "
+                  "this run cannot reproduce issue #139.")
+    except Exception as e:  # import path or probe may move across vLLM versions
+        print(f"  FA_VERSION probe failed ({type(e).__name__}: {e})")
+
+
 def cmd_run(args):
-    """Load the SR MultiSwitch model under one setting; capture decodes + dists."""
+    """Load the SR MultiSwitch model under one setting; capture decodes + dists.
+
+    The REFERENCE run (tag 'ref_*') is the source of truth: it greedily generates
+    each adapter's continuation and records it. Those continuation ids ARE the
+    adapter's allowed set, and every CANDIDATE run is teacher-forced over the
+    exact same [prefix + ctrl + reference-continuation] sequence — so distribution
+    comparison is apples-to-apples and "out of allowed set" means "diverged from
+    the known-good reference", not an arbitrary range.
+    """
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     from vllm import SamplingParams
@@ -300,6 +316,7 @@ def cmd_run(args):
     register_granite_switch()
 
     work_dir, tag = args.work_dir, args.tag
+    is_ref = tag.startswith("ref")
     model_dir = os.path.join(work_dir, "sr_switch")
     inp = json.load(open(os.path.join(work_dir, "inputs.json")))
     shared_prefix = inp["shared_prefix"]
@@ -310,25 +327,36 @@ def cmd_run(args):
         f"prefix_caching={args.prefix}..."
     )
     llm = _make_llm(model_dir, args.cudagraph, args.prefix == "on")
+    _probe_fa_version()
 
     greedy = SamplingParams(temperature=0.0, max_tokens=GEN_TOKENS, ignore_eos=True)
 
-    # A growing, prefix-cached history: each batch element is
-    # [shared_prefix (cached) + adapter control token]. Several adapters share
-    # the prefix and differ only in the control-token suffix — the exact shape
-    # from the issue. We decode each as its own request so the shared prefix is
-    # a cache hit for every element after the first.
+    # The reference writes the continuation; candidates read it back so every
+    # run is scored over the identical token sequence.
+    if is_ref:
+        continuations = {}
+    else:
+        continuations = json.load(open(os.path.join(work_dir, "ref_cont.json")))
+
     decodes = {}
     dists = {}
     for ai, ctrl in enumerate(adapter_token_ids):
         seq = list(shared_prefix) + [ctrl]
+        # Each adapter decodes against the shared (prefix-cached) prefix — the
+        # exact "same history, different adapter suffix" regime from the issue.
         g = llm.generate(TokensPrompt(prompt_token_ids=seq), greedy)
         gen_ids = list(g[0].outputs[0].token_ids)
         decodes[str(ctrl)] = gen_ids
-        # Teacher-forced distributions over [prefix + ctrl + greedy continuation],
-        # scored identically across settings for the JSD/Jaccard gate.
-        dists[str(ctrl)] = _dists_over(llm, seq + gen_ids)
+        cont = gen_ids if is_ref else continuations[str(ctrl)]
+        if is_ref:
+            continuations[str(ctrl)] = gen_ids
+        # Teacher-force over [prefix + ctrl + REFERENCE continuation] in all runs.
+        dists[str(ctrl)] = _dists_over(llm, seq + list(cont))
         print(f"  adapter {ADAPTER_NAMES[ai]} (ctrl={ctrl}) greedy[:8]={gen_ids[:8]}")
+
+    if is_ref:
+        with open(os.path.join(work_dir, "ref_cont.json"), "w") as f:
+            json.dump(continuations, f)
 
     with open(os.path.join(work_dir, f"{tag}.json"), "w") as f:
         json.dump({"decodes": decodes, "dists": dists}, f)
@@ -366,20 +394,30 @@ def _gate_distributions(R, C, label):
 
 
 def cmd_compare(args):
-    """Gate a candidate run against a reference run: allowed-set + distributions."""
+    """Gate a candidate run against the reference: allowed-set + distributions.
+
+    The reference's own greedy output per adapter defines that adapter's allowed
+    set. A correct candidate (any setting that is NOT the broken FA3+FULL path)
+    reproduces the reference exactly, so its decoded ids are a subset of the
+    reference's and its teacher-forced distributions match within the fused-vs-
+    native floor. The broken path emits ids the reference never produced and
+    diverges in distribution.
+    """
     work_dir = args.work_dir
     ref = json.load(open(os.path.join(work_dir, f"{args.ref}.json")))
     cand = json.load(open(os.path.join(work_dir, f"{args.cand}.json")))
-    inp = json.load(open(os.path.join(work_dir, "inputs.json")))
-    allowed = {k: set(v) for k, v in inp["allowed_sets"].items()}
     label = args.label
+
+    # Allowed set per adapter = the set of ids the REFERENCE emitted for it.
+    allowed = {ctrl: set(ids) for ctrl, ids in ref["decodes"].items()}
 
     print(f"\nFA3-SCHEDULE compare: {label}  (cand '{args.cand}' vs ref '{args.ref}')")
 
     failures = []
 
-    # 1. Allowed-set gate: every decoded token must be in the adapter's set.
-    #    This is the direct analogue of the production KeyError (token 0).
+    # 1. Allowed-set gate: every candidate token must be one the reference also
+    #    produced for that adapter. This is the analogue of the production
+    #    out-of-allowed-set token (the token-0 KeyError).
     out_of_set = 0
     for ctrl, gen_ids in cand["decodes"].items():
         aset = allowed.get(ctrl, set())
@@ -387,12 +425,13 @@ def cmd_compare(args):
         if bad:
             out_of_set += len(bad)
             failures.append(
-                f"{label}: adapter ctrl={ctrl} emitted {len(bad)} token(s) "
-                f"outside its allowed set (e.g. {bad[:5]})"
+                f"{label}: adapter ctrl={ctrl} emitted {len(bad)} token(s) the "
+                f"reference never produced (e.g. {bad[:5]})"
             )
-    print(f"  tokens outside allowed set: {out_of_set}")
+    print(f"  tokens outside the reference's allowed set: {out_of_set}")
 
-    # 2. Distribution gate: candidate must match the reference within the floor.
+    # 2. Distribution gate: candidate must match the reference within the floor,
+    #    scored over the identical [prefix + ctrl + ref-continuation] sequence.
     for ctrl in ref["dists"]:
         if ctrl not in cand["dists"]:
             failures.append(f"{label}: candidate missing adapter ctrl={ctrl}")
