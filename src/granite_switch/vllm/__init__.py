@@ -43,6 +43,14 @@ def register():
     """
     from vllm import ModelRegistry
 
+    # FA3's ahead-of-time schedule must be sized for the switch's own attention
+    # layers (SR's doubled query heads, the counting/memory heads), not the model
+    # config, or FULL cudagraphs produce wrong tokens under FlashAttention 3.
+    # See fa3_schedule and docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md.
+    from .fa3_schedule import patch_flash_attn_schedule
+
+    patch_flash_attn_schedule()
+
     # Register config with transformers AutoConfig
     try:
         from transformers import AutoConfig
