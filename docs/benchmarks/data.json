@@ -365,7 +365,14 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "accuracy": 0.8020166933481361,
+            "accuracy_pooled": 0.829382215563585,
+            "balanced_accuracy": 0.7969479408176279,
+            "f1": 0.764955421712153,
+            "n": 11347,
+            "parse_failures": 0,
+            "score_version": 1,
+            "truncated": 0
           }
         },
         "query_clarification": {
@@ -384,7 +391,13 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "clear_hard_accuracy": 0.88,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.931899641577061,
+            "score_version": 1,
+            "truncated": 0,
+            "underspecified_accuracy": 0.8354430379746836
           }
         },
         "query_rewrite": {
@@ -424,7 +437,15 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "accuracy": 0.6542133665421337,
+            "balanced_accuracy": 0.6523320201240854,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5663716814159292,
+            "score_version": 1,
+            "truncated": 0,
+            "weighted_f1": 0.6613995865541842,
+            "yes_f1": 0.7124611667241975
           }
         }
       },
@@ -465,7 +486,55 @@
         "token_budget": 262144,
         "torch": "2.10.0",
         "transformers": "5.8.1"
-      }
+      },
+      "updates": [
+        {
+          "adapters": {
+            "guardian_core/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:32Z",
+              "weights_sha256": "b10160f9570fb58241a63c128cab48f6ead64fe103ce6b160b83430ee27f91aa"
+            },
+            "query_clarification/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:37Z",
+              "weights_sha256": "0e6ec9dac40994b1797c2d67e140400409a61838124bf7233a3e1b9fa66fe7e5"
+            },
+            "requirement_check/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:43Z",
+              "weights_sha256": "a13d6a27720d567723ef3a4d4dcb173764a224d71bcae06513b2794149921fe5"
+            }
+          },
+          "base_instructions_sha256": "b729efc36ee51aad46d9ae3d45d00a8eb8179a5f1196555273f705af694525dd",
+          "base_model_local_copy": true,
+          "finished": "2026-10-07T11:43:17Z",
+          "gpu": "NVIDIA A100-SXM4-80GB",
+          "gpus": 4,
+          "harness_dirty": false,
+          "harness_sha": "4ab06d32788577826823fede4a8e242038be094b",
+          "limit": null,
+          "max_batch": 64,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "query_clarification/sr",
+            "guardian_core/sr",
+            "requirement_check/sr"
+          ],
+          "peft": "0.19.1",
+          "run_ts": "20261007T113210Z",
+          "sr_invocation_dropped": [],
+          "sr_ref": "488f8e7af9c88e02659d5ff8b04eb744ce9a3c61",
+          "started": "2026-10-07T11:32:55Z",
+          "token_budget": 262144,
+          "torch": "2.10.0",
+          "transformers": "5.8.1"
+        }
+      ]
     }
   },
   "rows": [
@@ -502,7 +571,14 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "accuracy": 0.8015446212112256,
+            "accuracy_pooled": 0.8290296994800388,
+            "balanced_accuracy": 0.7961683896199693,
+            "f1": 0.7644158009138196,
+            "n": 11347,
+            "parse_failures": 0,
+            "score_version": 1,
+            "truncated": 0
           }
         },
         "query_clarification": {
@@ -513,7 +589,13 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "clear_hard_accuracy": 0.88,
+            "clear_random_accuracy": 1.0,
+            "n": 279,
+            "overall_accuracy": 0.9283154121863799,
+            "score_version": 1,
+            "truncated": 0,
+            "underspecified_accuracy": 0.8227848101265823
           }
         },
         "query_rewrite": {
@@ -535,7 +617,15 @@
             "skipped": "adapter not staged"
           },
           "sr": {
-            "skipped": "adapter not staged"
+            "accuracy": 0.6575342465753424,
+            "balanced_accuracy": 0.6557088980411001,
+            "invalid": 0,
+            "n": 2409,
+            "no_f1": 0.5700885878061491,
+            "score_version": 1,
+            "truncated": 0,
+            "weighted_f1": 0.6646228046335558,
+            "yes_f1": 0.7154191100379441
           }
         }
       },
@@ -1116,6 +1206,66 @@
           "torch": "2.11.0",
           "transformers": "5.17.0",
           "vllm": null
+        },
+        {
+          "adapters": {
+            "guardian_core/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:32Z",
+              "weights_sha256": "b10160f9570fb58241a63c128cab48f6ead64fe103ce6b160b83430ee27f91aa"
+            },
+            "query_clarification/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:37Z",
+              "weights_sha256": "0e6ec9dac40994b1797c2d67e140400409a61838124bf7233a3e1b9fa66fe7e5"
+            },
+            "requirement_check/sr": {
+              "cross_rank": 32,
+              "rank": 32,
+              "staged_at": "2026-10-07T08:46:43Z",
+              "weights_sha256": "a13d6a27720d567723ef3a4d4dcb173764a224d71bcae06513b2794149921fe5"
+            }
+          },
+          "base_model_local_copy": true,
+          "enforce_eager": false,
+          "finished": "2026-10-07T11:35:29Z",
+          "gpu": "NVIDIA A100-SXM4-80GB",
+          "harness_dirty": false,
+          "harness_sha": "4ab06d32788577826823fede4a8e242038be094b",
+          "limit": null,
+          "max_model_len": 32768,
+          "mlp_keys_renamed": [],
+          "only": [
+            "guardian_core",
+            "query_clarification",
+            "requirement_check"
+          ],
+          "prefix_caching": false,
+          "run_ts": "20261007T112130Z",
+          "scheduler": {
+            "chunked_prefill": true,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 256
+          },
+          "sr_anchor_converted": [],
+          "started": "2026-10-07T11:22:34Z",
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.11.0",
+          "transformers": "5.17.0",
+          "vllm": "0.26.0"
         }
       ]
     },
