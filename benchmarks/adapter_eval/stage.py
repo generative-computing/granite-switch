@@ -95,11 +95,11 @@ MLP = {
 # short keys must be a whole ``/``- or ``_``-separated token.
 INTRINSIC_KEYWORDS = {
     "answerability": (("answerab",), ()),
-    "hallucination_detection": (("hallucination",), ("hd",)),
+    "hallucination_detection": (("halluc",), ("hd",)),
     "query_rewrite": (("query_rewrite", "rewrite"), ("qr",)),
     "query_clarification": (("clarification", "clarif"), ("qc",)),
     "guardian_core": (("guardian", "ood_safety"), ()),
-    "requirement_check": (("requirement",), ("req",)),
+    "requirement_check": (("requirement", "reqcheck"), ("req",)),
 }
 
 SKIP_DIRS = {".git", "__pycache__", "wandb", ".cache", "node_modules"}

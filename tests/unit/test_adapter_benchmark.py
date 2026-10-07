@@ -2634,6 +2634,11 @@ def test_discover_skip_reasons(tmp_path):
         # Staged before the flag was recorded: the source name decides.
         ({"source": "/runs/sr-qo-mlp-r32-c32-sharedkv/final"}, None),
         ({"source": "/runs/sr-qo-mlp-r32-c32/final"}, "not trained with shared K/V"),
+        # The Granite 4.2 runs' names shorten it to "skv".
+        (
+            {"source": "/sr/guardian-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints"},
+            None,
+        ),
         (None, "K/V mode unknown"),
     ],
 )
@@ -2672,10 +2677,40 @@ def test_read_jsonl_limit(tmp_path):
         ("/datasets/rag/query_rewrite/full/eval.jsonl", "query_rewrite"),
         ("/runs/answerability_vs_hallucination", None),  # ambiguous
         ("/runs/shd/lora", None),  # "hd" only counts as a whole token
+        # The Granite 4.2 SR runs' names.
+        (
+            "reqcheck-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints",
+            "requirement_check",
+        ),
+        ("guardian-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints", "guardian_core"),
+        ("qrewrite-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints", "query_rewrite"),
+        (
+            "qclarify-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints",
+            "query_clarification",
+        ),
+        (
+            "halluc-sr-qo-mlp-r32-c32-skv-g42-3b/run_1/checkpoints",
+            "hallucination_detection",
+        ),
     ],
 )
 def test_guess_intrinsic(path, expected):
     assert stage.guess_intrinsic(Path(path)) == expected
+
+
+@pytest.mark.parametrize(
+    ("name", "shared"),
+    [
+        ("sr-qo-mlp-r32-c32-sharedkv", True),
+        ("sr-qo-mlp-r32-c32-shared_kv", True),
+        ("guardian-sr-qo-mlp-r32-c32-skv-g42-3b/run_1", True),
+        ("runs/skv/final", True),
+        ("sr-qo-mlp-r32-c32-g42-3b", False),
+        ("sr-riskvalue-r32", False),  # only "skv" as a whole token
+    ],
+)
+def test_says_shared_kv(name, shared):
+    assert staged.says_shared_kv(name) is shared
 
 
 @pytest.mark.parametrize(

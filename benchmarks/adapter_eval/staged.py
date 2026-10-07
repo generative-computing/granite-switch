@@ -52,10 +52,11 @@ EVAL_FILE = "evaluation.jsonl"
 PROVENANCE_FILE = "provenance.json"
 MODEL_FILE = "model.json"
 # A saved SR checkpoint does not record whether its adapter stream had its own
-# K/V; only the run's config name says so ("..._sharedkv"). This backend always
-# takes K/V from the base stream, so a run with its own K/V would compose
+# K/V; only the run's config name says so ("..._sharedkv", or "skv" as a whole
+# token in the Granite 4.2 runs' names, "...-c32-skv-g42-3b"). This backend
+# always takes K/V from the base stream, so a run with its own K/V would compose
 # cleanly and give wrong outputs. So SR runs only when the name says shared K/V.
-SHARED_KV = re.compile(r"shared_?kv")
+SHARED_KV = re.compile(r"shared_?kv|(?:^|[/_])skv(?:[/_]|$)")
 # The internal trainer's decoder layer holds gate/up/down itself, with no
 # ``mlp`` block, so its checkpoints name them ``layers.N.gate_proj``.
 FLAT_MLP = re.compile(r"(\.layers\.\d+\.)(gate_proj|up_proj|down_proj)\.")
