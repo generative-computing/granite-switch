@@ -28,9 +28,10 @@ run was scored on.
 ``apply`` copies rather than links, so retraining a source run cannot change
 the benchmark underneath it. An eval file that is a predictions file is
 copied without the model's outputs. Each staged folder gets a ``provenance.json``
-with the source path and file checksums. Existing cells are kept unless
-``--replace`` is given; replacing a staged checkpoint changes the numbers, so
-it goes with a ``bench_version`` bump.
+with the source path and file checksums. A cell already staged from the
+same source is kept, so applying a selection again stages only its new picks;
+one staged from another source needs ``--replace``. Replacing a staged
+checkpoint changes the numbers, so it goes with a ``bench_version`` bump.
 
 The selection file::
 
@@ -544,6 +545,21 @@ def now() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def kept(dest: Path, src: Path) -> dict | None:
+    """The provenance of ``dest`` if it is already staged from ``src``, else None.
+
+    Staging a selection again then adds its new picks and keeps the rest; a
+    pick that differs from what is staged still needs ``--replace``.
+    """
+    try:
+        provenance = json.loads((dest / staged.PROVENANCE_FILE).read_text())
+    except (OSError, ValueError):
+        return None
+    return (
+        {**provenance, "kept": True} if provenance.get("source") == str(src) else None
+    )
+
+
 def check_eval_rows(path: Path) -> int:
     n = 0
     for row in staged.read_jsonl(path):
@@ -605,6 +621,11 @@ def cmd_apply(args) -> int:
         for tech_id, src in by_tech.items():
             src = Path(src)
             key = f"{intrinsic_id}/{tech_id}"
+            dest = staged.adapter_dir(root, intrinsic_id, tech_id)
+            if not args.replace and (prov := kept(dest, src)):
+                report["adapters"][key] = prov
+                print(f"[stage] adapter {key}: kept (already staged from it)")
+                continue
             try:
                 reason = staged.check_adapter(src, tech_id)
                 if reason:
@@ -621,7 +642,7 @@ def cmd_apply(args) -> int:
                 rank, cross = lora_ranks(src / staged.WEIGHTS_FILE)
                 prov = copy_into(
                     files,
-                    staged.adapter_dir(root, intrinsic_id, tech_id),
+                    dest,
                     {
                         "source": str(src),
                         "technology": tech_id,
@@ -643,9 +664,13 @@ def cmd_apply(args) -> int:
             print(f"[stage] eval {intrinsic_id}: not in adapters.yaml; skipped")
             continue
         src = Path(src)
+        dest = staged.eval_path(root, intrinsic_id).parent
+        if not args.replace and (prov := kept(dest, src)):
+            report["eval"][intrinsic_id] = prov
+            print(f"[stage] eval {intrinsic_id}: kept (already staged from it)")
+            continue
         try:
             rows = check_eval_rows(src)
-            dest = staged.eval_path(root, intrinsic_id).parent
             with tempfile.TemporaryDirectory() as tmp:
                 clean, removed = without_predictions(src, Path(tmp))
                 files = {staged.EVAL_FILE: clean}

@@ -715,8 +715,10 @@ scored again; older rows stay as they were. Some cells are left as they are:
    scorer, headline metric and `max_new_tokens`.
 2. If no scorer fits, add one under
    [scorers/](../benchmarks/adapter_eval/scorers/__init__.py) and register it.
-3. Add the new picks to `local/selection.json` and run `submit.sh stage`.
-   Existing cells are kept; `--replace` overwrites them.
+3. Add the new picks to `local/selection.json` (`selection.<model>.json` for
+   another model) and run `submit.sh stage`. Cells already staged from the
+   same picks are kept, so only the new ones are copied; a pick that differs
+   from what is staged fails unless `--replace` is given, which overwrites it.
 4. Bump `bench_version` if the change alters existing numbers. That covers a
    new eval set, new generation settings, or a replaced checkpoint. A
    scoring change alone bumps the intrinsic's `score_version` instead (see

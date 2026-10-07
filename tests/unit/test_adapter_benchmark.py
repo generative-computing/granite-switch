@@ -3066,9 +3066,22 @@ def test_apply_stages_the_selection(tmp_path, capsys):
         SPEC.model_id
     )
 
-    # A second apply keeps what is staged unless --replace is given.
+    # A second apply keeps what is staged from the same picks; the rejected
+    # aLoRA pick still fails.
     assert stage.main(argv) == 1
-    assert "already staged" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "adapter answerability/sr: kept" in out and "eval answerability: kept" in out
+    report = common.extract_block(out, stage.STAGE_BEGIN, stage.STAGE_END)
+    assert report["adapters"]["answerability/sr"]["kept"] is True
+    assert "looks like lora" in report["adapters"]["answerability/alora"]["error"]
+    # A pick that differs from what is staged needs --replace.
+    picks = json.loads(selection.read_text())
+    picks["adapters"]["answerability"]["lora"] = str(
+        ans / "lora-qkvo-mlp-r16/run_1/checkpoints/final"
+    )
+    selection.write_text(json.dumps(picks))
+    assert stage.main(argv) == 1
+    assert "answerability/lora: FAILED" in capsys.readouterr().out
     # Another model's cells never go into this root.
     with pytest.raises(ValueError, match="staged for"):
         stage.main([*argv, "--model", SPEC.models[1].id])
