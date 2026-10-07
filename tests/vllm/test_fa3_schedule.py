@@ -20,6 +20,15 @@ Two tests, both built on the SR MultiSwitch checkpoint composed by the worker
   ``(eager, prefix-off)`` reference, so a future numerics/schedule regression in
   any of these settings is caught, not just the one that broke in #139.
 
+Both tests SKIP unless FlashAttention 3 is active (``require_fa3``). The bug only
+exists under FA3 + FULL; FA3 needs a Hopper GPU (compute capability 9.x). On any
+other GPU vLLM uses FA2, FULL silently downgrades to FULL_AND_PIECEWISE, and the
+tests would pass without exercising anything. Outcomes:
+
+- SKIPPED — no FA3 here; nothing was tested (not a pass, not a fail).
+- FAILED  — FA3 active and the outputs diverge: issue #139 is present.
+- PASSED  — FA3 active and every setting matches the reference.
+
 Each worker step is a fresh subprocess so only one vLLM model is on GPU at a
 time (CUDA context fully torn down between steps). The FULL runs use real CUDA
 graphs (NOT enforce_eager), so assertions are on generated tokens and logprobs,
@@ -58,6 +67,49 @@ MATRIX = [
 
 def _tag(cudagraph, prefix):
     return f"run_{cudagraph.lower()}_prefix{prefix}"
+
+
+def _probe_fa_version():
+    """Ask the worker which FlashAttention version vLLM selects on this machine.
+
+    Runs in a subprocess for the same reason every other step does: vLLM/CUDA
+    must initialize in a clean process. Returns (version, reason).
+    """
+    res = subprocess.run(
+        [sys.executable, str(WORKER), "probe"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    version, reason = None, (res.stderr or "").strip()[-300:]
+    for line in res.stdout.splitlines():
+        if line.startswith("FA_VERSION="):
+            value = line.split("=", 1)[1].strip()
+            version = int(value) if value.isdigit() else None
+        elif line.startswith("FA3_REASON="):
+            reason = line.split("=", 1)[1].strip() or reason
+    return version, reason
+
+
+@pytest.fixture(scope="module")
+def require_fa3():
+    """Skip unless FlashAttention 3 is active.
+
+    Issue #139 only exists under FA3 + cudagraph_mode=FULL. Without FA3 (any
+    non-Hopper GPU, compute capability < 9.x) vLLM uses FA2, whose cudagraph
+    support silently downgrades FULL to FULL_AND_PIECEWISE — the setting that is
+    already correct. Every cell would then match the reference and the test
+    would pass without having exercised the bug. Skipping keeps a green result
+    honest: it means "not applicable here", never "verified".
+    """
+    version, reason = _probe_fa_version()
+    print(f"\nFA3 skip-guard: FA_VERSION={version} reason={reason!r}")
+    if version != 3:
+        pytest.skip(
+            f"FlashAttention 3 not active (FA_VERSION={version}; {reason}). "
+            "cudagraph_mode=FULL downgrades without FA3, so issue #139 cannot "
+            "be exercised here; needs a Hopper GPU (compute capability 9.x)."
+        )
 
 
 def _run_step(step_name, *cmd_args, timeout):
@@ -113,7 +165,7 @@ def _compare(work_dir, ref_tag, cand_tag, label):
 
 
 @pytest.mark.requires_model
-def test_fa3_full_cudagraph_prefix_caching_is_correct():
+def test_fa3_full_cudagraph_prefix_caching_is_correct(require_fa3):
     """FULL + prefix-caching must match the (eager, prefix-off) reference.
 
     This is the issue #139 repro. It FAILS on a tree without the fa3_schedule
@@ -129,7 +181,7 @@ def test_fa3_full_cudagraph_prefix_caching_is_correct():
 
 
 @pytest.mark.requires_model
-def test_fa3_config_matrix_matches_reference():
+def test_fa3_config_matrix_matches_reference(require_fa3):
     """Every {cudagraph x prefix} setting must match the same reference.
 
     Guards against a schedule/numerics regression in any supported serving
