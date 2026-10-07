@@ -19,9 +19,14 @@ the full trace.
 Each mode is a separate subprocess so only one vLLM model is ever resident on
 GPU at a time::
 
+    python worker.py probe
     python worker.py build   --work-dir <dir>
     python worker.py run     --work-dir <dir> --tag <tag> --cudagraph <mode> --prefix <on|off>
     python worker.py compare --work-dir <dir> --ref <tag> --cand <tag> --label <label>
+
+``probe`` reports which FlashAttention version vLLM selects on this machine. The
+test front-end uses it to SKIP when FA3 is absent: the bug only exists under
+FA3 + FULL cudagraphs, and FA3 needs a Hopper GPU (compute capability 9.x).
 
 ``build`` composes a small SR MultiSwitch checkpoint on CPU (tiny random base,
 no download) through ``GraniteSwitchComposer`` — model construction must go
@@ -42,8 +47,9 @@ import json
 import os
 import sys
 
-import torch
-from safetensors.torch import save_file
+# NOTE: torch / safetensors / vllm are imported INSIDE the functions that need
+# them, not at module top level, so `compare` mode (pure JSON math) runs on a
+# box without torch — which keeps the gate logic unit-testable off-GPU.
 
 # Make tests.shared importable when run as a bare subprocess (cwd-independent).
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -93,6 +99,9 @@ GEN_TOKENS = int(os.environ.get("FA3_GEN_TOKENS", "16"))
 
 def _write_base_model(path):
     """Write a tiny Granite base checkpoint on disk (random weights, no download)."""
+    import torch
+    from safetensors.torch import save_file
+
     base_cfg = {
         "model_type": "granite",
         "architectures": ["GraniteForCausalLM"],
@@ -136,6 +145,9 @@ def _write_base_model(path):
 
 def _write_sr_adapter(path):
     """Write a mock SR adapter (cross_stream weights) on disk."""
+    import torch
+    from safetensors.torch import save_file
+
     os.makedirs(path, exist_ok=True)
     config = {
         "r": LORA_RANK,
@@ -177,6 +189,8 @@ def _write_sr_adapter(path):
 
 def cmd_build(args):
     """Compose a small SR MultiSwitch checkpoint through GraniteSwitchComposer."""
+    import torch
+
     from granite_switch.composer import GraniteSwitchComposer
 
     work_dir = args.work_dir
@@ -294,6 +308,41 @@ def _probe_fa_version():
                   "this run cannot reproduce issue #139.")
     except Exception as e:  # import path or probe may move across vLLM versions
         print(f"  FA_VERSION probe failed ({type(e).__name__}: {e})")
+
+
+# ── probe mode (GPU visible, no model) ─────────────────────────────────────
+
+
+def cmd_probe(args):
+    """Print the FlashAttention version vLLM selects here, for the test's skip-guard.
+
+    Emits two machine-readable lines the test front-end parses:
+
+        FA_VERSION=<int or None>
+        FA3_REASON=<why FA3 is unavailable, or empty>
+
+    Always exits 0: an unavailable FA3 (or no vLLM / no GPU) is a reason to SKIP,
+    not a worker failure.
+    """
+    version, reason = None, ""
+    try:
+        from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
+
+        version = get_flash_attn_version()
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+    if version != 3 and not reason:
+        try:
+            from vllm.vllm_flash_attn.flash_attn_interface import (
+                fa_version_unsupported_reason,
+            )
+
+            reason = fa_version_unsupported_reason(3) or ""
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+    print(f"FA_VERSION={version}")
+    print(f"FA3_REASON={reason}")
+    return 0
 
 
 def cmd_run(args):
@@ -473,8 +522,15 @@ def main():
     p_cmp.add_argument("--cand", required=True, help="Candidate run tag")
     p_cmp.add_argument("--label", required=True)
 
+    sub.add_parser("probe", help="Report the FlashAttention version (skip-guard)")
+
     args = parser.parse_args()
-    return {"build": cmd_build, "run": cmd_run, "compare": cmd_compare}[args.mode](args)
+    return {
+        "build": cmd_build,
+        "run": cmd_run,
+        "compare": cmd_compare,
+        "probe": cmd_probe,
+    }[args.mode](args)
 
 
 if __name__ == "__main__":
