@@ -63,6 +63,9 @@ vllm27     = ["vllm>=0.27.0,<0.28.0"]
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
 dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
+# The newest vLLM line, as an alias. The GPU workflow tests `dev` and `dev-latest`
+# (one leg if both pin the same minor), so a vLLM bump is repointing this line.
+dev-latest = [{ include-group = "dev-vllm27" }]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
@@ -73,6 +76,8 @@ conflicts = [
     [{ group = "dev" },        { group = "vllm27" }],
     [{ group = "dev" },        { group = "dev-vllm27" }],
     [{ group = "dev-vllm27" }, { group = "vllm26" }],
+    [{ group = "dev" },        { group = "dev-latest" }],
+    [{ group = "dev-latest" }, { group = "vllm26" }],
     # group-vs-extra
     [{ group = "vllm26" },     { extra = "vllm27" }],
     [{ group = "vllm27" },     { extra = "vllm" }],
@@ -80,6 +85,8 @@ conflicts = [
     [{ group = "dev" },        { extra = "vllm27" }],
     [{ group = "dev-vllm27" }, { extra = "vllm" }],
     [{ group = "dev-vllm27" }, { extra = "tutorials" }],
+    [{ group = "dev-latest" }, { extra = "vllm" }],
+    [{ group = "dev-latest" }, { extra = "tutorials" }],
     # extra-vs-extra
     [{ extra = "vllm" },       { extra = "vllm27" }],
     [{ extra = "tutorials" },  { extra = "vllm27" }],
