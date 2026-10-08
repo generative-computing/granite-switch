@@ -58,26 +58,60 @@ markers = [
 [dependency-groups]
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
 vllm27     = ["vllm>=0.27.0,<0.28.0"]
+# NO DEV GROUP MAY BE NAMED A BARE `dev`. The GPU cluster harness looks the
+# `--dep-group` name up in a table of its own that pairs each name with a job tag
+# and the vLLM line it then ASSERTS the pod installed. Observed from run logs:
+#
+#     dep group: dev          (job tag v19,         expect vllm 0.19.x)
+#     dep group: dev-vllm20   (job tag v20,         expect vllm 0.20.x)
+#     dep group: dev-vllm27   (job tag dev-vllm27,  expect vllm any.x)
+#
+# Note the third line: an UNKNOWN name is not an error -- it falls back to
+# `tag = the name itself, expect any.x`, i.e. no assertion at all. Only names the
+# table knows carry a version claim, and `dev`'s claim was frozen at 0.19.x.
+#
+# So once #130 moved `dev` onto the 0.26 line, the leg installed 0.26 correctly and
+# then died on that stale entry, before pytest ever started:
+#
+#     torch 2.11.0+cu130 vllm 0.26.0
+#     FATAL expected vllm 0.19.x for group dev but got 0.26.0
+#
+# while `dev-vllm27`, absent from the table, sailed through on `any.x`. Renaming to
+# `dev-vllm26` therefore fixes the leg unconditionally -- it stops addressing the
+# one stale entry and lands on the no-assertion fallback. It does NOT depend on the
+# harness parsing "26" out of the name; it cannot, as the table is explicit.
+#
+# TRADE-OFF, AND THE REAL FOLLOW-UP: `any.x` means no leg asserts its vLLM line any
+# more, so a venv that silently resolved the wrong line would no longer be caught
+# here. The fix is for the harness table to gain real `dev-vllm26/27/30` entries;
+# until it does, the per-line `vllm26`/`vllm27` bounds below are what pin the line.
+#
+# This is a rename, not a new group: `dev` is gone rather than aliased, so the name
+# carrying the stale 0.19.x claim cannot be passed by accident. Adding a parallel
+# `dev-vllm26` and keeping `dev` was tried and rejected -- an extra conflicting
+# group multiplies uv's resolution-marker space (+3093 net lines of uv.lock for an
+# identical 275-package resolution), whereas the rename is diff-balanced.
+#
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
-dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
+dev-vllm26 = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
 dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
-test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
+test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev-vllm26" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
 conflicts = [
     # group-vs-group
     [{ group = "vllm26" },     { group = "vllm27" }],
-    [{ group = "dev" },        { group = "vllm27" }],
-    [{ group = "dev" },        { group = "dev-vllm27" }],
+    [{ group = "dev-vllm26" }, { group = "vllm27" }],
+    [{ group = "dev-vllm26" }, { group = "dev-vllm27" }],
     [{ group = "dev-vllm27" }, { group = "vllm26" }],
     # group-vs-extra
     [{ group = "vllm26" },     { extra = "vllm27" }],
     [{ group = "vllm27" },     { extra = "vllm" }],
     [{ group = "vllm27" },     { extra = "tutorials" }],
-    [{ group = "dev" },        { extra = "vllm27" }],
+    [{ group = "dev-vllm26" }, { extra = "vllm27" }],
     [{ group = "dev-vllm27" }, { extra = "vllm" }],
     [{ group = "dev-vllm27" }, { extra = "tutorials" }],
     # extra-vs-extra

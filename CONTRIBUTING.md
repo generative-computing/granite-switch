@@ -19,10 +19,12 @@ Or via pip: `pip install uv`
    ```bash
    git clone https://github.com/<your-username>/granite-switch.git
    cd granite-switch
-   uv sync --group dev
+   uv sync --group dev-vllm26
    ```
-   > **On macOS (or any machine without a CUDA GPU):** the `dev` group pulls in vLLM + CUDA,
-   > which have no macOS wheels, so `uv sync --group dev` fails. Install the CPU-only subset
+   > The dev groups are named after the vLLM line they install (`dev-vllm26`,
+   > `dev-vllm27`); there is no bare `dev` group. Pick the line you want to work against.
+   > **On macOS (or any machine without a CUDA GPU):** these groups pull in vLLM + CUDA,
+   > which have no macOS wheels, so `uv sync --group dev-vllm26` fails. Install the CPU-only subset
    > instead — enough for unit, HF, and compose work:
    > ```bash
    > uv sync --frozen --no-default-groups --extra hf --extra compose
