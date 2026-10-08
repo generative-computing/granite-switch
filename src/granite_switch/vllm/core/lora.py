@@ -45,7 +45,8 @@ class SwitchedLoRALinear(nn.Module):
       2. _lora_expand(...)       (Triton kernel: accumulate LoRA into base_out)
 
     Weights are stored in checkpoint-compatible format during loading, then
-    converted to fused format via finalize_weights().
+    converted to fused format via finalize_weights(), which releases the
+    checkpoint-format lora_A/lora_B (they stay registered, but empty).
 
     Memory layout (post finalize_weights)
     ======================================
@@ -86,7 +87,9 @@ class SwitchedLoRALinear(nn.Module):
 
     w_ext  [N_total + sum_{a applicable to this module}(S * r_a),  K]
     -------------------------------------------------------
-      rows 0 .. N_total-1     : W_base (all slices fused, as stored by vLLM)
+      rows 0 .. N_total-1     : W_base (all slices fused, as stored by vLLM);
+                                base_layer.weight is re-pointed at this view,
+                                so the base weight is held once, not twice
       tier r0, adapter a0     : lora_A_a0_s0, lora_A_a0_s1, ... (S*r0 rows)
       tier r0, adapter a1     : lora_A_a1_s0, lora_A_a1_s1, ... (S*r0 rows)
       ...
@@ -191,7 +194,8 @@ class SwitchedLoRALinear(nn.Module):
         else:
             self.output_slices = (out_features,)
 
-        # Checkpoint-format parameters (populated by weight_loader, consumed by finalize_weights)
+        # Checkpoint-format parameters (populated by weight_loader, consumed by
+        # finalize_weights, which then releases their storage)
         if num_slices == 1:
             self.lora_A = nn.Parameter(
                 torch.zeros(
@@ -420,6 +424,14 @@ class SwitchedLoRALinear(nn.Module):
         N_total = W_base.shape[0]
         self._N_total = N_total
 
+        # build_w_ext stacks the base weight's rows first, so the leading N_total
+        # rows of w_ext are W_base exactly, as a contiguous view. Point the base
+        # layer there and drop the original: forward() takes the base output from
+        # x @ w_ext.T and never reads base_layer.weight, so keeping both held every
+        # adapted base weight twice (~1.87x the checkpoint on GPU, issue #128).
+        self.base_layer.weight.data = self.w_ext[:N_total]
+        del W_base
+
         # Build lora_B_merged per tier: {rank: [n_r, N_total, rank]}
         # Slices are concatenated along N_total so tiles can access any output col uniformly.
         tier_info = {}
@@ -511,15 +523,17 @@ class SwitchedLoRALinear(nn.Module):
             else:
                 self._output_bias = self.base_layer.bias
 
-        # Freeze checkpoint-format parameters (data retained for state_dict)
+        # The checkpoint-format LoRA tensors (zero-padded to max_lora_rank) are now
+        # packed into w_ext and the expand buffers. Release them rather than keep a
+        # padded second copy resident; the Parameters stay registered, empty, so
+        # parameter names do not change.
         if S == 1:
-            self.lora_A.requires_grad_(False)
-            self.lora_B.requires_grad_(False)
+            checkpoint_params = [self.lora_A, self.lora_B]
         else:
-            for p in self.lora_A_slices:
-                p.requires_grad_(False)
-            for p in self.lora_B_slices:
-                p.requires_grad_(False)
+            checkpoint_params = [*self.lora_A_slices, *self.lora_B_slices]
+        for p in checkpoint_params:
+            p.requires_grad_(False)
+            p.data = p.data.new_empty(0)
 
         self._finalized = True
 

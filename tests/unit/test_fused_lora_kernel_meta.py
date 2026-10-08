@@ -146,6 +146,20 @@ def _fill_selective(layer, adapter_ranks, applicable_mask):
                     )
 
 
+def _snapshot_lora(layer):
+    """Per-slice (lora_A, lora_B) copies, taken before finalize_weights.
+
+    finalize_weights packs the checkpoint-format tensors into w_ext and the
+    expand buffers and then releases them, so references computed after it
+    read this copy.
+    """
+    if layer.num_slices == 1:
+        pairs = [(layer.lora_A, layer.lora_B)]
+    else:
+        pairs = list(zip(layer.lora_A_slices, layer.lora_B_slices))
+    return [(a.detach().clone(), b.detach().clone()) for a, b in pairs]
+
+
 def _run_layer_forward(layer, x, adapter_indices):
     """Run a finalized layer's forward with proper context setup."""
     remap_table_2d = layer.remap_table.unsqueeze(0)
@@ -634,6 +648,7 @@ class TestMultiModuleForward:
             else:
                 layer = _make_layer(K, N_or_slices, NA, max_rank, device)
             _fill_selective(layer, adapter_ranks, applicable)
+            layer._ref_lora = _snapshot_lora(layer)
             layer.finalize_weights(adapter_ranks)
             modules.append(layer)
 
@@ -688,12 +703,9 @@ class TestMultiModuleForward:
                 if layer.remap_table[ai].item() == 0:
                     continue
                 for s in range(S):
-                    if S == 1:
-                        lA = layer.lora_A.data[a, 0, :r, :]
-                        lB = layer.lora_B.data[a, 0, :, :r]
-                    else:
-                        lA = layer.lora_A_slices[s].data[a, 0, :r, :]
-                        lB = layer.lora_B_slices[s].data[a, 0, :, :r]
+                    A_s, B_s = layer._ref_lora[s]
+                    lA = A_s[a, 0, :r, :]
+                    lB = B_s[a, 0, :, :r]
                     shrink = x[m_tok] @ lA.T
                     expand = shrink @ lB.T
                     ns = slice_starts[s]
@@ -815,6 +827,7 @@ class TestPerModuleDivergentRanks:
                     layer.lora_B.data[i, 0, :, :r] = (
                         torch.randn(N, r, dtype=layer._dtype, device=device) * 0.1
                     )
+            layer._ref_lora = _snapshot_lora(layer)
             layer.finalize_weights(ranks)
             modules.append(layer)
 
@@ -888,8 +901,9 @@ class TestPerModuleDivergentRanks:
             # Reference: base + lora_A[:r] @ lora_B[:, :r]
             r = ranks[0]  # adapter 0's rank in this module
             W_base = layer.base_layer.weight.data
-            lA = layer.lora_A.data[0, 0, :r, :]
-            lB = layer.lora_B.data[0, 0, :, :r]
+            A, B = layer._ref_lora[0]
+            lA = A[0, 0, :r, :]
+            lB = B[0, 0, :, :r]
             ref = (x @ W_base.T) + (x @ lA.T) @ lB.T
 
             layer._lora_ctx = ctx
@@ -932,8 +946,9 @@ class TestPerModuleDivergentRanks:
                     continue
                 a = ai - 1
                 r = ranks[a]
-                lA = layer.lora_A.data[a, 0, :r, :]
-                lB = layer.lora_B.data[a, 0, :, :r]
+                A, B = layer._ref_lora[0]
+                lA = A[a, 0, :r, :]
+                lB = B[a, 0, :, :r]
                 ref[m_tok] += (x[m_tok] @ lA.T) @ lB.T
 
             layer._lora_ctx = ctx

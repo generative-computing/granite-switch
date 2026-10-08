@@ -437,6 +437,33 @@ class TestFinalizeWeights:
         with pytest.raises(AssertionError, match="block_n=.*must divide"):
             layer.finalize_weights([16])
 
+    @pytest.mark.parametrize("kind", ["single", "multi"])
+    def test_no_weight_held_twice_after_finalize(self, kind):
+        """Issue #128: the base weight becomes a view into w_ext and the padded
+        checkpoint-format LoRA tensors are released, so neither stays resident twice."""
+        device = torch.device("cuda")
+        adapter_ranks = [16, 32]
+        NA, max_rank = len(adapter_ranks), max(adapter_ranks)
+        if kind == "single":
+            K, N, _ = SINGLE_SLICE_GEOMETRIES[0]
+            layer = _make_single_slice_layer(K, N, NA, max_rank, device)
+            checkpoint_params = lambda: [layer.lora_A, layer.lora_B]  # noqa: E731
+        else:
+            K, output_slices, _ = MULTI_SLICE_GEOMETRIES[0]
+            N = sum(output_slices)
+            layer = _make_multi_slice_layer(K, output_slices, NA, max_rank, device)
+            checkpoint_params = lambda: [*layer.lora_A_slices, *layer.lora_B_slices]  # noqa: E731
+        _fill_lora_weights(layer, adapter_ranks)
+        W_before = layer.base_layer.weight.detach().clone()
+
+        layer.finalize_weights(adapter_ranks)
+
+        W = layer.base_layer.weight
+        assert W.data_ptr() == layer.w_ext.data_ptr()  # shares w_ext's storage
+        assert W.shape == (N, K) and W.is_contiguous()
+        assert torch.equal(W, W_before)
+        assert all(p.numel() == 0 for p in checkpoint_params())
+
 
 # ════════════════════════════════════════════════════════════════════════
 # 3. Forward correctness tests

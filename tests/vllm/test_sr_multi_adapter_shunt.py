@@ -152,6 +152,26 @@ def test_each_adapters_rows_are_reachable_through_its_remap_entry():
         assert torch.equal(shunt.slice_col_r, reference.slice_col_r)
 
 
+def test_checkpoint_tensors_released_after_finalize():
+    """Issue #128: once packed, the padded checkpoint-format tensors are released.
+
+    The Parameters stay registered (names unchanged) but hold no storage, and the
+    packed buffers still carry every adapter's weights.
+    """
+    ids = [0, 1, 2]
+    shunt = _make_shunt(ids)
+    assert shunt.lora_A.numel() == 0 and shunt.lora_B.numel() == 0
+    assert {"lora_A", "lora_B"} <= dict(shunt.named_parameters()).keys()
+
+    lb = shunt._lb_packed.view(NUM_ADAPTERS, HIDDEN, CROSS_RANK)
+    for identity, k in _kernel_index(shunt, ids).items():
+        want_a, want_b = _identity_weights(identity)
+        assert torch.equal(
+            shunt.w_ext_cross[(k - 1) * CROSS_RANK : k * CROSS_RANK], want_a
+        )
+        assert torch.equal(lb[k - 1], want_b)
+
+
 def test_non_contributing_adapter_drops_out_of_the_tiers():
     """An adapter with no cross_stream weights maps to base and takes no tier."""
     ids = [0, 1, 2]

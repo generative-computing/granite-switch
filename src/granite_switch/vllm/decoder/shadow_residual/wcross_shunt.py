@@ -53,7 +53,8 @@ class WCrossShunt(nn.Module):
         self._device = device
         self._dtype = dtype
 
-        # Checkpoint-format params (single-slice layout; consumed by finalize).
+        # Checkpoint-format params (single-slice layout; consumed and released by
+        # finalize).
         self.lora_A = nn.Parameter(
             torch.zeros(
                 num_adapters, 1, cross_rank, hidden_size, dtype=dtype, device=device
@@ -185,8 +186,13 @@ class WCrossShunt(nn.Module):
         )
         self.register_buffer("_lb_packed", lb_packed.contiguous(), persistent=False)
 
-        self.lora_A.requires_grad_(False)
-        self.lora_B.requires_grad_(False)
+        # The checkpoint-format tensors are now packed into w_ext_cross and
+        # _lb_packed. Release them, as SwitchedLoRALinear.finalize_weights does,
+        # rather than keep a second copy resident; the Parameters stay registered,
+        # empty, so parameter names do not change.
+        for p in (self.lora_A, self.lora_B):
+            p.requires_grad_(False)
+            p.data = p.data.new_empty(0)
         self._finalized = True
 
     def forward(self, h_base: torch.Tensor) -> torch.Tensor:
