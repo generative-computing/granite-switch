@@ -45,7 +45,8 @@ class SwitchedLoRALinear(nn.Module):
       2. _lora_expand(...)       (Triton kernel: accumulate LoRA into base_out)
 
     Weights are stored in checkpoint-compatible format during loading, then
-    converted to fused format via finalize_weights().
+    converted to fused format via finalize_weights(), which releases the
+    checkpoint-format lora_A/lora_B (they stay registered, but empty).
 
     Memory layout (post finalize_weights)
     ======================================
@@ -86,7 +87,9 @@ class SwitchedLoRALinear(nn.Module):
 
     w_ext  [N_total + sum_{a applicable to this module}(S * r_a),  K]
     -------------------------------------------------------
-      rows 0 .. N_total-1     : W_base (all slices fused, as stored by vLLM)
+      rows 0 .. N_total-1     : W_base (all slices fused, as stored by vLLM);
+                                base_layer.weight is re-pointed at this view,
+                                so the base weight is held once, not twice
       tier r0, adapter a0     : lora_A_a0_s0, lora_A_a0_s1, ... (S*r0 rows)
       tier r0, adapter a1     : lora_A_a1_s0, lora_A_a1_s1, ... (S*r0 rows)
       ...
@@ -191,7 +194,8 @@ class SwitchedLoRALinear(nn.Module):
         else:
             self.output_slices = (out_features,)
 
-        # Checkpoint-format parameters (populated by weight_loader, consumed by finalize_weights)
+        # Checkpoint-format parameters (populated by weight_loader, consumed by
+        # finalize_weights, which then releases their storage)
         if num_slices == 1:
             self.lora_A = nn.Parameter(
                 torch.zeros(
