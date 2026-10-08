@@ -101,23 +101,43 @@ permissions:
   contents: read
 
 jobs:
+  # WHICH vLLM LINES TO TEST, read from the tested commit's own pyproject.toml
+  # rather than written here. Up to two legs, from the dependency groups `dev` and
+  # `dev-latest` (usually an alias: dev-latest = [{ include-group = "dev-vllm27" }]).
+  # Each is labelled `vllmNN` after the vLLM minor its requirements pin, which the
+  # GPU harness asserts the leg really installed; when both pin the same minor it
+  # is one leg. So moving to a new vLLM line is a pyproject edit and nothing else,
+  # this file is identical in every repo however far apart their vLLM lines are,
+  # and the pull request that makes the bump tests its own new lines.
+  #
+  # The rule and its refusals live in /opt/gsw/derive_legs.py, baked into the
+  # runner image like every other script. A pyproject that yields no legs fails
+  # here, before any GPU is asked for.
+  legs:
+    name: Resolve vLLM legs
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.legs.outputs.matrix }}
+    steps:
+      - name: Read the legs from pyproject.toml
+        id: legs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ inputs.sha || github.sha }}
+        run: /opt/gsw/derive_legs.py >> "$GITHUB_OUTPUT"
+
   gpu-tests:
+    needs: legs
     # The suite is in the job name because it cannot be read from env.LEG here --
     # this is evaluated before any step runs.
     name: GPU Tests (${{ matrix.label }} · ${{ inputs.suite || 'full' }})
-    # granite-switch supports two mutually-exclusive vLLM lines and both must be
-    # tested. They cannot share a venv (pyproject declares vllm26/vllm27 as
-    # conflicting groups), so each gets its own cluster pod. Only the dev* groups
-    # used because the bare vllm26/vllm27 groups omit pytest. The label encodes
-    # the vLLM minor the leg installs (the GPU harness asserts it matches).
+    # One pod per vLLM line: the lines cannot share a venv (pyproject declares the
+    # vllmNN groups as conflicting), and every one the repo supports must be tested.
     strategy:
-      fail-fast: false   # a vllm26 failure must not hide the vllm27 result
+      fail-fast: false   # one line's failure must not hide another's result
       matrix:
-        include:
-          - label: vllm26
-            dep_group: dev
-          - label: vllm27
-            dep_group: dev-vllm27
+        include: ${{ fromJSON(needs.legs.outputs.matrix) }}
     runs-on: [self-hosted, gpu]
 
     # MUST be set explicitly. GitHub's default is 360 minutes, which is exactly the
@@ -190,11 +210,13 @@ jobs:
               SUFFIX="short"
               LEG="$LABEL-short"
               ;;
-            # One fast file that still exercises the GPU — ~30s of pytest, a couple
-            # of minutes end to end once pod startup and uv sync are counted. A
-            # CPU-only pick would pass with a broken CUDA venv.
+            # One fast file that still exercises the GPU — a couple of minutes end to
+            # end once pod startup and uv sync are counted. A CPU-only pick would
+            # pass with a broken CUDA venv. This was test_single_switch.py until
+            # granite-switch #131 folded it into test_multi_switch.py; a path that
+            # no longer exists makes pytest collect nothing and fail every leg.
             dev)
-              PATHS="tests/vllm/test_single_switch.py"
+              PATHS="tests/vllm/test_multi_switch.py"
               SUFFIX="dev"
               LEG="$LABEL-dev"
               ;;
