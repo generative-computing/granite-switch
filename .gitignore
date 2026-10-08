@@ -1,8 +1,9 @@
 # OS files
 .DS_Store
 
-# Claude Code
-.claude/
+# Claude Code: local state stays untracked; the shared settings.json is committed.
+.claude/*
+!.claude/settings.json
 
 # Python cache files
 *.pyc
