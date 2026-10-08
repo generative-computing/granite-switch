@@ -461,18 +461,6 @@ but **the config itself does not** — the guard is decoder-level. This is why t
 the no-MLP case; protect it if you refactor the gate. Config-level coverage:
 `tests/unit/test_config_edge_cases.py`.
 
-### 14. After `finalize_weights`, the vLLM Checkpoint-Format Weights Are Views or Empty
-
-The SWITCH kernel computes every output from a packed `w_ext = [W_base; lora_A rows]`, so to avoid
-holding weights twice (issue #128, ~1.87x the checkpoint on GPU) `SwitchedLoRALinear.finalize_weights`
-re-points `base_layer.weight` at the view `w_ext[:N_total]` and empties `lora_A`/`lora_B` (and
-`*_slices`); `WCrossShunt.finalize_weights` empties its `lora_A`/`lora_B` too. The Parameters stay
-registered, so names are unchanged, but a test that builds a reference from them must snapshot them
-**before** finalize (see `_snapshot_lora` in `tests/unit/test_fused_lora_kernel_meta.py`). Anything
-that writes the base weight after load (weight reload, sleep mode) now writes into `w_ext`;
-`w_ext`, `_lb_packed` and the other packed buffers are `persistent=False`, so they never show up in
-`parameters()` or `state_dict()` counts — measure GPU memory, not parameter counts.
-
 ## Pre-commit
 
 **See [docs/CICD.md](docs/CICD.md) for the full CI/CD setup — pre-commit hook list, setup steps, and what runs on every commit vs. in CI.**
