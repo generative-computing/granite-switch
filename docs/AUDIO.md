@@ -27,7 +27,7 @@ with an `--asr-model` your installed transformers supports (for example
 
 ```bash
 # Serving an audio-enabled checkpoint
-uv sync --extra vllm --extra audio     # or --extra vllm27 --extra audio
+uv sync --extra vllm --extra audio     # any vLLM 0.26.x - 0.30.x
 
 # Development / running the test suite (the dev groups include audio already)
 uv sync --group dev                    # vLLM 0.26.x

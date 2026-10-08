@@ -72,8 +72,18 @@ class TestGranite4FullSizeEquivalence:
             # by timing and then caches.  2.9e-3 absolute at |expected|=11.28 is
             # 2.6e-4 relative, under one bf16 ulp (0.031) -- a reduction-order
             # difference, not a logic error.  An equivalence test must not measure
-            # the compiler as well as the model.  _granite4_mini_tests.py already
-            # pins eager for the config that needed it.
+            # the compiler as well as the model.
+            #
+            # SCOPED TO THIS TEST, deliberately.  run_vllm_logprobs briefly
+            # defaulted enforce_eager for every equivalence runner on the strength
+            # of that last sentence, and it broke TestZeroAdapterNoHiding.  The
+            # reasoning does not generalise, because everything measured above is
+            # at num_adapters=0, where eager is bit-exact and the compiler is the
+            # only variable left.  With the ADAPTER TIER LIVE it inverts: eager is
+            # the configuration that diverges (1.95e-3 worst on 4.0-350m mini,
+            # deterministic) and torch.compile is what normalises the reduction
+            # order.  So this belongs to each test rather than to the shared
+            # helper -- see the table in run_vllm_logprobs.
             enforce_eager=True,
             # Set, not defaulted, so the two sides are configured alike.  vLLM
             # 0.26 resolves `default_prefix_caching = is_prefix_caching_supported
@@ -85,6 +95,8 @@ class TestGranite4FullSizeEquivalence:
             # asymmetry is numerically INERT -- upstream with the flag forced on
             # is bit-identical to upstream with it off -- so this is not the fix
             # for anything.  But a comparison should have one variable in it.
+            # Also now the run_vllm_logprobs default, for the same reason plus a
+            # vLLM 0.28-only crash in upstream's model that it avoids.
             enable_prefix_caching=False,
         )
 

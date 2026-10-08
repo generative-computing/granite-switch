@@ -22,6 +22,8 @@ import tempfile
 
 import torch
 
+from tests.shared.vllm_gpu_mem import gpu_mem_util, shutdown_llm
+
 # ── Model creation (kept for other tests) ─────────────────────────
 
 
@@ -214,9 +216,8 @@ def dump_model_params(model_dir, dump_path):
 
     torch.save(checksums, dump_path)
 
+    shutdown_llm(llm)
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
 
 
 def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
@@ -243,6 +244,60 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
     # Allow requesting logprobs for all vocab tokens
     llm_kwargs.setdefault("max_logprobs", vocab_size)
 
+    # Every equivalence runner funnels both engines through here with the same
+    # llm_kwargs, so defaults set here apply symmetrically. setdefault, so an
+    # explicit caller value still wins.
+    #
+    # Deliberately NOT enforce_eager, and NOT a free choice -- it decides whether
+    # the adapter-present runners can meet get_tolerances' 1e-5 inert-path gate.
+    #
+    # Measured on vLLM 0.26.0 (test_logs/floor-eager), eager, per config, with the
+    # zero-LoRA pair run_zero_adapter_no_hiding_equivalence builds:
+    #
+    #                upstream vs upstream   switch vs switch   switch vs upstream
+    #     4.0-1b          0.0000e+00          0.0000e+00          9.9182e-04
+    #     4.0-350m        0.0000e+00          0.0000e+00          1.9522e-03
+    #     4.0-micro       0.0000e+00          0.0000e+00          5.0116e-04
+    #
+    # Each engine is bit-exact against a second instance of itself over all 3840
+    # elements, so there is no noise floor to hide behind: the switch/upstream
+    # column is a real, fully deterministic difference, ~200x the 1e-5 gate.
+    #
+    # It appears only when the ADAPTER TIER IS LIVE. save_upstream_model builds
+    # num_adapters=0, where the projection is the plain base linear and eager is
+    # bit-exact (the zeros above, and the 0.0 over 702464 elements recorded in
+    # _granite4_fullsize_tests.py). save_zero_adapter_model builds
+    # num_adapters=2, where the same projection runs the fused SWITCH kernel plus
+    # a zero-valued LoRA shrink/expand -- a different op sequence reducing in a
+    # different order, which is get_tolerances error source 1. Note that source
+    # is titled "No adapters" and its 4.77e-7 was measured at num_adapters=0, so
+    # it never characterized this configuration.
+    #
+    # torch.compile closes the gap because inductor lowers both op sequences to
+    # equivalent kernels, canonicalizing the reduction order -- precisely the
+    # thing an equivalence test does not want to measure. It preserves semantics,
+    # so a genuine kernel bug still moves the values and still trips 1e-5; only
+    # the ordering is normalized. Compiled is also how vLLM actually serves.
+    #
+    # The one place eager IS required is _granite4_fullsize_tests.py, which asks
+    # for it explicitly: at full size an unpinned autotuner picked between two
+    # cached kernels and reddened ~1 run in 7. setdefault is not involved there.
+    #
+    # enable_prefix_caching: upstream's GraniteMoeHybridForCausalLM declares
+    # IsHybrid and GraniteSwitchForCausalLM deliberately does not (declaring it
+    # would size the KV cache for zero attention layers), so the two sides resolve
+    # DIFFERENT prefix-caching defaults — an asymmetry in a test whose whole job is
+    # to have one variable. It also kills a vLLM 0.28-only crash in upstream's
+    # model: with prefix caching on, 0.28 logs "Mamba cache mode is set to 'align'"
+    # and then asserts "no mamba layers in the model" (v1/worker/mamba_utils.py).
+    llm_kwargs.setdefault("enable_prefix_caching", False)
+    # gpu_memory_utilization: vLLM's default is a fraction of TOTAL memory, which
+    # assumes an idle card. These runners start engines back to back and the
+    # previous one is often still releasing. See tests/shared/vllm_gpu_mem.py.
+    mem_util = gpu_mem_util()
+    if mem_util is not None:
+        llm_kwargs.setdefault("gpu_memory_utilization", mem_util)
+
     llm = LLM(
         model=model_dir,
         skip_tokenizer_init=True,
@@ -261,9 +316,12 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, **llm_kwargs):
 
     logprobs_tensor = extract_logprobs_tensor(outputs, vocab_size)
 
+    # Synchronous, and waits for the card. Every equivalence runner calls this
+    # function twice in a row, so the next engine's gpu_mem_util() measurement is
+    # taken after this returns -- which is only meaningful if the previous
+    # EngineCore child has actually exited by then. See shutdown_llm.
+    shutdown_llm(llm)
     del llm
-    gc.collect()
-    torch.cuda.empty_cache()
 
     return logprobs_tensor
 

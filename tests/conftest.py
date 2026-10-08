@@ -14,6 +14,35 @@ from granite_switch.config import GraniteSwitchConfig
 
 
 def pytest_configure(config):
+    # ── flashinfer sampler: off unless the runner asks for it ─────
+    #
+    # MEASURED, not precautionary. On an image shipping CUDA 12.4
+    # (/usr/local/cuda-12.4, while the driver advertises 13.0 -- that is the driver
+    # ceiling, not the toolkit) the vLLM 0.30 engine failed to start 171 times on
+    #
+    #     nvcc fatal : Unknown option '--compress-mode=size'
+    #
+    # flashinfer JIT-compiles its sampling kernels with `--compress-mode`, an nvcc
+    # option added in CUDA 12.8. Every GPU suite went red downstream of that --
+    # including on UPSTREAM's own GraniteMoeHybridForCausalLM, so it is not a
+    # granite-switch defect, and it masks everything else because the engine never
+    # reaches a test.
+    #
+    # It is version-dependent, which is why this lives here now: vLLM 0.26 is green
+    # on that image WITHOUT this (test_logs/gputest-v26, 219 passed) and 0.30 is not
+    # (test_logs/gputest-v30), so raising the CI ceiling to 0.30 is exactly what
+    # exposes it. The variable is read and honoured on all of 0.26-0.30
+    # (vllm/v1/sample/ops/topk_topp_sampler.py).
+    #
+    # SCOPED TO THE SAMPLER, and inert for what these tests assert: the attention
+    # backend resolves to FlashAttention independently, and the equivalence suites
+    # compare logprobs, which the model produces before any sampling op runs.
+    #
+    # setdefault, so an image with CUDA >= 12.8 can export
+    # VLLM_USE_FLASHINFER_SAMPLER=1 and genuinely exercise that path. The real fix is
+    # a newer toolkit in the image; this keeps the suites meaningful until then.
+    os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id is None:
         return  # not running under xdist

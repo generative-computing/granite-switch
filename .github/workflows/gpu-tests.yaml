@@ -105,19 +105,29 @@ jobs:
     # The suite is in the job name because it cannot be read from env.LEG here --
     # this is evaluated before any step runs.
     name: GPU Tests (${{ matrix.label }} · ${{ inputs.suite || 'full' }})
-    # granite-switch supports two mutually-exclusive vLLM lines and both must be
-    # tested. They cannot share a venv (pyproject declares vllm26/vllm27 as
-    # conflicting groups), so each gets its own cluster pod. Only the dev* groups
-    # used because the bare vllm26/vllm27 groups omit pytest. The label encodes
-    # the vLLM minor the leg installs (the GPU harness asserts it matches).
+    # granite-switch supports ONE tree across vLLM 0.26-0.30, and these two legs are
+    # the ENDS of that range. They cannot share a venv (pyproject declares
+    # vllm26/vllm30 as conflicting groups), so each gets its own cluster pod. Only
+    # the dev* groups are used because the bare vllm26/vllm30 groups omit pytest.
+    # The label encodes the vLLM minor the leg installs (the GPU harness asserts it
+    # matches).
+    #
+    # WHY THE ENDS AND NOT A MIDDLE LINE. The breaks this range actually contains
+    # are all at a boundary: APIs deleted at 0.29 (AttentionBackend.get_kv_cache_shape,
+    # BaseMultiModalProcessor._call_hf_processor) only fail at the ceiling, and an API
+    # that does not exist yet (ForwardContext.is_padding, added at 0.27) only fails at
+    # the floor. A middle leg is bracketed by two tested lines and would have caught
+    # neither. 0.27/0.28/0.29 were verified green out of band by a five-leg matrix,
+    # every suite, so this is a sampling decision about per-run cost -- not a claim
+    # that the middle is untested.
     strategy:
-      fail-fast: false   # a vllm26 failure must not hide the vllm27 result
+      fail-fast: false   # a vllm26 failure must not hide the vllm30 result
       matrix:
         include:
           - label: vllm26
             dep_group: dev
-          - label: vllm27
-            dep_group: dev-vllm27
+          - label: vllm30
+            dep_group: dev-vllm30
     runs-on: [self-hosted, gpu]
 
     # MUST be set explicitly. GitHub's default is 360 minutes, which is exactly the
