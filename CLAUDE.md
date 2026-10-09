@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **Building models with embedded adapters** - Combine a base Granite model with multiple LoRA adapters into a single checkpoint
 2. **Automatic adapter control** - Activate adapters via special control tokens or chat templates
 3. **Fast inference** - Deploy with vLLM for speedup over standard HuggingFace inference
-4. **Optional trainable switching** - Train a router to automatically select adapters per-token
+4. **Multi-transition switching** - MultiSwitch picks the adapter per token from the control tokens seen so far (latest wins), so one request can switch adapters any number of times
 
 ## Project Structure
 
@@ -157,7 +157,7 @@ from granite_switch.composer import GraniteSwitchComposer
 - **`tests/vllm/`**: vLLM implementation tests
 - **`tests/composer/`**: Compose system tests
 - **`tests/integration/`**: Cross-implementation and end-to-end integration tests
-- **`tests/regression/`**: Regression tests (hf/, vllm/, integration/, shared/, tools/)
+- **`tests/audio/`**: Audio/ASR tests (`pytest -m audio`)
 - **`tests/shared/`**: Shared test utilities and parametrized cases
 
 **IMPORTANT: `tests/` is for official regression tests ONLY.** Do NOT place throwaway diagnostic,
@@ -251,7 +251,7 @@ The Granite Switch extends the base Granite model with:
 1. **Embedded LoRA Adapters** (frozen during inference)
    - Multiple task/domain-specific adapters embedded in the same checkpoint
    - Each adapter has LoRA weights (lora_A, lora_B) stacked in tensors
-   - Controlled via special tokens or router-selected indices
+   - Controlled via control tokens; MultiSwitch turns them into a per-token adapter index
 
 2. **Control Tokens**
    - Each adapter has a control token `<|adapter|>` that fires the switch
