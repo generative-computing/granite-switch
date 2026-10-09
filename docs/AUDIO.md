@@ -18,11 +18,11 @@ extra, which the `audio` extra here pulls in (as `vllm[audio]`). A plain
 non-16 kHz input.
 
 The default ASR model needs **transformers >= 5.16**, the release that added
-`granite_speech5_ctc` — its architecture. **That version is not pinned yet**: the
-package currently caps transformers below it, and raising the cap is tracked
-separately (issue #84). Until that lands, the first transcription on the default
-model raises an `ImportError` naming the fix, and the cascade works today only
-with an `--asr-model` your installed transformers supports (for example
+`granite_speech5_ctc` — its architecture. The package itself requires
+`transformers>=5.16` (see `pyproject.toml`), so a normal install already has it.
+If an older transformers ends up installed anyway, the first transcription on the
+default model raises an `ImportError` naming the fix; you can also point the
+checkpoint at any `--asr-model` your installed transformers supports (for example
 `openai/whisper-small`).
 
 ```bash

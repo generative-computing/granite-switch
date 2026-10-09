@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 1. **Building models with embedded adapters** - Combine a base Granite model with multiple LoRA adapters into a single checkpoint
 2. **Automatic adapter control** - Activate adapters via special control tokens or chat templates
 3. **Fast inference** - Deploy with vLLM for speedup over standard HuggingFace inference
-4. **Optional trainable switching** - Train a router to automatically select adapters per-token
+4. **Multi-transition switching** - MultiSwitch picks the adapter per token from the control tokens seen so far (latest wins), so one request can switch adapters any number of times
 
 ## Project Structure
 
@@ -20,6 +20,8 @@ granite-switch/
 │   └── granite_switch/                  # Unified package
 │       ├── __init__.py                  # Core exports (GraniteSwitchConfig, __version__)
 │       ├── config.py                    # Unified GraniteSwitchConfig
+│       ├── conversation.py              # Conversation: multi-turn, per-turn adapter, KV-history policy
+│       ├── token_exchange.py            # Control-token -> substitute-id LUT (shared by both backends)
 │       │
 │       ├── composer/                    # Compose system (requires [compose] extra)
 │       │   ├── __init__.py
@@ -47,8 +49,9 @@ granite-switch/
 │       │   │   ├── __init__.py
 │       │   │   └── lora.py              # SwitchedLoRALinear, MergedSwitchedLoRALinear
 │       │   └── switch/
-│       │       ├── __init__.py
-│       │       └── single.py            # SingleSwitch (HF attention backends)
+│       │       ├── __init__.py          # create_switch() -> MultiSwitch
+│       │       ├── multi.py             # MultiSwitch (HF attention backends)
+│       │       └── codes/               # Kerdock/DG codebook generation for the memory head
 │       │
 │       ├── kernels/                     # Backend-agnostic Triton kernels
 │       │   ├── __init__.py
@@ -71,9 +74,10 @@ granite-switch/
 │           │       ├── wcross_shunt.py  # WCrossShunt (base->adapter cross-stream)
 │           │       ├── kernel_meta.py   # SRFusedLoRAKernelMeta
 │           │       └── _sr_ops.py       # Q-head interleave / deinterleave
+│           ├── audio/                   # Audio input (alpha): ASR cascade, chunking, processor
 │           └── switch/
-│               ├── __init__.py
-│               └── single.py            # SingleSwitch (vLLM Attention)
+│               ├── __init__.py          # create_switch() -> MultiSwitch
+│               └── multi.py             # MultiSwitch (vLLM Attention)
 │
 ├── tests/                               # All tests
 │   ├── unit/                            # Unit tests (fastest, CPU)
@@ -81,7 +85,7 @@ granite-switch/
 │   ├── vllm/                            # vLLM-specific tests
 │   ├── composer/                        # Compose system tests
 │   ├── integration/                     # Cross-backend integration tests
-│   ├── regression/                      # Regression tests (hf/, vllm/, integration/, shared/, tools/)
+│   ├── audio/                           # Audio/ASR tests (pytest -m audio)
 │   └── shared/                          # Shared test utilities and parametrized cases
 │
 ├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
@@ -110,8 +114,8 @@ uv sync --extra vllm
 # With compose tools
 uv sync --extra compose
 
-# Everything (development)
-uv sync --extra dev
+# Everything (development) -- `dev` is a dependency group, not an extra
+uv sync --group dev
 ```
 
 ## Import Paths
@@ -124,7 +128,7 @@ from granite_switch.config import GraniteSwitchConfig  # equivalent
 # HuggingFace backend
 from granite_switch.hf import GraniteSwitchForCausalLM
 from granite_switch.hf.core.lora import SwitchedLoRALinear
-from granite_switch.hf.switch.single import SingleSwitch
+from granite_switch.hf.switch import MultiSwitch, create_switch
 
 # vLLM backend (auto-registered via plugin entry point)
 from granite_switch.vllm import register
@@ -153,7 +157,7 @@ from granite_switch.composer import GraniteSwitchComposer
 - **`tests/vllm/`**: vLLM implementation tests
 - **`tests/composer/`**: Compose system tests
 - **`tests/integration/`**: Cross-implementation and end-to-end integration tests
-- **`tests/regression/`**: Regression tests (hf/, vllm/, integration/, shared/, tools/)
+- **`tests/audio/`**: Audio/ASR tests (`pytest -m audio`)
 - **`tests/shared/`**: Shared test utilities and parametrized cases
 
 **IMPORTANT: `tests/` is for official regression tests ONLY.** Do NOT place throwaway diagnostic,
@@ -209,11 +213,11 @@ single command:
 pytest tests/unit/ -v -s --tb=short -x
 
 # 2. HF tests by file (CPU)
-pytest tests/hf/test_single_switch.py -v -s --tb=short -x
+pytest tests/hf/test_multi_switch.py -v -s --tb=short -x
 pytest tests/hf/test_model_forward.py -v -s --tb=short -x
 
 # 3. vLLM tests by file (GPU required)
-pytest tests/vllm/test_single_switch.py -v -s --tb=short -x
+pytest tests/vllm/test_multi_switch.py -v -s --tb=short -x
 pytest tests/vllm/test_model_forward.py -v -s --tb=short -x
 
 # 4. Integration tests last (slowest, GPU required)
@@ -247,7 +251,7 @@ The Granite Switch extends the base Granite model with:
 1. **Embedded LoRA Adapters** (frozen during inference)
    - Multiple task/domain-specific adapters embedded in the same checkpoint
    - Each adapter has LoRA weights (lora_A, lora_B) stacked in tensors
-   - Controlled via special tokens or router-selected indices
+   - Controlled via control tokens; MultiSwitch turns them into a per-token adapter index
 
 2. **Control Tokens**
    - Each adapter has a control token `<|adapter|>` that fires the switch
@@ -258,16 +262,20 @@ The Granite Switch extends the base Granite model with:
    - Maps adapter names to control tokens
    - Automatic token placement based on adapter type (ALORA vs LORA)
 
-4. **Optional Trainable Router** (SingleSwitch)
-   - N transformer layers that compute adapter indices per-token
-   - Linear projection head to num_adapters dimensions
-   - ~1-2% of total model parameters
+4. **MultiSwitch** (the only switch engine; SingleSwitch was removed)
+   - Two small attention heads compute the adapter index per token: a counting head turns
+     "how many control tokens so far" into an address, and a Kerdock/DG coded-memory head
+     reads back the adapter written there
+   - Routing is latest-wins and supports any number of transitions per request, including a
+     return to base via a base-reset control token
+   - The codebook is constructed, not trained; config knobs are the `ms_*` fields
+   - See [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md)
 
 ### Two Backends
 
 #### HuggingFace Backend (`granite_switch.hf`)
 
-**Purpose**: Model building and optional router training
+**Purpose**: Model building, prototyping, and training
 
 - Full `transformers` integration (`PreTrainedModel`, `GenerationMixin`)
 - Training with `Trainer` API
@@ -383,8 +391,8 @@ The eager backend does NOT handle `attention_mask=None` as causal — it treats 
 (full attention). SDPA and FlashAttention handle `attention_mask=None` correctly via `is_causal`
 attribute on the module.
 
-The HF stress tests (`tests/hf/test_single_switch.py`) auto-detect which attention backends work on the
-current platform by probing each with a k=-inf GQA call at import time. Unavailable backends are skipped.
+The HF MultiSwitch tests (`tests/hf/test_multi_switch.py`) probe each non-eager attention backend once
+and parametrize over the ones that work on the current platform. Unavailable backends are skipped.
 
 ### 7. Known Limitation: Hidden Count Offset When Position 0 is in a Hiding Group
 
