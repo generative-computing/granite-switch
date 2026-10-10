@@ -229,7 +229,7 @@ def test_classifier_only_compose_loads_trained_head(tmp_path):
 
 
 def test_mixed_lora_and_classifier_preserves_slot_numbering(tmp_path):
-    """[lora, classifier]: LoRA slot 0 populated, classifier slot 1 loaded."""
+    """[lora, classifier]: retain LoRA at the classifier marker and score it."""
     tokenizer = _tokenizer(MIXED_BASE)
     hidden = _hidden_size(MIXED_BASE)
     lora_dir = _find_rag_lora_dir()
@@ -292,14 +292,18 @@ def test_mixed_lora_and_classifier_preserves_slot_numbering(tmp_path):
         "classifier slot 1 LoRA row is not zero — slot numbering leaked"
     )
 
-    # A detect forward on the classifier control token emits the winning label.
-    input_ids = _classifier_prompt_ids(tokenizer, clf_ctrl).to(
-        next(model.parameters()).device
-    )
+    # Select LoRA slot 1, then probe at the classifier's final marker. The
+    # classifier marker must not replace the active LoRA in the decoder stream.
+    prompt = _classifier_prompt_ids(tokenizer, clf_ctrl)
+    input_ids = torch.cat(
+        [prompt[:, :-1], torch.tensor([[lora_ctrl]]), prompt[:, -1:]], dim=1
+    ).to(next(model.parameters()).device)
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=False)
     emitted = int(out.logits[0, -1].argmax().item())
     assert emitted == label_ids[winner]
+    assert model.model._last_lora_indices[0, -1].item() == 1
+    assert model.model._last_classifier_indices[0, -1].item() == 2
 
 
 def test_ragged_label_counts_pad_and_fire_per_slot(tmp_path):

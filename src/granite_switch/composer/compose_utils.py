@@ -175,8 +175,9 @@ class GraniteSwitchComposer:
 
         # adapter_ranks/adapter_alphas stay full external width (one entry per
         # slot, classifiers included) so config.adapter_ranks is length
-        # num_adapters. A classifier slot's LoRA row never fires: split_indices
-        # zeroes the LoRA stream at classifier positions.
+        # num_adapters. A classifier slot itself has no LoRA weights. A
+        # separately selected LoRA slot can remain active through a classifier
+        # marker because classifier selection does not overwrite adapter state.
         if lora_adapter_paths:
             lora_rank, lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths

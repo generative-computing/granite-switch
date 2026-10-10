@@ -1273,10 +1273,13 @@ def build():
             # counts and the padded bank width from this.
             per_slot_label_names: list[list[str] | None] = []
             per_slot_label_token_ids: list[list[int] | None] = []
+            # Full width too: each classifier slot's read layer (None = final).
+            per_slot_read_layer: list[int | None] = []
             for name, kind in zip(adapter_names, adapter_kinds):
                 if kind != "classifier":
                     per_slot_label_names.append(None)
                     per_slot_label_token_ids.append(None)
+                    per_slot_read_layer.append(None)
                     continue
                 labels = classifier_meta[name].get("labels")
                 if not labels:
@@ -1292,14 +1295,21 @@ def build():
                     resolve_label_token_ids(tokenizer, label_names)
                 )
 
+                per_slot_read_layer.append(classifier_meta[name].get("layer"))
+
             optional_kwargs["adapter_kinds"] = adapter_kinds
             optional_kwargs["classifier_label_token_ids"] = per_slot_label_token_ids
+            optional_kwargs["classifier_read_layers"] = per_slot_read_layer
             print("\nClassifier slots:")
-            for name, words, ids in zip(
-                adapter_names, per_slot_label_names, per_slot_label_token_ids
+            for name, words, ids, layer in zip(
+                adapter_names,
+                per_slot_label_names,
+                per_slot_label_token_ids,
+                per_slot_read_layer,
             ):
                 if ids is not None:
-                    print(f"  {name} → labels {words} → token ids {ids}")
+                    where = "final norm" if layer is None else f"layer {layer}"
+                    print(f"  {name} → labels {words} → token ids {ids} @ {where}")
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,

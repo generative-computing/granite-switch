@@ -59,7 +59,10 @@ SEED = 42
 # ── Helpers ──────────────────────────────────────────────────────────
 
 
-def _tiny_vllm_config():
+def _tiny_vllm_config(
+    adapter_kinds=None,
+    classifier_label_token_ids=None,
+):
     """Minimal GraniteSwitchConfig for single-GPU vLLM tests."""
     return GraniteSwitchConfig(
         vocab_size=300,
@@ -76,6 +79,8 @@ def _tiny_vllm_config():
         # finalize_weights asserts this for applicable adapters.
         max_lora_rank=16,
         adapter_ranks=[16, 16],
+        adapter_kinds=adapter_kinds,
+        classifier_label_token_ids=classifier_label_token_ids,
         switch_head_dim=32,
         max_position_embeddings=512,
         attention_multiplier=1.0,
@@ -183,7 +188,7 @@ class _VLLMModelTestBase:
         _ensure_distributed()
 
         self.device = torch.device("cuda")
-        self.config = _tiny_vllm_config()
+        self.config = self._make_config()
 
         old_dtype = torch.get_default_dtype()
         torch.set_default_dtype(torch.bfloat16)
@@ -227,6 +232,9 @@ class _VLLMModelTestBase:
         sfc = self.vllm_config.compilation_config.static_forward_context
         for name in list(self._layer_names):
             sfc.pop(name, None)
+
+    def _make_config(self):
+        return _tiny_vllm_config()
 
     def _setup_kv_caches(self):
         self._kv_caches = []
@@ -469,6 +477,42 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
         assert not torch.allclose(logits_a1[3:], logits_a2[3:]), (
             "Different adapters should produce different post-control logits"
         )
+
+
+class TestClassifierLoRAProbe(_VLLMModelTestBase):
+    def _make_config(self):
+        return _tiny_vllm_config(
+            adapter_kinds=["lora", "classifier"],
+            classifier_label_token_ids=[None, [100, 101]],
+        )
+
+    def test_marker_scores_with_active_lora_and_emits_label(self, monkeypatch):
+        self.model.eval()
+        seen = {}
+        switch = self.model.model.switch
+        original_split = switch.split_indices
+
+        def record_split(adapter_indices, classifier_probe_indices=None):
+            lora_indices, classifier_indices = original_split(
+                adapter_indices, classifier_probe_indices
+            )
+            seen["lora"] = lora_indices.detach().cpu()
+            seen["classifier"] = classifier_indices.detach().cpu()
+            return lora_indices, classifier_indices
+
+        monkeypatch.setattr(switch, "split_indices", record_split)
+
+        with torch.no_grad():
+            logits = self._run_forward_and_logits([10, 250, 20, 30, 251])
+
+        assert seen["lora"].tolist() == [0, 1, 1, 1, 1]
+        assert seen["classifier"].tolist() == [0, 0, 0, 0, 2]
+        final_logits = logits[-1]
+        assert torch.isfinite(final_logits[[100, 101]]).all()
+        non_label_ids = [
+            i for i in range(self.config.vocab_size) if i not in (100, 101)
+        ]
+        assert torch.isneginf(final_logits[non_label_ids]).all()
 
 
 # ════════════════════════════════════════════════════════════════════

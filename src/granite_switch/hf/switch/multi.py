@@ -69,6 +69,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from ...token_exchange import (
     apply_token_exchange,
     build_adapter_kind_lut,
+    build_classifier_control_luts,
     build_control_to_substitute_lut,
     split_adapter_indices,
 )
@@ -294,6 +295,13 @@ class MultiSwitch(nn.Module):
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
         else:
             self.control_to_substitute_lut = None
+        marker_lut, slot_lut = build_classifier_control_luts(config)
+        if marker_lut is not None:
+            self.register_buffer("classifier_control_lut", marker_lut, persistent=False)
+            self.register_buffer("classifier_slot_lut", slot_lut, persistent=False)
+        else:
+            self.classifier_control_lut = None
+            self.classifier_slot_lut = None
 
     def _apply(self, *args, **kwargs):
         """Keep ``codebook`` in fp32 across ``.to()`` / ``.half()`` / ``.bfloat16()``.
@@ -323,13 +331,26 @@ class MultiSwitch(nn.Module):
         return out
 
     def split_indices(
-        self, adapter_indices: torch.Tensor
+        self,
+        adapter_indices: torch.Tensor,
+        classifier_probe_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Split ``[batch, seq_len]`` or ``[num_tokens]`` into (lora, classifier).
 
         See :func:`granite_switch.token_exchange.split_adapter_indices`.
         """
-        return split_adapter_indices(self.adapter_kind_lut, adapter_indices)
+        return split_adapter_indices(
+            self.adapter_kind_lut,
+            adapter_indices,
+            classifier_probe_indices,
+        )
+
+    def classifier_indices_from_tokens(
+        self, input_ids: torch.Tensor
+    ) -> torch.Tensor | None:
+        if self.classifier_slot_lut is None:
+            return None
+        return self.classifier_slot_lut[input_ids]
 
     @property
     def num_cache_layers(self) -> int:
@@ -384,9 +405,15 @@ class MultiSwitch(nn.Module):
         # [B, S, 1] == [1, 1, A] -> [B, S, A]
         matches = input_ids.unsqueeze(2) == adapter_token_ids.unsqueeze(0).unsqueeze(0)
         is_control_token = matches.any(dim=2)  # [B, S]
+        route_control_token = is_control_token
+        if self.classifier_control_lut is not None:
+            # A classifier marker probes the current residual stream; it must
+            # not overwrite the persistent adapter selection in coded memory.
+            is_classifier_marker = self.classifier_control_lut[input_ids]
+            route_control_token = is_control_token & ~is_classifier_marker
         # expert_id = argmax + offset (offset selects the layout; see __init__).
         expert_ids = torch.where(
-            is_control_token,
+            route_control_token,
             matches.long().argmax(dim=2) + self._expert_id_offset,
             torch.zeros_like(input_ids, dtype=torch.long),
         )  # [B, S]
@@ -401,8 +428,10 @@ class MultiSwitch(nn.Module):
             device=device,
             dtype=torch.float32,
         )
-        # Un-mask (0) dim 0 at anchor + control tokens (arithmetic where).
-        anchor_or_control = is_counting_anchor | is_control_token  # [B, S]
+        # Un-mask at the anchor and adapter-selection controls. Classifier
+        # markers are excluded because they do not change persistent adapter
+        # selection.
+        anchor_or_control = is_counting_anchor | route_control_token  # [B, S]
         key_states_count[:, 0, :, 0] = torch.where(
             anchor_or_control,
             torch.zeros_like(key_states_count[:, 0, :, 0]),
@@ -528,7 +557,7 @@ class MultiSwitch(nn.Module):
             bsz, q_len, self.memory_dim
         )  # [B, S, memory_dim], fp32
 
-        write_mask = is_control_token.unsqueeze(2).to(torch.float32)  # [B, S, 1]
+        write_mask = route_control_token.unsqueeze(2).to(torch.float32)  # [B, S, 1]
 
         key_states_memory = torch.zeros(
             (bsz, 1, q_len, self.memory_head_dim),
@@ -547,7 +576,7 @@ class MultiSwitch(nn.Module):
         )
         value_states_memory[:, 0, :, 0] = expert_ids.to(
             torch.float32
-        ) * is_control_token.to(torch.float32)
+        ) * route_control_token.to(torch.float32)
 
         if past_key_values is not None:
             cache_kwargs = {"cache_position": cache_position}

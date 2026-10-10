@@ -256,3 +256,72 @@ class TestNoSharedMLP:
             "shared_input_linear",
             "shared_output_linear",
         }
+
+
+# ════════════════════════════════════════════════════════════════════
+# N. classifier_read_layers
+# ════════════════════════════════════════════════════════════════════
+
+
+def _classifier_kwargs(num_adapters=2, num_decoder_layers=4, **overrides):
+    """A LoRA slot(s) then one classifier slot, over ``num_decoder_layers``."""
+    from granite_switch.config import SWITCH_CACHE_LAYERS
+
+    base = _valid_kwargs(
+        num_adapters=num_adapters,
+        num_hidden_layers=num_decoder_layers + SWITCH_CACHE_LAYERS,
+        adapter_kinds=["lora"] * (num_adapters - 1) + ["classifier"],
+        classifier_label_token_ids=[None] * (num_adapters - 1) + [[100, 200]],
+    )
+    base.update(overrides)
+    return base
+
+
+class TestClassifierReadLayers:
+    def test_omitted_reads_the_final_layer(self):
+        assert (
+            GraniteSwitchConfig(**_classifier_kwargs()).classifier_read_layers is None
+        )
+
+    @pytest.mark.parametrize("layers", [[None, None], [None, 0], [None, 3]])
+    def test_valid_layers_are_accepted(self, layers):
+        cfg = GraniteSwitchConfig(**_classifier_kwargs(classifier_read_layers=layers))
+        assert cfg.classifier_read_layers == layers
+
+    def test_wrong_length_raises(self):
+        with pytest.raises(ValueError, match="classifier_read_layers length"):
+            GraniteSwitchConfig(
+                **_classifier_kwargs(classifier_read_layers=[None, 2, 3])
+            )
+
+    def test_non_classifier_slot_with_a_layer_raises(self):
+        with pytest.raises(ValueError, match="non-classifier slot 0"):
+            GraniteSwitchConfig(**_classifier_kwargs(classifier_read_layers=[1, 2]))
+
+    @pytest.mark.parametrize("layer", [-1, 4, 99, True, 1.0])
+    def test_out_of_range_or_non_int_layer_raises(self, layer):
+        # 4 == num_decoder_layers: the final state is requested by omitting it.
+        with pytest.raises(ValueError, match=r"in 0\.\.3"):
+            GraniteSwitchConfig(
+                **_classifier_kwargs(classifier_read_layers=[None, layer])
+            )
+
+    def test_dual_stream_with_intermediate_layer_raises(self):
+        with pytest.raises(ValueError, match="dual_stream=True"):
+            GraniteSwitchConfig(
+                **_classifier_kwargs(
+                    classifier_read_layers=[None, 2],
+                    dual_stream=True,
+                    cross_stream_rank=8,
+                )
+            )
+
+    def test_classifier_slot_id_above_256_raises(self):
+        with pytest.raises(ValueError, match="<= 256"):
+            GraniteSwitchConfig(**_classifier_kwargs(num_adapters=257))
+
+    def test_classifier_slot_id_256_is_accepted(self):
+        GraniteSwitchConfig(**_classifier_kwargs(num_adapters=256))
+
+    def test_dual_stream_with_final_layer_is_accepted(self):
+        GraniteSwitchConfig(**_classifier_kwargs(dual_stream=True, cross_stream_rank=8))
