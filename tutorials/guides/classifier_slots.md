@@ -50,10 +50,17 @@ size. That is the whole artifact — a single linear layer that maps a base-mode
 logit per label.
 
 Train the head however you like (a frozen base model plus a trainable linear layer over the last
-hidden state is the usual recipe). At serving time the head reads the final hidden state of the
-control token, which the model embeds as the base's role-open marker: `<|start_of_role|>` on
-Granite 4.0/4.1, `<|im_start|>` on 4.2. So train on the chat-rendered prompt with no generation
-prompt, with that marker appended, and read the hidden state there.
+hidden state is the usual recipe). At serving time the head reads the hidden state of the control
+token, which the model embeds as the base's role-open marker: `<|start_of_role|>` on Granite
+4.0/4.1, `<|im_start|>` on 4.2. So train on the chat-rendered prompt with no generation prompt,
+with that marker appended, and read the hidden state there.
+
+By default that is the **final post-norm** hidden state (HF's `last_hidden_state`). A slot can
+instead read an intermediate decoder layer (see `layer` in Step 2); train it on that layer's output.
+With HF's `output_hidden_states=True` that is `hidden_states[layer + 1]`, except for the last
+decoder layer, whose entry HF replaces with the normalized output; read that one with a forward hook
+on `model.model.layers[layer]`. The head must be trained on the same representation it will read at
+serving time.
 
 Here is a helper that writes a **synthetic** head.
 
@@ -124,6 +131,19 @@ safety:
 `type` and `kind` are independent axes: `type` is the LoRA *technology* (drives control-token
 placement), while `kind` is whether the slot is a real LoRA or a classifier head. A plain LoRA entry
 simply omits `kind`/`labels`.
+
+A classifier entry may also set an optional `layer`, the zero-based decoder layer whose output the
+head reads (the residual stream after that layer, before the final norm). Omit it to read the final
+post-norm hidden state:
+
+```yaml
+safety_mid:
+  path: ./safety-mid-head/safety_mid/granite-4.1-3b/lora
+  type: lora
+  kind: classifier
+  labels: [safe, unsafe]
+  layer: 20                  # 0..num_decoder_layers - 1 (granite-4.1-3b has 40); omit for final
+```
 
 You can mix LoRA and classifier entries in one manifest, and give each classifier its own `labels`
 list of any length:
@@ -205,18 +225,21 @@ Compose will:
 
 ```
 Classifier slots:
-  safety → labels ['safe', 'unsafe'] → token ids [19193, 39257]
-  faithfulness → labels ['good', 'bad', 'neutral'] → token ids [19045, 14176, 60668]
+  safety → labels ['safe', 'unsafe'] → token ids [19193, 39257] @ final norm
+  faithfulness → labels ['good', 'bad', 'neutral'] → token ids [19045, 14176, 60668] @ final norm
 ```
+
+A slot with `layer: 20` prints `@ layer 20` instead.
 
 The resulting `config.json` carries the per-slot classifier metadata as plain lists/ints, so it
 round-trips through `save_pretrained`/`from_pretrained` with no custom code, and both the HF and
-vLLM backends read it identically. Two fields are the stored contract:
+vLLM backends read it identically. Three fields are the stored contract:
 
 | Field | Meaning |
 |-------|---------|
 | `adapter_kinds` | per-slot `"lora"` / `"classifier"`, one entry per adapter — what marks a slot a classifier |
 | `classifier_label_token_ids` | per-slot list of label token ids, `null` on LoRA slots |
+| `classifier_read_layers` | per-slot zero-based decoder layer a classifier reads; `null` for the final post-norm state and on LoRA slots |
 
 The rest are **derived** from those in `GraniteSwitchConfig.__init__`, so they appear on the config
 object but are not independent inputs:
@@ -310,10 +333,15 @@ channel.
   `max_classifier_labels`; a slot with fewer labels leaves its extra rows zero. This keeps the vLLM
   head a single fused, compile-safe operation regardless of how many labels each slot has — the same
   way the LoRA bank pads every adapter to `max_lora_rank`.
-- **Label-word verdict exit.** The model collapses each classifier request to its final token,
-  computes the head's per-label logits, blanks the vocabulary, and scatters the verdict onto that
-  slot's own label token ids (sliced to the slot's real label count, so padded columns are never
-  emitted). The sampler then emits the label word.
+- **Scored at the read layer.** A slot reading an intermediate layer is scored as soon as that
+  layer runs; final-layer slots are scored after the final norm. The per-label scores and slot id
+  travel with the hidden states, so vLLM's own row selection delivers them to the logits step,
+  which also works under CUDA-graph capture.
+- **Label-word verdict exit.** At each classifier request's final token the model blanks the
+  vocabulary and scatters the head's per-label logits onto that slot's own label token ids (sliced
+  to the slot's real label count, so padded columns are never emitted). The sampler then emits the
+  label word.
+
 
 ## Related
 

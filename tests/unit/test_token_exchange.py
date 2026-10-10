@@ -6,8 +6,14 @@ GraniteSwitchConfig, now that token-exchange is the only mode.
 """
 
 import pytest
+import torch
 
 from granite_switch.config import GraniteSwitchConfig
+from granite_switch.token_exchange import (
+    build_adapter_kind_lut,
+    build_classifier_control_luts,
+    split_adapter_indices,
+)
 
 
 def _base(num_adapters=2, **overrides):
@@ -60,3 +66,40 @@ class TestProjectionHeadDim:
     def test_inferred_from_hidden_size(self):
         cfg = GraniteSwitchConfig(**_base())
         assert cfg.projection_head_dim == cfg.hidden_size // cfg.num_attention_heads
+
+
+class TestClassifierLoRACoactivation:
+    def _config(self):
+        return GraniteSwitchConfig(
+            **_base(
+                adapter_token_ids=[499, 500, 501],  # leading base-reset token
+                adapter_substitute_token_ids=[1, 1, 1],
+                adapter_kinds=["lora", "classifier"],
+                classifier_label_token_ids=[None, [100, 101]],
+            )
+        )
+
+    def test_classifier_probe_lut_skips_leading_base_reset_token(self):
+        cfg = self._config()
+        marker_lut, slot_lut = build_classifier_control_luts(cfg)
+
+        assert not marker_lut[499]
+        assert not marker_lut[500]
+        assert marker_lut[501]
+        assert slot_lut[499] == slot_lut[500] == 0
+        assert slot_lut[501] == 2
+        assert cfg.classifier_control_token_ids == [501]
+
+    def test_classifier_probe_preserves_lora_indices_and_separates_probe(self):
+        cfg = self._config()
+        adapter_indices = torch.tensor([0, 1, 1, 1])
+        probe_indices = torch.tensor([0, 0, 0, 2])
+
+        lora_indices, classifier_indices = split_adapter_indices(
+            build_adapter_kind_lut(cfg),
+            adapter_indices,
+            probe_indices,
+        )
+
+        assert lora_indices.tolist() == [0, 1, 1, 1]
+        assert classifier_indices.tolist() == [0, 0, 0, 2]

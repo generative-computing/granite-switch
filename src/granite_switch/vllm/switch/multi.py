@@ -105,6 +105,7 @@ from granite_switch.hf.switch.codes import (
 from granite_switch.token_exchange import (
     apply_token_exchange,
     build_adapter_kind_lut,
+    build_classifier_control_luts,
     build_control_to_substitute_lut,
     split_adapter_indices,
 )
@@ -328,15 +329,35 @@ class MultiSwitch(nn.Module):
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
         else:
             self.control_to_substitute_lut = None
+        marker_lut, slot_lut = build_classifier_control_luts(hf_config)
+        if marker_lut is not None:
+            self.register_buffer("classifier_control_lut", marker_lut, persistent=False)
+            self.register_buffer("classifier_slot_lut", slot_lut, persistent=False)
+        else:
+            self.classifier_control_lut = None
+            self.classifier_slot_lut = None
 
     def split_indices(
-        self, adapter_indices: torch.Tensor
+        self,
+        adapter_indices: torch.Tensor,
+        classifier_probe_indices: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Split ``[total_tokens]`` into (lora_indices, classifier_indices).
 
         See :func:`granite_switch.token_exchange.split_adapter_indices`.
         """
-        return split_adapter_indices(self.adapter_kind_lut, adapter_indices)
+        return split_adapter_indices(
+            self.adapter_kind_lut,
+            adapter_indices,
+            classifier_probe_indices,
+        )
+
+    def classifier_indices_from_tokens(
+        self, input_ids: torch.Tensor
+    ) -> torch.Tensor | None:
+        if self.classifier_slot_lut is None:
+            return None
+        return self.classifier_slot_lut[input_ids]
 
     @property
     def num_cache_layers(self) -> int:
@@ -408,10 +429,16 @@ class MultiSwitch(nn.Module):
         # Vectorized control-token matching against ORIGINAL input_ids.
         matches = input_ids.unsqueeze(1) == adapter_token_ids.unsqueeze(0)  # [T, A]
         is_control_token = matches.any(dim=1)  # [total_tokens]
+        route_control_token = is_control_token
+        if self.classifier_control_lut is not None:
+            # A classifier marker is an orthogonal probe. Do not let it replace
+            # the active adapter stored in the switch's KV-backed coded memory.
+            is_classifier_marker = self.classifier_control_lut[input_ids]
+            route_control_token = is_control_token & ~is_classifier_marker
         # expert_id = argmax + offset (offset selects the layout; see __init__).
         # 0 for non-control tokens.
         expert_ids = torch.where(
-            is_control_token,
+            route_control_token,
             matches.long().argmax(dim=1) + self._expert_id_offset,
             torch.zeros_like(input_ids, dtype=torch.long),
         )  # [total_tokens]
@@ -422,16 +449,16 @@ class MultiSwitch(nn.Module):
         _zero = torch.tensor(0.0, dtype=dtype, device=device)
         _one = torch.tensor(1.0, dtype=dtype, device=device)
 
-        # Keys: default masked (-1e9); un-mask (0) at anchor + control tokens
-        # so the one-hot query attends only to those. Arithmetic (torch.where),
-        # no boolean-index assignment.
+        # Keys: default masked (-1e9); un-mask (0) at the anchor and adapter
+        # selection controls. Classifier markers do not advance the persistent
+        # adapter address.
         k_count = torch.full(
             (total_tokens, self.num_kv_heads, self.counting_head_dim),
             _NEG_INF,
             device=device,
             dtype=dtype,
         )
-        anchor_or_control = is_counting_anchor | is_control_token
+        anchor_or_control = is_counting_anchor | route_control_token
         k_count[:, 0, 0] = torch.where(anchor_or_control, _zero, k_count[:, 0, 0])
 
         # Values: v=1 at the position-0 anchor only (the 1/(1+n) numerator).
@@ -475,7 +502,7 @@ class MultiSwitch(nn.Module):
         # ==================================================================
         # Look up the codeword for each token's address (compile-safe gather).
         all_code_vectors = self.codebook[write_addresses].to(dtype)  # [T, memory_dim]
-        write_mask = is_control_token.unsqueeze(-1).to(dtype)  # [T, 1]
+        write_mask = route_control_token.unsqueeze(-1).to(dtype)  # [T, 1]
 
         # Keys: code(n) * memory_gain at control tokens, zero elsewhere
         # (arithmetic masking). Value: expert_id at control tokens.
@@ -493,7 +520,7 @@ class MultiSwitch(nn.Module):
             device=device,
             dtype=dtype,
         )
-        v_memory[:, 0, 0] = expert_ids.to(dtype) * is_control_token.to(dtype)
+        v_memory[:, 0, 0] = expert_ids.to(dtype) * route_control_token.to(dtype)
 
         # Query: code(n) for every token (reads back the value at address n).
         q_memory = torch.zeros(

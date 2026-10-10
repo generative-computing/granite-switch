@@ -112,7 +112,7 @@ def discover_adapters_from_yaml(
     """Discover adapters from a YAML manifest file.
 
     Reads a YAML manifest that maps adapter names to their paths and types.
-    An entry can also mark itself a **classifier** slot with two extra keys:
+    An entry can also mark itself a **classifier** slot with these extra keys:
 
     .. code-block:: yaml
 
@@ -121,12 +121,16 @@ def discover_adapters_from_yaml(
           type: lora                # lora/alora technology (token placement)
           kind: classifier          # default "lora" when omitted
           labels: [faithful, hallucinated]
+          layer: 12                 # optional decoder layer; omit for the final layer
 
     ``type`` and ``kind`` are independent axes: ``type`` is the LoRA technology
     (lora vs alora, which drives token placement), ``kind`` is whether the slot
     is a real LoRA or a classifier head. ``kind`` and ``labels`` are optional;
     without them an entry is a plain LoRA adapter. The label words become token
     ids at compose time (see :func:`tokenizer_setup.resolve_label_token_ids`).
+
+    ``layer: K`` reads the residual stream after zero-based decoder layer ``K``
+    (switch cache layers excluded). Omitting it reads the final post-norm state.
 
     Args:
         manifest_path: Path to the YAML manifest file.
@@ -136,7 +140,7 @@ def discover_adapters_from_yaml(
         List of ``(adapter_path, adapter_name, technology, source)`` tuples.
         The source is set to the manifest path for traceability.
         ``classifier_meta`` maps name ->
-        ``{"kind", "labels"}`` for each entry that set ``kind``/``labels``;
+        ``{"kind", "labels", "layer"}`` for each entry that set any of them;
         names not in it are plain LoRA slots.
     """
     import yaml
@@ -160,10 +164,12 @@ def discover_adapters_from_yaml(
                 # Optional classifier slots.
                 kind = info.get("kind")
                 labels = info.get("labels")
-                if kind is not None or labels is not None:
+                layer = info.get("layer")
+                if kind is not None or labels is not None or layer is not None:
                     classifier_meta[name] = {
                         "kind": kind or "lora",
                         "labels": labels,
+                        "layer": layer,
                     }
 
     return found, classifier_meta
