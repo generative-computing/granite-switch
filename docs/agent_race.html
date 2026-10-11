@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- The data line is written by benchmarks/adapter_eval/race/build_page.py from a recorded race. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Granite Switch — SR vs LoRA Agent Race</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background: #1e1e1e;
+      color: #cccccc;
+      font-family: 'IBM Plex Mono', 'Consolas', 'Cascadia Code', 'Monaco', monospace;
+      font-size: 13px;
+      line-height: 1.4;
+      padding: 1rem 1.25rem 2rem;
+    }
+
+    /* ── Header ── */
+    .header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      margin-bottom: 0.6rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid #333;
+    }
+
+    .title { font-size: 1rem; font-weight: 600; color: #e0e0e0; }
+
+    .badge {
+      display: inline-block;
+      padding: 1px 7px;
+      border-radius: 9px;
+      font-size: 0.65rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      margin-left: 0.6rem;
+      background: #0d3558;
+      color: #4fc3f7;
+      border: 1px solid #4fc3f7;
+      vertical-align: middle;
+    }
+    .badge.sim {
+      background: #332800;
+      color: #dcdcaa;
+      border-color: #dcdcaa;
+    }
+
+    .elapsed {
+      font-size: 1.05rem;
+      color: #dcdcaa;
+      min-width: 9rem;
+      text-align: right;
+    }
+
+    /* ── About ── */
+    .about { color: #8a8a8a; font-size: 12px; max-width: 96rem; margin-bottom: 0.7rem; }
+    .about p { margin: 0.15rem 0; }
+    .about b { color: #bdbdbd; font-weight: 600; }
+    .about .setup { color: #6a6a6a; }
+
+    /* ── Controls ── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin-bottom: 0.75rem;
+    }
+
+    button {
+      background: #2a2a2a;
+      color: #cccccc;
+      border: 1px solid #4a4a4a;
+      padding: 0.22rem 0.65rem;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 0.82rem;
+      border-radius: 2px;
+      transition: background 0.1s;
+    }
+    button:hover  { background: #353535; border-color: #777; }
+    button.active { background: #0d3558; color: #4fc3f7; border-color: #4fc3f7; }
+
+    #playBtn { min-width: 5rem; }
+
+    .speed-group { display: flex; gap: 2px; }
+    .speed-group button { padding: 0.22rem 0.45rem; }
+
+    .scrubber-wrap {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    input[type=range] {
+      -webkit-appearance: none;
+      width: 100%;
+      height: 3px;
+      background: #3a3a3a;
+      border-radius: 2px;
+      outline: none;
+      cursor: pointer;
+    }
+    input[type=range]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+      background: #4fc3f7;
+      cursor: pointer;
+    }
+
+    .scrubber-time {
+      font-size: 0.72rem;
+      color: #666;
+      white-space: nowrap;
+      min-width: 9rem;
+      text-align: right;
+    }
+
+    /* ── Race grid ── */
+    .race-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: #333;
+      border: 1px solid #333;
+    }
+
+    .server-col { background: #1e1e1e; }
+
+    .server-header {
+      background: #252525;
+      color: #9cdcfe;
+      padding: 0.28rem 0.6rem;
+      font-weight: 600;
+      font-size: 0.82rem;
+      border-bottom: 1px solid #333;
+    }
+    .server-header small { color: #777; font-weight: 400; margin-left: 0.4rem; }
+
+    .conv-rows { padding: 0.2rem 0.5rem 0.2rem; }
+
+    .conv-row {
+      white-space: pre;
+      line-height: 1.32;
+      font-size: 12.5px;
+    }
+
+    .server-footer {
+      background: #212121;
+      padding: 0.28rem 0.6rem;
+      font-size: 0.78rem;
+      border-top: 1px solid #2d2d2d;
+      min-height: 1.4rem;
+    }
+
+    /* ── Metrics panel ── */
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1px;
+      background: #333;
+      border: 1px solid #333;
+      border-top: none;
+    }
+    .metrics-rows { padding: 0.3rem 0.5rem 0.25rem; }
+    .m-row { white-space: pre; line-height: 1.38; font-size: 12.5px; }
+    .m-label { color: #555; display: inline-block; width: 8.5rem; }
+
+    /* ── Result and legend ── */
+    .result { margin-top: 0.7rem; font-size: 0.9rem; color: #66bb6a; min-height: 1.3rem; }
+    .legend { margin-top: 0.35rem; font-size: 11.5px; color: #6a6a6a; }
+    .legend span { margin-right: 1.1rem; white-space: nowrap; }
+
+    /* ── Error ── */
+    #error { color: #f44747; margin: 1rem 0; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <span class="title">Granite Switch — SR vs LoRA Agent Race</span>
+    <span class="badge" id="modeBadge">TELEMETRY</span>
+  </div>
+  <div class="elapsed" id="elapsed">0:00.0</div>
+</div>
+
+<div class="about">
+  <p>Agents switching adapters, as in the adapter benchmark's Serving Quality
+  block. Each lane runs <b id="aboutAgents">16</b> agents, at most
+  <b id="aboutSlots">8</b> at a time: the next one starts as soon as one finishes.
+  Each agent has a prompt of its own, generates <b id="aboutTokens">512</b> tokens
+  and switches adapter every <b id="aboutSpan">32</b>, over
+  <b id="aboutAdapters">64</b> synthetic adapters, with tool calls and round
+  trips as real sleeps.</p>
+  <p><b>lora-vllm</b>: stock vLLM serving the adapters as LoRAs. At every switch it
+  ends the request and starts a new one, prefilling the agent's whole context
+  again (cached only for an adapter it served before).</p>
+  <p><b>gs-sr-vllm</b>: granite-switch Shadow Residual. One generation runs until a
+  tool call; its K/V come from the base model, so an adapter change needs no
+  re-prefill. As in the switch benchmark, each agent keeps one adapter for its
+  task: SR's switch is taken as free.</p>
+  <p>The lanes ran one after the other on the same GPU, each after an untimed
+  warm-up run, and are replayed side by side.
+  <span class="setup" id="setup"></span></p>
+</div>
+
+<div class="controls">
+  <button id="playBtn">&#9654; Play</button>
+  <div class="speed-group">
+    <button class="speed" data-speed="1">1&times;</button>
+    <button class="speed active" data-speed="2">2&times;</button>
+    <button class="speed" data-speed="5">5&times;</button>
+    <button class="speed" data-speed="10">10&times;</button>
+  </div>
+  <div class="scrubber-wrap">
+    <input type="range" id="scrubber" min="0" max="1000" value="0" step="1">
+    <span class="scrubber-time" id="scrubberTime">0:00.0 / 0:00.0</span>
+  </div>
+</div>
+
+<div class="race-grid" id="raceGrid"></div>
+<div class="metrics-grid" id="metricsGrid"></div>
+<div class="result" id="result"></div>
+<div class="legend" id="legend"></div>
+<div id="error"></div>
+
+<script>
+// ── Embedded data (written by build_page.py from a recorded race) ────────────
+const RACE_EVENTS_EMBEDDED = null; // <<RACE_EVENTS>>
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const BAR_WIDTH = 32;
+
+const PHASES = {
+  'queued':   {color: '#4a4a4a', label: s => 'waiting for a slot'},
+  'start':    {color: '#9cdcfe', label: s => 'starting'},
+  'prefill':  {color: '#ef5350', label: s => `prefill ${fmtTok(s.prompt)}`},
+  'decode':   {color: '#4fc3f7', label: s => `${s.adapter || 'decode'}  ${s.tokens}/${decodeTokens}`},
+  'rtt':      {color: '#80deea', label: s => 'round trip'},
+  'tool':     {color: '#fff176', label: s => 'tool call'},
+  'rtt+tool': {color: '#fff176', label: s => 'round trip, tool call'},
+  'done':     {color: '#66bb6a', label: s => `done ${s.wall.toFixed(1)}s`},
+};
+const LANE_TITLES = {
+  'gs-sr-vllm': 'granite-switch SR',
+  'lora-vllm':  'stock vLLM LoRA',
+};
+const DIM    = '#3a3a3a';
+const NUMCOL = '#666666';
+
+// ── Playback state ───────────────────────────────────────────────────────────
+let eventData    = null;
+let state        = [];        // state[laneIdx][agentRow]
+let metrics      = {};        // the latest metrics sample per lane
+let maxima       = {};        // each metric's largest value in the race
+let playbackTime = 0;
+let nextEventIdx = 0;
+let playing      = false;
+let speed        = 2;
+let lastRealTime = null;
+let raceDuration = 0;
+let numRuns      = 16;
+let slots        = 8;
+let decodeTokens = 512;
+
+// ── DOM refs ─────────────────────────────────────────────────────────────────
+const playBtn      = document.getElementById('playBtn');
+const scrubber     = document.getElementById('scrubber');
+const scrubberTime = document.getElementById('scrubberTime');
+const elapsedEl    = document.getElementById('elapsed');
+const modeBadge    = document.getElementById('modeBadge');
+const errorEl      = document.getElementById('error');
+const resultEl     = document.getElementById('result');
+
+// ── Data loading ─────────────────────────────────────────────────────────────
+function loadData() {
+  if (RACE_EVENTS_EMBEDDED) return RACE_EVENTS_EMBEDDED;
+  throw new Error('No race recorded yet: run benchmarks/adapter_eval/race/run_race.py ' +
+                  'and build_page.py (see docs/AGENT_RACE.md).');
+}
+
+// ── State management ─────────────────────────────────────────────────────────
+function initState() {
+  state = eventData.servers.map(() =>
+    Array.from({length: numRuns}, () =>
+      ({status: 'queued', phase: 'queued', tokens: 0, adapter: '', prompt: 0, wall: 0})
+    )
+  );
+  metrics = {};
+}
+
+function resetPlayback() {
+  playbackTime = 0;
+  nextEventIdx = 0;
+  initState();
+}
+
+function applyEvent(evt) {
+  const laneIdx = eventData.servers.indexOf(evt.srv);
+  if (laneIdx < 0) return;
+  if (evt.ev === 'metrics') {
+    metrics[evt.srv] = evt.m;
+    return;
+  }
+  if (evt.conv === undefined || evt.conv < 0 || evt.conv >= numRuns) return;
+  const s = state[laneIdx][evt.conv];
+
+  switch (evt.ev) {
+    case 'conv_start':
+      Object.assign(s, {status: 'running', phase: 'start', tokens: 0, wall: 0});
+      break;
+    case 'step_start':
+      s.phase = evt.step;
+      if (evt.adapter) s.adapter = evt.adapter;
+      if (evt.prompt_tokens !== undefined) s.prompt = evt.prompt_tokens;
+      break;
+    case 'progress':
+      s.tokens = evt.tokens;
+      break;
+    case 'conv_done':
+      Object.assign(s, {status: 'done', phase: 'done', tokens: decodeTokens,
+                        wall: evt.wall_time});
+      break;
+  }
+}
+
+function replayTo(targetTime) {
+  resetPlayback();
+  playbackTime = targetTime;
+  while (nextEventIdx < eventData.events.length &&
+         eventData.events[nextEventIdx].t <= targetTime) {
+    applyEvent(eventData.events[nextEventIdx++]);
+  }
+}
+
+// ── Formatting ───────────────────────────────────────────────────────────────
+function fmtTime(secs) {
+  const m = Math.floor(secs / 60);
+  const s = (secs % 60).toFixed(1).padStart(4, '0');
+  return `${m}:${s}`;
+}
+
+function fmtTok(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M tok`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k tok`;
+  return `${n} tok`;
+}
+
+// ── Rendering ────────────────────────────────────────────────────────────────
+function updateRow(laneIdx, row) {
+  const el = document.getElementById(`row-${laneIdx}-${row}`);
+  if (!el) return;
+  const s      = state[laneIdx][row];
+  const num    = String(row + 1).padStart(2);
+  const filled = Math.min(BAR_WIDTH, Math.round(s.tokens / decodeTokens * BAR_WIDTH));
+  const f      = '█'.repeat(filled);
+  const e      = '░'.repeat(BAR_WIDTH - filled);
+  const phase  = PHASES[s.phase] || PHASES.start;
+
+  if (s.status === 'queued') {
+    el.innerHTML = `<span style="color:#3d3d3d">${num} ${f}${e}  ${phase.label(s)}</span>`;
+  } else if (s.status === 'done') {
+    el.innerHTML =
+      `<span style="color:${NUMCOL}">${num} </span>` +
+      `<span style="color:${phase.color}">${f}${e}  ${phase.label(s)}</span>`;
+  } else {
+    el.innerHTML =
+      `<span style="color:${NUMCOL}">${num} </span>` +
+      `<span style="color:${phase.color}">${f}</span>` +
+      `<span style="color:${DIM}">${e}</span>` +
+      `<span style="color:${phase.color}">  ${phase.label(s)}</span>`;
+  }
+}
+
+function laneWall(srv) {
+  return eventData.metadata?.lanes?.[srv]?.wall_s ?? 0;
+}
+
+function updateFooter(laneIdx) {
+  const el = document.getElementById(`footer-${laneIdx}`);
+  if (!el) return;
+  const lane    = state[laneIdx];
+  const done    = lane.filter(s => s.status === 'done').length;
+  const running = lane.filter(s => s.status === 'running').length;
+  const queued  = lane.filter(s => s.status === 'queued').length;
+
+  if (done === numRuns) {
+    const wall = laneWall(eventData.servers[laneIdx]);
+    el.innerHTML =
+      `<span style="color:#66bb6a;font-weight:600">DONE ${done}/${numRuns}  ✓ ${wall.toFixed(1)}s</span>`;
+  } else {
+    el.innerHTML =
+      `<span style="color:#888">${done}/${numRuns} done · ${running} running · ` +
+      `${queued} waiting for a slot</span>`;
+  }
+}
+
+// ── Metrics rendering ────────────────────────────────────────────────────────
+const MBAR = 14;
+
+function mBar(val, maxVal) {
+  const frac   = maxVal > 0 ? Math.min(val / maxVal, 1.0) : 0;
+  const filled = Math.round(frac * MBAR);
+  return {
+    f:    '█'.repeat(filled),
+    e:    '░'.repeat(MBAR - filled),
+    frac,
+  };
+}
+
+function mColor(frac, invert = false) {
+  // invert=false: blue→orange→red (high is costly, e.g. re-prefill)
+  // invert=true:  red→orange→green (high is good, e.g. prefix-cache hits)
+  if (invert) return frac < 0.4 ? '#ef5350' : frac < 0.7 ? '#ffa726' : '#66bb6a';
+  return frac < 0.5 ? '#4fc3f7' : frac < 0.8 ? '#ffa726' : '#ef5350';
+}
+
+function mRow(label, val, maxVal, fmt, invert = false) {
+  if (val === null || val === undefined) {
+    return `<div class="m-row"><span class="m-label">${label}</span>` +
+           `<span style="color:#2e2e2e">${'░'.repeat(MBAR)}</span>` +
+           `<span style="color:#555">  —</span></div>`;
+  }
+  const {f, e, frac} = mBar(val, maxVal);
+  const c = mColor(frac, invert);
+  return `<div class="m-row">` +
+    `<span class="m-label">${label}</span>` +
+    `<span style="color:${c}">${f}</span>` +
+    `<span style="color:#2e2e2e">${e}</span>` +
+    `<span style="color:${c}">  ${fmt(val)}</span>` +
+    `</div>`;
+}
+
+function computeMaxima() {
+  maxima = {tok_s: 1, ttft_avg: 0.05, recomputed: 1};
+  for (const e of eventData.events) {
+    if (e.ev !== 'metrics') continue;
+    for (const k of Object.keys(maxima)) {
+      if (e.m[k] !== null && e.m[k] > maxima[k]) maxima[k] = e.m[k];
+    }
+  }
+}
+
+function updateMetrics() {
+  eventData.servers.forEach((srv, laneIdx) => {
+    const el = document.getElementById(`metrics-rows-${laneIdx}`);
+    const m  = metrics[srv];
+    if (!el || !m) return;
+    el.innerHTML =
+      mRow('Running',      m.running,    slots,              x => `${x}/${slots}`) +
+      mRow('Prefilling',   m.prefill,    slots,              x => `${x}`) +
+      mRow('Decoding',     m.decode,     slots,              x => `${x}`) +
+      mRow('Tool / RTT',   m.waiting,    slots,              x => `${x}`) +
+      mRow('Tokens/s',     m.tok_s,      maxima.tok_s,       x => `${Math.round(x)}`) +
+      mRow('TTFT avg',     m.ttft_avg,   maxima.ttft_avg,    x => `${x.toFixed(2)}s`) +
+      mRow('Re-prefilled', m.recomputed, maxima.recomputed,  x => fmtTok(x)) +
+      mRow('Prefix hit',   m.cache_hit === null ? null : m.cache_hit * 100, 100,
+           x => `${x.toFixed(0)}%`, true);
+  });
+}
+
+function updateResult() {
+  const lanes = eventData.servers;
+  const finished = lanes.every((srv, i) => state[i].every(s => s.status === 'done'));
+  if (!finished) { resultEl.textContent = ''; return; }
+  const walls = lanes.map(laneWall);
+  const fast  = walls.indexOf(Math.min(...walls));
+  const slow  = 1 - fast;
+  const ratio = walls[slow] / walls[fast];
+  resultEl.textContent =
+    lanes.map((srv, i) => `${srv}: all ${numRuns} agents done in ${walls[i].toFixed(1)}s`)
+         .join('  ·  ') +
+    `  ·  ${lanes[fast]} finished ${ratio.toFixed(1)}× sooner`;
+}
+
+function render() {
+  elapsedEl.textContent = fmtTime(playbackTime);
+
+  const frac = raceDuration > 0 ? playbackTime / raceDuration : 0;
+  scrubber.value = Math.round(frac * 1000);
+  scrubberTime.textContent = `${fmtTime(playbackTime)} / ${fmtTime(raceDuration)}`;
+
+  for (let lane = 0; lane < eventData.servers.length; lane++) {
+    for (let row = 0; row < numRuns; row++) updateRow(lane, row);
+    updateFooter(lane);
+  }
+  updateMetrics();
+  updateResult();
+}
+
+// ── Playback engine ──────────────────────────────────────────────────────────
+function tick(now) {
+  if (playing) {
+    const dt     = lastRealTime !== null ? (now - lastRealTime) / 1000 : 0;
+    lastRealTime = now;
+    playbackTime = Math.min(playbackTime + dt * speed, raceDuration);
+
+    while (nextEventIdx < eventData.events.length &&
+           eventData.events[nextEventIdx].t <= playbackTime) {
+      applyEvent(eventData.events[nextEventIdx++]);
+    }
+
+    render();
+
+    if (playbackTime >= raceDuration) {
+      playing      = false;
+      lastRealTime = null;
+      playBtn.textContent = '↺ Replay';
+    }
+  }
+  requestAnimationFrame(tick);
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+playBtn.addEventListener('click', () => {
+  if (!eventData) return;
+  if (playbackTime >= raceDuration) {
+    resetPlayback();
+    render();
+  }
+  playing = !playing;
+  lastRealTime = null;
+  playBtn.textContent = playing ? '⏸ Pause' : '▶ Play';
+});
+
+document.querySelectorAll('.speed').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.speed').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    speed = parseFloat(btn.dataset.speed);
+  });
+});
+
+let scrubbing = false;
+scrubber.addEventListener('mousedown', () => {
+  scrubbing = true;
+  playing = false;
+  lastRealTime = null;
+  playBtn.textContent = '▶ Play';
+});
+scrubber.addEventListener('input', () => {
+  if (!scrubbing || !eventData) return;
+  replayTo((scrubber.value / 1000) * raceDuration);
+  render();
+});
+scrubber.addEventListener('mouseup', () => { scrubbing = false; });
+
+// ── Grid builder ─────────────────────────────────────────────────────────────
+function buildGrid() {
+  const grid = document.getElementById('raceGrid');
+  grid.innerHTML = '';
+
+  eventData.servers.forEach((srv, laneIdx) => {
+    const col = document.createElement('div');
+    col.className = 'server-col';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'server-header';
+    hdr.innerHTML = `${srv}<small>${LANE_TITLES[srv] || ''}</small>`;
+    col.appendChild(hdr);
+
+    const rows = document.createElement('div');
+    rows.className = 'conv-rows';
+    for (let i = 0; i < numRuns; i++) {
+      const row = document.createElement('div');
+      row.className = 'conv-row';
+      row.id = `row-${laneIdx}-${i}`;
+      rows.appendChild(row);
+    }
+    col.appendChild(rows);
+
+    const footer = document.createElement('div');
+    footer.className = 'server-footer';
+    footer.id = `footer-${laneIdx}`;
+    col.appendChild(footer);
+
+    grid.appendChild(col);
+  });
+
+  const mgrid = document.getElementById('metricsGrid');
+  mgrid.innerHTML = '';
+  eventData.servers.forEach((srv, laneIdx) => {
+    const col = document.createElement('div');
+    col.className = 'server-col';
+
+    const hdr = document.createElement('div');
+    hdr.className = 'server-header';
+    hdr.style.color = '#666';
+    hdr.textContent = `${srv} — its agents and its engine`;
+    col.appendChild(hdr);
+
+    const rows = document.createElement('div');
+    rows.className = 'metrics-rows';
+    rows.id = `metrics-rows-${laneIdx}`;
+    col.appendChild(rows);
+
+    mgrid.appendChild(col);
+  });
+
+  document.getElementById('legend').innerHTML = Object.entries(PHASES)
+    .filter(([k]) => !['start', 'rtt+tool'].includes(k))
+    .map(([k, p]) => `<span><span style="color:${p.color}">██</span> ` +
+                     `${k === 'queued' ? 'waiting for a slot' : k === 'rtt' ? 'round trip'
+                        : k === 'tool' ? 'tool call' : k}</span>`)
+    .join('');
+}
+
+function describe() {
+  const meta = eventData.metadata || {};
+  const w    = meta.workload || {};
+  const set  = (id, v) => { if (v !== undefined) document.getElementById(id).textContent = v; };
+  set('aboutAgents', numRuns);
+  set('aboutSlots', slots);
+  set('aboutTokens', w.decode_tokens);
+  set('aboutSpan', w.span);
+  set('aboutAdapters', w.adapters);
+  const lane = Object.values(meta.lanes || {})[0] || {};
+  const bits = [
+    meta.model,
+    meta.commit?.sha ? `commit ${meta.commit.sha.slice(0, 8)}` : null,
+    lane.gpu,
+    lane.vllm ? `vLLM ${lane.vllm}` : null,
+    meta.timestamp ? meta.timestamp.slice(0, 10) : null,
+  ].filter(Boolean);
+  document.getElementById('setup').textContent = bits.length ? ` (${bits.join(' · ')})` : '';
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+function init() {
+  try {
+    eventData    = loadData();
+    numRuns      = eventData.metadata?.runs || 16;
+    slots        = eventData.metadata?.concurrency || 8;
+    decodeTokens = eventData.metadata?.workload?.decode_tokens || 512;
+    raceDuration = eventData.race_wall || eventData.metadata?.race_wall || 0;
+
+    if (eventData.simulated) {
+      modeBadge.textContent = 'SIMULATED';
+      modeBadge.classList.add('sim');
+    }
+
+    describe();
+    computeMaxima();
+    buildGrid();
+    resetPlayback();
+    render();
+
+    // Auto-play at the default speed (2×, already marked active).
+    playing = true;
+    lastRealTime = null;
+    playBtn.textContent = '⏸ Pause';
+    requestAnimationFrame(tick);
+  } catch (err) {
+    modeBadge.textContent = 'NO DATA';
+    modeBadge.classList.add('sim');
+    errorEl.textContent = err.message;
+  }
+}
+
+init();
+</script>
+</body>
+</html>
