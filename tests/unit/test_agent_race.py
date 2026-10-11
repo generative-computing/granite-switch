@@ -265,7 +265,8 @@ def test_sr_adapters_are_named_as_the_fleet_names_them(tmp_path):
 
 
 def test_build_page_embeds_the_race(tmp_path):
-    page = (REPO_ROOT / "docs" / "agent_race.html").read_text()
+    # The page, emptied of the race it holds.
+    page = build_page.embed((REPO_ROOT / "docs" / "agent_race.html").read_text(), None)
     assert "const RACE_EVENTS_EMBEDDED = null; // <<RACE_EVENTS>>" in page
     record = {"metadata": {"lanes": {"gs-sr-vllm": {"wall_s": 1.0}}}, "events": []}
     log = tmp_path / "pod.log"
