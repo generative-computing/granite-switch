@@ -474,18 +474,22 @@ benchmarks/adapter_eval/vela/submit.sh reference --model granite-4.2-3b
 A model's chat template decides how a prompt carries its documents, and the
 benchmark has to build prompts the way the checkpoints were trained:
 
-- **Granite 4.1** renders a `documents=` argument itself. Its prompts are
-  passed through as they are.
-- **Granite 4.2** ignores `documents=`, and opens a reasoning block unless
+- **Granite 4.1** renders a `documents=` argument itself, into the system
+  turn. Its prompts are passed through as they are.
+- **Granite 4.2** has no `documents=`, and opens a reasoning block unless
   `enable_thinking` is false. Its checkpoints were trained with reasoning off
-  and the documents in tool messages, so its prompts are built that way. Its
-  two trainers placed the documents differently, so each technology gets its
-  own form; the base model gets the SR form.
+  and the documents placed in the messages:
+  - LoRA and aLoRA, trained on 4.1's data, with the documents in the system
+    turn, in the very block 4.1's template writes there;
+  - SR, by its own trainer, with the documents in a tool message.
+
+  So each technology gets its own form; the base model gets the system form.
 
 | Form | Where the documents go |
 |---|---|
-| `tool_json_after_question` (4.2 SR, base) | one tool message after the question, all documents as a JSON list |
-| `tool_text_before_question` (4.2 aLoRA) | one tool message per document, its text, before the question |
+| `system` (4.2 LoRA, aLoRA, base) | the system turn: 4.1's preamble, each document as one JSON line within `<documents>` tags, 4.1's closing instruction; after the row's own system message, if any |
+| `tool_json_after_question` (4.2 SR) | one tool message after the question, all documents as a JSON list |
+| `tool_text_before_question` | one tool message per document, its text, before the question (the first 4.2 aLoRA, retired at v3) |
 
 The `prompt` entry of a model in `adapters.yaml` sets this. Both generation
 paths, granite-switch under vLLM and HF + PEFT, build their prompts the same

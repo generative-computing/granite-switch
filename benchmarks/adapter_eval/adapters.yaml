@@ -47,15 +47,19 @@ models:
   - id: granite-4.2-3b
     name: ibm-research/granite-4.2-3b-prerelease-r260622a
     label: Granite 4.2 3B (prerelease)
-    bench_version: 2
-    # Its chat template ignores documents= and reasons unless told not to. Its
-    # checkpoints were trained with reasoning off and the documents in tool
-    # messages, placed differently by its SR and aLoRA trainers (prompts.py).
-    # The base model gets the SR form.
+    # v3: the LoRA and aLoRA adapters trained on 4.1's data with its documents
+    # in the system turn (the answerability aLoRA replaced), and the base model
+    # prompted the same way.
+    bench_version: 3
+    # Its chat template has no documents= and reasons unless told not to. Its
+    # checkpoints were trained with reasoning off: LoRA and aLoRA on 4.1's data
+    # with the documents in the system turn, as 4.1's template put them; SR,
+    # by its own trainer, with the documents in a tool message (prompts.py).
+    # The base model gets the system form.
     prompt:
       chat_template_kwargs: {enable_thinking: false}
-      documents: tool_json_after_question
-      documents_by_technology: {alora: tool_text_before_question}
+      documents: system
+      documents_by_technology: {sr: tool_json_after_question}
 
 technologies:
   - id: lora
