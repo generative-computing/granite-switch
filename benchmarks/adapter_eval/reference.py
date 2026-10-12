@@ -52,6 +52,7 @@ import time
 import traceback
 from pathlib import Path
 
+from . import release as releases
 from . import staged
 from .common import (
     BASE_COLUMN,
@@ -59,6 +60,7 @@ from .common import (
     REFERENCE_LIBRARIES,
     error,
     format_reference_block,
+    format_release_reference_block,
     load_spec,
     skipped,
 )
@@ -239,11 +241,23 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="JSON of {intrinsic: {mode, text}}: the base model's instructions",
     )
+    p.add_argument(
+        "--release",
+        default=None,
+        help="a Hugging Face release (its revision): the adapters it was composed "
+        "from, in its folder (--bench-root), and the base at its revision",
+    )
     args = p.parse_args(argv)
 
     started = now()
     spec = load_spec(model=args.model)
+    release = record = None
+    if args.release:
+        release = spec.release(args.release)
+        spec = spec.for_model(release.model)
     staged.check_bench_root(args.bench_root, spec)
+    if release:
+        record = releases.read_release(args.bench_root, release)
     settings = spec.model.reference
     if args.token_budget is None:
         args.token_budget = int(settings.get("token_budget", 262144))
@@ -260,9 +274,14 @@ def main(argv: list[str] | None = None) -> int:
         flush=True,
     )
 
+    picked = list(only) if only else None
     discovered = {
         (c.intrinsic, c.tech): c
-        for c in staged.discover(args.bench_root, spec, list(only) if only else None)
+        for c in (
+            releases.discover(args.bench_root, spec, release, picked)
+            if release
+            else staged.discover(args.bench_root, spec, picked)
+        )
     }
     has_sr_code = sr_code_available()
     instructions = (
@@ -293,7 +312,8 @@ def main(argv: list[str] | None = None) -> int:
                 runnable.append((intrinsic.id, column, adapter, ev))
             print(f"[stage] {intrinsic.id}/{column}: {reason or 'ok'}")
 
-    base_dir = base_model_dir(base_model) if runnable else None
+    base_revision = release.base_revision if release else None
+    base_dir = base_model_dir(base_model, base_revision) if runnable else None
     run_meta: dict = {
         "sr_invocation_dropped": [],
         "mlp_keys_renamed": [],
@@ -437,11 +457,18 @@ def main(argv: list[str] | None = None) -> int:
             **run_meta,
         },
     }
+    if release:
+        reference["release_version"] = spec.release_version
+        reference["release"] = {
+            k: record[k] for k in ("repo", "revision", "date", "title")
+        }
+        reference["run"]["base_revision"] = base_revision
     print_table(cells, spec)
     out = args.results_out or work / "reference.json"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(reference, indent=2, sort_keys=True))
-    print(format_reference_block(reference), flush=True)
+    block = format_release_reference_block if release else format_reference_block
+    print(block(reference), flush=True)
     return 0
 
 

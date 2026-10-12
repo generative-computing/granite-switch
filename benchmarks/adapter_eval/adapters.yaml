@@ -61,6 +61,35 @@ models:
       documents: system
       documents_by_technology: {sr: tool_json_after_question}
 
+# Composed checkpoints published on the Hugging Face Hub, benchmarked as
+# published (release.py; docs/ADAPTER_BENCHMARK.md, "Hugging Face releases"):
+# a table of their own under their model's, a row per release, named by its Hub
+# revision. Each runs on its model's eval sets, its adapters against the same
+# library checkpoints under HF + PEFT. A new release is a new entry; a later Hub
+# commit that changes only the model card needs nothing. Bump release_version
+# when a change alters how releases are benchmarked: every one runs again.
+release_version: 1
+releases:
+  - model: granite-4.1-3b
+    repo: ibm-granite/granite-switch-4.1-3b-preview
+    revision: 7a3ac02e07868411424ac89440397b475da66fa7
+    # The base model's latest revision when the release was composed.
+    base_revision: c0650403e44e78ec0262dab1c90914c65b196c4e
+    # Composed for the single-switch engine, which 6013c7ff (#131) removed: its
+    # parent is the last commit that loads the checkpoint.
+    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
+    # The libraries of its adapters, at the revisions its BUILD.md records.
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
+      ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
+      ibm-granite/granitelib-guardian-r1.0: 773b254e98f993a605ec4b6259634906e0e64e8e
+    # Its name for each of the benchmark's intrinsics.
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
+
 technologies:
   - id: lora
     label: LoRA

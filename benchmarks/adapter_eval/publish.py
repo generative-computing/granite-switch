@@ -13,6 +13,10 @@ Runs locally, not on the pod::
     python -m benchmarks.adapter_eval.publish summary <sha> [--model <id>]  # PR comment
     python -m benchmarks.adapter_eval.publish rescore-targets --out targets.json
     python -m benchmarks.adapter_eval.publish merge-rescore rescore.json
+    python -m benchmarks.adapter_eval.publish check-release <revision>  # exit 0 = hit
+    python -m benchmarks.adapter_eval.publish check-release-reference <revision>
+    python -m benchmarks.adapter_eval.publish merge-release results.json
+    python -m benchmarks.adapter_eval.publish merge-release-reference reference.json
 
 The page data (``docs/benchmarks/data.json``) holds one row per (commit,
 model), each row being the results block ``run_benchmark.py`` printed. A
@@ -30,6 +34,12 @@ error.
 
 Blocks and data from before there were several models name only the base
 model; they are read as the model with that base model.
+
+A Hugging Face release (``releases`` in adapters.yaml) has a row of its own
+under ``releases``, named by its Hub revision, with its reference columns
+inside it. It is a cache hit when the row has the current ``release_version``
+and every cell, its throughput and its switching, each measured with the
+current settings, and its reference the current versions too.
 
 A scored cell records its intrinsic's ``score_version``. When that version is
 bumped (only the scoring changed), the cell's saved answers are scored again
@@ -54,6 +64,10 @@ from .common import (
     REFERENCE_COLUMNS,
     REFERENCE_END,
     REFERENCE_LIBRARIES,
+    RELEASE_BEGIN,
+    RELEASE_END,
+    RELEASE_REFERENCE_BEGIN,
+    RELEASE_REFERENCE_END,
     RESCORE_BEGIN,
     RESCORE_END,
     Spec,
@@ -79,6 +93,8 @@ BLOCKS = {
     "rescore": (RESCORE_BEGIN, RESCORE_END),
     "discovery": (stage.DISCOVERY_BEGIN, stage.DISCOVERY_END),
     "stage": (stage.STAGE_BEGIN, stage.STAGE_END),
+    "release": (RELEASE_BEGIN, RELEASE_END),
+    "release-reference": (RELEASE_REFERENCE_BEGIN, RELEASE_REFERENCE_END),
 }
 # Column-group labels on the page.
 ENGINE_LABEL = "granite-switch (vLLM)"
@@ -130,6 +146,8 @@ def load_data(path: Path, spec: Spec) -> dict:
 def save_data(path: Path, data: dict, spec: Spec) -> None:
     data["spec"] = spec.public()
     data["rows"].sort(key=lambda r: r["commit"]["date"], reverse=True)
+    for rows in data.get("releases", {}).values():
+        rows.sort(key=lambda r: r["release"]["date"], reverse=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
@@ -348,6 +366,197 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
     return reference
 
 
+# --- releases ----------------------------------------------------------------
+# A Hugging Face release (``releases`` in adapters.yaml) has a row of its own,
+# under ``releases`` by model, named by its Hub revision: its run as published
+# (``run_benchmark.py --release``) and, as its ``reference``, the library
+# adapters it was composed from under HF + PEFT, with the base model
+# (``reference.py --release``).
+
+RELEASE_URL = "https://huggingface.co/{repo}/commit/{revision}"
+HUB_URL = "https://huggingface.co/{repo}/tree/{revision}"
+
+
+def release_rows(data: dict, model_id: str) -> list[dict]:
+    return data.get("releases", {}).get(model_id, [])
+
+
+def find_release(data: dict, release) -> dict | None:
+    return next(
+        (
+            r
+            for r in release_rows(data, release.model)
+            if r["release"]["revision"] == release.revision
+        ),
+        None,
+    )
+
+
+def release_speed(row: dict, block: str, engine: str, spec: Spec) -> float | None:
+    """A release's tokens/s (throughput) or p95 seconds (switching) on one
+    engine, measured with the current settings, or None. Its switching cell is
+    over its own adapters, so their count and rank are its own."""
+    measured = (row.get(block) or {}).get(engine)
+    if not isinstance(measured, dict):
+        return None
+    if block == THROUGHPUT:
+        current, key = spec.throughput.matches(measured), "tokens_per_s"
+    else:
+        own = ("adapters", "rank")
+        current = all(
+            measured.get(k) == v
+            for k, v in spec.switching.settings().items()
+            if k not in own
+        )
+        key = "p95_s"
+    value = measured.get(key)
+    return value if current and isinstance(value, int | float) else None
+
+
+def _stale(cell: dict, intrinsic) -> bool:
+    return is_scored(cell) and cell.get("score_version", 1) < intrinsic.score_version
+
+
+def release_missing(row: dict | None, spec: Spec) -> list[str]:
+    """What keeps a release's row from being a cache hit: ``intrinsic/tech``
+    cells (one scored with an older score_version runs again; releases are not
+    rescored), ``throughput`` and ``switching``."""
+    row = row or {}
+    out = []
+    for intrinsic in spec.intrinsics:
+        for tech in spec.technologies:
+            cell = row.get("cells", {}).get(intrinsic.id, {}).get(tech.id)
+            if cell is None or is_error(cell) or _stale(cell, intrinsic):
+                out.append(f"{intrinsic.id}/{tech.id}")
+    for block in (THROUGHPUT, SWITCHING):
+        if any(release_speed(row, block, e, spec) is None for e in ENGINES):
+            out.append(block)
+    return out
+
+
+def release_reference_current(reference: dict | None, spec: Spec) -> bool:
+    return (
+        reference is not None
+        and reference.get("reference_version") == spec.reference_version
+        and reference.get("release_version") == spec.release_version
+    )
+
+
+def release_reference_missing(row: dict | None, spec: Spec) -> list[str]:
+    """A release's reference cells still to run, as ``intrinsic/column``."""
+    reference = (row or {}).get("reference")
+    current = release_reference_current(reference, spec)
+    out = []
+    for intrinsic in spec.intrinsics:
+        for column in REFERENCE_COLUMNS:
+            cell = (
+                reference["cells"].get(intrinsic.id, {}).get(column)
+                if current
+                else None
+            )
+            if cell is None or is_error(cell) or _stale(cell, intrinsic):
+                out.append(f"{intrinsic.id}/{column}")
+    return out
+
+
+def release_hit(row: dict | None, spec: Spec) -> bool:
+    return (
+        row is not None
+        and row.get("release_version") == spec.release_version
+        and "served_by" in row
+        and not release_missing(row, spec)
+    )
+
+
+def release_reference_hit(row: dict | None, spec: Spec) -> bool:
+    return row is not None and not release_reference_missing(row, spec)
+
+
+def _release_holder(data: dict, block: dict, spec: Spec):
+    """The release a block is of, its model's definition and its stored row."""
+    release = spec.release(block["release"]["revision"])
+    spec = spec.for_model(release.model)
+    refuse_private(spec)
+    if block["run"].get("limit") is not None:
+        raise ValueError("refusing to publish a --limit run")
+    return release, spec, find_release(data, release)
+
+
+def merge_release(data: dict, results: dict, spec: Spec) -> dict:
+    """Put a release's run into ``data`` and return its row.
+
+    A full run replaces the row's own cells and speed, and keeps its reference;
+    an ``--only`` run replaces just what it ran, in a row of the same
+    ``release_version``.
+    """
+    release, spec, old = _release_holder(data, results, spec)
+    run = results["run"]
+    if results.get("release_version") != spec.release_version:
+        raise ValueError(
+            f"results are release_version {results.get('release_version')}, "
+            f"adapters.yaml has {spec.release_version}"
+        )
+    if results["served_by"]["sha"] != release.serve_with:
+        raise ValueError(
+            f"served by {results['served_by']['sha'][:8]}, not by the release's "
+            f"{release.serve_with[:8]} (adapters.yaml)"
+        )
+    rows = data.setdefault("releases", {}).setdefault(spec.model_id, [])
+    if (
+        run.get("only")
+        and old
+        and old.get("release_version") == spec.release_version
+        and "served_by" in old
+    ):
+        for picked in run["only"]:
+            if picked in (THROUGHPUT, SWITCHING):
+                if picked in results:
+                    old[picked] = results[picked]
+            else:
+                old["cells"][picked] = results["cells"][picked]
+        old.setdefault("updates", []).append(run)
+        return old
+    if old:
+        rows.remove(old)
+        if old.get("reference"):
+            results["reference"] = old["reference"]
+    rows.append(results)
+    return results
+
+
+def merge_release_reference(data: dict, reference: dict, spec: Spec) -> dict:
+    """Put a release's reference run into its row, made if it has none yet;
+    returns the stored reference. An ``--only`` run replaces just its cells in
+    a stored reference of the same versions."""
+    _, spec, row = _release_holder(data, reference, spec)
+    if not release_reference_current(reference, spec):
+        raise ValueError(
+            f"reference is reference_version {reference.get('reference_version')}, "
+            f"release_version {reference.get('release_version')}; adapters.yaml "
+            f"has {spec.reference_version}, {spec.release_version}"
+        )
+    run = reference["run"]
+    if row is None:
+        row = {
+            "model": spec.model_id,
+            "release_version": spec.release_version,
+            "release": reference["release"],
+            "cells": {},
+        }
+        data.setdefault("releases", {}).setdefault(spec.model_id, []).append(row)
+    old = row.get("reference")
+    if run.get("only") and release_reference_current(old, spec):
+        for key in run["only"]:
+            intrinsic_id, column = key.split("/")
+            old["cells"].setdefault(intrinsic_id, {})[column] = reference["cells"][
+                intrinsic_id
+            ][column]
+        old.setdefault("updates", []).append(run)
+        return old
+    row["reference"] = {k: v for k, v in reference.items() if k != "release"}
+    return row["reference"]
+
+
 # --- rescoring ---------------------------------------------------------------
 
 
@@ -472,6 +681,7 @@ body { font: 14px/1.45 system-ui, sans-serif; margin: 2em; color: #1b1b1b;
 h1 { margin-bottom: .2em; }
 h2 { font-size: 18px; margin: 1.2em 0 .3em; }
 h2 small { font-weight: 400; color: #666; margin-left: .4em; }
+h3 { font-size: 15px; margin: 1.6em 0 .3em; }
 code { font-size: 13px; }
 .lede, .note { color: #444; max-width: 62em; }
 .flow { margin: 1.2em 0; padding: .9em 1.1em; border: 1px solid #e3e3e3;
@@ -782,13 +992,15 @@ def _speedup_html(row: dict, tech_id: str, extra: str, spec: Spec) -> str:
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
 
-def _switching_title(measured: dict) -> str:
+def _switching_title(measured: dict, adapters: str | None = None) -> str:
+    """``adapters`` names the agents' adapters; the synthetic fleet's by default."""
     parts = [
         f"p95 {measured['p95_s']:.1f} s, median {measured['median_s']:.1f} s, "
         f"over {measured['agents']} agents in {measured['waves']} waves",
         f"{measured['switches']} adapter switches and {measured['tool_calls']} tool "
         f"calls in all; {measured['prefill_recomputed']:,} prompt tokens re-prefilled",
-        f"{measured['adapters']} synthetic adapters of rank {measured['rank']}",
+        adapters
+        or f"{measured['adapters']} synthetic adapters of rank {measured['rank']}",
     ]
     if warmups := measured.get("warmup_p95_s"):
         parts.append(
@@ -941,26 +1153,28 @@ def _throughput_settings(run: dict) -> str:
     )
 
 
+def _items(pairs) -> str:
+    """A details list of (label, HTML) pairs, leaving out the empty ones."""
+    body = "".join(
+        f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in pairs if v not in (None, "")
+    )
+    return f"<dl>{body}</dl>"
+
+
+def _code(run: dict) -> str:
+    """The benchmark's own code that ran, as a link to its commit."""
+    sha = run.get("harness_sha")
+    if not sha:
+        return "not recorded"
+    text = (
+        f'<a href="{_esc(COMMIT_URL.format(sha=sha))}"><code>{_esc(sha[:8])}</code></a>'
+    )
+    return text + (" with local changes" if run.get("harness_dirty") else "")
+
+
 def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> str:
     """The run-details box of a row, as HTML."""
-
-    def items(pairs) -> str:
-        body = "".join(
-            f"<dt>{_esc(k)}</dt><dd>{v}</dd>" for k, v in pairs if v not in (None, "")
-        )
-        return f"<dl>{body}</dl>"
-
-    def code(run: dict) -> str:
-        """The benchmark's own code that ran, as a link to its commit."""
-        sha = run.get("harness_sha")
-        if not sha:
-            return "not recorded"
-        text = (
-            f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
-            f"<code>{_esc(sha[:8])}</code></a>"
-        )
-        return text + (" with local changes" if run.get("harness_dirty") else "")
-
+    items, code = _items, _code
     commit, run = row["commit"], row["run"]
     versions = (
         _esc(_libraries(run, ("vllm", "torch", "transformers"))) or "not recorded"
@@ -1067,35 +1281,14 @@ def _details_text(row: dict) -> str:
     return "; ".join(p for p in parts if p)
 
 
-def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
+def _task_head(head: list[list[str]], spec: Spec) -> None:
+    """The Task Quality headers under the section's: per intrinsic, its name,
+    its column groups and their technologies (rows 2 to 4 of ``head``)."""
     techs = spec.technologies
     n = len(techs)
-    # The serving blocks the model measures; each is 3 groups of n columns.
-    blocks = [b for b in (THROUGHPUT, SWITCHING) if spec.model.measures(b)]
-    serving_width = 3 * n * len(blocks)
     sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
     width = sum(sizes.values())
     data_attrs = " ".join(f'data-{g}="{size}"' for g, size in sizes.items())
-    count = len(spec.intrinsics)
-    head = [
-        [
-            '<th class="commit" rowspan="4">Commit</th>',
-            '<th rowspan="4">Subject</th>',
-            f'<th class="task-head section i-start" colspan="{width * count}">'
-            f"{_esc(TASK_LABEL)}</th>",
-        ]
-        + (
-            [
-                f'<th class="grp-thr section i-start" colspan="{serving_width}">'
-                f"{_esc(SERVING_LABEL)}</th>"
-            ]
-            if blocks
-            else []
-        ),
-        [],
-        [],
-        [],
-    ]
     for intrinsic in spec.intrinsics:
         mark = f"in-{intrinsic.id}"  # what its filter hides
         head[1].append(
@@ -1117,6 +1310,95 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                 head[3].append(
                     f"<th{_classes(f'grp-{group}', first, mark)}>{_esc(tech.label)}</th>"
                 )
+
+
+def _task_cells(
+    gs_cells: dict, ref_cells: dict | None, gap: str | None, spec: Spec
+) -> list[str]:
+    """One row's Task Quality cells: per intrinsic, granite-switch's, HF + PEFT's,
+    the base model's and the gain ratios. ``ref_cells`` is None, with ``gap``
+    saying why, when the row has no reference columns."""
+    techs = spec.technologies
+    cells = []
+    for intrinsic in spec.intrinsics:
+        headline = intrinsic.headline
+        mark = f"in-{intrinsic.id}"
+        by_tech = gs_cells.get(intrinsic.id, {})
+        by_column = {} if ref_cells is None else ref_cells.get(intrinsic.id, {})
+        gs = [by_tech.get(t.id) for t in techs]
+        ref = [by_column.get(t.id) for t in techs]
+        base = by_column.get(BASE_COLUMN)
+        scored = [
+            v
+            for v in (_headline(c, headline) for c in [*gs, *ref, base])
+            if v is not None
+        ]
+        best = max(scored) if len(scored) > 1 else None
+        ref_missing = gap or "not run"
+        for k, cell in enumerate(gs):
+            start = "start i-start" if k == 0 else ""
+            cells.append(_cell_html(cell, headline, best, _join("grp-gs", start, mark)))
+        for k, cell in enumerate(ref):
+            start = "start" if k == 0 else ""
+            cells.append(
+                _cell_html(
+                    cell, headline, best, _join("grp-ref", start, mark), ref_missing
+                )
+            )
+        cells.append(
+            _cell_html(base, headline, best, _join("grp-base start", mark), ref_missing)
+        )
+        for k in range(len(techs)):
+            start = "start" if k == 0 else ""
+            # No adapter for this technology: the ratio cell says so too.
+            skip = next((c for c in (gs[k], ref[k]) if c and "skipped" in c), None)
+            if skip:
+                extra = _join("grp-ratio", start, mark)
+                cells.append(_cell_html(skip, headline, None, extra))
+                continue
+            cells.append(
+                _ratio_html(
+                    _headline(gs[k], headline),
+                    _headline(ref[k], headline),
+                    _headline(base, headline),
+                    _join("grp-ratio", start, mark),
+                    gap
+                    or f"needs the {ENGINE_LABEL}, {REFERENCE_LABEL} and "
+                    f"{BASE_LABEL} scores",
+                )
+            )
+    return cells
+
+
+def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
+    techs = spec.technologies
+    n = len(techs)
+    # The serving blocks the model measures; each is 3 groups of n columns.
+    blocks = [b for b in (THROUGHPUT, SWITCHING) if spec.model.measures(b)]
+    serving_width = 3 * n * len(blocks)
+    sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
+    width = sum(sizes.values())
+    count = len(spec.intrinsics)
+    head = [
+        [
+            '<th class="commit" rowspan="4">Commit</th>',
+            '<th rowspan="4">Subject</th>',
+            f'<th class="task-head section i-start" colspan="{width * count}">'
+            f"{_esc(TASK_LABEL)}</th>",
+        ]
+        + (
+            [
+                f'<th class="grp-thr section i-start" colspan="{serving_width}">'
+                f"{_esc(SERVING_LABEL)}</th>"
+            ]
+            if blocks
+            else []
+        ),
+        [],
+        [],
+        [],
+    ]
+    _task_head(head, spec)
     # The serving blocks, per technology rather than per intrinsic.
     labels = {
         THROUGHPUT: (decode_label(spec), "tokens/s"),
@@ -1153,57 +1435,9 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
             f'<td class="subject" title="{_esc(commit["subject"])}">'
             f"{_esc(commit['subject'])}</td>",
         ]
-        for intrinsic in spec.intrinsics:
-            headline = intrinsic.headline
-            mark = f"in-{intrinsic.id}"
-            by_tech = row["cells"].get(intrinsic.id, {})
-            by_column = {} if gap else reference["cells"].get(intrinsic.id, {})
-            gs = [by_tech.get(t.id) for t in techs]
-            ref = [by_column.get(t.id) for t in techs]
-            base = by_column.get(BASE_COLUMN)
-            scored = [
-                v
-                for v in (_headline(c, headline) for c in [*gs, *ref, base])
-                if v is not None
-            ]
-            best = max(scored) if len(scored) > 1 else None
-            ref_missing = gap or "not run"
-            for k, cell in enumerate(gs):
-                start = "start i-start" if k == 0 else ""
-                cells.append(
-                    _cell_html(cell, headline, best, _join("grp-gs", start, mark))
-                )
-            for k, cell in enumerate(ref):
-                start = "start" if k == 0 else ""
-                cells.append(
-                    _cell_html(
-                        cell, headline, best, _join("grp-ref", start, mark), ref_missing
-                    )
-                )
-            cells.append(
-                _cell_html(
-                    base, headline, best, _join("grp-base start", mark), ref_missing
-                )
-            )
-            for k in range(len(techs)):
-                start = "start" if k == 0 else ""
-                # No adapter for this technology: the ratio cell says so too.
-                skip = next((c for c in (gs[k], ref[k]) if c and "skipped" in c), None)
-                if skip:
-                    extra = _join("grp-ratio", start, mark)
-                    cells.append(_cell_html(skip, headline, None, extra))
-                    continue
-                cells.append(
-                    _ratio_html(
-                        _headline(gs[k], headline),
-                        _headline(ref[k], headline),
-                        _headline(base, headline),
-                        _join("grp-ratio", start, mark),
-                        gap
-                        or f"needs the {ENGINE_LABEL}, {REFERENCE_LABEL} and "
-                        f"{BASE_LABEL} scores",
-                    )
-                )
+        cells += _task_cells(
+            row["cells"], None if gap else reference["cells"], gap, spec
+        )
         if THROUGHPUT in blocks:
             for e, engine in enumerate(ENGINES):
                 for k, tech in enumerate(techs):
@@ -1230,6 +1464,268 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
             f'<td colspan="{width * len(spec.intrinsics) + serving_width}"></td></tr>'
         )
     return (
+        '<div class="wrap"><table class="bench"><thead>'
+        + "".join(f"<tr>{''.join(r)}</tr>" for r in head)
+        + "</thead><tbody>\n"
+        + "\n".join(body)
+        + "\n</tbody></table></div>"
+    )
+
+
+RELEASES_HEADING = "Hugging Face releases"
+RELEASES_NOTE = (
+    "Composed checkpoints published on Hugging Face, a row per release, named by "
+    "its Hub revision. Each runs as published, on the granite-switch commit that "
+    f"loads it; {REFERENCE_LABEL} runs the library adapters it was composed from. "
+    "Its speed is over all of its own adapters, against stock vLLM serving the "
+    "same library adapters, so it does not compare with the table above."
+)
+
+
+def _release_gap(reference: dict | None, spec: Spec) -> str | None:
+    """Why a release's row shows no reference columns, or None when it shows them."""
+    if reference is None:
+        return "reference not computed yet"
+    if not release_reference_current(reference, spec):
+        return "reference out of date"
+    return None
+
+
+def _release_speed_html(
+    row: dict, block: str, engine: str, extra: str, spec: Spec
+) -> str:
+    """One engine's throughput or switching ``<td>`` of a release."""
+    measured = (row.get(block) or {}).get(engine)
+    value = release_speed(row, block, engine, spec)
+    if not isinstance(measured, dict):
+        cls, title, text = "skip", "not measured", "·"
+    elif is_error(measured):
+        cls, title, text = "err", measured["error"], "error"
+    elif value is None:
+        cls, title, text = "skip", "measured with other settings", "·"
+    elif block == THROUGHPUT:
+        cls, title, text = "num", _speed_title(measured), f"{value:,.0f}"
+    else:
+        own = f"the release's {measured['adapters']} adapters, rank up to {measured['rank']}"
+        cls, title, text = "num", _switching_title(measured, own), f"{value:,.0f}"
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _release_speedup_html(row: dict, block: str, extra: str, spec: Spec) -> str:
+    gs, native = (release_speed(row, block, e, spec) for e in ENGINES)
+    if not gs or native is None:
+        cls, title, text = "skip", "needs both engines' numbers", "·"
+    else:
+        # More tokens per second, or fewer seconds, is faster.
+        ratio = gs / native if block == THROUGHPUT else native / gs
+        unit = "tokens/s" if block == THROUGHPUT else "s at p95"
+        cls, text = "num", percent_faster(ratio)
+        title = (
+            f"{ratio:.2f}x: {ENGINE_LABEL} {gs:,.1f} {unit}, {NATIVE_LABEL} "
+            f"{native:,.1f} {unit}; the same GPU, one after the other"
+        )
+    return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
+
+
+def _release_details(row: dict, release, spec: Spec) -> str:
+    """The details box of a release's row, as HTML."""
+    rel, run, served = row["release"], row.get("run") or {}, row.get("served_by")
+    out = [
+        "<h4>Release</h4>",
+        _items(
+            [
+                (
+                    "repository",
+                    f'<a href="{_esc(HUB_URL.format(**rel))}">'
+                    f"<code>{_esc(rel['repo'])}</code></a>",
+                ),
+                ("revision", f"<code>{_esc(rel['revision'])}</code>"),
+                ("date", _esc(rel["date"][:16].replace("T", " "))),
+                ("commit", _esc(rel.get("title") or "")),
+                (
+                    "composed from",
+                    ", ".join(
+                        f"<code>{_esc(lib)}</code> <code>{_esc(rev[:8])}</code>"
+                        for lib, rev in release.sources.items()
+                    )
+                    if release
+                    else "",
+                ),
+                (
+                    "base model",
+                    f"<code>{_esc(spec.base_model)}</code> "
+                    f"<code>{_esc(release.base_revision[:8])}</code>"
+                    if release
+                    else "",
+                ),
+            ]
+        ),
+        f"<h4>{_esc(ENGINE_LABEL)} run</h4>",
+    ]
+    if served is None:
+        out.append("<p>not run yet</p>")
+    else:
+        sha = served["sha"]
+        out.append(
+            _items(
+                [
+                    (
+                        "served by",
+                        f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
+                        f"<code>{_esc(sha[:8])}</code></a> {_esc(served['subject'])}",
+                    ),
+                    ("finished", _esc(run.get("finished", "")[:16].replace("T", " "))),
+                    (
+                        "libraries",
+                        _esc(_libraries(run, ("vllm", "torch", "transformers")))
+                        or "not recorded",
+                    ),
+                    ("GPU", _esc(run.get("gpu") or "")),
+                    (
+                        "context",
+                        f"{run['max_model_len']:,} tokens"
+                        if run.get("max_model_len")
+                        else "",
+                    ),
+                    ("CUDA graphs", "off" if run.get("enforce_eager") else "on"),
+                    ("throughput", _esc(_throughput_settings(run))),
+                    ("benchmark", f"releases v{row.get('release_version')}"),
+                    ("benchmark code", _code(run)),
+                ]
+            )
+        )
+    fingerprints = run.get("adapters") or {}
+    if fingerprints and release:
+        body = []
+        for intrinsic in spec.intrinsics:
+            name = release.adapters.get(intrinsic.id)
+            found = [
+                (tech, f)
+                for tech in spec.technologies
+                if (f := fingerprints.get(f"{intrinsic.id}/{tech.id}"))
+            ]
+            for tech, f in found:
+                weights = f.get("weights_sha256") or ""
+                body.append(
+                    f"<tr><th>{_esc(intrinsic.name)}</th><td><code>{_esc(name)}</code>"
+                    f" {_esc(tech.label)} {_esc(_ranks(f))} <code>{_esc(weights[:8])}</code>"
+                    "</td></tr>"
+                )
+        out += [
+            "<h4>Adapters</h4>",
+            f"<table>{''.join(body)}</table>",
+            "<p>The release's name for each, its rank and the first 8 characters of "
+            "its library checkpoint's SHA-256 checksum.</p>",
+        ]
+    reference = row.get("reference")
+    out.append(f"<h4>{_esc(REFERENCE_LABEL)} and {_esc(BASE_LABEL)}</h4>")
+    gap = _release_gap(reference, spec)
+    if gap:
+        out.append(f"<p>{_esc(gap)}</p>")
+    else:
+        ref_run = reference["run"]
+        instructions = ref_run.get("base_instructions_sha256")
+        out.append(
+            _items(
+                [
+                    (
+                        "finished",
+                        _esc(ref_run.get("finished", "")[:16].replace("T", " ")),
+                    ),
+                    ("libraries", _esc(_libraries(ref_run, REFERENCE_LIBRARIES))),
+                    (
+                        "Base prompt",
+                        f"instructions <code>{_esc(instructions[:8])}</code> (checksum)"
+                        if instructions
+                        else "",
+                    ),
+                    ("GPU", _esc(ref_run.get("gpu") or "")),
+                    ("version", f"reference v{reference.get('reference_version')}"),
+                    ("benchmark code", _code(ref_run)),
+                ]
+            )
+        )
+    return "".join(out)
+
+
+def _release_details_text(row: dict) -> str:
+    """A plain-text summary of a release's details box, for browsers without scripts."""
+    run, served = row.get("run") or {}, row.get("served_by")
+    parts = [
+        f"served by {served['sha'][:8]}" if served else "not run yet",
+        _libraries(run, ("vllm", "torch", "transformers")),
+        run.get("gpu"),
+    ]
+    return "; ".join(p for p in parts if p)
+
+
+def _release_table(rows: list[dict], spec: Spec) -> str:
+    """A model's Hugging Face releases: the Task Quality columns as in its main
+    table, then each release's speed over its own adapters, per engine."""
+    width = 3 * len(spec.technologies) + 1
+    count = len(spec.intrinsics)
+    head = [
+        [
+            '<th class="commit" rowspan="4">Release</th>',
+            '<th rowspan="4">Repository</th>',
+            f'<th class="task-head section i-start" colspan="{width * count}">'
+            f"{_esc(TASK_LABEL)}</th>",
+            f'<th class="grp-thr section i-start" colspan="6">{_esc(SERVING_LABEL)}</th>',
+        ],
+        [],
+        [],
+        [],
+    ]
+    _task_head(head, spec)
+    for label, unit in (
+        (decode_label(spec), "tokens/s"),
+        (switching_label(spec), "p95 seconds to complete"),
+    ):
+        head[1].append(
+            f'<th class="grp-thr i-start" colspan="3">{_esc(label)}<br>'
+            f"<small>{_esc(unit)}</small></th>"
+        )
+        for engine_label in (*ENGINES.values(), SPEEDUP_LABEL):
+            head[2].append(
+                f'<th class="grp-thr start" rowspan="2">{_esc(engine_label)}</th>'
+            )
+    by_revision = {r.revision: r for r in spec.releases_of(spec.model_id)}
+    body = []
+    for row in rows:
+        rel = row["release"]
+        reference = row.get("reference")
+        gap = _release_gap(reference, spec)
+        cells = [
+            '<td class="commit">'
+            f'<a href="{_esc(RELEASE_URL.format(**rel))}"><code>'
+            f"{_esc(rel['revision'][:8])}</code></a>"
+            f'<button class="info" type="button" aria-label="Release details" '
+            f'title="{_esc(_release_details_text(row))}">i</button>'
+            '<div class="details" hidden>'
+            f"{_release_details(row, by_revision.get(rel['revision']), spec)}</div>"
+            f'<div class="date">{_esc(rel["date"][:10])}</div></td>',
+            f'<td class="subject" title="{_esc(rel["repo"])}">'
+            f'<a href="{_esc(HUB_URL.format(**rel))}">'
+            f"{_esc(rel['repo'].rsplit('/', 1)[-1])}</a></td>",
+        ]
+        cells += _task_cells(
+            row.get("cells", {}), None if gap else reference["cells"], gap, spec
+        )
+        for block in (THROUGHPUT, SWITCHING):
+            for e, engine in enumerate(ENGINES):
+                extra = "grp-thr start i-start" if e == 0 else "grp-thr start"
+                cells.append(_release_speed_html(row, block, engine, extra, spec))
+            cells.append(_release_speedup_html(row, block, "grp-thr start", spec))
+        old = row.get("release_version") != spec.release_version
+        body.append(f"<tr{_classes('old' if old else '')}>" + "".join(cells) + "</tr>")
+    if not body:
+        body.append(
+            '<tr><td class="commit" colspan="2">no Hugging Face release yet</td>'
+            f'<td colspan="{width * count + 6}"></td></tr>'
+        )
+    return (
+        f"<h3>{_esc(RELEASES_HEADING)}</h3>"
+        f'<p class="note">{_esc(RELEASES_NOTE)}</p>'
         '<div class="wrap"><table class="bench"><thead>'
         + "".join(f"<tr>{''.join(r)}</tr>" for r in head)
         + "</thead><tbody>\n"
@@ -1283,6 +1779,7 @@ def render(data: dict, spec: Spec) -> str:
             + (f" Staged adapters: {_esc(adapters)}." if adapters else "")
             + "</p>"
             + _model_table(rows, reference, model_spec)
+            + _release_table(release_rows(data, m.id), model_spec)
             + "</section>"
         )
     # Every model's intrinsics, in spec order: the filters apply to every tab.
@@ -1566,6 +2063,18 @@ def main(argv: list[str] | None = None) -> int:
     rt.add_argument("--out", type=Path, required=True)
     ms = sub.add_parser("merge-rescore", help="add a rescore run to the page data")
     ms.add_argument("rescore", type=Path)
+    for name, what in (
+        ("check-release", "its row"),
+        ("check-release-reference", "its reference columns"),
+    ):
+        cl = sub.add_parser(name, help=f"exit 0 and print {what} on a cache hit")
+        cl.add_argument("release", help="its revision (8+ characters)")
+    mrl = sub.add_parser("merge-release", help="add a release's run to the page data")
+    mrl.add_argument("results", type=Path)
+    mrr = sub.add_parser(
+        "merge-release-reference", help="add a release's reference run to the page data"
+    )
+    mrr.add_argument("reference", type=Path)
     args = p.parse_args(argv)
 
     spec = load_spec()
@@ -1573,9 +2082,16 @@ def main(argv: list[str] | None = None) -> int:
         block = extract_block(args.log.read_text(errors="replace"), *BLOCKS[args.kind])
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(block, indent=2, sort_keys=True) + "\n")
-        if args.kind in ("results", "reference"):
+        if args.kind in ("results", "reference", "release", "release-reference"):
             bad = [f"{i}/{t}" for i, t, c in iter_cells(block["cells"]) if is_error(c)]
-            name = block["commit"]["sha"][:8] if args.kind == "results" else "reference"
+            name = {
+                "results": lambda: block["commit"]["sha"][:8],
+                "reference": lambda: "reference",
+                "release": lambda: f"release {block['release']['revision'][:8]}",
+                "release-reference": lambda: (
+                    f"release {block['release']['revision'][:8]} reference"
+                ),
+            }[args.kind]()
             print(f"extracted {name}; error cells: {', '.join(bad) or 'none'}")
         else:
             print(f"extracted {args.kind} block to {args.out}")
@@ -1649,6 +2165,45 @@ def main(argv: list[str] | None = None) -> int:
         print(f"rescored {len(outcome['merged'])} cells into {args.data}")
         for line in outcome["skipped"]:
             print(f"  skipped {line}")
+        return 0
+    if args.cmd in ("check-release", "check-release-reference"):
+        release = spec.release(args.release)
+        spec = spec.for_model(release.model)
+        row = find_release(data, release)
+        if args.cmd == "check-release":
+            hit, missing = release_hit(row, spec), release_missing(row, spec)
+        else:
+            hit, missing = (
+                release_reference_hit(row, spec),
+                release_reference_missing(row, spec),
+            )
+        if hit:
+            print(json.dumps(row, indent=2, sort_keys=True))
+            return 0
+        if row is None:
+            print(f"cache miss: no row for release {release.key}")
+        elif (
+            args.cmd == "check-release"
+            and row.get("release_version") != spec.release_version
+        ):
+            print(f"cache miss: row is release_version {row.get('release_version')}")
+        else:
+            print(
+                f"cache miss: to run: {', '.join(missing) or 'its granite-switch run'}"
+            )
+        return 1
+    if args.cmd == "merge-release":
+        row = merge_release(data, json.loads(args.results.read_text()), spec)
+        save_data(args.data, data, spec)
+        print(f"merged release {row['release']['revision'][:8]} into {args.data}")
+        return 0
+    if args.cmd == "merge-release-reference":
+        block = json.loads(args.reference.read_text())
+        merge_release_reference(data, block, spec)
+        save_data(args.data, data, spec)
+        print(
+            f"merged release {block['release']['revision'][:8]}'s reference into {args.data}"
+        )
         return 0
     return 2
 

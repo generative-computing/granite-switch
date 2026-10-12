@@ -141,10 +141,11 @@ def cells(settings: dict) -> str:
 
 def arm_command(
     tech: str, engine: str, model: str, fleet_dir: Path, native_root: Path | None,
-    settings: dict, out: Path,
+    settings: dict, out: Path, in_order: bool = False,
 ) -> list[str]:  # fmt: skip
     """One engine's run: its driver for stock vLLM and SR, ``gs_switch`` for
-    granite-switch LoRA and aLoRA."""
+    granite-switch LoRA and aLoRA. ``in_order``: a checkpoint whose adapters
+    have names of their own (a release), taken in its order."""
     common = [
         "--cells",
         cells(settings),
@@ -161,7 +162,10 @@ def arm_command(
         ]  # fmt: skip
     if tech == "sr":
         return [DRIVER, "--arm", "shadow-residual", "--sr-checkpoint", model, *common]
-    return ["-m", GS_DRIVER, "--checkpoint", model, *common]
+    return [
+        "-m", GS_DRIVER, "--checkpoint", model, *common,
+        *(["--in-order"] if in_order else []),
+    ]  # fmt: skip
 
 
 def p95(values: list[float]) -> float:

@@ -50,6 +50,7 @@ import traceback
 from importlib import metadata
 from pathlib import Path
 
+from . import release as releases
 from . import staged, switching
 from . import throughput as switch_bench
 from .common import (
@@ -57,6 +58,7 @@ from .common import (
     adapter_name,
     compose_group,
     error,
+    format_release_block,
     format_results_block,
     is_scored,
     load_spec,
@@ -69,6 +71,8 @@ COMPOSER_MODULE = "granite_switch.composer.compose_granite_switch"
 THROUGHPUT = "throughput"
 # The --only entry that measures agents switching adapters.
 SWITCHING = "switching"
+# The engines a release's speed is measured on: granite-switch, stock vLLM.
+ENGINES = ("gs", "native")
 
 
 def now() -> str:
@@ -185,12 +189,12 @@ def versions(names: tuple[str, ...]) -> dict[str, str | None]:
     return out
 
 
-def base_model_dir(base_model: str) -> Path:
+def base_model_dir(base_model: str, revision: str | None = None) -> Path:
     if Path(base_model).is_dir():
         return Path(base_model)
     from huggingface_hub import snapshot_download
 
-    return Path(snapshot_download(base_model))
+    return Path(snapshot_download(base_model, revision=revision))
 
 
 def generate(python: str, harness_root: Path, jobs_path: Path, spec: dict) -> dict:
@@ -538,6 +542,82 @@ def score_cell(scorer_name: str, pred_path: Path, eval_dir: Path, out_path: Path
     return result.metrics
 
 
+def generate_and_score(
+    args, spec, harness_root: Path, work: Path, model_dir: Path, group: str,
+    group_cells: list, names: dict, cells: dict, run_meta: dict, token_budget,
+) -> None:  # fmt: skip
+    """Generate every cell of one checkpoint, then score each into ``cells``.
+
+    ``names`` is each cell's adapter name in the checkpoint, by (intrinsic,
+    technology); the library versions go into ``run_meta``.
+    """
+    jobs = []
+    for c in group_cells:
+        intrinsic = spec.intrinsic(c.intrinsic)
+        jobs.append(
+            {
+                "key": f"{c.intrinsic}/{c.tech}",
+                "adapter_name": names[c.intrinsic, c.tech],
+                "eval_path": str(c.eval_path),
+                "out_path": str(work / "predictions" / c.intrinsic / f"{c.tech}.jsonl"),
+                "limit": args.limit,
+                "max_new_tokens": intrinsic.max_new_tokens,
+                **spec.model.prompt_for(c.tech),
+            }
+        )
+    status = generate(
+        args.python,
+        harness_root,
+        work / "generate" / f"{group}.jobs.json",
+        {
+            "model_dir": str(model_dir),
+            "status_path": str(work / "generate" / f"{group}.status.json"),
+            "llm": {
+                "max_model_len": args.max_model_len,
+                "gpu_memory_utilization": args.gpu_memory_utilization,
+                "enforce_eager": args.enforce_eager,
+                "enable_prefix_caching": args.prefix_caching,
+                "enable_chunked_prefill": not args.no_chunked_prefill,
+                "max_num_batched_tokens": token_budget,
+            },
+            "jobs": jobs,
+        },
+    )
+    if "failed" in status:
+        for c in group_cells:
+            cells[c.intrinsic][c.tech] = error("generation failed")
+        return
+    run_meta["vllm"] = run_meta["vllm"] or status.get("vllm")
+    run_meta["gpu"] = run_meta["gpu"] or status.get("gpu")
+    run_meta["scheduler"] = run_meta["scheduler"] or status.get("scheduler")
+
+    for c, job in zip(group_cells, jobs, strict=True):
+        st = status["jobs"].get(job["key"], {"ok": False, "reason": "not generated"})
+        if not st.get("ok") or "n_generated" not in st:
+            cells[c.intrinsic][c.tech] = error(st.get("reason", "generation failed"))
+            continue
+        try:
+            metrics = score_cell(
+                spec.intrinsic(c.intrinsic).scorer,
+                Path(job["out_path"]),
+                c.eval_path.parent,
+                work / "scores" / c.intrinsic / f"{c.tech}.json",
+            )
+        except ScorerUnavailable as e:
+            cells[c.intrinsic][c.tech] = skipped(str(e))
+            continue
+        except Exception as e:
+            traceback.print_exc()
+            cells[c.intrinsic][c.tech] = error(f"scoring failed ({type(e).__name__})")
+            continue
+        cell = dict(metrics)
+        cell["score_version"] = spec.intrinsic(c.intrinsic).score_version
+        cell["truncated"] = st.get("truncated", 0)
+        if st.get("too_long"):
+            cell["too_long"] = st["too_long"]
+        cells[c.intrinsic][c.tech] = cell
+
+
 def print_table(cells: dict, spec) -> None:
     print("\n[results]")
     for intrinsic_id, by_tech in cells.items():
@@ -550,6 +630,176 @@ def print_table(cells: dict, spec) -> None:
                 parts.append(f"{tech_id}=({cell.get('skipped') or cell.get('error')})")
         print(f"  {intrinsic_id:<24} " + "  ".join(parts))
     print(flush=True)
+
+
+def run_release(args, started: str) -> int:
+    """Benchmark a Hugging Face release as published (``releases`` in
+    adapters.yaml), from the folder ``release.py`` staged it in.
+
+    Nothing is composed: the release's own checkpoint answers each of the
+    benchmark's intrinsics under its name for it, on the commit that loads it
+    (``--repo-dir``). Its decode throughput and agents switching are measured
+    over all of its adapters, against stock vLLM serving the library checkpoints
+    it was composed from.
+    """
+    spec = load_spec()
+    release = spec.release(args.release)
+    spec = spec.for_model(release.model)
+    root = args.bench_root
+    staged.check_bench_root(root, spec)
+    record = releases.read_release(root, release)
+    only = [s.strip() for s in args.only.split(",")] if args.only else None
+    measure_speed = only is None or THROUGHPUT in only
+    measure_switching = only is None or SWITCHING in only
+    picked = (
+        None if only is None else [o for o in only if o not in (THROUGHPUT, SWITCHING)]
+    )
+    work = args.work_dir.resolve()
+    copies = (args.model_dir or work / "models").resolve() / "adapters"
+    harness_root = Path(__file__).resolve().parents[2]
+    checkpoint = root / releases.CHECKPOINT
+    base_model = args.base_model or str(
+        base_model_dir(spec.base_model, release.base_revision)
+    )
+    commit = commit_info(args.repo_dir)
+    print(f"[release] {release.repo}@{release.key}, served by {commit['sha'][:8]}")
+
+    cells: dict[str, dict[str, dict]] = {}
+    runnable = []
+    for cell in releases.discover(root, spec, release, picked) if picked != [] else []:
+        cells.setdefault(cell.intrinsic, {})
+        if cell.skip_reason:
+            cells[cell.intrinsic][cell.tech] = skipped(cell.skip_reason)
+        else:
+            runnable.append(cell)
+            cells[cell.intrinsic][cell.tech] = error("not run")
+        print(f"[stage] {cell.intrinsic}/{cell.tech}: {cell.skip_reason or 'ok'}")
+    run_meta: dict = {
+        "vllm": None,
+        "gpu": None,
+        "scheduler": None,
+        **versions(("torch", "transformers")),
+        "adapters": {
+            f"{c.intrinsic}/{c.tech}": staged.fingerprint(c.adapter_dir)
+            for c in runnable
+        },
+    }
+    token_budget = args.max_num_batched_tokens or (
+        args.max_model_len if args.no_chunked_prefill else None
+    )
+    if runnable:
+        names = {(c.intrinsic, c.tech): release.adapters[c.intrinsic] for c in runnable}
+        generate_and_score(
+            args, spec, harness_root, work, checkpoint, "release", runnable, names, cells,
+            run_meta, token_budget,
+        )  # fmt: skip
+
+    natives = releases.native_copies(root, record, copies / "release_native")
+    speed = None
+    if measure_speed:
+        speed = {}
+        for engine in ENGINES:
+            clear_compile_caches()
+            speed[engine] = time_engine(
+                args.python,
+                harness_root,
+                {
+                    # LoRA's arms serve an aLoRA too (throughput.py).
+                    "technology": "lora",
+                    "engine": engine,
+                    "model": str(checkpoint) if engine == "gs" else base_model,
+                    "paths": [str(p) for p in natives],
+                    "settings": spec.throughput.settings(),
+                    "dump": str(work / "throughput" / f"release_{engine}.jsonl"),
+                },
+            )
+        print(f"[throughput] release: {json.dumps(speeds(speed))}", flush=True)
+    switching_results = None
+    settings = releases.switching_settings(spec, record)
+    if measure_switching:
+        switching_results = release_switching(
+            args, harness_root, work, checkpoint, base_model, natives, settings
+        )
+
+    results = {
+        "model": spec.model_id,
+        "release_version": spec.release_version,
+        "release": {k: record[k] for k in ("repo", "revision", "date", "title")},
+        "served_by": commit,
+        "cells": cells,
+        "run": {
+            "started": started,
+            "finished": now(),
+            "limit": args.limit,
+            "only": only,
+            "max_model_len": args.max_model_len,
+            "enforce_eager": args.enforce_eager,
+            "prefix_caching": args.prefix_caching,
+            "base_revision": release.base_revision,
+            "harness_sha": os.environ.get("ADAPTER_BENCH_HARNESS_SHA"),
+            "run_ts": os.environ.get("RUN_TS"),
+            "harness_dirty": os.environ.get("ADAPTER_BENCH_HARNESS_DIRTY") == "1",
+            "throughput": {
+                **spec.throughput.settings(),
+                **switch_bench.PINNED,
+                "driver": switch_bench.DRIVER,
+            },
+            **run_meta,
+        },
+    }
+    if speed is not None:
+        results["throughput"] = speed
+    if switching_results is not None:
+        results["switching"] = switching_results
+        results["run"]["switching"] = settings
+    print_table(cells, spec)
+    out = args.results_out or work / "results.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(results, indent=2, sort_keys=True))
+    print(format_release_block(results), flush=True)
+    return 0
+
+
+def release_switching(
+    args, harness_root: Path, work: Path, checkpoint: Path, base_model: str,
+    natives: list[Path], settings: dict,
+) -> dict:  # fmt: skip
+    """The switching cell over a release's own adapters, on granite-switch (its
+    checkpoint, each agent's adapter by its control token in the checkpoint's
+    order) and on stock vLLM (the same adapters' library checkpoints)."""
+    grid = work / "switching" / "grid"
+    grid_file = grid / f"grid_c{settings['concurrency']}_s{settings['span']}.jsonl"
+    grid.mkdir(parents=True, exist_ok=True)
+    if run_streamed(
+        [args.python, *switching.grid_command(settings, grid_file)],
+        harness_root,
+        "switching",
+    )[0]:
+        return {e: error("workload generation failed") for e in ENGINES}
+    entries = {}
+    for engine in ENGINES:
+        clear_compile_caches()
+        rows = work / "switching" / f"release_{engine}.jsonl"
+        rows.unlink(missing_ok=True)
+        model = str(checkpoint) if engine == "gs" else base_model
+        cmd = [
+            args.python,
+            *switching.arm_command(
+                "lora", engine, model, grid, natives[0].parent, settings, rows,
+                in_order=True,
+            ),
+        ]  # fmt: skip
+        returncode, tail = run_streamed(cmd, harness_root, "switching")
+        entries[engine] = (
+            switching.read_entry(rows, settings)
+            if returncode == 0 and rows.is_file()
+            else error(switch_bench.failure(tail))
+        )
+    print(
+        f"[switching] release: {json.dumps({e: v.get('p95_s', v.get('error')) for e, v in entries.items()})}",
+        flush=True,
+    )
+    return entries
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -601,9 +851,17 @@ def main(argv: list[str] | None = None) -> int:
         help="where the switching runs keep their synthetic adapters, kept across "
         "runs (default: the work dir)",
     )
+    p.add_argument(
+        "--release",
+        default=None,
+        help="benchmark this Hugging Face release (its revision) as published, from "
+        "its folder (--bench-root) on its serving commit (--repo-dir)",
+    )
     args = p.parse_args(argv)
 
     started = now()
+    if args.release:
+        return run_release(args, started)
     spec = load_spec(model=args.model)
     staged.check_bench_root(args.bench_root, spec)
     only = [s.strip() for s in args.only.split(",")] if args.only else None
@@ -730,80 +988,14 @@ def main(argv: list[str] | None = None) -> int:
                 cells[c.intrinsic][c.tech] = error("compose failed")
             continue
         composed[group] = {adapter_name(c.intrinsic, c.tech) for c in group_cells}
-
-        jobs = []
-        for c in group_cells:
-            intrinsic = spec.intrinsic(c.intrinsic)
-            jobs.append(
-                {
-                    "key": f"{c.intrinsic}/{c.tech}",
-                    "adapter_name": adapter_name(c.intrinsic, c.tech),
-                    "eval_path": str(c.eval_path),
-                    "out_path": str(
-                        work / "predictions" / c.intrinsic / f"{c.tech}.jsonl"
-                    ),
-                    "limit": args.limit,
-                    "max_new_tokens": intrinsic.max_new_tokens,
-                    **spec.model.prompt_for(c.tech),
-                }
-            )
-        status = generate(
-            args.python,
-            harness_root,
-            work / "generate" / f"{group}.jobs.json",
-            {
-                "model_dir": str(model_dir),
-                "status_path": str(work / "generate" / f"{group}.status.json"),
-                "llm": {
-                    "max_model_len": args.max_model_len,
-                    "gpu_memory_utilization": args.gpu_memory_utilization,
-                    "enforce_eager": args.enforce_eager,
-                    "enable_prefix_caching": args.prefix_caching,
-                    "enable_chunked_prefill": not args.no_chunked_prefill,
-                    "max_num_batched_tokens": token_budget,
-                },
-                "jobs": jobs,
-            },
-        )
-        if "failed" in status:
-            for c in group_cells:
-                cells[c.intrinsic][c.tech] = error("generation failed")
-            continue
-        run_meta["vllm"] = run_meta["vllm"] or status.get("vllm")
-        run_meta["gpu"] = run_meta["gpu"] or status.get("gpu")
-        run_meta["scheduler"] = run_meta["scheduler"] or status.get("scheduler")
-
-        for c, job in zip(group_cells, jobs, strict=True):
-            st = status["jobs"].get(
-                job["key"], {"ok": False, "reason": "not generated"}
-            )
-            if not st.get("ok") or "n_generated" not in st:
-                cells[c.intrinsic][c.tech] = error(
-                    st.get("reason", "generation failed")
-                )
-                continue
-            try:
-                metrics = score_cell(
-                    spec.intrinsic(c.intrinsic).scorer,
-                    Path(job["out_path"]),
-                    c.eval_path.parent,
-                    work / "scores" / c.intrinsic / f"{c.tech}.json",
-                )
-            except ScorerUnavailable as e:
-                cells[c.intrinsic][c.tech] = skipped(str(e))
-                continue
-            except Exception as e:
-                traceback.print_exc()
-                cells[c.intrinsic][c.tech] = error(
-                    f"scoring failed ({type(e).__name__})"
-                )
-                continue
-            cell = dict(metrics)
-            cell["score_version"] = spec.intrinsic(c.intrinsic).score_version
-            cell["truncated"] = st.get("truncated", 0)
-            if st.get("too_long"):
-                cell["too_long"] = st["too_long"]
-            cells[c.intrinsic][c.tech] = cell
+        names = {
+            (c.intrinsic, c.tech): adapter_name(c.intrinsic, c.tech)
+            for c in group_cells
+        }
+        generate_and_score(
+            args, spec, harness_root, work, model_dir, group, group_cells, names, cells,
+            run_meta, token_budget,
+        )  # fmt: skip
 
     @functools.cache
     def sr_anchor():

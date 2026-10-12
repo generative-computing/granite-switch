@@ -100,6 +100,7 @@ granite-switch/
 │       ├── prompts.py                   # Per-model prompt building (documents, chat-template options)
 │       ├── staged.py                    # Staged adapter / eval-set layout and format checks
 │       ├── stage.py                     # Discover source checkpoints and stage the chosen ones
+│       ├── release.py                   # Stage a Hugging Face release (releases in adapters.yaml)
 │       ├── publish.py                   # Cache check, merge results into the page data, render the page
 │       ├── rescore.py                   # In-pod: score saved answers again after a scoring change
 │       ├── common.py                    # Spec loading, cell helpers, results-block format

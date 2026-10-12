@@ -167,7 +167,8 @@ def build(args) -> dict:
     sha, dirty = harness_version()
 
     extra: dict[str, Path] = {}
-    if mode == "stage":
+    # A release's staging fetches it from the Hub, with no selection file.
+    if mode == "stage" and not args.release:
         extra["selection.json"] = Path(need("SELECTION_FILE"))
         if os.environ.get("JUDGE_PROMPT_FILE"):
             extra["judge_prompt.txt"] = Path(os.environ["JUDGE_PROMPT_FILE"])
@@ -251,6 +252,10 @@ def build(args) -> dict:
         need("BENCH_ROOT")
         if args.replace:
             env.append(env_var("ADAPTER_BENCH_STAGE_REPLACE", "1"))
+    if args.release:
+        env.append(env_var("ADAPTER_BENCH_RELEASE", args.release))
+        if mode == "stage":  # the model's eval sets, copied into the release's folder
+            env.append(env_var("ADAPTER_BENCH_EVAL_FROM", need("EVAL_FROM")))
     env.append(env_var("ADAPTER_BENCH_HARNESS_TGZ", harness_payload(extra)))
     env.append(env_var("ADAPTER_BENCH_SWITCH_TGZ", switch_payload()))
 
@@ -303,6 +308,10 @@ def main(argv: list[str] | None = None) -> int:
         help="bench, reference, rescore: give the pod the LLM judge's endpoint and key",
     )
     p.add_argument("--replace", action="store_true", help="stage: overwrite cells")
+    p.add_argument(
+        "--release",
+        help="stage, bench, reference: a Hugging Face release, by its revision",
+    )
     p.add_argument(
         "--private-models",
         help="the private models file, for a job of a private model",

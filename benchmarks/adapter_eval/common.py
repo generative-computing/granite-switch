@@ -25,6 +25,16 @@ REFERENCE_BEGIN = "=== ADAPTER_BENCH_REFERENCE_BEGIN ==="
 REFERENCE_END = "=== ADAPTER_BENCH_REFERENCE_END ==="
 RESCORE_BEGIN = "=== ADAPTER_BENCH_RESCORE_BEGIN ==="
 RESCORE_END = "=== ADAPTER_BENCH_RESCORE_END ==="
+# A Hugging Face release's blocks: its own markers, so one can never be merged
+# as a commit's row or a model's reference.
+RELEASE_BEGIN = "=== ADAPTER_BENCH_RELEASE_BEGIN ==="
+RELEASE_END = "=== ADAPTER_BENCH_RELEASE_END ==="
+RELEASE_REFERENCE_BEGIN = "=== ADAPTER_BENCH_RELEASE_REFERENCE_BEGIN ==="
+RELEASE_REFERENCE_END = "=== ADAPTER_BENCH_RELEASE_REFERENCE_END ==="
+# The skip reason of a technology a release has no adapter of.
+NOT_IN_RELEASE = "not in this release"
+# A Hub revision or git commit, in full.
+FULL_SHA = re.compile(r"[0-9a-f]{40}")
 
 # Technologies composed into the same checkpoint. SR is a whole-checkpoint
 # dual-stream mode and the composer refuses to mix it with LoRA / aLoRA.
@@ -184,6 +194,33 @@ class Switching:
 
 
 @dataclass(frozen=True)
+class Release:
+    """A composed checkpoint published on the Hugging Face Hub, benchmarked as
+    published (``releases`` in adapters.yaml; ``release.py``)."""
+
+    model: str  # the adapters.yaml model it was composed on
+    repo: str
+    revision: str
+    # Its base model's revision when it was composed, for the HF + PEFT columns.
+    base_revision: str
+    # The granite-switch commit that serves it: a checkpoint loads only on code
+    # that still reads its format.
+    serve_with: str
+    # Each Hub library its adapters come from, at the revision its BUILD.md names.
+    sources: dict
+    # The release's name for each of the benchmark's intrinsics it has.
+    adapters: dict
+
+    @property
+    def key(self) -> str:
+        """Its short name in job names and on the command line."""
+        return self.revision[:8]
+
+    def public(self) -> dict:
+        return vars(self).copy()
+
+
+@dataclass(frozen=True)
 class Spec:
     """The benchmark definition, for one of its models (``model_id``)."""
 
@@ -194,6 +231,9 @@ class Spec:
     model_id: str
     throughput: Throughput = field(default_factory=Throughput)
     switching: Switching = field(default_factory=Switching)
+    releases: tuple[Release, ...] = ()
+    # Bumped when how a release is benchmarked changes: every release runs again.
+    release_version: int = 1
 
     @property
     def model(self) -> Model:
@@ -253,6 +293,19 @@ class Spec:
                 return i
         raise KeyError(f"unknown intrinsic {intrinsic_id!r}")
 
+    def release(self, key: str) -> Release:
+        """The release whose revision starts with ``key`` (at least 7 characters)."""
+        found = [
+            r for r in self.releases if len(key) >= 7 and r.revision.startswith(key)
+        ]
+        if len(found) != 1:
+            known = [r.key for r in self.releases]
+            raise ValueError(f"{key!r} names {len(found)} releases; known: {known}")
+        return found[0]
+
+    def releases_of(self, model_id: str) -> tuple[Release, ...]:
+        return tuple(r for r in self.releases if r.model == model_id)
+
     def select(self, only: list[str] | None) -> tuple[Intrinsic, ...]:
         if not only:
             return self.intrinsics
@@ -279,6 +332,8 @@ class Spec:
             ],
             "throughput": self.throughput.settings(),
             "switching": self.switching.settings(),
+            "release_version": self.release_version,
+            "releases": [r.public() for r in self.releases],
         }
 
 
@@ -315,6 +370,8 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         model_id=ids[0],
         throughput=Throughput(**raw.get("throughput", {})),
         switching=Switching(**raw.get("switching", {})),
+        releases=tuple(Release(**r) for r in raw.get("releases") or ()),
+        release_version=int(raw.get("release_version", 1)),
     )
 
     def bad(settings: dict) -> bool:
@@ -369,6 +426,22 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     for i in spec.intrinsics:
         if not re.fullmatch(r"[a-z][a-z0-9_]*", i.id):
             raise ValueError(f"intrinsic id {i.id!r} must be snake_case")
+    for r in spec.releases:
+        if spec.get_model(r.model).private:
+            raise ValueError(f"release {r.repo}: {r.model} is a private model")
+        pinned = [r.revision, r.base_revision, r.serve_with, *r.sources.values()]
+        if not all(isinstance(v, str) and FULL_SHA.fullmatch(v) for v in pinned):
+            raise ValueError(f"release {r.repo}: pin every revision by its full sha")
+        if (
+            not r.sources
+            or not r.adapters
+            or set(r.adapters) - {i.id for i in spec.intrinsics}
+            or not all(isinstance(n, str) and n for n in r.adapters.values())
+        ):
+            raise ValueError(f"release {r.repo}: bad sources or adapters")
+    keys = [r.key for r in spec.releases]
+    if len(set(keys)) != len(keys):
+        raise ValueError(f"release revisions must differ in their first 8: {keys}")
     return spec.for_model(model)
 
 
@@ -425,6 +498,14 @@ def format_results_block(results: dict) -> str:
 
 def format_reference_block(reference: dict) -> str:
     return format_block(reference, REFERENCE_BEGIN, REFERENCE_END)
+
+
+def format_release_block(results: dict) -> str:
+    return format_block(results, RELEASE_BEGIN, RELEASE_END)
+
+
+def format_release_reference_block(reference: dict) -> str:
+    return format_block(reference, RELEASE_REFERENCE_BEGIN, RELEASE_REFERENCE_END)
 
 
 def extract_block(text: str, begin_marker: str, end_marker: str):

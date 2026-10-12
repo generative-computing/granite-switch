@@ -61,14 +61,21 @@ class ControlTokenEngine:
         return getattr(self._engine, name)
 
 
-def control_tokens(checkpoint: pathlib.Path) -> dict[str, int]:
+def control_tokens(checkpoint: pathlib.Path, in_order: bool = False) -> dict[str, int]:
     """Each fleet adapter (``adN``) by its control token, from the checkpoint's own
-    config rather than a flag: a wrong id would silently decode on another adapter."""
+    config rather than a flag: a wrong id would silently decode on another adapter.
+
+    A synthetic fleet's checkpoint names its adapters ``adapter_NN``; with
+    ``in_order`` (a release, whose adapters have names of their own) ``adN`` is
+    the checkpoint's N-th adapter.
+    """
     cfg = json.loads((checkpoint / "config.json").read_text())
     names = cfg.get("adapter_names") or []
     ids = cfg.get("adapter_token_ids") or []
     if not names or len(names) != len(ids):
         raise SystemExit(f"FATAL: {checkpoint}/config.json names no control tokens")
+    if in_order:
+        return {f"ad{k}": token for k, token in enumerate(ids)}
     by_name = dict(zip(names, ids, strict=True))
     out = {}
     for k in range(len(names)):
@@ -90,7 +97,7 @@ async def amain(args) -> None:
             json.loads(x) for x in f.read_text().splitlines() if x.strip()
         ]
     checkpoint = pathlib.Path(args.checkpoint)
-    tokens = control_tokens(checkpoint)
+    tokens = control_tokens(checkpoint, args.in_order)
     needed = {
         dd["adapter"]
         for f in fleets.values()
@@ -158,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cells", required=True, help='e.g. "8:32"  (concurrency:span)')
     ap.add_argument("--fleet-dir", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument(
+        "--in-order",
+        action="store_true",
+        help="adN is the checkpoint's N-th adapter (a release's own names)",
+    )
     # That benchmark's engine and agent settings, with its defaults.
     ap.add_argument("--max-model-len", type=int, default=49152)
     ap.add_argument("--max-loras", type=int, default=32)

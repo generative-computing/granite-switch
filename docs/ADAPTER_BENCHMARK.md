@@ -313,6 +313,9 @@ Everything goes through
 | `submit.sh rescore [--only a,b]` | Scores saved answers again after a scoring change, and publishes the new scores. Generates nothing. |
 | `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
 | `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
+| `submit.sh stage --release <rev>` | Fetches a Hugging Face release into its folder (see [Hugging Face releases](#hugging-face-releases)). |
+| `submit.sh bench --release <rev> [flags]` | Benchmarks the release as published, on its own serving commit, and publishes its row. |
+| `submit.sh reference --release <rev> [flags]` | Computes the release's HF + PEFT and Base columns. |
 
 Any command takes `--dry-run`: it renders the job and stops. Any command
 also takes `--model <id>`, for a model other than the first (see
@@ -556,6 +559,93 @@ A bench root records the model it was staged for (`model.json`), and every
 run refuses a root staged for another model. Without that check, one model's
 adapters would load onto another base model with no error. A root staged
 before there were several models counts as the first model's.
+
+## Hugging Face releases
+
+The main table measures the adapters this benchmark stages. Composed
+granite-switch checkpoints are also published on Hugging Face, with the
+adapter libraries they were composed from. Each model's tab has a second
+table for them, **Hugging Face releases**: a row per release, named by its
+Hub revision rather than by a git commit. A model with no release says so.
+
+### What runs
+
+| Columns | What they are |
+|---|---|
+| granite-switch (vLLM) | the release's checkpoint as published, served by the granite-switch commit that loads it; each intrinsic under the release's own name for its adapter |
+| HF + PEFT | the library adapters it was composed from, at the revisions its BUILD.md records, under PEFT on the base model at its revision of the time |
+| Base | the base model alone, as in the main table |
+| Throughput, switching | the main table's two cells, over all of the release's own adapters: its checkpoint against stock vLLM serving the same library adapters (an aLoRA without its invocation tokens) |
+
+A release has one adapter per intrinsic, of its own technology; the others
+show "not in this release". The eval sets and prompts are the model's own,
+so the accuracy columns compare with the main table's. The speed columns do
+not: the main table's are per technology, and its switching cell is over 64
+synthetic adapters.
+
+### A release's entry
+
+Each release is an entry of `releases` in `adapters.yaml`:
+
+```yaml
+releases:
+  - model: granite-4.1-3b
+    repo: ibm-granite/granite-switch-4.1-3b-preview
+    revision: 7a3ac02e07868411424ac89440397b475da66fa7
+    base_revision: c0650403e44e78ec0262dab1c90914c65b196c4e
+    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
+      ...
+    adapters: {answerability: answerability, guardian_core: guardian-core, ...}
+```
+
+- **`revision`**, **`base_revision`**, **`serve_with`** and every `sources`
+  revision are full shas: a branch would move under the row.
+- **`serve_with`**: a checkpoint loads only on code that still reads its
+  format. The 4.1 preview was composed for the single-switch engine, which
+  `6013c7ff` (#131) removed; its parent, `24aa420f`, is the last commit that
+  loads it. A release of the current engine is served by a current commit.
+- **`sources`**: the libraries its BUILD.md names, at their revisions. Each
+  adapter's folder there is `<name>/<base>/<technology>`, from the
+  checkpoint's `adapter_index.json`.
+- **`adapters`**: the release's name for each of the benchmark's intrinsics
+  (`guardian-core` for `guardian_core`).
+- A later Hub commit that changes only the model card needs nothing. A new
+  release is a new entry.
+
+### Commands
+
+```bash
+benchmarks/adapter_eval/vela/submit.sh stage --release 7a3ac02e
+benchmarks/adapter_eval/vela/submit.sh bench --release 7a3ac02e --limit 20
+benchmarks/adapter_eval/vela/submit.sh reference --release 7a3ac02e --limit 20
+```
+
+`stage` fetches the release into `RELEASE_ROOT/<model>/<repo name>/<revision>`
+(set in `local.env`):
+
+```
+checkpoint/                   the composed checkpoint, at the release's revision
+native/<adapter>/             each adapter from its library, for stock vLLM
+adapters/<intrinsic>/<tech>/  the benchmark's intrinsics among them, for HF + PEFT
+eval/<intrinsic>/             the model's eval sets, copied from its bench root
+model.json, release.json      the model; what was fetched, from which Hub commits
+```
+
+It refuses a library revision the release's BUILD.md does not name, and an
+adapter whose files are not of the technology the release says. `bench` and
+`reference` then run in that folder; `--limit N` makes a smoke run, never
+published.
+
+### Cache
+
+A release's row is a cache hit when it has the current `release_version`,
+every cell (one scored with an older `score_version` runs again: releases are
+not re-scored), and its throughput and switching measured with the current
+settings; its reference columns, when they have the current
+`reference_version` and `release_version`. Bump `release_version` when a
+change alters how releases are benchmarked: every release runs again.
 
 ## Cache rules
 
@@ -807,7 +897,7 @@ local/
   logs/<job>.log         full pod logs
   results/<job>.json     results blocks from bench, reference and rescore runs
   rescore/targets.json   the cells the last `rescore` scored again
-  stage/<job>.json       stage reports
+  stage/<job>.json       stage reports, a release's included
 .rendered/               rendered Helm values and job specs
 ```
 

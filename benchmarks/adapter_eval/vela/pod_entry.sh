@@ -14,6 +14,10 @@
 #             extra/script.py (a one-off check, e.g. from scratch/)
 #   rescore   score saved answers again (the cells in extra/targets.json), with
 #             no commit and no generation
+#
+# With ADAPTER_BENCH_RELEASE (a Hugging Face release's revision), stage fetches
+# that release into its folder (release.py), and bench and reference run it,
+# each in a work folder of its own.
 set -euo pipefail
 
 HARNESS=$(cd "$(dirname "$0")/../../.." && pwd)
@@ -62,6 +66,14 @@ discover)
     harness_py -m benchmarks.adapter_eval.stage discover "${args[@]}" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ;;
 stage)
+    if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then
+        args=(--release "$ADAPTER_BENCH_RELEASE" --root "${ADAPTER_BENCH_ROOT:?}"
+            --eval-from "${ADAPTER_BENCH_EVAL_FROM:?}")
+        if [[ -n "${ADAPTER_BENCH_STAGE_REPLACE:-}" ]]; then args+=(--replace); fi
+        (cd "$HARNESS" && uv run --quiet --no-project --python 3.12 --with pyyaml \
+            --with "huggingface_hub>=0.30" python -m benchmarks.adapter_eval.release stage "${args[@]}")
+        exit
+    fi
     args=(--selection "$HARNESS/extra/selection.json" --bench-root "${ADAPTER_BENCH_ROOT:?}")
     if [[ -f "$HARNESS/extra/judge_prompt.txt" ]]; then
         args+=(--judge-prompt "$HARNESS/extra/judge_prompt.txt")
@@ -71,15 +83,20 @@ stage)
     ;;
 bench)
     install_commit
+    work=${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}
+    if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then
+        work=$ADAPTER_BENCH_WORK_ROOT/releases/${ADAPTER_BENCH_RELEASE:0:12}/${RUN_TS:-run}
+    fi
     args=(
         --repo-dir "$REPO"
         --bench-root "${ADAPTER_BENCH_ROOT:?}"
-        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}"
+        --work-dir "$work"
         --model-dir /workspace/models
         # The switching runs' synthetic adapters, built once per model.
         --switching-cache "${ADAPTER_BENCH_WORK_ROOT:?}/synthetic/${MODEL:-default}"
     )
     if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
+    if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then args+=(--release "$ADAPTER_BENCH_RELEASE"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
     if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then
@@ -103,12 +120,17 @@ reference)
         PYTHONPATH=$PYTHONPATH:/workspace/sr_ref/src
     fi
     export PYTHONPATH
+    work=${ADAPTER_BENCH_WORK_ROOT:?}/reference/${MODEL:-default}/${RUN_TS:-run}
+    if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then
+        work=$ADAPTER_BENCH_WORK_ROOT/reference/releases/${ADAPTER_BENCH_RELEASE:0:12}/${RUN_TS:-run}
+    fi
     args=(
         --bench-root "${ADAPTER_BENCH_ROOT:?}"
-        --work-dir "${ADAPTER_BENCH_WORK_ROOT:?}/reference/${MODEL:-default}/${RUN_TS:-run}"
+        --work-dir "$work"
         --model-dir /workspace/models
     )
     if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
+    if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then args+=(--release "$ADAPTER_BENCH_RELEASE"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
     if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then

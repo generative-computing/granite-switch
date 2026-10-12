@@ -18,6 +18,12 @@
 #                                  the commit installed (one-off checks)
 #   submit.sh fetch <job>          resume following a job and collect its output
 #
+#   submit.sh stage --release <rev>      a Hugging Face release (releases in
+#   submit.sh bench --release <rev> ...  adapters.yaml, named by its revision):
+#   submit.sh reference --release <rev>  fetch it into its folder, run it as
+#                                  published on its serving commit, run its
+#                                  library adapters under HF + PEFT
+#
 # Any mode takes --model <id> (an adapters.yaml model; default: its first) and
 # --dry-run (render the job and stop). Settings come from the gitignored
 # local/local.env (start from local.env.example).
@@ -31,7 +37,7 @@ LOCAL_DIR=$HERE/local
 RENDERED=$HERE/.rendered
 
 usage() {
-    sed -n '4,23p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '4,29p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 }
 say() { echo "[submit] $*"; }
@@ -73,11 +79,15 @@ MODE=${1:-}
 SHA="" LIMIT="" ONLY="" EXTRA_ARGS="" NO_CACHE="" PUBLISH=1 REPLACE="" DRY_RUN="" JOB=""
 MODEL=""
 SCRIPT=""
+RELEASE="" REF=""
 case "$MODE" in
 bench)
+    # A release names its own serving commit: then there is no ref.
     [[ $# -gt 0 ]] || usage
-    REF=$1
-    shift
+    if [[ "$1" != --* ]]; then
+        REF=$1
+        shift
+    fi
     ;;
 script)
     [[ $# -gt 1 ]] || usage
@@ -104,9 +114,19 @@ while [[ $# -gt 0 ]]; do
     --replace) REPLACE=1 && shift ;;
     --dry-run) DRY_RUN=1 && shift ;;
     --model) MODEL=$2 && shift 2 ;;
+    --release) RELEASE=$2 && shift 2 ;;
     *) usage ;;
     esac
 done
+if [[ -n "$RELEASE" ]]; then
+    case "$MODE" in
+    stage | bench | reference) ;;
+    *) die "--release is for stage, bench and reference" ;;
+    esac
+    [[ -z "$REF" ]] || die "a release runs on its own serving commit: give no ref"
+elif [[ "$MODE" == bench && -z "$REF" ]]; then
+    usage
+fi
 
 # --- follow a submitted job ----------------------------------------------------
 
@@ -185,12 +205,22 @@ json.dump(d["draft_selection"], open(sys.argv[2], "w"), indent=2, sort_keys=True
         publish extract "$LOG" --kind stage --out "$LOCAL_DIR/stage/$JOB.json"
         ;;
     bench)
-        publish extract "$LOG" --out "$out"
-        publish_run merge "$out" "${SHA:0:8}"
+        if [[ -n "${RELEASE:-}" ]]; then
+            publish extract "$LOG" --kind release --out "$out"
+            publish_run merge-release "$out" "release ${RELEASE:0:8}"
+        else
+            publish extract "$LOG" --out "$out"
+            publish_run merge "$out" "${SHA:0:8}"
+        fi
         ;;
     reference)
-        publish extract "$LOG" --kind reference --out "$out"
-        publish_run merge-reference "$out" reference
+        if [[ -n "${RELEASE:-}" ]]; then
+            publish extract "$LOG" --kind release-reference --out "$out"
+            publish_run merge-release-reference "$out" "release ${RELEASE:0:8} reference"
+        else
+            publish extract "$LOG" --kind reference --out "$out"
+            publish_run merge-reference "$out" reference
+        fi
         ;;
     rescore)
         publish extract "$LOG" --kind rescore --out "$out"
@@ -225,6 +255,17 @@ fi
 # and are never used for another model.
 DEFAULT_MODEL=$(local_py -c 'from benchmarks.adapter_eval.common import load_spec
 print(load_spec().model_id)')
+# A release is of one model, and runs in a folder of its own on its own commit.
+if [[ -n "$RELEASE" ]]; then
+    RELEASE_INFO=$(local_py -c 'import sys
+from benchmarks.adapter_eval.common import load_spec
+r = load_spec().release(sys.argv[1])
+print(r.model, r.revision, r.serve_with, r.repo.rsplit("/", 1)[-1])' "$RELEASE") ||
+        die "unknown release $RELEASE"
+    read -r REL_MODEL RELEASE REL_SERVE REL_NAME <<<"$RELEASE_INFO"
+    [[ -z "$MODEL" || "$MODEL" == "$REL_MODEL" ]] || die "that release is of $REL_MODEL"
+    MODEL=$REL_MODEL
+fi
 MODEL=${MODEL:-$DEFAULT_MODEL}
 local_py -c 'import sys
 from benchmarks.adapter_eval.common import load_spec
@@ -252,6 +293,13 @@ if [[ "$MODEL" != "$DEFAULT_MODEL" ]]; then
     MODEL_TAG=-$(printf %s "${MODEL#granite-}" | tr '.' '-')
 else
     MODEL_TAG=""
+fi
+if [[ -n "$RELEASE" ]]; then
+    : "${RELEASE_ROOT:?set RELEASE_ROOT in local.env: where releases are staged}"
+    # Staging copies the model's eval sets from its bench root.
+    export EVAL_FROM=$BENCH_ROOT
+    export BENCH_ROOT=$RELEASE_ROOT/$MODEL/$REL_NAME/$RELEASE
+    say "release $REL_NAME@${RELEASE:0:8}, in $BENCH_ROOT"
 fi
 say "model $MODEL"
 if local_py -c 'import sys
@@ -283,7 +331,26 @@ sys.exit(0 if load_spec(model=sys.argv[1]).needs_judge else 1)' "$MODEL"; then
     fi
     ;;
 esac
-if [[ "$MODE" == bench ]]; then
+if [[ -n "$RELEASE" ]]; then
+    render_args+=(--release "$RELEASE")
+    JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-$STAMP"
+    if [[ "$MODE" == bench ]]; then
+        SHA=$REL_SERVE
+        render_args+=(--sha "$SHA")
+    fi
+    if [[ "$MODE" != stage && -z "$NO_CACHE$LIMIT$ONLY" ]]; then
+        check=check-release
+        if [[ "$MODE" == reference ]]; then check=check-release-reference; fi
+        if publish "$check" "$RELEASE"; then
+            say "release ${RELEASE:0:8} is cached; nothing to run (--no-cache to re-run)"
+            exit 0
+        fi
+    fi
+    if [[ -n "$LIMIT" ]]; then render_args+=(--limit "$LIMIT"); fi
+    if [[ -n "$ONLY" ]]; then render_args+=(--only "$ONLY"); fi
+    if [[ -n "$EXTRA_ARGS" ]]; then render_args+=("--extra-args=$EXTRA_ARGS"); fi
+    if [[ -n "$REPLACE" ]]; then render_args+=(--replace); fi
+elif [[ "$MODE" == bench ]]; then
     SHA=$(git -C "$REPO" rev-parse --verify "$REF^{commit}") || die "unknown ref $REF"
     if ! git -C "$REPO" branch -r --contains "$SHA" 2>/dev/null | grep -q .; then
         say "warning: ${SHA:0:12} is on no remote branch; the pod clones from GitHub"
@@ -346,6 +413,7 @@ mkdir -p "$LOCAL_DIR/jobs"
 {
     printf 'MODE=%q\nSHA=%q\nLIMIT=%q\nONLY=%q\n' "$MODE" "$SHA" "$LIMIT" "$ONLY"
     printf 'PUBLISH=%q\nK8S=%q\nMODEL=%q\nSUFFIX=%q\n' "$PUBLISH" "$K8S" "$MODEL" "$SUFFIX"
+    printf 'RELEASE=%q\n' "$RELEASE"
 } >"$LOCAL_DIR/jobs/$JOB.env"
 oc create -n "$NAMESPACE" -f "$K8S"
 say "submitted $JOB"

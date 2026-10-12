@@ -11,11 +11,14 @@ tensor data.
 from __future__ import annotations
 
 import base64
+import datetime
+import fnmatch
 import hashlib
 import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -42,6 +45,7 @@ from benchmarks.adapter_eval import (
     staged,
     switching,
 )
+from benchmarks.adapter_eval import release as releases
 from benchmarks.adapter_eval import throughput as switch_bench
 from benchmarks.adapter_eval.scorers import (
     ScoreContext,
@@ -251,6 +255,12 @@ def page_data(*rows: dict, reference: dict | None = None) -> dict:
         "rows": list(rows),
         "references": {SPEC.model_id: reference} if reference else {},
     }
+
+
+def main_tables(page: str) -> str:
+    """The page without its Hugging Face releases tables."""
+    head = re.escape(f"<h3>{publish.RELEASES_HEADING}</h3>")
+    return re.sub(head + r".*?</table></div>", "", page, flags=re.S)
 
 
 # --- benchmark definition ------------------------------------------------------
@@ -897,7 +907,7 @@ def test_render_reference_columns():
     ref["cells"]["answerability"]["alora"] = {"accuracy": 0.9, "n": 10}
     del ref["cells"]["answerability"]["base"]
 
-    page = publish.render(page_data(row, old, reference=ref), SPEC)
+    page = main_tables(publish.render(page_data(row, old, reference=ref), SPEC))
 
     # Every model has its table: Task Quality, 10 columns per intrinsic in four
     # groups; then Serving Quality, two throughput blocks of 9 columns.
@@ -1022,8 +1032,11 @@ def test_page_filters():
         assert f'{mark}" colspan="10"' in page
         assert f'data-intrinsic="{intrinsic.id}">{intrinsic.name}<br>' in page
         assert row.count(f'{mark}"') == 3 * len(SPEC.technologies) + 1
-    # Task Quality's header is sized by the script, to what is left under it.
-    assert page.count('<th class="task-head section i-start"') == len(SPEC.models)
+    # Task Quality's header is sized by the script, to what is left under it,
+    # in every table (a model's own and its releases').
+    tables = page.count('<table class="bench">')
+    assert tables == 2 * len(SPEC.models)
+    assert page.count('<th class="task-head section i-start"') == tables
 
 
 def test_render_run_details():
@@ -3829,3 +3842,601 @@ def test_load_lock(tmp_path):
     path = tmp_path / "locks" / "load.lock"
     with hf_generate.load_lock(str(path)):
         assert path.is_file()
+
+
+# --- Hugging Face releases -----------------------------------------------------
+
+RELEASE = SPEC.release("7a3ac02e")
+# A release's adapters in its checkpoint's order, (name, technology), and the
+# library each comes from; the benchmark's intrinsics are among them.
+RELEASE_ADAPTERS = (
+    ("citations", "lora", "ibm-granite/granitelib-rag-r1.0"),
+    ("query_clarification", "alora", "ibm-granite/granitelib-rag-r1.0"),
+    ("answerability", "alora", "ibm-granite/granitelib-rag-r1.0"),
+    ("guardian-core", "alora", "ibm-granite/granitelib-guardian-r1.0"),
+    ("requirement-check", "alora", "ibm-granite/granitelib-core-r1.0"),
+)
+
+
+def release_record() -> dict:
+    """What release.py records of the release it staged."""
+    return {
+        "model": RELEASE.model,
+        "repo": RELEASE.repo,
+        "revision": RELEASE.revision,
+        "base_revision": RELEASE.base_revision,
+        "base": "granite-4.1-3b",
+        "date": "2026-05-24T09:23:06+00:00",
+        "title": "Updating GraniteSwitch 4.1 3b",
+        "adapters": [
+            {
+                "name": name,
+                "technology": tech,
+                "token_id": 100352 + k,
+                "repo": lib,
+                "revision": RELEASE.sources[lib],
+                "path": f"{name}/granite-4.1-3b/{tech}",
+                "rank": 32 if name == "query_clarification" else 16,
+                "weights_sha256": "f" * 64,
+            }
+            for k, (name, tech, lib) in enumerate(RELEASE_ADAPTERS)
+        ],
+    }
+
+
+def make_release_root(root: Path) -> Path:
+    """A release's folder as release.py leaves it, with fake checkpoints and
+    answerability's eval set only."""
+    record = release_record()
+    (root / releases.CHECKPOINT).mkdir(parents=True)
+    (root / releases.CHECKPOINT / "config.json").write_text(
+        json.dumps(
+            {
+                "adapter_names": [a["name"] for a in record["adapters"]],
+                "adapter_token_ids": [a["token_id"] for a in record["adapters"]],
+            }
+        )
+    )
+    techs = {a["name"]: a["technology"] for a in record["adapters"]}
+    for a in record["adapters"]:
+        make_adapter(root / releases.NATIVE / a["name"], a["technology"], a["rank"])
+    for intrinsic_id, name in RELEASE.adapters.items():
+        dest = staged.adapter_dir(root, intrinsic_id, techs[name])
+        shutil.copytree(root / releases.NATIVE / name, dest)
+        write_provenance(dest, technology=techs[name])
+    write_answerability_eval(root)
+    (root / staged.MODEL_FILE).write_text(json.dumps({"model": RELEASE.model}))
+    (root / releases.RELEASE_FILE).write_text(json.dumps(record))
+    return root
+
+
+def spec_file(tmp_path: Path, **changes) -> Path:
+    """adapters.yaml with its release changed."""
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["releases"] = [{**raw["releases"][0], **changes}]
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
+
+
+def test_releases_in_the_spec(tmp_path, monkeypatch):
+    assert RELEASE.model == "granite-4.1-3b"
+    assert RELEASE.key == RELEASE.revision[:8]
+    assert SPEC.releases_of("granite-4.2-3b") == ()
+    assert SPEC.public()["releases"] == [RELEASE.public()]
+    assert RELEASE.adapters["guardian_core"] == "guardian-core"
+    with pytest.raises(ValueError, match="names 0 releases"):
+        SPEC.release("deadbeef")
+    with pytest.raises(ValueError):  # too short to name one
+        SPEC.release(RELEASE.revision[:6])
+    for bad in (
+        {"revision": RELEASE.key},  # every pin is a full sha
+        {"serve_with": "main"},
+        {"sources": {"ibm-granite/granitelib-rag-r1.0": "main"}},
+        {"adapters": {"unknown_intrinsic": "x"}},
+        {"adapters": {}},
+        {"model": "no-such-model"},
+    ):
+        with pytest.raises(ValueError):
+            common.load_spec(spec_file(tmp_path, **bad))
+    private = tmp_path / "private.yaml"
+    private.write_text(
+        "models:\n  - {id: moe-test-1b, name: org/moe, label: M, bench_version: 1}\n"
+    )
+    monkeypatch.setenv(common.PRIVATE_MODELS_ENV, str(private))
+    with pytest.raises(ValueError, match="private model"):
+        common.load_spec(spec_file(tmp_path, model="moe-test-1b"))
+
+
+def test_release_discover_skips_what_it_has_not(tmp_path):
+    root = make_release_root(tmp_path / "release")
+    spec = SPEC.for_model(RELEASE.model)
+    cells = {(c.intrinsic, c.tech): c for c in releases.discover(root, spec, RELEASE)}
+    assert cells["answerability", "alora"].skip_reason is None
+    assert cells["answerability", "lora"].skip_reason == common.NOT_IN_RELEASE
+    assert cells["answerability", "sr"].skip_reason == common.NOT_IN_RELEASE
+    # An adapter of the release without its eval set keeps the real reason.
+    assert cells["guardian_core", "alora"].skip_reason == "eval set not staged"
+
+
+def test_release_native_copies_serve_its_adapters_in_order(tmp_path):
+    root = make_release_root(tmp_path / "release")
+    leaves = releases.native_copies(root, release_record(), tmp_path / "native")
+    assert [p.name for p in leaves] == [f"adapter_{k:02d}" for k in range(5)]
+    # An aLoRA without its invocation tokens; a LoRA as it is.
+    for leaf in leaves:
+        assert "alora_invocation_tokens" not in json.loads(
+            (leaf / staged.CONFIG_FILE).read_text()
+        )
+    assert (leaves[0] / staged.WEIGHTS_FILE).resolve() == (
+        root / releases.NATIVE / "citations" / staged.WEIGHTS_FILE
+    ).resolve()
+    settings = releases.switching_settings(SPEC, release_record())
+    assert settings == {**SPEC.switching.settings(), "adapters": 5, "rank": 32}
+
+
+def fake_release_repos(hub: Path, build: str | None = None) -> dict[str, Path]:
+    """The release and its libraries, as folders of a fake Hub."""
+    repo = hub / RELEASE.repo
+    repo.mkdir(parents=True)
+    names = [n for n, _, _ in RELEASE_ADAPTERS]
+    (repo / "config.json").write_text(
+        json.dumps({"adapter_names": names, "adapter_token_ids": list(range(5))})
+    )
+    (repo / releases.INDEX_FILE).write_text(
+        json.dumps(
+            {
+                "model_info": {"base_model": "granite-4.1-3b"},
+                "adapters": [
+                    {
+                        "adapter_index": k + 1,
+                        "adapter_name": n,
+                        "technology": t,
+                        "control_token": {"token": f"<|{n}|>", "id": 100352 + k},
+                    }
+                    for k, (n, t, _) in enumerate(RELEASE_ADAPTERS)
+                ],
+            }
+        )
+    )
+    pins = " ".join(f"{lib}: {rev}" for lib, rev in RELEASE.sources.items())
+    (repo / releases.BUILD_FILE).write_text(build if build is not None else pins)
+    (repo / "model.safetensors").write_bytes(b"weights")
+    for name, tech, lib in RELEASE_ADAPTERS:
+        leaf = make_adapter(hub / lib / name / "granite-4.1-3b" / tech, tech)
+        config = json.loads((leaf / staged.CONFIG_FILE).read_text())
+        (leaf / staged.CONFIG_FILE).write_text(json.dumps({**config, "r": 16}))
+        (leaf / "io.yaml").write_text("name: x\n")
+        (leaf / "model.sig").write_text("sig")
+    # A library holds other base models' folders too.
+    make_adapter(
+        hub / RELEASE_ADAPTERS[0][2] / "citations" / "granite-4.1-8b" / "lora", "lora"
+    )
+    return {name: hub / name for name in (RELEASE.repo, *RELEASE.sources)}
+
+
+def fake_hub(monkeypatch, repos: dict[str, Path]) -> list:
+    """huggingface_hub, serving ``repos`` from local folders; returns its downloads."""
+    downloads = []
+    hub = types.ModuleType("huggingface_hub")
+
+    def snapshot_download(repo_id, revision=None, local_dir=None, allow_patterns=None):
+        downloads.append((repo_id, revision, allow_patterns))
+        src = repos[repo_id]
+        for f in sorted(src.rglob("*")):
+            rel = f.relative_to(src).as_posix()
+            wanted = allow_patterns is None or any(
+                fnmatch.fnmatch(rel, p) for p in allow_patterns
+            )
+            if f.is_file() and wanted:
+                dest = Path(local_dir) / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(f, dest)
+        return str(local_dir)
+
+    class HfApi:
+        def list_repo_files(self, repo_id, revision=None):
+            src = repos[repo_id]
+            return [
+                f.relative_to(src).as_posix() for f in src.rglob("*") if f.is_file()
+            ]
+
+        def list_repo_commits(self, repo_id, revision=None):
+            when = datetime.datetime(2026, 5, 24, 9, 23, 6, tzinfo=datetime.UTC)
+            return [
+                types.SimpleNamespace(commit_id=revision, created_at=when, title="t")
+            ]
+
+    hub.snapshot_download, hub.HfApi = snapshot_download, HfApi
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+    return downloads
+
+
+def test_stage_release_from_the_hub(tmp_path, monkeypatch):
+    fetches = fake_hub(monkeypatch, fake_release_repos(tmp_path / "hub"))
+    bench = tmp_path / "bench"
+    for intrinsic_id in RELEASE.adapters:
+        write_eval(staged.eval_path(bench, intrinsic_id))
+    root = tmp_path / "release"
+    spec = SPEC.for_model(RELEASE.model)
+    downloads = tmp_path / "downloads"
+    record = releases.stage_release(
+        spec, RELEASE, root, bench, False, downloads=downloads
+    )
+
+    assert (root / releases.CHECKPOINT / "model.safetensors").is_file()
+    assert not (root / f"{releases.CHECKPOINT}.staging").exists()
+    assert not downloads.exists()
+    assert [a["name"] for a in record["adapters"]] == [
+        n for n, _, _ in RELEASE_ADAPTERS
+    ]
+    guardian = next(a for a in record["adapters"] if a["name"] == "guardian-core")
+    assert (guardian["repo"], guardian["path"]) == (
+        "ibm-granite/granitelib-guardian-r1.0",
+        "guardian-core/granite-4.1-3b/alora",
+    )
+    assert (record["date"][:10], record["title"]) == ("2026-05-24", "t")
+    # Every adapter for stock vLLM; the benchmark's as a bench root holds them.
+    assert sorted(p.name for p in (root / releases.NATIVE).iterdir()) == sorted(
+        n for n, _, _ in RELEASE_ADAPTERS
+    )
+    cells = {
+        (c.intrinsic, c.tech): c.skip_reason
+        for c in releases.discover(root, spec, RELEASE)
+    }
+    assert cells["guardian_core", "alora"] is None
+    assert cells["guardian_core", "lora"] == common.NOT_IN_RELEASE
+    provenance = json.loads(
+        (
+            staged.adapter_dir(root, "guardian_core", "alora") / staged.PROVENANCE_FILE
+        ).read_text()
+    )
+    assert provenance["source"].startswith("hf://ibm-granite/granitelib-guardian-r1.0@")
+    assert (
+        staged.fingerprint(staged.adapter_dir(root, "guardian_core", "alora"))["rank"]
+        == 16
+    )
+    # The eval sets are the model's, byte for byte.
+    assert stage.sha256(staged.eval_path(root, "answerability")) == stage.sha256(
+        staged.eval_path(bench, "answerability")
+    )
+    # Each library once, at its pinned revision, for its adapters' folders only.
+    fetched = {(repo, rev): patterns for repo, rev, patterns in fetches if patterns}
+    assert set(fetched) == set(RELEASE.sources.items())
+    assert not any("8b" in p for patterns in fetched.values() for p in patterns)
+    # Staged already: kept as it is.
+    assert (
+        releases.stage_release(spec, RELEASE, root, bench, False, downloads=downloads)
+        == record
+    )
+    assert json.loads((root / releases.RELEASE_FILE).read_text()) == record
+
+
+def test_stage_release_refuses_sources_its_build_does_not_name(tmp_path, monkeypatch):
+    fake_hub(monkeypatch, fake_release_repos(tmp_path / "hub", build="no pins here"))
+    spec = SPEC.for_model(RELEASE.model)
+    with pytest.raises(ValueError, match="does not name"):
+        releases.stage_release(
+            spec,
+            RELEASE,
+            tmp_path / "r",
+            tmp_path / "bench",
+            False,
+            downloads=tmp_path / "d",
+        )
+
+
+def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
+    root = make_release_root(tmp_path / "release")
+    base = write_base(tmp_path / "base")
+    monkeypatch.setattr(
+        run_benchmark,
+        "commit_info",
+        lambda repo: {"sha": RELEASE.serve_with, "date": "2026-09-08", "subject": "s"},
+    )
+    generated = []
+
+    def fake_generate(python, harness_root, jobs_path, spec):
+        generated.append(spec)
+        for job in spec["jobs"]:
+            rows = staged.read_jsonl(Path(job["eval_path"]))
+            staged.write_jsonl(
+                Path(job["out_path"]),
+                [{**r, "generated_content": '"answerable"'} for r in rows],
+            )
+        ok = {"ok": True, "n_generated": 3, "truncated": 0}
+        return {"vllm": "0.19.1", "jobs": {j["key"]: dict(ok) for j in spec["jobs"]}}
+
+    engines, switched = [], []
+    monkeypatch.setattr(run_benchmark, "generate", fake_generate)
+    monkeypatch.setattr(
+        run_benchmark,
+        "time_engine",
+        lambda python, harness, spec: engines.append(spec)
+        or timed(3300.0 if spec["engine"] == "gs" else 1900.0),
+    )
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: None)
+    monkeypatch.setattr(
+        run_benchmark,
+        "release_switching",
+        lambda *a: switched.append(a) or {"gs": waited(40.0), "native": waited(60.0)},
+    )
+    argv = [
+        "--bench-root", str(root), "--work-dir", str(tmp_path / "work"),
+        "--repo-dir", str(tmp_path), "--base-model", str(base),
+        "--release", RELEASE.key,
+    ]  # fmt: skip
+    assert run_benchmark.main(argv) == 0
+
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert results["release"] == {
+        k: release_record()[k] for k in ("repo", "revision", "date", "title")
+    }
+    assert results["served_by"]["sha"] == RELEASE.serve_with
+    assert results["release_version"] == SPEC.release_version
+    answerability = results["cells"]["answerability"]
+    assert (
+        answerability["lora"]
+        == answerability["sr"]
+        == common.skipped(common.NOT_IN_RELEASE)
+    )
+    assert answerability["alora"]["score_version"] == 1
+    # Nothing composed: the release's checkpoint, under its own adapter names.
+    (spec,) = generated
+    assert spec["model_dir"] == str(root / releases.CHECKPOINT)
+    assert [j["adapter_name"] for j in spec["jobs"]] == ["answerability"]
+    # Its speed over all its adapters, on the checkpoint and on stock vLLM.
+    assert [(e["engine"], e["model"]) for e in engines] == [
+        ("gs", str(root / releases.CHECKPOINT)),
+        ("native", str(base)),
+    ]
+    assert [Path(p).name for p in engines[1]["paths"]] == [
+        f"adapter_{k:02d}" for k in range(5)
+    ]
+    assert results["throughput"] == {"gs": timed(3300.0), "native": timed(1900.0)}
+    assert results["run"]["switching"]["adapters"] == 5
+    assert results["switching"]["native"]["p95_s"] == 60.0
+    log = (tmp_path / "work" / "results.json").read_text()
+    assert json.loads(log) == results
+
+
+def test_release_switching_runs_its_own_adapters(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_run(cmd, cwd, tag):
+        commands.append(cmd)
+        return (1, ["boom"]) if "--cells" in cmd else (0, [])
+
+    monkeypatch.setattr(run_benchmark, "run_streamed", fake_run)
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: None)
+    natives = [tmp_path / "native" / f"adapter_{k:02d}" for k in range(3)]
+    settings = {**SPEC.switching.settings(), "adapters": 3, "rank": 32}
+    entries = run_benchmark.release_switching(
+        types.SimpleNamespace(python="python"), tmp_path, tmp_path / "work",
+        tmp_path / "checkpoint", "base", natives, settings,
+    )  # fmt: skip
+    grid, gs, native = commands
+    assert grid[grid.index("--adapters") + 1] == "3"
+    assert str(tmp_path / "checkpoint") in gs and "--in-order" in gs
+    assert native[native.index("--lora-root") + 1] == str(tmp_path / "native")
+    assert native[native.index("--lora-rank") + 1] == "32"
+    assert set(entries) == {"gs", "native"}
+    assert all(common.is_error(e) for e in entries.values())
+
+
+def test_gs_switch_takes_a_release_in_order(tmp_path):
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "adapter_names": ["citations", "answerability"],
+                "adapter_token_ids": [7, 9],
+            }
+        )
+    )
+    assert gs_switch.control_tokens(tmp_path, in_order=True) == {"ad0": 7, "ad1": 9}
+    with pytest.raises(SystemExit):  # by name, a synthetic fleet's
+        gs_switch.control_tokens(tmp_path)
+
+
+def release_results(value: float = 0.8, **run) -> dict:
+    """A release's results block, as run_benchmark.py --release prints it."""
+    return {
+        "model": RELEASE.model,
+        "release_version": SPEC.release_version,
+        "release": {
+            k: release_record()[k] for k in ("repo", "revision", "date", "title")
+        },
+        "served_by": {
+            "sha": RELEASE.serve_with,
+            "date": "2026-09-08T11:55:00+03:00",
+            "subject": "Remove irrelevant documents (#121)",
+        },
+        "cells": {
+            i.id: {
+                "lora": common.skipped(common.NOT_IN_RELEASE),
+                "alora": {i.headline: value, "n": 10, "score_version": i.score_version},
+                "sr": common.skipped(common.NOT_IN_RELEASE),
+            }
+            for i in SPEC.intrinsics
+        },
+        "run": {
+            "limit": None,
+            "only": None,
+            "finished": "2026-10-13T10:00:00Z",
+            "vllm": "0.19.1",
+            "adapters": {
+                f"{i.id}/alora": {"rank": 16, "weights_sha256": "f" * 64}
+                for i in SPEC.intrinsics
+            },
+            **run,
+        },
+        "throughput": {
+            "gs": timed(3300.0, adapters=12),
+            "native": timed(1900.0, adapters=12),
+        },
+        "switching": {
+            "gs": waited(40.0, adapters=12, rank=32),
+            "native": waited(60.0, adapters=12, rank=32),
+        },
+    }
+
+
+def release_reference(value: float = 0.7, base: float = 0.5) -> dict:
+    """A release's reference block, as reference.py --release prints it."""
+    cells = {
+        i.id: {
+            "lora": common.skipped(common.NOT_IN_RELEASE),
+            "alora": {i.headline: value, "n": 10},
+            "sr": common.skipped(common.NOT_IN_RELEASE),
+            "base": {i.headline: base, "n": 10},
+        }
+        for i in SPEC.intrinsics
+    }
+    return {
+        **reference_for(cells=cells),
+        "release_version": SPEC.release_version,
+        "release": release_results()["release"],
+    }
+
+
+def test_release_rows_merge_and_cache():
+    data = page_data()
+    assert not publish.release_hit(publish.find_release(data, RELEASE), SPEC)
+    # The reference first: the release gets a row with only that.
+    publish.merge_release_reference(data, release_reference(), SPEC)
+    row = publish.find_release(data, RELEASE)
+    assert publish.release_reference_hit(row, SPEC)
+    assert not publish.release_hit(row, SPEC)
+    assert "release" not in row["reference"]
+    # Its run keeps the reference.
+    publish.merge_release(data, release_results(), SPEC)
+    row = publish.find_release(data, RELEASE)
+    assert publish.release_hit(row, SPEC) and publish.release_reference_hit(row, SPEC)
+    assert row["reference"]["cells"]["answerability"]["base"]["n"] == 10
+    assert len(publish.release_rows(data, RELEASE.model)) == 1
+    # An --only run replaces just what it ran.
+    patch = release_results(0.9, only=["answerability"])
+    publish.merge_release(data, patch, SPEC)
+    row = publish.find_release(data, RELEASE)
+    assert row["cells"]["answerability"]["alora"]["accuracy"] == 0.9
+    assert row["updates"][-1]["only"] == ["answerability"]
+    # Measured with other settings, or scored with an older version: run again.
+    row["switching"]["gs"]["span"] = 99
+    first = SPEC.intrinsics[0]
+    row["cells"][first.id]["alora"]["score_version"] = first.score_version - 1
+    assert publish.release_missing(row, SPEC) == [f"{first.id}/alora", "switching"]
+    # Its own adapter count and rank are its own, not a mismatch.
+    assert publish.release_speed(row, "switching", "native", SPEC) == 60.0
+
+    with pytest.raises(ValueError, match="served by"):
+        publish.merge_release(
+            data,
+            {**release_results(), "served_by": {"sha": SHA_A, "subject": ""}},
+            SPEC,
+        )
+    with pytest.raises(ValueError, match="--limit"):
+        publish.merge_release(data, release_results(limit=20), SPEC)
+    stale = release_reference()
+    stale["release_version"] = SPEC.release_version + 1
+    with pytest.raises(ValueError, match="release_version"):
+        publish.merge_release_reference(data, stale, SPEC)
+
+
+def test_release_rows_are_kept_newest_first(tmp_path):
+    data = page_data()
+    publish.merge_release(data, release_results(), SPEC)
+    data["releases"][RELEASE.model].append(
+        {
+            **release_results(),
+            "release": {
+                **release_results()["release"],
+                "date": "2026-06-01T00:00:00+00:00",
+                "revision": "e" * 40,
+            },
+        }
+    )
+    path = tmp_path / "data.json"
+    publish.save_data(path, data, SPEC)
+    saved = json.loads(path.read_text())["releases"][RELEASE.model]
+    assert [r["release"]["date"][:10] for r in saved] == ["2026-06-01", "2026-05-24"]
+
+
+def test_render_release_table():
+    data = page_data(results_for())
+    plain = publish.render(data, SPEC)
+    data["releases"] = {
+        RELEASE.model: [{**release_results(), "reference": release_reference()}]
+    }
+    page = publish.render(data, SPEC)
+    # The model's own tables are the same with releases or without.
+    assert main_tables(page) == main_tables(plain)
+    tables = page.split(f"<h3>{publish.RELEASES_HEADING}</h3>")[1:]
+    assert len(tables) == len(SPEC.models)
+    first, second = tables
+    url = f"https://huggingface.co/{RELEASE.repo}/commit/{RELEASE.revision}"
+    assert f'<a href="{url}"><code>{RELEASE.key}</code></a>' in first
+    assert ">granite-switch-4.1-3b-preview</a></td>" in first
+    # What the release has no adapter of is a skipped cell, ratio included.
+    assert f'title="{common.NOT_IN_RELEASE}">—</td>' in first
+    # (0.8 - 0.5) / (0.7 - 0.5) = 1.5
+    assert ">1.50</td>" in first
+    assert ">+74%</td>" in first  # 3,300 against 1,900 tokens/s
+    assert ">+50%</td>" in first  # 40 against 60 s at p95
+    assert "the release&#x27;s 12 adapters, rank up to 32" in first
+    # Its details: the libraries, and the commit that served it.
+    assert "ibm-granite/granitelib-core-r1.0</code> <code>d0a2a96a" in first
+    assert publish.COMMIT_URL.format(sha=RELEASE.serve_with) in first
+    # A model with no release says so.
+    assert "no Hugging Face release yet" in second
+    assert page.count("no Hugging Face release yet") == 1
+
+
+def test_render_job_of_a_release(tmp_path, monkeypatch):
+    render_job = load_render_job()
+    monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))
+    for k in ("NAMESPACE", "CONTAINER_IMAGE", "IMAGE_PULL_SECRET", "PVC_NAME"):
+        monkeypatch.setenv(k, "x")
+    for k, v in {
+        "PVC_MOUNT": "/m",
+        "BENCH_ROOT": "/m/releases/r",
+        "WORK_ROOT": "/m/runs",
+    }.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("SELECTION_FILE", raising=False)
+    out = tmp_path / "values.json"
+    argv = [
+        "--job-name",
+        "j",
+        "--run-ts",
+        "T",
+        "--out",
+        str(out),
+        "--release",
+        RELEASE.revision,
+    ]
+    with pytest.raises(SystemExit):  # staging copies the model's eval sets: EVAL_FROM
+        render_job.main(["--mode", "stage", *argv])
+    monkeypatch.setenv("EVAL_FROM", "/m/bench")
+    assert render_job.main(["--mode", "stage", *argv]) == 0
+    env = {
+        e["name"]: e.get("value")
+        for e in json.loads(out.read_text())["environmentVariables"]
+    }
+    assert env["ADAPTER_BENCH_RELEASE"] == RELEASE.revision
+    assert env["ADAPTER_BENCH_EVAL_FROM"] == "/m/bench"
+    with tarfile.open(
+        fileobj=io.BytesIO(base64.b64decode(env["ADAPTER_BENCH_HARNESS_TGZ"]))
+    ) as tar:
+        assert "extra/selection.json" not in tar.getnames()
+        assert "benchmarks/adapter_eval/release.py" in tar.getnames()
+    assert render_job.main(["--mode", "bench", *argv, "--sha", RELEASE.serve_with]) == 0
+    env = {
+        e["name"]: e.get("value")
+        for e in json.loads(out.read_text())["environmentVariables"]
+    }
+    assert (env["ADAPTER_BENCH_RELEASE"], env["ADAPTER_BENCH_COMMIT"]) == (
+        RELEASE.revision,
+        RELEASE.serve_with,
+    )
