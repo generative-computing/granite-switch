@@ -194,9 +194,28 @@ def test_the_recording_names_every_phase(stub_vllm, fleet):
     assert report["recomputed_tokens"] == sum(
         n - n // 4 for _, n, _ in engine.requests[-256:]
     )
+    # Each agent's first request is its first prefill; every later one re-sends
+    # context, and what the cache did not hold of it is the re-prefill.
+    timed, firsts = engine.requests[-256:], set()
+    first = later = resent = 0
+    for rid, n, _ in timed:
+        agent = rid.rsplit("-u", 1)[0]
+        if agent in firsts:
+            later, resent = later + n - n // 4, resent + n
+        else:
+            firsts.add(agent)
+            first += n - n // 4
+    assert len(firsts) == 16
+    assert report["first_prefill_tokens"] == first
+    assert report["reprefilled_tokens"] == later
+    assert report["resent_tokens"] == resent
     samples = [e["m"] for e in report["events"] if e["ev"] == "metrics"]
     assert samples and max(m["running"] for m in samples) <= 8
     assert samples[-1]["done"] == 16 and samples[-1]["generated"] == 16 * 512
+    assert samples[-1]["reprefilled"] == later
+    assert samples[-1]["context_hit"] == pytest.approx(
+        report["resent_cached_tokens"] / resent, abs=1e-4
+    )
 
 
 def test_sr_runs_one_request_between_tool_calls(stub_vllm, fleet):

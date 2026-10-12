@@ -122,6 +122,12 @@ class Recorder:
         self.ttfts: collections.deque = collections.deque(maxlen=TTFT_WINDOW)
         self.generated = 0
         self.prompt_tokens = self.cached_tokens = self.recomputed_tokens = 0
+        # An agent's first request prefills its own prompt, which nothing could
+        # have cached; every later one sends that context again, and what the
+        # cache did not hold of it is the re-prefill.
+        self.first_seen: set[int] = set()
+        self.first_prefill = 0
+        self.resent_tokens = self.resent_cached = 0
         self._last = (0.0, 0)  # (time, generated) at the previous sample
 
     def start(self) -> None:
@@ -176,10 +182,17 @@ class Recorder:
         if st["shown"] != st["tokens"]:
             st["shown"] = st["tokens"]
             self.emit("progress", agent_id, tokens=st["tokens"])
+        first = agent_id not in self.first_seen
+        self.first_seen.add(agent_id)
         if cached is not None:
             self.prompt_tokens += prompt_tokens
             self.cached_tokens += cached
             self.recomputed_tokens += prompt_tokens - cached
+            if first:
+                self.first_prefill += prompt_tokens - cached
+            else:
+                self.resent_tokens += prompt_tokens
+                self.resent_cached += cached
         self.emit(
             "req_done", agent_id, unit=ui, prompt_tokens=prompt_tokens, cached=cached
         )
@@ -212,9 +225,10 @@ class Recorder:
             "ttft_avg": round(sum(self.ttfts) / len(self.ttfts), 4)
             if self.ttfts
             else None,
-            "recomputed": self.recomputed_tokens,
-            "cache_hit": round(self.cached_tokens / self.prompt_tokens, 4)
-            if self.prompt_tokens
+            "first_prefill": self.first_prefill,
+            "reprefilled": self.resent_tokens - self.resent_cached,
+            "context_hit": round(self.resent_cached / self.resent_tokens, 4)
+            if self.resent_tokens
             else None,
             "generated": generated,
         }
@@ -325,6 +339,10 @@ async def race_lane(engine, flavour, agents, arm, args, lora_for, adapter_of) ->
         "prompt_tokens": recorder.prompt_tokens,
         "recomputed_tokens": recorder.recomputed_tokens,
         "cached_tokens": recorder.cached_tokens,
+        "first_prefill_tokens": recorder.first_prefill,
+        "resent_tokens": recorder.resent_tokens,
+        "resent_cached_tokens": recorder.resent_cached,
+        "reprefilled_tokens": recorder.resent_tokens - recorder.resent_cached,
         "rows": sorted(rows, key=lambda r: r["agent_id"]),
         "events": recorder.events,
     }
@@ -465,7 +483,8 @@ async def amain(args) -> None:
     print(
         f"[race] {args.lane}: {len(agents)} agents through {args.concurrency} slots in "
         f"{report['wall_s']:.1f}s (warm-up {report['warmup_wall_s']}), "
-        f"{report['recomputed_tokens']:,} prompt tokens re-prefilled",
+        f"first prefill {report['first_prefill_tokens']:,} tokens, "
+        f"re-prefilled {report['reprefilled_tokens']:,}",
         file=sys.stderr,
         flush=True,
     )

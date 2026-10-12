@@ -206,6 +206,10 @@
   tool call; its K/V come from the base model, so an adapter change needs no
   re-prefill. As in the switch benchmark, each agent keeps one adapter for its
   task: SR's switch is taken as free.</p>
+  <p><b>Re-prefilled</b>: prompt tokens computed again after an agent's first
+  request (the first prefills its own prompt, the same in both lanes).
+  <b>Context hit</b>: the share of the context sent again that vLLM's prefix cache
+  already held.</p>
   <p>The lanes ran one after the other on the same GPU, each after an untimed
   warm-up run, and are replayed side by side.
   <span class="setup" id="setup"></span></p>
@@ -259,6 +263,7 @@ const NUMCOL = '#666666';
 let eventData    = null;
 let state        = [];        // state[laneIdx][agentRow]
 let metrics      = {};        // the latest metrics sample per lane
+let work         = {};        // per lane: prefill accounting from its requests
 let maxima       = {};        // each metric's largest value in the race
 let playbackTime = 0;
 let nextEventIdx = 0;
@@ -294,6 +299,20 @@ function initState() {
     )
   );
   metrics = {};
+  work = Object.fromEntries(eventData.servers.map(srv => [srv, newWork()]));
+}
+
+// An agent's first request prefills its own prompt, which nothing could have
+// cached. Every later one sends that context again: what vLLM's prefix cache
+// held of it is the context hit, what it recomputed is the re-prefill.
+function newWork() { return {seen: new Set(), first: 0, resent: 0, cached: 0}; }
+
+function countRequest(w, evt) {
+  const first = !w.seen.has(evt.conv);
+  w.seen.add(evt.conv);
+  if (evt.cached === null || evt.cached === undefined) return;
+  if (first) w.first += evt.prompt_tokens - evt.cached;
+  else { w.resent += evt.prompt_tokens; w.cached += evt.cached; }
 }
 
 function resetPlayback() {
@@ -323,6 +342,9 @@ function applyEvent(evt) {
       break;
     case 'progress':
       s.tokens = evt.tokens;
+      break;
+    case 'req_done':
+      countRequest(work[evt.srv], evt);
       break;
     case 'conv_done':
       Object.assign(s, {status: 'done', phase: 'done', tokens: decodeTokens,
@@ -439,12 +461,17 @@ function mRow(label, val, maxVal, fmt, invert = false) {
 }
 
 function computeMaxima() {
-  maxima = {tok_s: 1, ttft_avg: 0.05, recomputed: 1};
+  maxima = {tok_s: 1, ttft_avg: 0.05, reprefilled: 1};
+  const done = Object.fromEntries(eventData.servers.map(srv => [srv, newWork()]));
   for (const e of eventData.events) {
+    if (e.ev === 'req_done' && done[e.srv]) countRequest(done[e.srv], e);
     if (e.ev !== 'metrics') continue;
-    for (const k of Object.keys(maxima)) {
+    for (const k of ['tok_s', 'ttft_avg']) {
       if (e.m[k] !== null && e.m[k] > maxima[k]) maxima[k] = e.m[k];
     }
+  }
+  for (const w of Object.values(done)) {
+    maxima.reprefilled = Math.max(maxima.reprefilled, w.resent - w.cached);
   }
 }
 
@@ -452,6 +479,7 @@ function updateMetrics() {
   eventData.servers.forEach((srv, laneIdx) => {
     const el = document.getElementById(`metrics-rows-${laneIdx}`);
     const m  = metrics[srv];
+    const w  = work[srv];
     if (!el || !m) return;
     el.innerHTML =
       mRow('Running',      m.running,    slots,              x => `${x}/${slots}`) +
@@ -460,9 +488,9 @@ function updateMetrics() {
       mRow('Tool / RTT',   m.waiting,    slots,              x => `${x}`) +
       mRow('Tokens/s',     m.tok_s,      maxima.tok_s,       x => `${Math.round(x)}`) +
       mRow('TTFT avg',     m.ttft_avg,   maxima.ttft_avg,    x => `${x.toFixed(2)}s`) +
-      mRow('Re-prefilled', m.recomputed, maxima.recomputed,  x => fmtTok(x)) +
-      mRow('Prefix hit',   m.cache_hit === null ? null : m.cache_hit * 100, 100,
-           x => `${x.toFixed(0)}%`, true);
+      mRow('Re-prefilled', w.resent - w.cached, maxima.reprefilled, x => fmtTok(x)) +
+      mRow('Context hit',  w.resent ? w.cached / w.resent * 100 : null, 100,
+           x => `${x.toFixed(1)}%`, true);
   });
 }
 
