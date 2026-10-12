@@ -453,7 +453,8 @@ BASE_MODEL_PATH__granite_4_2_3b=$PVC_MOUNT/<path>/granite-4.2-3b
 
 `BENCH_ROOT__<id>` is required: the first model's plain settings are never
 used for another model. Without `BASE_MODEL_PATH__<id>` the pod downloads the
-base model by name.
+base model by name. `ADAPTER_SOURCE_ROOTS`, `EVAL_SOURCE_ROOTS` and `SR_REF`
+take the suffix too, and keep the first model's value without one.
 
 Then stage and run as usual, with `--model`:
 
@@ -494,6 +495,60 @@ benchmark has to build prompts the way the checkpoints were trained:
 The `prompt` entry of a model in `adapters.yaml` sets this. Both generation
 paths, granite-switch under vLLM and HF + PEFT, build their prompts the same
 way ([prompts.py](../benchmarks/adapter_eval/prompts.py)).
+
+### A model's own settings
+
+Everything else is benchmark-wide, unless a model sets it for itself. Each of
+these is optional, and without it the model gets the benchmark-wide
+behaviour:
+
+| Setting | What it changes |
+|---|---|
+| `technologies.<tech>.source` | how the page describes the model's adapters of that technology |
+| `technologies.<tech>.shape` | the rank, cross rank, adapted modules, K/V mode, expert routing (`share_moe_routing`) and config names its checkpoints must have, over `EXPECTED` in `stage.py` |
+| `resources.<mode>` | the pod size of a launcher mode: `gpus`, `cpus`, `memory` |
+| `serving.throughput`, `serving.switching` | `false` leaves that serving block out: not measured, not needed for a cache hit, no columns |
+| `reference` | `token_budget` and `max_batch` of the HF + PEFT generation, and `serial_loads`: load one cell's model at a time, for a large base |
+
+For example, for a mixture-of-experts model whose adapters can target
+attention only, and whose SR adapters must route experts with the base
+stream:
+
+```yaml
+    technologies:
+      lora: {source: "LoRA (q,k,v,o, r=32)", shape: {rank: 32, modules: qkvo, names: [lora_qkvo_r32]}}
+      sr:
+        source: "Shadow Residual (q,o, r=32, cross r=32, shared KV and routing)"
+        shape: {rank: 32, cross_rank: 32, modules: qo, shared_kv: true,
+                share_moe_routing: true, names: [sr_qo_c32_sharedkv]}
+    resources: {bench: {memory: 384Gi}}
+    serving: {throughput: false, switching: false}
+```
+
+A declared shape is checked when a pick is staged: a checkpoint of another
+shape is refused, including one whose `all-linear` targets also wrapped a
+mixture-of-experts router. With `share_moe_routing: true`, an SR checkpoint
+must say so in its adapter config, when staged and on every run:
+granite-switch always takes an SR adapter's expert routing from the base
+stream, so one trained to route on its own would run with no error and give
+wrong answers.
+
+### Private models
+
+A model that is not public yet is defined in `local/models.private.yaml`,
+with the same fields as in `adapters.yaml`:
+
+```yaml
+models:
+  - id: <id>
+    name: <hub id>
+    label: <tab label>
+    bench_version: 1
+```
+
+Every command then knows it (`--model <id>`), and ships the file with its
+jobs. It is never published: `submit.sh` does not merge its results, which
+stay in `local/results/`, and the page and its data leave it out.
 
 ### One model's adapters never run on another
 
@@ -764,7 +819,8 @@ This repository is public. So:
   scores, commit metadata and generic skip reasons.
 - **Private (in `local/`):** namespace, image, volume and paths, secret
   names, the judge endpoint, the judge prompt and the base model's
-  instructions.
+  instructions, and models that are not public yet
+  (`local/models.private.yaml`).
 - **Private, and not in this repository at all:** the SR model code of the
   reference column. The job ships it from a local checkout. Only its commit
   sha is published.

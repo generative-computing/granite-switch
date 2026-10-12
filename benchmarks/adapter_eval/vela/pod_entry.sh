@@ -22,6 +22,10 @@ MODE=${ADAPTER_BENCH_MODE:?}
 MODEL=${ADAPTER_BENCH_MODEL:-}
 MODEL_ARGS=()
 if [[ -n "$MODEL" ]]; then MODEL_ARGS=(--model "$MODEL"); fi
+# A model kept off the public page is defined in a file shipped with the job.
+if [[ -f "$HARNESS/extra/models.private.yaml" ]]; then
+    export ADAPTER_BENCH_PRIVATE_MODELS="$HARNESS/extra/models.private.yaml"
+fi
 echo "[pod] mode=${MODE} model=${MODEL:-default} harness=${ADAPTER_BENCH_HARNESS_SHA:-?} dirty=${ADAPTER_BENCH_HARNESS_DIRTY:-?} run=${RUN_TS:-?}"
 nvidia-smi -L 2>/dev/null || true
 

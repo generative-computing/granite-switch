@@ -607,8 +607,21 @@ def main(argv: list[str] | None = None) -> int:
     spec = load_spec(model=args.model)
     staged.check_bench_root(args.bench_root, spec)
     only = [s.strip() for s in args.only.split(",")] if args.only else None
-    measure_speed = only is None or THROUGHPUT in only
-    measure_switching = only is None or SWITCHING in only
+    for block in (THROUGHPUT, SWITCHING):
+        if only and block in only and not spec.model.measures(block):
+            print(
+                f"[bench] {spec.model_id} does not measure {block} "
+                "(serving in adapters.yaml)",
+                file=sys.stderr,
+            )
+            return 2
+    # A model's serving settings can leave a block out (adapters.yaml).
+    measure_speed = spec.model.measures(THROUGHPUT) and (
+        only is None or THROUGHPUT in only
+    )
+    measure_switching = spec.model.measures(SWITCHING) and (
+        only is None or SWITCHING in only
+    )
     picked = (
         None if only is None else [o for o in only if o not in (THROUGHPUT, SWITCHING)]
     )

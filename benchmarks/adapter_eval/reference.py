@@ -221,10 +221,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--token-budget",
         type=int,
-        default=262144,
-        help="padded prompt plus new tokens per batch",
+        default=None,
+        help="padded prompt plus new tokens per batch (default: the model's "
+        "reference settings in adapters.yaml, else 262144)",
     )
-    p.add_argument("--max-batch", type=int, default=64, help="rows per batch")
+    p.add_argument(
+        "--max-batch",
+        type=int,
+        default=None,
+        help="rows per batch (default: the model's, else 64)",
+    )
     p.add_argument("--python", default=sys.executable)
     p.add_argument("--results-out", type=Path, default=None)
     p.add_argument(
@@ -238,6 +244,11 @@ def main(argv: list[str] | None = None) -> int:
     started = now()
     spec = load_spec(model=args.model)
     staged.check_bench_root(args.bench_root, spec)
+    settings = spec.model.reference
+    if args.token_budget is None:
+        args.token_budget = int(settings.get("token_budget", 262144))
+    if args.max_batch is None:
+        args.max_batch = int(settings.get("max_batch", 64))
     only = parse_only(args.only, spec)
     work = args.work_dir.resolve()
     copies = (args.model_dir or work / "models").resolve() / "reference"
@@ -348,6 +359,12 @@ def main(argv: list[str] | None = None) -> int:
                 "max_model_len": args.max_model_len,
                 "token_budget": args.token_budget,
                 "max_batch": args.max_batch,
+                # One cell loads its model at a time, where the model's
+                # settings ask for it: a large base held on CPU while it loads
+                # would otherwise run the pod out of memory, once per GPU.
+                "load_lock": str(work / "load.lock")
+                if settings.get("serial_loads")
+                else None,
                 **spec.model.prompt_for(None if column == BASE_COLUMN else column),
                 "instruction": instructions.get(intrinsic_id)
                 if column == BASE_COLUMN

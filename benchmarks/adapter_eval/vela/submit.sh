@@ -49,6 +49,11 @@ if [[ -z "${JUDGE_PROMPT_FILE:-}" && -f "$LOCAL_DIR/judge_prompt.txt" ]]; then
     JUDGE_PROMPT_FILE=$LOCAL_DIR/judge_prompt.txt
 fi
 BASE_INSTRUCTIONS_FILE=${BASE_INSTRUCTIONS_FILE:-$LOCAL_DIR/base_instructions.json}
+# Models kept off the public page (common.PRIVATE_MODELS_ENV): defined in a
+# file of their own here, known to every job, never published.
+if [[ -z "${ADAPTER_BENCH_PRIVATE_MODELS:-}" && -f "$LOCAL_DIR/models.private.yaml" ]]; then
+    ADAPTER_BENCH_PRIVATE_MODELS=$LOCAL_DIR/models.private.yaml
+fi
 set +a
 : "${NAMESPACE:?set NAMESPACE in local.env}"
 JOB_PREFIX=${JOB_PREFIX:-adapter-bench}
@@ -230,7 +235,9 @@ if [[ "$MODEL" != "$DEFAULT_MODEL" ]]; then
     SUFFIX=.$MODEL
     key=$(printf %s "$MODEL" | tr '.-' '__')
     SELECTION_FILE=$LOCAL_DIR/selection$SUFFIX.json
-    for name in BENCH_ROOT BASE_MODEL_PATH SELECTION_FILE; do
+    # The source roots and SR_REF keep the default model's when not suffixed.
+    for name in BENCH_ROOT BASE_MODEL_PATH SELECTION_FILE ADAPTER_SOURCE_ROOTS \
+        EVAL_SOURCE_ROOTS SR_REF; do
         var=${name}__$key
         if [[ -n "${!var:-}" ]]; then
             export "$name=${!var}"
@@ -247,10 +254,25 @@ else
     MODEL_TAG=""
 fi
 say "model $MODEL"
+if local_py -c 'import sys
+from benchmarks.adapter_eval.common import load_spec
+sys.exit(0 if load_spec(model=sys.argv[1]).model.private else 1)' "$MODEL"; then
+    PUBLISH=""
+    PRIVATE_MODEL=1
+    say "$MODEL is private: its results stay in $LOCAL_DIR/results, off the page"
+fi
 
 STAMP=$(date -u +%m%d%H%M)
 RUN_TS=$(date -u +%Y%m%dT%H%M%SZ)
 render_args=(--mode "$MODE" --run-ts "$RUN_TS" --model "$MODEL")
+# The model's own pod size for this mode (resources in adapters.yaml).
+RESOURCES_JSON=$(local_py -c 'import json, sys
+from benchmarks.adapter_eval.common import load_spec
+print(json.dumps(load_spec(model=sys.argv[1]).model.resources_for(sys.argv[2])))' "$MODEL" "$MODE")
+if [[ "$RESOURCES_JSON" != "{}" ]]; then render_args+=(--resources "$RESOURCES_JSON"); fi
+if [[ -n "${PRIVATE_MODEL:-}" ]]; then
+    render_args+=(--private-models "$ADAPTER_BENCH_PRIVATE_MODELS")
+fi
 # Only jobs that score with the LLM judge get its endpoint and key.
 case "$MODE" in
 bench | reference | rescore)

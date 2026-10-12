@@ -30,7 +30,9 @@ checkpoint whose MLP weights lack the base model's ``mlp.`` level
 weight (``modules_missing_from_base``).
 
 An SR checkpoint must also have been trained with shared K/V
-(``shared_kv_reason``).
+(``shared_kv_reason``) and, for a model that says so in adapters.yaml (a
+mixture-of-experts base), with the base stream's expert routing
+(``routing_reason``).
 
 Standard library only.
 """
@@ -297,6 +299,24 @@ def shared_kv_reason(adapter_dir: Path) -> str | None:
     return None if shared else "SR adapter not trained with shared K/V"
 
 
+def routing_reason(adapter_dir: Path) -> str | None:
+    """None if an SR checkpoint routes experts with the base stream.
+
+    granite-switch always takes an SR adapter's expert routing from the base
+    stream, so one trained to route on its own would compose cleanly and give
+    wrong outputs. The SR trainer records the mode in the adapter config.
+    """
+    try:
+        shared = json.loads((adapter_dir / CONFIG_FILE).read_text()).get(
+            "share_moe_routing"
+        )
+    except (OSError, ValueError):
+        shared = None
+    if shared is None:
+        return "SR adapter: expert routing mode unknown"
+    return None if shared is True else "SR adapter routes experts on its own"
+
+
 def check_adapter(adapter_dir: Path, expected_tech: str) -> str | None:
     """None if the checkpoint is a usable ``expected_tech`` adapter."""
     tech, reason = detect_technology(adapter_dir)
@@ -355,6 +375,8 @@ def discover(
                 reason = check_adapter(ad, tech.id)
                 if reason is None and tech.id == "sr":
                     reason = shared_kv_reason(ad)
+                if reason is None and tech.id == "sr" and spec.model.shared_routing:
+                    reason = routing_reason(ad)
             cells.append(
                 StagedCell(
                     intrinsic=intrinsic.id,

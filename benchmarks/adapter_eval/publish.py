@@ -161,7 +161,10 @@ def has_engine(tech_id: str, engine: str) -> bool:
 
 
 def throughput_done(row: dict, spec: Spec) -> bool:
-    """Whether every technology's throughput is measured, or has no adapter."""
+    """Whether every technology's throughput is measured, or has no adapter.
+    True for a model that does not measure it (``serving`` in adapters.yaml)."""
+    if not spec.model.measures(THROUGHPUT):
+        return True
     for tech in spec.technologies:
         entry = (row.get("throughput") or {}).get(tech.id)
         if entry is None or is_error(entry):
@@ -186,7 +189,10 @@ def p95_seconds(row: dict, tech_id: str, engine: str, spec: Spec) -> float | Non
 
 
 def switching_done(row: dict, spec: Spec) -> bool:
-    """Whether every technology's switching run is measured, on every engine it has."""
+    """Whether every technology's switching run is measured, on every engine it
+    has. True for a model that does not measure it."""
+    if not spec.model.measures(SWITCHING):
+        return True
     for tech in spec.technologies:
         entry = (row.get(SWITCHING) or {}).get(tech.id)
         if entry is None or is_error(entry):
@@ -240,6 +246,7 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     the existing row of the same ``bench_version``.
     """
     spec = spec.for_model(spec.model_of(results))
+    refuse_private(spec)
     results["model"] = spec.model_id
     run = results["run"]
     if run.get("limit") is not None:
@@ -254,7 +261,8 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     if run.get("only") and old and old.get("bench_version") == spec.bench_version:
         for picked in run["only"]:
             if picked in (THROUGHPUT, SWITCHING):
-                old[picked] = results[picked]
+                if picked in results:  # absent when the model does not measure it
+                    old[picked] = results[picked]
             else:
                 old["cells"][picked] = results["cells"][picked]
         old.setdefault("updates", []).append(run)
@@ -263,6 +271,12 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
         data["rows"].remove(old)
     data["rows"].append(results)
     return results
+
+
+def refuse_private(spec: Spec) -> None:
+    """A private model's results are kept off the page (common.PRIVATE_MODELS_ENV)."""
+    if spec.model.private:
+        raise ValueError(f"refusing to publish {spec.model_id}: a private model")
 
 
 def reference_current(reference: dict | None, spec: Spec) -> bool:
@@ -310,6 +324,7 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
     replaces just its cells inside a stored reference of the same versions.
     """
     spec = spec.for_model(spec.model_of(reference))
+    refuse_private(spec)
     reference["model"] = spec.model_id
     run = reference["run"]
     if run.get("limit") is not None:
@@ -399,6 +414,7 @@ def merge_rescore(data: dict, block: dict, spec: Spec) -> dict[str, list[str]]:
     the cell it replaces.
     """
     spec = spec.for_model(spec.model_of(block))
+    refuse_private(spec)
     merged: list[str] = []
     skipped: list[str] = []
     touched: dict[int, tuple[dict, list[str]]] = {}
@@ -1054,6 +1070,9 @@ def _details_text(row: dict) -> str:
 def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     techs = spec.technologies
     n = len(techs)
+    # The serving blocks the model measures; each is 3 groups of n columns.
+    blocks = [b for b in (THROUGHPUT, SWITCHING) if spec.model.measures(b)]
+    serving_width = 3 * n * len(blocks)
     sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
     width = sum(sizes.values())
     data_attrs = " ".join(f'data-{g}="{size}"' for g, size in sizes.items())
@@ -1064,9 +1083,15 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
             '<th rowspan="4">Subject</th>',
             f'<th class="task-head section i-start" colspan="{width * count}">'
             f"{_esc(TASK_LABEL)}</th>",
-            f'<th class="grp-thr section i-start" colspan="{6 * n}">'
-            f"{_esc(SERVING_LABEL)}</th>",
-        ],
+        ]
+        + (
+            [
+                f'<th class="grp-thr section i-start" colspan="{serving_width}">'
+                f"{_esc(SERVING_LABEL)}</th>"
+            ]
+            if blocks
+            else []
+        ),
         [],
         [],
         [],
@@ -1092,11 +1117,12 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                 head[3].append(
                     f"<th{_classes(f'grp-{group}', first, mark)}>{_esc(tech.label)}</th>"
                 )
-    # The two throughput blocks, per technology rather than per intrinsic.
-    for block, unit in (
-        (decode_label(spec), "tokens/s"),
-        (switching_label(spec), "p95 seconds to complete"),
-    ):
+    # The serving blocks, per technology rather than per intrinsic.
+    labels = {
+        THROUGHPUT: (decode_label(spec), "tokens/s"),
+        SWITCHING: (switching_label(spec), "p95 seconds to complete"),
+    }
+    for block, unit in (labels[b] for b in blocks):
         head[1].append(
             f'<th class="grp-thr i-start" colspan="{3 * n}">{_esc(block)}<br>'
             f"<small>{_esc(unit)}</small></th>"
@@ -1178,28 +1204,30 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
                         f"{BASE_LABEL} scores",
                     )
                 )
-        for e, engine in enumerate(ENGINES):
+        if THROUGHPUT in blocks:
+            for e, engine in enumerate(ENGINES):
+                for k, tech in enumerate(techs):
+                    start = ("start i-start" if e == 0 else "start") if k == 0 else ""
+                    extra = f"grp-thr {start}".strip()
+                    cells.append(_throughput_html(row, tech.id, engine, extra, spec))
             for k, tech in enumerate(techs):
-                start = ("start i-start" if e == 0 else "start") if k == 0 else ""
-                extra = f"grp-thr {start}".strip()
-                cells.append(_throughput_html(row, tech.id, engine, extra, spec))
-        for k, tech in enumerate(techs):
-            extra = "grp-thr start" if k == 0 else "grp-thr"
-            cells.append(_speedup_html(row, tech.id, extra, spec))
-        for e, engine in enumerate(ENGINES):
+                extra = "grp-thr start" if k == 0 else "grp-thr"
+                cells.append(_speedup_html(row, tech.id, extra, spec))
+        if SWITCHING in blocks:
+            for e, engine in enumerate(ENGINES):
+                for k, tech in enumerate(techs):
+                    start = ("start i-start" if e == 0 else "start") if k == 0 else ""
+                    extra = f"grp-thr {start}".strip()
+                    cells.append(_switching_html(row, tech.id, engine, extra, spec))
             for k, tech in enumerate(techs):
-                start = ("start i-start" if e == 0 else "start") if k == 0 else ""
-                extra = f"grp-thr {start}".strip()
-                cells.append(_switching_html(row, tech.id, engine, extra, spec))
-        for k, tech in enumerate(techs):
-            extra = "grp-thr start" if k == 0 else "grp-thr"
-            cells.append(_switching_speedup_html(row, tech.id, extra, spec))
+                extra = "grp-thr start" if k == 0 else "grp-thr"
+                cells.append(_switching_speedup_html(row, tech.id, extra, spec))
         old = row.get("bench_version") != spec.bench_version
         body.append(f"<tr{_classes('old' if old else '')}>" + "".join(cells) + "</tr>")
     if not body:
         body.append(
             f'<tr><td class="commit" colspan="2">no commit benchmarked yet</td>'
-            f'<td colspan="{width * len(spec.intrinsics) + 6 * n}"></td></tr>'
+            f'<td colspan="{width * len(spec.intrinsics) + serving_width}"></td></tr>'
         )
     return (
         '<div class="wrap"><table class="bench"><thead>'
@@ -1235,7 +1263,7 @@ adapter's gain over the base model.</figcaption>
 
 def render(data: dict, spec: Spec) -> str:
     sections, tabs = [], []
-    for m in spec.models:
+    for m in spec.public_models:
         model_spec = spec.for_model(m.id)
         rows = [r for r in data["rows"] if r["model"] == m.id]
         reference = data["references"].get(m.id)
@@ -1258,7 +1286,9 @@ def render(data: dict, spec: Spec) -> str:
             + "</section>"
         )
     # Every model's intrinsics, in spec order: the filters apply to every tab.
-    intrinsics = {i.id: i for m in spec.models for i in spec.for_model(m.id).intrinsics}
+    intrinsics = {
+        i.id: i for m in spec.public_models for i in spec.for_model(m.id).intrinsics
+    }
 
     def boxes(kind: str, items) -> str:
         return "".join(
@@ -1476,17 +1506,21 @@ def summary(
             for t, r in zip(techs, ratios, strict=True)
         )
 
-    lines += [
-        "",
-        f"{decode_label(spec)}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
-        f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
-        + percents([speedup(row, t.id, spec) for t in techs]),
-        "",
-        f"{switching_label(spec)}, p95 seconds to complete, {labels}: "
-        f"{ENGINE_LABEL} {seconds('gs')}; {NATIVE_LABEL} {seconds('native')}; "
-        f"{SPEEDUP_LABEL.lower()} "
-        + percents([switching_speedup(row, t.id, spec) for t in techs]),
-    ]
+    if spec.model.measures(THROUGHPUT):
+        lines += [
+            "",
+            f"{decode_label(spec)}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
+            f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
+            + percents([speedup(row, t.id, spec) for t in techs]),
+        ]
+    if spec.model.measures(SWITCHING):
+        lines += [
+            "",
+            f"{switching_label(spec)}, p95 seconds to complete, {labels}: "
+            f"{ENGINE_LABEL} {seconds('gs')}; {NATIVE_LABEL} {seconds('native')}; "
+            f"{SPEEDUP_LABEL.lower()} "
+            + percents([switching_speedup(row, t.id, spec) for t in techs]),
+        ]
     return "\n".join(lines)
 
 

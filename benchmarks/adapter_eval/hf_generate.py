@@ -51,6 +51,8 @@ failed, to ``status_path``.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import sys
 import time
@@ -170,6 +172,22 @@ def load_model(job: dict):
     return model.to("cuda").eval()
 
 
+@contextlib.contextmanager
+def load_lock(path: str | None):
+    """Hold ``path`` locked while a model loads, so the pod's cells load one
+    at a time; no lock without a path."""
+    if not path:
+        yield
+        return
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def invocation_tokens(job: dict) -> list[int] | None:
     if job["column"] != "alora":
         return None
@@ -267,7 +285,8 @@ def run(job: dict) -> dict:
         raise CellFailed("no rows left to generate")
 
     t0 = time.time()
-    model = load_model(job)
+    with load_lock(job.get("load_lock")):
+        model = load_model(job)
     if job.get("adapter_dir"):
         saved = load_file(str(Path(job["adapter_dir"]) / WEIGHTS_FILE))
         bad = unloaded_weights(saved, model.state_dict())

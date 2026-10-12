@@ -64,7 +64,9 @@ STAGE_BEGIN = "=== ADAPTER_BENCH_STAGE_BEGIN ==="
 STAGE_END = "=== ADAPTER_BENCH_STAGE_END ==="
 
 # What each benchmarked technology was trained with, as read from the
-# weights. Used only for the draft selection; the config names break ties.
+# weights. Used for the draft selection, where the config names break ties; a
+# model's own shape in adapters.yaml goes over it (``expected``), and is also
+# checked when a pick is staged.
 EXPECTED = {
     "lora": {"rank": 16, "modules": "qkvo+mlp", "names": ("lora_qkvo_mlp_r16",)},
     "alora": {"rank": 32, "modules": "qkvo+mlp", "names": ("alora_qkvo_mlp_r32",)},
@@ -130,9 +132,20 @@ def guess_intrinsic(path: Path) -> str | None:
     return hits[0] if len(hits) == 1 else None
 
 
-def guess_config(path: Path) -> str | None:
+def expected(spec, tech_id: str) -> dict:
+    """What a technology's checkpoints look like for the spec's model."""
+    exp = {**EXPECTED[tech_id], **spec.model.shape(tech_id)}
+    exp["names"] = tuple(exp.get("names", ()))
+    return exp
+
+
+def expected_table(spec) -> dict:
+    return {tech_id: expected(spec, tech_id) for tech_id in EXPECTED}
+
+
+def guess_config(path: Path, table: dict = EXPECTED) -> str | None:
     text = _norm(path)
-    for tech, exp in EXPECTED.items():
+    for tech, exp in table.items():
         # "alora_..." must not count as "lora_...".
         if any(re.search(rf"(?<![a-z]){name}", text) for name in exp["names"]):
             return tech
@@ -254,7 +267,9 @@ def mtime(path: Path) -> str:
     return dt.datetime.fromtimestamp(ts, dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def adapter_candidate(folder: Path, root: Path, hint: str | None = None) -> dict:
+def adapter_candidate(
+    folder: Path, root: Path, hint: str | None = None, table: dict = EXPECTED
+) -> dict:
     # Guesses read only the part below the search root, so the mount's own
     # path cannot match a keyword.
     rel = folder.relative_to(root)
@@ -265,7 +280,7 @@ def adapter_candidate(folder: Path, root: Path, hint: str | None = None) -> dict
         "technology": tech,
         "invalid": reason,
         "intrinsic_guess": guess_intrinsic(rel) or hint,
-        "config_guess": guess_config(rel),
+        "config_guess": guess_config(rel, table),
         "checkpoint": bool(re.search(r"(^|/)checkpoint[_-]\d+", rel.as_posix())),
         "mtime": mtime(weights),
         "size_mb": round(weights.stat().st_size / 2**20, 1),
@@ -278,6 +293,9 @@ def adapter_candidate(folder: Path, root: Path, hint: str | None = None) -> dict
         cand["base_model"] = config.get("base_model_name_or_path")
         cand["target_modules"] = config.get("target_modules")
         cand["alpha"] = config.get("lora_alpha")
+        # SR on a mixture-of-experts base: whose expert routing the adapter
+        # stream used (its trainer records it; None on dense bases).
+        cand["share_moe_routing"] = config.get("share_moe_routing")
         # How the adapter turns on: aLoRA invocation tokens or an SR anchor.
         cand["activation"] = (
             "invocation"
@@ -355,9 +373,12 @@ def probe_judge() -> str:
     return "ok"
 
 
-def fits_cell(a: dict, intrinsic_id: str, tech_id: str, base_model: str) -> bool:
-    """Whether a checkpoint has the technology, shape, K/V mode and base model of a cell."""
-    exp = EXPECTED[tech_id]
+def fits_cell(
+    a: dict, intrinsic_id: str, tech_id: str, base_model: str, exp: dict | None = None
+) -> bool:
+    """Whether a checkpoint has the technology, shape, K/V mode, expert routing
+    and base model of a cell. ``exp`` is the model's ``expected`` shape."""
+    exp = exp or EXPECTED[tech_id]
     return (
         a["technology"] == tech_id
         and a["intrinsic_guess"] == intrinsic_id
@@ -367,6 +388,10 @@ def fits_cell(a: dict, intrinsic_id: str, tech_id: str, base_model: str) -> bool
         and a.get("shared_kv") == exp.get("shared_kv")
         and base_model_matches(a.get("base_model"), base_model) is not False
         and not a["checkpoint"]
+        and (
+            exp.get("share_moe_routing") is None
+            or a.get("share_moe_routing") is exp["share_moe_routing"]
+        )
     )
 
 
@@ -383,10 +408,11 @@ def draft_selection(spec, adapters: list[dict], evals: list[dict]) -> dict:
     for intrinsic in spec.intrinsics:
         picked = []
         for tech in spec.technologies:
+            exp = expected(spec, tech.id)
             fits = [
                 a
                 for a in adapters
-                if fits_cell(a, intrinsic.id, tech.id, spec.base_model)
+                if fits_cell(a, intrinsic.id, tech.id, spec.base_model, exp)
             ]
             if fits:
                 best = max(
@@ -445,13 +471,14 @@ def short_base(name: str | None) -> str:
 
 def cmd_discover(args) -> int:
     spec = load_spec(model=args.model)
+    table = expected_table(spec)
     adapters, evals = [], []
 
     unweighted = []
 
     def visit_adapter(folder, files, root, hint):
         if staged.CONFIG_FILE in files and staged.WEIGHTS_FILE in files:
-            adapters.append(adapter_candidate(folder, root, hint))
+            adapters.append(adapter_candidate(folder, root, hint, table))
         elif PREDICTIONS_FILE in files or folder.name == "checkpoints":
             # A scored run without final weights: list what it holds instead.
             unweighted.append(
@@ -483,6 +510,11 @@ def cmd_discover(args) -> int:
             f"{short_base(a.get('base_model')):<16} "
             f"{a['intrinsic_guess'] or '?':<24} "
             + ("shared_kv " if a.get("shared_kv") else "")
+            + (
+                f"routing={'shared' if a['share_moe_routing'] else 'own'} "
+                if a.get("share_moe_routing") is not None
+                else ""
+            )
             + f"preds={preds['rows'] if preds else '-'!s:<6} "
             f"{a['path']}" + (f"  [{a['invalid']}]" if a["invalid"] else "")
         )
@@ -630,6 +662,19 @@ def cmd_apply(args) -> int:
                 reason = staged.check_adapter(src, tech_id)
                 if reason:
                     raise ValueError(reason)
+                if spec.model.shape(tech_id):
+                    # A model with its own shape (attention only, say): an
+                    # adapter of another shape, or one that also wrapped a
+                    # mixture-of-experts router, does not belong in the cell.
+                    exp = expected(spec, tech_id)
+                    found = weight_summary(src / staged.WEIGHTS_FILE)
+                    keys = ("rank", "cross_rank", "modules")
+                    if any(found.get(k) != exp.get(k) for k in keys):
+                        raise ValueError(
+                            f"its weights are {', '.join(f'{k} {found.get(k)}' for k in keys)}; "
+                            f"{spec.model_id} {tech_id} adapters are "
+                            f"{', '.join(f'{k} {exp.get(k)}' for k in keys)}"
+                        )
                 extra = {}
                 if tech_id == "sr":
                     if not staged.says_shared_kv(str(src)):
@@ -637,6 +682,11 @@ def cmd_apply(args) -> int:
                             "not a shared-K/V run: its path does not say sharedkv"
                         )
                     extra["shared_kv"] = True
+                    if spec.model.shared_routing:
+                        routing = staged.routing_reason(src)
+                        if routing:
+                            raise ValueError(routing)
+                        extra["share_moe_routing"] = True
                 names = [staged.CONFIG_FILE, staged.WEIGHTS_FILE, "io.yaml"]
                 files = {n: src / n for n in names if (src / n).is_file()}
                 rank, cross = lora_ranks(src / staged.WEIGHTS_FILE)

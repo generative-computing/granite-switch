@@ -159,6 +159,10 @@ def env_var(name: str, value) -> dict:
 def build(args) -> dict:
     mode = args.mode
     gpus, cpus, memory = RESOURCES[mode]
+    # The model's own pod size for this mode (adapters.yaml), from submit.sh.
+    own = json.loads(args.resources) if args.resources else {}
+    gpus, cpus = int(own.get("gpus", gpus)), int(own.get("cpus", cpus))
+    memory = str(own.get("memory", memory))
     mount = need("PVC_MOUNT")
     sha, dirty = harness_version()
 
@@ -173,6 +177,10 @@ def build(args) -> dict:
         extra["targets.json"] = Path(args.targets)
     if mode == "reference":
         extra["base_instructions.json"] = Path(need("BASE_INSTRUCTIONS_FILE"))
+    # A model kept off the public page is defined in a local file, which its
+    # jobs need to know it by (common.PRIVATE_MODELS_ENV).
+    if args.private_models:
+        extra["models.private.yaml"] = Path(args.private_models)
     for path in extra.values():
         if not path.is_file():
             fail(f"{path} does not exist")
@@ -295,6 +303,14 @@ def main(argv: list[str] | None = None) -> int:
         help="bench, reference, rescore: give the pod the LLM judge's endpoint and key",
     )
     p.add_argument("--replace", action="store_true", help="stage: overwrite cells")
+    p.add_argument(
+        "--private-models",
+        help="the private models file, for a job of a private model",
+    )
+    p.add_argument(
+        "--resources",
+        help='the model\'s pod size for this mode, JSON: {"gpus", "cpus", "memory"}',
+    )
     args = p.parse_args(argv)
     if args.mode in ("bench", "script") and not args.sha:
         fail(f"--sha is required for {args.mode}")

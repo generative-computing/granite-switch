@@ -3400,3 +3400,432 @@ def test_reference_job_ships_the_sr_code(tmp_path, monkeypatch):
     monkeypatch.delenv("SR_REPO")
     with pytest.raises(SystemExit):
         render_job.main(argv)
+
+
+# --- per-model settings and private models ---------------------------------------
+
+QKVO = ("q_proj", "k_proj", "v_proj", "o_proj")
+QO = ("q_proj", "o_proj")
+# A made-up model with every per-model setting: attention-only adapters, SR that
+# takes the expert routing from the base stream, no serving blocks.
+PRIVATE_MODEL = {
+    "id": "moe-test-1b",
+    "name": "example-org/moe-test-1b",
+    "label": "MoE test 1B",
+    "bench_version": 1,
+    "prompt": {
+        "chat_template_kwargs": {"enable_thinking": False},
+        "documents": "system",
+        "documents_by_technology": {"sr": "tool_json_after_question"},
+    },
+    "technologies": {
+        "lora": {
+            "source": "LoRA (q,k,v,o, r=32)",
+            "shape": {"rank": 32, "modules": "qkvo", "names": ["lora_qkvo_r32"]},
+        },
+        "alora": {
+            "source": "aLoRA (q,k,v,o, r=32)",
+            "shape": {"rank": 32, "modules": "qkvo", "names": ["alora_qkvo_r32"]},
+        },
+        "sr": {
+            "source": "Shadow Residual (q,o, r=32, cross r=32, shared K/V and routing)",
+            "shape": {
+                "rank": 32, "cross_rank": 32, "modules": "qo", "shared_kv": True,
+                "share_moe_routing": True, "names": ["sr_qo_c32_sharedkv"],
+            },
+        },
+    },
+    "resources": {"bench": {"memory": "384Gi"}, "reference": {"memory": "400Gi"}},
+    "serving": {"throughput": False, "switching": False},
+    "reference": {"token_budget": 65536, "max_batch": 16, "serial_loads": True},
+}  # fmt: skip
+
+
+@pytest.fixture
+def private_spec(tmp_path, monkeypatch):
+    """The benchmark with a private model added, as submit.sh adds one."""
+    import yaml
+
+    path = tmp_path / "models.private.yaml"
+    path.write_text(yaml.safe_dump({"models": [PRIVATE_MODEL]}))
+    monkeypatch.setenv(common.PRIVATE_MODELS_ENV, str(path))
+    return common.load_spec(model=PRIVATE_MODEL["id"])
+
+
+def set_config(folder: Path, **values) -> None:
+    path = folder / staged.CONFIG_FILE
+    path.write_text(json.dumps({**json.loads(path.read_text()), **values}))
+
+
+def test_a_private_model_has_its_own_settings(private_spec):
+    m = private_spec.model
+    assert m.private and private_spec.model_id == "moe-test-1b"
+    assert m.shape("lora") == {
+        "rank": 32,
+        "modules": "qkvo",
+        "names": ["lora_qkvo_r32"],
+    }
+    exp = stage.expected(private_spec, "sr")
+    assert (exp["modules"], exp["cross_rank"], exp["names"]) == (
+        "qo", 32, ("sr_qo_c32_sharedkv",)
+    )  # fmt: skip
+    assert m.shared_routing
+    assert not m.measures("throughput") and not m.measures("switching")
+    assert m.resources_for("bench") == {"memory": "384Gi"}
+    assert m.resources_for("stage") == {}
+    assert private_spec.source("lora") == "LoRA (q,k,v,o, r=32)"
+    default = private_spec.for_model(SPEC.model_id)
+    assert default.source("lora") == next(
+        t.source for t in SPEC.technologies if t.id == "lora"
+    )
+
+
+def test_models_without_their_own_settings_are_unchanged():
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    # The page records exactly what it recorded before models had settings.
+    assert SPEC.public()["models"] == [
+        {k: m.get(k, {}) for k in ("id", "name", "label", "bench_version", "prompt")}
+        for m in raw["models"]
+    ]
+    for m in SPEC.models:
+        spec = SPEC.for_model(m.id)
+        assert not m.private and not m.shared_routing and m.reference == {}
+        assert m.measures("throughput") and m.measures("switching")
+        assert m.resources_for("bench") == {}
+        assert stage.expected_table(spec) == {
+            t: {**e, "names": tuple(e["names"])} for t, e in stage.EXPECTED.items()
+        }
+        for t in SPEC.technologies:
+            assert spec.source(t.id) == t.source
+
+
+def test_private_models_stay_off_the_page(private_spec):
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    public = private_spec.public()
+    assert [m["id"] for m in public["models"]] == [m["id"] for m in raw["models"]]
+    html = publish.render(page_data(), private_spec)
+    for text in (json.dumps(public), html):
+        for name in ("moe-test", "example-org", "MoE test"):
+            assert name not in text
+    results = {
+        **results_for(cells=cells_for(private_spec)),
+        "model": private_spec.model_id,
+        "bench_version": private_spec.bench_version,
+        "base_model": private_spec.base_model,
+    }
+    with pytest.raises(ValueError, match="private model"):
+        publish.merge(page_data(), results, private_spec)
+    ref = {**reference_for(), "model": private_spec.model_id, "bench_version": 1}
+    with pytest.raises(ValueError, match="private model"):
+        publish.merge_reference(page_data(), ref, private_spec)
+
+
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("technologies", {"lorax": {}}, "bad technologies"),
+        ("technologies", {"lora": {"label": "x"}}, "bad technologies"),
+        ("technologies", {"lora": {"shape": {"rank": 32, "colour": "red"}}}, "bad technologies"),
+        ("resources", {"bench": {"gpus": 2, "disk": "1Ti"}}, "bad resources"),
+        ("resources", {"training": {"gpus": 2}}, "bad resources"),
+        ("serving", {"throughput": "no"}, "bad serving"),
+        ("serving", {"latency": False}, "bad serving"),
+        ("reference", {"batch": 8}, "bad reference"),
+    ],
+)  # fmt: skip
+def test_load_spec_rejects_bad_model_settings(tmp_path, field, value, message):
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["models"][1][field] = value
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match=message):
+        common.load_spec(path)
+
+
+def candidate(tech: str, rank: int, modules: str, cross=None, routing=None, base=None):
+    return {
+        "technology": tech, "intrinsic_guess": "answerability", "rank": rank,
+        "cross_rank": cross, "modules": modules,
+        "shared_kv": True if tech == "sr" else None, "share_moe_routing": routing,
+        "base_model": base or PRIVATE_MODEL["name"], "checkpoint": False,
+    }  # fmt: skip
+
+
+def test_cells_fit_the_shape_of_their_model(private_spec):
+    dense = private_spec.for_model(SPEC.model_id)
+
+    def fits(a, tech, spec):
+        exp = stage.expected(spec, tech)
+        return stage.fits_cell(a, "answerability", tech, spec.base_model, exp)
+
+    qkvo = candidate("lora", 32, "qkvo")
+    assert fits(qkvo, "lora", private_spec)
+    assert not fits({**qkvo, "base_model": SPEC.base_model}, "lora", dense)
+    all_linear = candidate("lora", 16, "qkvo+mlp", base=SPEC.base_model)
+    assert fits(all_linear, "lora", dense)
+    assert not fits(
+        {**all_linear, "base_model": PRIVATE_MODEL["name"]}, "lora", private_spec
+    )
+    # all-linear on a mixture-of-experts model wraps its router too.
+    assert not fits(candidate("lora", 32, "qkvo+layer"), "lora", private_spec)
+    sr = candidate("sr", 32, "qo", cross=32, routing=True)
+    assert fits(sr, "sr", private_spec)
+    assert not fits({**sr, "share_moe_routing": False}, "sr", private_spec)
+    assert not fits({**sr, "share_moe_routing": None}, "sr", private_spec)
+    # A dense model has no routing to check.
+    dense_sr = candidate("sr", 32, "qo+mlp", cross=32, base=SPEC.base_model)
+    assert fits(dense_sr, "sr", dense) and fits(
+        {**dense_sr, "share_moe_routing": True}, "sr", dense
+    )
+
+
+def test_discover_drafts_by_the_models_own_shapes(
+    tmp_path, capsys, monkeypatch, private_spec
+):
+    runs = tmp_path / "runs" / "answerability"
+    base = private_spec.base_model
+    lora = make_adapter(
+        runs / "lora-qkvo-r32" / "run_1" / "final",
+        "lora",
+        rank=32,
+        modules=QKVO,
+        base_model=base,
+    )
+    make_adapter(
+        runs / "lora-qkvo-mlp-r16" / "run_1" / "final",
+        "lora",
+        rank=16,
+        modules=QKVO_MLP,
+        base_model=base,
+    )
+    sr = {"tech": "sr", "rank": 32, "cross": 32, "modules": QO, "base_model": base}
+    shared = make_adapter(runs / "sr-qo-c32-sharedkv" / "run_1" / "final", **sr)
+    own = make_adapter(runs / "sr-qo-c32-sharedkv-own" / "run_1" / "final", **sr)
+    set_config(shared, share_moe_routing=True)
+    set_config(own, share_moe_routing=False)
+    t = 1_900_000_000  # the newest SR run, which must still lose
+    os.utime(own / staged.WEIGHTS_FILE, (t, t))
+
+    report = discover(
+        tmp_path,
+        capsys,
+        monkeypatch,
+        "--adapter-root",
+        str(tmp_path / "runs"),
+        "--model",
+        private_spec.model_id,
+    )
+    assert report["draft_selection"]["adapters"] == {
+        "answerability": {"lora": str(lora), "sr": str(shared)}
+    }  # fmt: skip
+
+
+def test_apply_checks_the_models_shape_and_routing(tmp_path, capsys, private_spec):
+    runs = tmp_path / "runs" / "answerability"
+    base = private_spec.base_model
+    lora = make_adapter(
+        runs / "lora-qkvo-r32" / "run_1" / "final",
+        "lora",
+        rank=32,
+        modules=QKVO,
+        base_model=base,
+    )
+    alora = make_adapter(
+        runs / "alora-qkvo-mlp-r32" / "run_1" / "final",
+        "alora",
+        rank=32,
+        modules=QKVO_MLP,
+        base_model=base,
+    )
+    sr = make_adapter(
+        runs / "sr-qo-c32-sharedkv" / "run_1" / "final",
+        "sr",
+        rank=32,
+        cross=32,
+        modules=QO,
+        base_model=base,
+    )
+    set_config(sr, share_moe_routing=False)
+    selection = tmp_path / "selection.json"
+    selection.write_text(json.dumps({
+        "adapters": {"answerability": {"lora": str(lora), "alora": str(alora), "sr": str(sr)}},
+        "eval": {"answerability": str(write_eval(tmp_path / "eval.jsonl"))},
+    }))  # fmt: skip
+    bench = tmp_path / "bench"
+    argv = ["apply", "--model", private_spec.model_id, "--selection", str(selection),
+            "--bench-root", str(bench)]  # fmt: skip
+
+    assert stage.main(argv) == 1
+    report = common.extract_block(
+        capsys.readouterr().out, stage.STAGE_BEGIN, stage.STAGE_END
+    )
+    adapters = report["adapters"]
+    assert "error" not in adapters["answerability/lora"]
+    assert "modules qkvo+mlp" in adapters["answerability/alora"]["error"]
+    assert "routes experts on its own" in adapters["answerability/sr"]["error"]
+
+    set_config(sr, share_moe_routing=True)
+    assert stage.main(argv) == 1  # the aLoRA pick still fails
+    report = common.extract_block(
+        capsys.readouterr().out, stage.STAGE_BEGIN, stage.STAGE_END
+    )
+    assert report["adapters"]["answerability/sr"]["share_moe_routing"] is True
+    cells = {
+        c.tech: c.skip_reason
+        for c in staged.discover(bench, private_spec, ["answerability"])
+    }
+    assert cells == {"lora": None, "alora": "adapter not staged", "sr": None}
+    # Staged, a checkpoint that routes on its own is still refused.
+    set_config(
+        staged.adapter_dir(bench, "answerability", "sr"), share_moe_routing=False
+    )
+    cells = {
+        c.tech: c.skip_reason
+        for c in staged.discover(bench, private_spec, ["answerability"])
+    }
+    assert cells["sr"] == "SR adapter routes experts on its own"
+
+
+@pytest.mark.parametrize(
+    "routing, reason",
+    [
+        (True, None),
+        (False, "routes experts on its own"),
+        (None, "routing mode unknown"),
+    ],
+)
+def test_routing_reason_reads_the_adapter_config(tmp_path, routing, reason):
+    sr = make_adapter(tmp_path / "sr", "sr", rank=32, cross=32)
+    if routing is not None:
+        set_config(sr, share_moe_routing=routing)
+    got = staged.routing_reason(sr)
+    assert got is None if reason is None else reason in got
+
+
+def test_a_model_can_leave_out_the_serving_blocks(tmp_path, private_spec):
+    row = {
+        **results_for(cells=cells_for(private_spec)),
+        "model": private_spec.model_id,
+        "bench_version": private_spec.bench_version,
+    }
+    del row["throughput"], row["switching"]
+    assert publish.cache_hit(row, private_spec)
+    # Asked for a block the model leaves out, the run refuses before any work.
+    argv = bench_argv(
+        tmp_path, "--model", private_spec.model_id, "--only", "throughput"
+    )
+    assert run_benchmark.main(argv) == 2
+
+
+def test_render_leaves_out_the_serving_blocks_a_model_does_not_measure(tmp_path):
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["models"][1]["serving"] = {"throughput": False, "switching": False}
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    spec = common.load_spec(path)
+    second = spec.for_model(spec.models[1].id)
+    row = {
+        **results_for(cells=cells_for(second)),
+        "model": second.model_id,
+        "bench_version": second.bench_version,
+        "base_model": second.base_model,
+    }
+    del row["throughput"], row["switching"]
+    table = publish._model_table([row], None, second)
+    assert "grp-thr" not in table and "task-head" in table
+    assert "grp-thr" in publish._model_table([results_for()], None, spec)
+    assert "grp-thr" not in publish._model_table([], None, second)
+    data = {"rows": [row], "references": {}}
+    text = publish.summary(data, second, row["commit"]["sha"], "success")
+    assert "tokens/s" not in text and "p95 seconds" not in text
+
+
+def test_job_values_take_the_models_pod_size_and_private_file(tmp_path, monkeypatch):
+    render_job = load_render_job()
+    monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))
+    env = {
+        "NAMESPACE": "ns", "CONTAINER_IMAGE": "img", "IMAGE_PULL_SECRET": "pull",
+        "PVC_NAME": "pvc", "PVC_MOUNT": "/mnt/x", "BENCH_ROOT": "/mnt/x/bench",
+        "WORK_ROOT": "/mnt/x/runs",
+    }  # fmt: skip
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    out = tmp_path / "values.json"
+    argv = ["--mode", "bench", "--job-name", "j", "--run-ts", "T", "--out", str(out),
+            "--sha", SHA_A]  # fmt: skip
+
+    def payload_names(values: dict) -> list[str]:
+        payload = next(
+            e["value"] for e in values["environmentVariables"]
+            if e["name"] == "ADAPTER_BENCH_HARNESS_TGZ"
+        )  # fmt: skip
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(payload))) as tar:
+            return tar.getnames()
+
+    gpus, cpus, memory = render_job.RESOURCES["bench"]
+    assert render_job.main(argv) == 0
+    values = json.loads(out.read_text())
+    assert (values["numGpusPerPod"], values["numCpusPerPod"], values["totalMemoryPerPod"]) == (
+        gpus, cpus, memory
+    )  # fmt: skip
+    assert "extra/models.private.yaml" not in payload_names(values)
+
+    private = tmp_path / "models.private.yaml"
+    private.write_text("models: []\n")
+    own = json.dumps({"memory": "384Gi"})
+    assert (
+        render_job.main([*argv, "--resources", own, "--private-models", str(private)])
+        == 0
+    )
+    values = json.loads(out.read_text())
+    assert (values["numGpusPerPod"], values["totalMemoryPerPod"]) == (gpus, "384Gi")
+    assert "extra/models.private.yaml" in payload_names(values)
+
+
+def test_reference_takes_the_models_settings(tmp_path, monkeypatch, private_spec):
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    (bench / staged.MODEL_FILE).write_text(
+        json.dumps({"model": private_spec.model_id, "name": private_spec.base_model})
+    )
+    jobs = []
+
+    def fake_run_jobs(job_list, gpus, python, harness_root):
+        jobs.extend(job_list)
+        return {j["key"]: {"ok": False, "reason": "not run here"} for j in job_list}
+
+    monkeypatch.setattr(reference, "gpu_ids", lambda count: ["0", "1"])
+    monkeypatch.setattr(reference, "sr_code_available", lambda: True)
+    monkeypatch.setattr(reference, "run_jobs", fake_run_jobs)
+    work = tmp_path / "work"
+    argv = [
+        "--bench-root", str(bench), "--work-dir", str(work), "--model", private_spec.model_id,
+        "--base-model", str(write_base(tmp_path / "base")),
+        "--base-instructions", str(write_instructions(tmp_path / "instructions.json")),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert reference.main(argv) == 0
+    run = json.loads((work / "reference.json").read_text())["run"]
+    assert (run["token_budget"], run["max_batch"]) == (65536, 16)
+    (base_job,) = jobs
+    assert base_job["column"] == "base" and base_job["load_lock"].endswith("load.lock")
+    assert reference.main([*argv, "--token-budget", "1000"]) == 0
+    assert (
+        json.loads((work / "reference.json").read_text())["run"]["token_budget"] == 1000
+    )
+
+
+def test_load_lock(tmp_path):
+    with hf_generate.load_lock(None):
+        pass
+    path = tmp_path / "locks" / "load.lock"
+    with hf_generate.load_lock(str(path)):
+        assert path.is_file()
