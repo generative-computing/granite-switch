@@ -91,7 +91,9 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
     walls = {lane["lane"]: lane["wall_s"] for lane in lanes}
     keep = (
         "arm", "wall_s", "warmup_wall_s", "generated", "prompt_tokens",
-        "recomputed_tokens", "cached_tokens", "kv_capacity", "gpu", "torch", "vllm",
+        "recomputed_tokens", "cached_tokens", "first_prefill_tokens", "resent_tokens",
+        "resent_cached_tokens", "reprefilled_tokens", "kv_capacity", "gpu", "torch",
+        "vllm",
     )  # fmt: skip
     return {
         "metadata": {
@@ -220,7 +222,8 @@ def main(argv: list[str] | None = None) -> int:
     for lane, meta in race["metadata"]["lanes"].items():
         print(
             f"[{TAG}] {lane}: all agents done in {meta['wall_s']:.1f}s, "
-            f"{meta['recomputed_tokens']:,} prompt tokens re-prefilled",
+            f"first prefill {meta['first_prefill_tokens']:,} tokens, "
+            f"re-prefilled {meta['reprefilled_tokens']:,}",
             flush=True,
         )
     print(encode_block(race), flush=True)
