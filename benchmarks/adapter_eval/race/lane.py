@@ -92,6 +92,17 @@ def units_of(agent: dict, arm: str) -> list[dict]:
     return units
 
 
+def segments_of(agent: dict) -> list[dict]:
+    """The agent's segments as its schedule names them, in token order: where each
+    ends, its adapter, and whether the adapter changes after it."""
+    out, at = [], 0
+    for unit in units_of(agent, "native-lora"):
+        if unit["kind"] == "gen":
+            at += unit["tokens"]
+            out.append(dict(end=at, adapter=unit["adapter"], switch=unit["switch"]))
+    return out
+
+
 def gap_after(units: list[dict], ui: int, arm: str) -> str | None:
     """What an agent waits on after its request ``ui``: a round trip (native-lora,
     after a switch), a tool call, both, or nothing."""
@@ -112,10 +123,19 @@ class Recorder:
         # The page's row of each agent: its place in the order agents start.
         self.row = {a["agent_id"]: k for k, a in enumerate(ordered)}
         self.units = {a["agent_id"]: units_of(a, arm) for a in ordered}
+        # Each agent's segments, as its schedule names them. Stock vLLM switches
+        # adapter at their ends, with a new request. SR's switch is not
+        # implemented, and would cost nothing on the GPU (its K/V come from the
+        # base model), so its generation runs on: its adapter is shown changing
+        # on the same schedule, and the switches counted as for stock vLLM.
+        self.segments = {a["agent_id"]: segments_of(a) for a in ordered}
         self.state = {
-            a["agent_id"]: dict(status="queued", phase=None, tokens=0, shown=0)
+            a["agent_id"]: dict(
+                status="queued", phase=None, tokens=0, shown=0, seg=0, req_end=0
+            )
             for a in ordered
         }
+        self.switches = self.requests = 0
         self.events: list[dict] = []
         self.t0 = time.perf_counter()
         self.started_at: dict[tuple[int, int], float] = {}
@@ -154,9 +174,27 @@ class Recorder:
         if phase:
             self.emit("step_start", agent_id, step=phase, **fields)
 
+    def _shown_adapter(self, agent_id: int) -> str | None:
+        """The adapter the schedule gives the agent's next token."""
+        segs, seg = self.segments[agent_id], self.state[agent_id]["seg"]
+        return segs[seg]["adapter"] if seg < len(segs) else None
+
+    def _switch(self, agent_id: int, adapter: str | None, to: str | None) -> None:
+        self.switches += 1
+        self.emit("switch", agent_id, adapter=adapter, to=to)
+
     def request_start(
-        self, agent_id: int, ui: int, adapter: str | None, prompt_tokens: int
+        self,
+        agent_id: int,
+        ui: int,
+        adapter: str | None,
+        prompt_tokens: int,
+        n_tokens: int = 0,
     ) -> None:
+        st = self.state[agent_id]
+        st["req_end"] = st["tokens"] + n_tokens
+        if self.arm == "shadow-residual":
+            adapter = self._shown_adapter(agent_id)
         self.started_at[agent_id, ui] = self.now()
         self._phase(
             agent_id, "prefill", unit=ui, adapter=adapter, prompt_tokens=prompt_tokens
@@ -174,6 +212,16 @@ class Recorder:
         if st["tokens"] // PROGRESS_EVERY > st["shown"] // PROGRESS_EVERY:
             st["shown"] = st["tokens"]
             self.emit("progress", agent_id, tokens=st["tokens"])
+        if self.arm != "shadow-residual":
+            return
+        segs = self.segments[agent_id]
+        while st["seg"] < len(segs) and st["tokens"] >= segs[st["seg"]]["end"]:
+            ended = segs[st["seg"]]
+            st["seg"] += 1
+            if ended["switch"]:
+                self._switch(agent_id, ended["adapter"], self._shown_adapter(agent_id))
+            if st["seg"] < len(segs) and st["tokens"] < st["req_end"]:
+                self._phase(agent_id, "decode", adapter=self._shown_adapter(agent_id))
 
     def request_end(
         self, agent_id: int, ui: int, prompt_tokens: int, cached: int | None
@@ -193,10 +241,15 @@ class Recorder:
             else:
                 self.resent_tokens += prompt_tokens
                 self.resent_cached += cached
+        self.requests += 1
         self.emit(
             "req_done", agent_id, unit=ui, prompt_tokens=prompt_tokens, cached=cached
         )
-        self._phase(agent_id, gap_after(self.units[agent_id], ui, self.arm))
+        units = self.units[agent_id]
+        if self.arm == "native-lora" and units[ui]["switch"]:
+            nxt = next((u for u in units[ui + 1 :] if u["kind"] == "gen"), None)
+            self._switch(agent_id, units[ui]["adapter"], nxt and nxt["adapter"])
+        self._phase(agent_id, gap_after(units, ui, self.arm))
 
     def agent_done(self, agent_id: int, elapsed: float) -> None:
         self.state[agent_id].update(status="done", phase=None)
@@ -225,6 +278,8 @@ class Recorder:
             "ttft_avg": round(sum(self.ttfts) / len(self.ttfts), 4)
             if self.ttfts
             else None,
+            "switches": self.switches,
+            "requests": self.requests,
             "first_prefill": self.first_prefill,
             "reprefilled": self.resent_tokens - self.resent_cached,
             "context_hit": round(self.resent_cached / self.resent_tokens, 4)
@@ -246,6 +301,7 @@ class RecordingEngine:
         self._engine = engine
         self._rec = recorder
         self._adapter_of = adapter_of
+        self.adapters_run: set[str] = set()
 
     def generate(self, prompt, params, request_id, **kw):
         found = REQUEST_ID.search(request_id)
@@ -255,12 +311,16 @@ class RecordingEngine:
         ids = prompt["prompt_token_ids"]
         lora = kw.get("lora_request")
         adapter = lora.lora_name if lora is not None else self._adapter_of(ids)
+        if adapter:
+            self.adapters_run.add(adapter)
         stream = self._engine.generate(prompt, params, request_id, **kw)
-        return self._stream(stream, agent_id, ui, adapter, len(ids))
+        return self._stream(
+            stream, agent_id, ui, adapter, len(ids), getattr(params, "max_tokens", 0)
+        )
 
-    async def _stream(self, stream, agent_id, ui, adapter, prompt_tokens):
+    async def _stream(self, stream, agent_id, ui, adapter, prompt_tokens, n_tokens):
         rec = self._rec
-        rec.request_start(agent_id, ui, adapter, prompt_tokens)
+        rec.request_start(agent_id, ui, adapter, prompt_tokens, n_tokens)
         seen, out = 0, None
         async for out in stream:
             got = len(out.outputs[0].token_ids)
@@ -339,6 +399,10 @@ async def race_lane(engine, flavour, agents, arm, args, lora_for, adapter_of) ->
         "prompt_tokens": recorder.prompt_tokens,
         "recomputed_tokens": recorder.recomputed_tokens,
         "cached_tokens": recorder.cached_tokens,
+        "switches": recorder.switches,
+        "requests": recorder.requests,
+        # The adapters the engine actually ran: for SR, the one every agent kept.
+        "adapters_run": sorted(proxy.adapters_run),
         "first_prefill_tokens": recorder.first_prefill,
         "resent_tokens": recorder.resent_tokens,
         "resent_cached_tokens": recorder.resent_cached,

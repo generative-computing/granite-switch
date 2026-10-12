@@ -14,9 +14,9 @@ concurrency 8" cell (see [Agents switching adapters](ADAPTER_BENCHMARK.md#agents
 from the switch benchmark's own generator and agent loop, copied unchanged into
 `benchmarks/`:
 
-- **16 agents per lane, at most 8 at a time.** The next agent starts as soon as
-  any running one finishes. (The benchmark releases its agents in two fixed
-  waves of 8 instead.)
+- **64 agents per lane, at most 8 at a time.** The next agent starts as soon as
+  any running one finishes. (The benchmark's switching block runs 16, released in
+  two fixed waves of 8.)
 - **Each agent** has a prompt of its own (256 to 16,384 tokens), generates 512
   tokens, and switches adapter every 32 tokens over 64 synthetic adapters of rank
   32, with its tool calls and round trips as real sleeps.
@@ -25,7 +25,7 @@ from the switch benchmark's own generator and agent loop, copied unchanged into
 
 | Lane | Serving | At an adapter switch |
 |---|---|---|
-| `gs-sr-vllm` | granite-switch SR: the 64 SR adapters composed by the commit, the switch benchmark's shadow-residual arm | nothing: one generation runs until a tool call. As in the switch benchmark, each agent keeps one adapter for its task, since SR's K/V come from the base model and a switch is taken as free. |
+| `gs-sr-vllm` | granite-switch SR: the 64 SR adapters composed by the commit, the switch benchmark's shadow-residual arm | nothing: its K/V come from the base model, so one generation runs until a tool call. The page shows its adapter switching on the same schedule as stock vLLM's, as many times; the switch itself is not implemented yet, so the run kept one adapter per agent, and on the GPU SR costs the same with or without one. |
 | `lora-vllm` | stock vLLM serving the 64 LoRA adapters (its native-lora arm) | ends the request and starts a new one, prefilling the agent's whole context again; vLLM's prefix cache is keyed on the LoRA, so only an adapter served before hits it |
 
 **How it is measured:** both lanes run on one GPU, one after the other, each in
@@ -42,6 +42,9 @@ replays them side by side, each from its own start.
 - **A footer per lane**: agents done, running and waiting, then the lane's time.
 - **A metrics panel per lane**, sampled every half second: agents running,
   prefilling, decoding and waiting on a tool or round trip; tokens per second;
+  the adapter switches so far (the same in both lanes at the end: 16 per agent)
+  and the requests behind them (stock vLLM issues one per switch, SR one per run
+  between tool calls);
   the average time to first token of its last 8 requests; and, from vLLM's own
   count of each request's cached prompt tokens:
   - **Re-prefilled**: prompt tokens computed again after an agent's first
@@ -65,7 +68,8 @@ replays them side by side, each from its own start.
    It takes the workload's settings from `switching` in `adapters.yaml` and the
    synthetic adapters from the benchmark's cache (built if missing), composes and
    checks the SR checkpoint, and runs both lanes. Add
-   `--extra-args "--model granite-4.2-3b"` for another model.
+   `--extra-args "--model granite-4.2-3b"` for another model, or
+   `--extra-args "--agents 16"` for fewer agents per lane.
 
 2. Put the race into the page, from the pod's saved log:
 

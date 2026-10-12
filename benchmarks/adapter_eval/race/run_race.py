@@ -57,6 +57,14 @@ LANES = (
     ("lora-vllm", "native-lora", "lora"),
 )
 TAG = "race"
+# Agents per lane: more than the switching block's 16, through its 8 slots.
+AGENTS = 64
+
+
+def race_settings(spec, agents: int) -> dict:
+    """The switching block's settings (``switching`` in adapters.yaml), with the
+    race's number of agents per lane."""
+    return {**spec.switching.settings(), "min_agents": agents}
 
 
 def harness_root() -> Path:
@@ -92,7 +100,8 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
     keep = (
         "arm", "wall_s", "warmup_wall_s", "generated", "prompt_tokens",
         "recomputed_tokens", "cached_tokens", "first_prefill_tokens", "resent_tokens",
-        "resent_cached_tokens", "reprefilled_tokens", "kv_capacity", "gpu", "torch",
+        "resent_cached_tokens", "reprefilled_tokens", "switches", "requests",
+        "adapters_run", "kv_capacity", "gpu", "torch",
         "vllm",
     )  # fmt: skip
     return {
@@ -107,7 +116,14 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
             "commit": commit,
             "workload": {
                 k: settings[k]
-                for k in ("decode_tokens", "span", "adapters", "rank", "warmup_runs")
+                for k in (
+                    "decode_tokens",
+                    "span",
+                    "adapters",
+                    "rank",
+                    "warmup_runs",
+                    "min_agents",
+                )  # fmt: skip
             },
             "lanes": {lane["lane"]: {k: lane.get(k) for k in keep} for lane in lanes},
         },
@@ -149,6 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         help="where to compose the SR checkpoint (default: the pod's local disk)",
     )
     p.add_argument(
+        "--agents",
+        type=int,
+        default=AGENTS,
+        help="agents per lane (at most the switching block's concurrency at a time)",
+    )
+    p.add_argument(
         "--switching-cache",
         default=None,
         help="the synthetic adapters' cache (default: the benchmark's, per model)",
@@ -156,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     spec = load_spec(model=args.model)
-    settings = spec.switching.settings()
+    settings = race_settings(spec, args.agents)
     python, root = sys.executable, harness_root()
     work = Path(args.work_dir).resolve() / "race"
     work.mkdir(parents=True, exist_ok=True)
@@ -222,6 +244,7 @@ def main(argv: list[str] | None = None) -> int:
     for lane, meta in race["metadata"]["lanes"].items():
         print(
             f"[{TAG}] {lane}: all agents done in {meta['wall_s']:.1f}s, "
+            f"{meta['switches']:,} switches over {meta['requests']:,} requests, "
             f"first prefill {meta['first_prefill_tokens']:,} tokens, "
             f"re-prefilled {meta['reprefilled_tokens']:,}",
             flush=True,

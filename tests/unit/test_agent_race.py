@@ -221,11 +221,65 @@ def test_the_recording_names_every_phase(stub_vllm, fleet):
 def test_sr_runs_one_request_between_tool_calls(stub_vllm, fleet):
     report = race(FakeEngine(), fleet, "shadow-residual")
     steps = [e for e in report["events"] if e["ev"] == "step_start"]
-    assert "rtt" not in {e["step"] for e in steps}  # no switch, no round trip
-    assert {e["adapter"] for e in steps if e["step"] == "prefill"} == {"ad0"}
+    assert "rtt" not in {e["step"] for e in steps}  # no request ends at a switch
     per_agent = len([e for e in steps if e["step"] == "prefill"]) / len(fleet)
     tools = sum(a["n_tool_nodes"] for a in fleet) / len(fleet)
     assert per_agent <= tools + 1
+    assert report["requests"] == len([e for e in steps if e["step"] == "prefill"])
+    # The engine ran one adapter for every agent, the switch benchmark's floor.
+    assert report["adapters_run"] == ["ad0"]
+
+
+def test_both_lanes_show_the_schedules_switches(stub_vllm, fleet):
+    lanes = {
+        arm: race(FakeEngine(), fleet, arm)
+        for arm in ("shadow-residual", "native-lora")
+    }
+    rows = {
+        a["agent_id"]: k
+        for k, a in enumerate(sorted(fleet, key=lambda a: a["agent_id"]))
+    }
+    for arm, report in lanes.items():
+        switches = [e for e in report["events"] if e["ev"] == "switch"]
+        assert (
+            report["switches"] == len(switches) == sum(a["n_switches"] for a in fleet)
+        )
+        for agent in fleet:
+            mine = [e for e in switches if e["conv"] == rows[agent["agent_id"]]]
+            assert len(mine) == agent["n_switches"], (arm, agent["agent_id"])
+    # SR shows each agent's adapters on the schedule's segments, as stock vLLM
+    # runs them: the same adapters, in the same order.
+    sr, native = lanes["shadow-residual"], lanes["native-lora"]
+    for k, agent in enumerate(sorted(fleet, key=lambda a: a["agent_id"])):
+        planned = [s["adapter"] for s in lane.segments_of(agent)]
+        shown = [
+            e["adapter"]
+            for e in sr["events"]
+            if e.get("conv") == k and e["ev"] == "step_start" and e.get("adapter")
+        ]
+        assert [a for i, a in enumerate(shown) if i == 0 or a != shown[i - 1]] == [
+            a for i, a in enumerate(planned) if i == 0 or a != planned[i - 1]
+        ]
+        ran = [
+            e["adapter"]
+            for e in native["events"]
+            if e.get("conv") == k and e["ev"] == "step_start" and e["step"] == "prefill"
+        ]
+        assert ran == planned
+    assert native["requests"] == 256 and sr["requests"] < native["requests"]
+    final = [e["m"] for e in sr["events"] if e["ev"] == "metrics"][-1]
+    assert final["switches"] == sr["switches"] and final["requests"] == sr["requests"]
+
+
+def test_the_race_runs_more_agents_through_the_same_slots():
+    spec = types.SimpleNamespace(
+        switching=types.SimpleNamespace(settings=lambda: dict(WORKLOAD))
+    )
+    settings = run_race.race_settings(spec, 64)
+    assert settings == {**WORKLOAD, "min_agents": 64}
+    grid = run_race.switching.grid_command(settings, Path("g.jsonl"))
+    assert grid[grid.index("--min-agents") + 1] == "64"
+    assert grid[grid.index("--concurrency") + 1] == "8"
 
 
 def test_race_record_and_its_block(stub_vllm, fleet):
