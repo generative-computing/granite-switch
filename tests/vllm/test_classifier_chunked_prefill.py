@@ -90,6 +90,11 @@ def _run_worker(outdir, argv, env, timeout=1800):
         text=True,
         timeout=timeout,
     )
+    # Keep complete worker traces; pytest's concise failure message has only
+    # the tail and can otherwise lose the graph-compiler's originating error.
+    for stream in ("stdout", "stderr"):
+        with open(out_path.removesuffix(".json") + f".{stream}.log", "w") as log:
+            log.write(getattr(proc, stream))
     label = " ".join(argv)
     if not os.path.exists(out_path):
         pytest.fail(
@@ -113,6 +118,133 @@ def composed(tmp_path_factory):
 
 def _composed_env(composed, **extra):
     return {"CLS_CKPT": composed["ckpt"], "CLS_PIDS": composed["pids_path"], **extra}
+
+
+@pytest.fixture(scope="module")
+def composed_sr(tmp_path_factory):
+    return _compose(tmp_path_factory, ["compose-sr-classifier"], "sr_cls_ckpt")
+
+
+@pytest.fixture(scope="module")
+def composed_sr_probes(tmp_path_factory):
+    return _compose(tmp_path_factory, ["compose-sr-classifiers"], "sr_probes_ckpt")
+
+
+@pytest.mark.parametrize("mode", ["eager", "full"])
+def test_sr_and_final_classifier_coactivate(composed_sr, mode):
+    """The identity head scores the selected SR output; transport stays exact."""
+    served = _run_worker(
+        composed_sr["outdir"],
+        [f"run-sr-{mode}"],
+        {"CLS_CKPT": composed_sr["ckpt"]},
+    )
+    sequential = served["sequential"]
+    assert [len(case["records"]) for case in sequential] == [1, 1, 1]
+    active, inactive, replay = [case["records"][0] for case in sequential]
+    assert active["served_hidden"] != inactive["served_hidden"]
+    assert replay["packed_scores"] == active["packed_scores"]
+    for case in [*sequential, served["mixed"]]:
+        for record in case["records"]:
+            assert record["slot"] == 2
+            assert record["packed_scores"] == record["served_hidden"]
+            assert record["rewritten_label_logits"] == record["packed_scores"]
+    for case in sequential:
+        output, record = case["outputs"][0], case["records"][0]
+        assert not output["has_non_label_support"]
+        logprobs, scores = output["label_logprobs"], record["packed_scores"]
+        assert all(lp is not None for lp in logprobs)
+        assert output["token_id"] == 100 + scores.index(max(scores))
+        for lp, score in zip(logprobs, scores):
+            assert lp - logprobs[0] == pytest.approx(score - scores[0], abs=1e-5)
+    assert len(served["mixed"]["records"]) == 2
+    assert [o["has_non_label_support"] for o in served["mixed"]["outputs"]] == [
+        False,
+        True,
+        False,
+    ]
+
+
+@pytest.fixture(scope="module", params=["eager", "full"])
+def sr_probe_reference(composed_sr_probes, request):
+    mode = request.param
+    return mode, _run_worker(
+        composed_sr_probes["outdir"],
+        [f"run-sr-pp-{mode}", "1"],
+        {"CLS_CKPT": composed_sr_probes["ckpt"]},
+    )
+
+
+def _check_sr_layer_probes(result, mode, pp):
+    """Distinct identity-head rows expose wrong sources, masks and stale replay."""
+    failures = []
+    assert len(result["sequential"]) == 9
+    active_scores = []
+    for slot in (2, 3, 4):
+        active, inactive, replay = result["sequential"][3 * (slot - 2) : 3 * (slot - 1)]
+        assert [r["slot"] for r in active["records"]] == [slot]
+        assert [r["slot"] for r in inactive["records"]] == [slot]
+        scores = active["records"][0]["packed_scores"]
+        active_scores.append(scores)
+        assert scores != inactive["records"][0]["packed_scores"]
+        assert scores == replay["records"][0]["packed_scores"]
+        for name, case in (
+            ("active", active),
+            ("inactive", inactive),
+            ("replay", replay),
+        ):
+            record, output = case["records"][0], case["outputs"][0]
+            failures.extend(
+                _check_transport(
+                    f"PP{pp}/{mode}/slot{slot}/{name}",
+                    {**record, **output},
+                    list(range(100, 164)),
+                )
+            )
+            assert output["token_id"] == 100 + record["packed_scores"].index(
+                max(record["packed_scores"])
+            )
+            assert not output["has_non_label_support"]
+    assert all(
+        active_scores[a] != active_scores[b] for a, b in ((0, 1), (0, 2), (1, 2))
+    )
+    assert sorted(r["slot"] for r in result["mixed"]["records"]) == [2, 3, 4]
+    assert [o["has_non_label_support"] for o in result["mixed"]["outputs"]] == [
+        False,
+        True,
+        False,
+        False,
+    ]
+    assert not failures, "\n".join(failures)
+
+
+def test_sr_classifier_reads_each_layer_under_replay(sr_probe_reference):
+    """One GPU: probes at layer 0, layer 1 and final norm with SR active/inactive."""
+    mode, served = sr_probe_reference
+    _check_sr_layer_probes(served, mode, 1)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two GPUs for PP=2")
+def test_sr_layer_probes_across_pipeline_stages(composed_sr_probes, sr_probe_reference):
+    """Same checkpoint and execution mode: PP=2 must preserve PP=1 score rows."""
+    mode, reference = sr_probe_reference
+    served = _run_worker(
+        composed_sr_probes["outdir"],
+        [f"run-sr-pp-{mode}", "2"],
+        {"CLS_CKPT": composed_sr_probes["ckpt"]},
+    )
+    _check_sr_layer_probes(served, mode, 2)
+    # Compare execution modes separately: graph compilation can change bf16
+    # rounding, whereas the pipeline handoff itself must preserve score rows.
+    for case1, case2 in zip(
+        [*reference["sequential"], reference["mixed"]],
+        [*served["sequential"], served["mixed"]],
+    ):
+        assert case1["outputs"] == case2["outputs"]
+        assert len(case1["records"]) == len(case2["records"])
+        for r1, r2 in zip(case1["records"], case2["records"]):
+            assert r1["slot"] == r2["slot"]
+            assert r1["packed_scores"] == r2["packed_scores"]
+            assert r1["rewritten_label_logits"] == r2["rewritten_label_logits"]
 
 
 def test_full_cudagraph_mode_does_not_crash_and_matches_eager(composed):

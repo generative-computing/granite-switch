@@ -441,16 +441,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 "verdict as a label word, so the per-label token ids are required. "
                 "Re-compose so config.json carries classifier_label_token_ids."
             )
-        # vLLM packs each token's classifier slot id into the bf16 hidden states,
-        # which hold integers exactly only up to 256.
-        if any(
-            kind == "classifier" and slot > 256
-            for slot, kind in enumerate(adapter_kinds, start=1)
-        ):
-            raise ValueError(
-                "classifier slot ids must be <= 256; classifier slots are numbered "
-                "after LoRA slots, so compose at most 256 adapters."
-            )
         self.classifier_label_token_ids = classifier_label_token_ids
 
         # Per slot: zero-based decoder layer a classifier reads (switch cache
@@ -480,11 +470,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     raise ValueError(
                         f"classifier_read_layers[{i}] = {layer!r} must be an int in "
                         f"0..{num_decoder_layers - 1}; omit it for the final layer."
-                    )
-                if self.dual_stream:
-                    raise ValueError(
-                        f"classifier slot {i} reads layer {layer}, but intermediate "
-                        f"layers are not supported with dual_stream=True."
                     )
         self.classifier_read_layers = classifier_read_layers
 

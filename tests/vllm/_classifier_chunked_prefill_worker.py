@@ -299,51 +299,16 @@ def compose_two_slot(base, outdir, read_layer, control_offset=5, num_labels=2):
 
 
 def _record_classifier_rows(llm):
-    """Copy each sampled classifier row as ``compute_logits`` sees it.
+    """Install after startup; PP callbacks must be importable for standard pickle."""
+    from tests.shared.classifier_recorder import install_classifier_recorder
 
-    Installed after engine startup, so profiling and capture runs are not
-    recorded. ``compute_logits`` runs outside the captured forward, and the
-    wrapper only copies tensors after the original returns. Requires the
-    in-process engine so the returned list is filled in this process.
-    """
-    from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
+    llm.apply_model(install_classifier_recorder)
 
-    records = []
 
-    def install(model):
-        target = next(
-            m for m in model.modules() if isinstance(m, GraniteSwitchForCausalLM)
-        )
-        original = target.compute_logits
-        config = target.config
-        head = target.model.classifier_head
+def _read_classifier_rows(llm):
+    from tests.shared.classifier_recorder import read_classifier_records
 
-        def compute_logits(hidden_states):
-            logits = original(hidden_states)
-            slots = hidden_states[:, -1].round().long()
-            for row in (slots > 0).nonzero(as_tuple=True)[0].tolist():
-                slot = int(slots[row])
-                labels = config.classifier_label_token_ids[slot - 1]
-                n = len(labels)
-                h = config.hidden_size
-                record = {
-                    "slot": slot,
-                    "packed_scores": hidden_states[row, h : h + n].float().cpu(),
-                    "rewritten_label_logits": logits[row, labels].float().cpu(),
-                }
-                # The packed hidden-state prefix is the final post-norm
-                # activation: the actual head input only for final-layer slots.
-                if config.classifier_read_layers[slot - 1] is None:
-                    record["served_hidden"] = hidden_states[row, :h].float().cpu()
-                    record["loaded_weight"] = head.weight[slot - 1, :n].float().cpu()
-                    record["loaded_bias"] = head.bias[slot - 1, :n].float().cpu()
-                records.append(record)
-            return logits
-
-        target.compute_logits = compute_logits
-
-    llm.apply_model(install)
-    return records
+    return [row for rows in llm.apply_model(read_classifier_records) for row in rows]
 
 
 def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *, eager):
@@ -369,15 +334,15 @@ def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *,
     if not eager:
         kw["compilation_config"] = {"cudagraph_mode": "FULL"}
     llm = LLM(**kw)
-    records = _record_classifier_rows(llm)
+    _record_classifier_rows(llm)
     sp = SamplingParams(max_tokens=1, temperature=0.0, logprobs=len(label_token_ids))
 
     results = []
     for expected_slot, prompt_ids in ((1, prompt_ids_1), (2, prompt_ids_2)):
-        records.clear()
         out = llm.generate([TokensPrompt(prompt_token_ids=prompt_ids)], sp)[0].outputs[
             0
         ]
+        records = _read_classifier_rows(llm)
         recorded_slots = [r["slot"] for r in records]
         if recorded_slots != [expected_slot]:
             raise RuntimeError(
@@ -392,7 +357,7 @@ def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *,
                 "token_id": int(out.token_ids[0]),
                 "text": out.text,
                 "label_logprobs": label_logprobs,
-                **{k: v.tolist() for k, v in records[0].items() if k != "slot"},
+                **{k: v for k, v in records[0].items() if k != "slot"},
             }
         )
 
@@ -431,6 +396,90 @@ def run_at_layer(ckpt, prompt_ids, label_token_ids, out_path, full_cudagraph=Fal
         },
         open(out_path, "w"),
     )
+
+
+def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
+    """Exercise SR probes at each configured layer, sequentially and in a mixed batch."""
+    os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+    if pp_size > 1:
+        # Only trusted, importable test callbacks cross the local RPC boundary.
+        os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    from transformers import AutoConfig
+    from vllm import LLM, SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    from tests.composer.test_sr_compose_e2e import CONTROL_TOKEN_ID, HIDDEN
+
+    labels = list(range(100, 100 + HIDDEN))
+    config = AutoConfig.from_pretrained(ckpt)
+    markers = config.classifier_control_token_ids
+    kw = dict(
+        model=ckpt,
+        skip_tokenizer_init=True,
+        enforce_eager=eager,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=16,
+        max_logprobs=HIDDEN + 1,
+        enable_prefix_caching=False,
+        pipeline_parallel_size=pp_size,
+    )
+    if pp_size > 1:
+        kw["distributed_executor_backend"] = "mp"
+    if not eager:
+        kw["compilation_config"] = {
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [1, 2, 4, 16],
+        }
+    llm = LLM(**kw)
+    _record_classifier_rows(llm)
+    sampling = SamplingParams(max_tokens=1, temperature=0.0, logprobs=HIDDEN + 1)
+    plain = [10, CONTROL_TOKEN_ID, 20, 30]
+
+    def serve(prompts):
+        outputs = llm.generate(
+            [TokensPrompt(prompt_token_ids=p) for p in prompts], sampling
+        )
+        return {
+            "records": _read_classifier_rows(llm),
+            "outputs": [
+                {
+                    "token_id": int(o.outputs[0].token_ids[0]),
+                    "label_logprobs": [
+                        o.outputs[0].logprobs[0][tid].logprob
+                        if tid in o.outputs[0].logprobs[0]
+                        else None
+                        for tid in labels
+                    ],
+                    "has_non_label_support": any(
+                        tid not in labels and lp.logprob > float("-inf")
+                        for tid, lp in o.outputs[0].logprobs[0].items()
+                    ),
+                }
+                for o in outputs
+            ],
+        }
+
+    result = {
+        "sequential": [
+            serve([p])
+            for marker in markers
+            for p in (
+                [10, CONTROL_TOKEN_ID, 20, marker],
+                [10, 21, 20, marker],
+                [10, CONTROL_TOKEN_ID, 20, marker],
+            )
+        ]
+    }
+    mixed = [[10, CONTROL_TOKEN_ID, 20, markers[0]], plain, [10, 21, 20, markers[-1]]]
+    if len(markers) > 1:
+        mixed.append([10, CONTROL_TOKEN_ID, 20, markers[1]])
+    result["mixed"] = serve(mixed)
+    with open(out_path, "w") as f:
+        json.dump(result, f)
 
 
 def run_full_cudagraph_replay(
@@ -550,6 +599,27 @@ def run_budget(ckpt, prompt_ids, budget, out_path):
 
 def main():
     mode = sys.argv[1]
+    if mode in ("compose-sr-classifier", "compose-sr-classifiers"):
+        from pathlib import Path
+
+        from tests.composer.test_sr_compose_e2e import _compose_sr_classifier
+
+        read_layers = [0, 1, None] if mode == "compose-sr-classifiers" else [None]
+        model = _compose_sr_classifier(
+            Path(os.environ["CLS_OUT"]), read_layers=read_layers
+        )
+        ckpt = os.path.join(os.environ["CLS_OUT"], "composed")
+        model.save_pretrained(ckpt)
+        print(json.dumps({"result": {"ckpt": ckpt}}))
+        return
+    if mode in ("run-sr-eager", "run-sr-full", "run-sr-pp-eager", "run-sr-pp-full"):
+        run_sr_classifier(
+            os.environ["CLS_CKPT"],
+            sys.argv[3] if mode.startswith("run-sr-pp-") else sys.argv[2],
+            eager=mode.endswith("eager"),
+            pp_size=int(sys.argv[2]) if mode.startswith("run-sr-pp-") else 1,
+        )
+        return
     if mode == "compose-multilabel":
         try:
             meta = compose(os.environ["CLS_BASE"], os.environ["CLS_OUT"])
@@ -656,4 +726,18 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if sys.argv[1].startswith("run-sr-pp-"):
+        # Like _pp_generation_worker, contain distributed-worker teardown in
+        # this subprocess so a completed test cannot hang in Python finalizers.
+        exit_code = 1
+        try:
+            main()
+            exit_code = 0
+        except BaseException:
+            traceback.print_exc()
+        finally:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        os._exit(exit_code)
+    else:
+        main()

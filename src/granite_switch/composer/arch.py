@@ -394,14 +394,6 @@ def granite_dense_arch(base_config=None) -> ArchDescriptor:
     )
 
 
-_SR_BUFFER_KEYWORDS: list[str] = [
-    "adapter_token_ids",
-    "adapter_scalings",
-    "control_to_substitute_lut",
-    "cross_stream",  # zero-initialized, no base source
-]
-
-
 def granite_moe_hybrid_sr_arch(base_config=None) -> ArchDescriptor:
     """GraniteMoeHybrid Shadow Residual architecture.
 
@@ -410,7 +402,7 @@ def granite_moe_hybrid_sr_arch(base_config=None) -> ArchDescriptor:
     """
     arch = granite_moe_hybrid_arch(base_config=base_config)
     arch.groups = arch.groups + _cross_stream_groups()
-    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    arch.buffer_keywords.append("cross_stream")  # zero-initialized, no base source
     return arch
 
 
@@ -418,7 +410,7 @@ def granite_moe_sr_arch(base_config=None) -> ArchDescriptor:
     """GraniteMoe Shadow Residual architecture (attention + ``cross_stream``)."""
     arch = granite_moe_arch(base_config=base_config)
     arch.groups = arch.groups + _cross_stream_groups()
-    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    arch.buffer_keywords.append("cross_stream")
     return arch
 
 
@@ -426,7 +418,7 @@ def granite_dense_sr_arch(base_config=None) -> ArchDescriptor:
     """Granite dense Shadow Residual architecture (fused + ``cross_stream``)."""
     arch = granite_dense_arch(base_config=base_config)
     arch.groups = arch.groups + _cross_stream_groups()
-    arch.buffer_keywords = list(_SR_BUFFER_KEYWORDS)
+    arch.buffer_keywords.append("cross_stream")
     return arch
 
 

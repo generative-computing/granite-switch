@@ -286,7 +286,7 @@ class MultiSwitch(nn.Module):
         # no slot is a classifier.
         kind_lut = build_adapter_kind_lut(config)
         if kind_lut is not None:
-            self.register_buffer("adapter_kind_lut", kind_lut, persistent=False)
+            self.register_buffer("adapter_kind_lut", kind_lut, persistent=True)
         else:
             self.adapter_kind_lut = None
 
@@ -297,8 +297,10 @@ class MultiSwitch(nn.Module):
             self.control_to_substitute_lut = None
         marker_lut, slot_lut = build_classifier_control_luts(config)
         if marker_lut is not None:
-            self.register_buffer("classifier_control_lut", marker_lut, persistent=False)
-            self.register_buffer("classifier_slot_lut", slot_lut, persistent=False)
+            # These routing tables must survive HF's meta-device loading, just
+            # like the token-exchange LUT above.
+            self.register_buffer("classifier_control_lut", marker_lut, persistent=True)
+            self.register_buffer("classifier_slot_lut", slot_lut, persistent=True)
         else:
             self.classifier_control_lut = None
             self.classifier_slot_lut = None

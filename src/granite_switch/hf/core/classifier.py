@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Switched classifier heads for Granite Switch.
 
-A classifier head is an optional substitute for a LoRA adapter: an adapter slot
-is either a LoRA adapter or a classifier head, selected by the same control
-token and adapter index. Where a classifier is selected, the LoRA path no-ops
-and the classifier reads clean base-model hidden states.
+Classifier markers select a head independently of the active LoRA or SR
+adapter. The model supplies the configured layer's residual stream (or final
+normalized hidden states), and the head produces per-label scores.
 
 Classifier positions are expected to be sparse, and the weight bank is replicated
 on every rank at this point; revisit if classifiers ever cover most tokens or

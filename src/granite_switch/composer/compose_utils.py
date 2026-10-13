@@ -118,12 +118,11 @@ class GraniteSwitchComposer:
         print(f"Loading config from {base_model_name_or_path}...")
         base_config = load_base_config(base_model_name_or_path)
 
-        # Classify every adapter as single-stream (LoRA/aLoRA) or dual-stream
-        # (Shadow Residual).  A checkpoint holds one kind or the other: the whole
-        # decoder runs in one mode, chosen from ``dual_stream``.
+        # Classify adapting slots as single-stream (LoRA/aLoRA) or dual-stream
+        # (Shadow Residual). Classifier heads can read either decoder mode.
         sr_adapters = []
         non_sr_adapters = []
-        for ap in adapter_paths:
+        for ap in lora_adapter_paths:
             if is_shadow_residual_adapter(ap):
                 sr_adapters.append(ap)
             else:
@@ -179,7 +178,7 @@ class GraniteSwitchComposer:
         # separately selected LoRA slot can remain active through a classifier
         # marker because classifier selection does not overwrite adapter state.
         if lora_adapter_paths:
-            lora_rank, lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
+            lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths
             )
             lora_target_modules, source_analysis = detect_present_modules(

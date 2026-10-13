@@ -308,22 +308,21 @@ class TestClassifierReadLayers:
                 **_classifier_kwargs(classifier_read_layers=[None, layer])
             )
 
-    def test_dual_stream_with_intermediate_layer_raises(self):
-        with pytest.raises(ValueError, match="dual_stream=True"):
-            GraniteSwitchConfig(
-                **_classifier_kwargs(
-                    classifier_read_layers=[None, 2],
-                    dual_stream=True,
-                    cross_stream_rank=8,
-                )
+    def test_dual_stream_with_intermediate_layer(self):
+        cfg = GraniteSwitchConfig(
+            **_classifier_kwargs(
+                classifier_read_layers=[None, 2],
+                dual_stream=True,
+                cross_stream_rank=8,
             )
+        )
+        assert cfg.classifier_read_layers == [None, 2]
+        restored = GraniteSwitchConfig.from_dict(cfg.to_dict())
+        assert restored.dual_stream
+        assert restored.classifier_read_layers == cfg.classifier_read_layers
 
-    def test_classifier_slot_id_above_256_raises(self):
-        with pytest.raises(ValueError, match="<= 256"):
-            GraniteSwitchConfig(**_classifier_kwargs(num_adapters=257))
-
-    def test_classifier_slot_id_256_is_accepted(self):
-        GraniteSwitchConfig(**_classifier_kwargs(num_adapters=256))
+    def test_classifier_slot_id_has_no_config_cap(self):
+        GraniteSwitchConfig(**_classifier_kwargs(num_adapters=257))
 
     def test_dual_stream_with_final_layer_is_accepted(self):
         GraniteSwitchConfig(**_classifier_kwargs(dual_stream=True, cross_stream_rank=8))

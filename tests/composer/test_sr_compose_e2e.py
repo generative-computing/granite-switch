@@ -184,6 +184,115 @@ def _create_sr_adapter(
     save_file(state_dict, str(path / "adapter_model.safetensors"))
 
 
+def _compose_sr_classifier(path: Path, read_layers=(None,)):
+    """Tiny SR + classifier checkpoint, also used by the vLLM test.
+
+    An identity head exposes every component of its input, making a base-stream
+    read distinguishable from an adapted-stream read without random margins.
+    """
+    from granite_switch.composer import GraniteSwitchComposer
+    from granite_switch.composer.weight_transfer import CLASSIFIER_HEAD_FILE
+
+    base, sr, classifier = (path / name for name in ("base", "sr", "classifier"))
+    base.mkdir(parents=True)
+    classifier.mkdir()
+    _create_base_model(base)
+    _create_sr_adapter(sr)
+    save_file(
+        {"weight": torch.eye(HIDDEN), "bias": torch.zeros(HIDDEN)},
+        str(classifier / CLASSIFIER_HEAD_FILE),
+    )
+    return GraniteSwitchComposer.from_base_and_adapters(
+        base_model_name_or_path=str(base),
+        adapter_paths=[str(sr), *[str(classifier)] * len(read_layers)],
+        adapter_token_ids=list(
+            range(CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1 + len(read_layers))
+        ),
+        adapter_substitute_token_ids=[1, *[2] * len(read_layers)],
+        adapter_names=["sr", *[f"detect{i}" for i in range(len(read_layers))]],
+        adapter_kinds=["lora", *["classifier"] * len(read_layers)],
+        classifier_label_token_ids=[
+            None,
+            *[list(range(100, 100 + HIDDEN))] * len(read_layers),
+        ],
+        classifier_read_layers=[None, *read_layers],
+        switch_head_dim=16,
+    ).eval()
+
+
+@pytest.mark.parametrize("read_layer", [None, 0, NUM_LAYERS - 1])
+def test_sr_classifier_reads_selected_stream(tmp_path, capsys, read_layer):
+    """Identity scores prove stream, layer and normalization before/after reload."""
+    from granite_switch.hf import load_model
+
+    model = _compose_sr_classifier(tmp_path, read_layers=[read_layer])
+    assert "cross_stream slots are all-zero" not in capsys.readouterr().out
+    assert model.config.dual_stream
+    head = model.model.classifier_head
+    torch.testing.assert_close(head.weight[1], torch.eye(HIDDEN))
+    assert torch.count_nonzero(head.weight[0]) == 0
+    for layer in model.model.layers:
+        assert torch.count_nonzero(layer.cross_stream.lora_B[0]) > 0
+        assert torch.count_nonzero(layer.cross_stream.lora_B[1]) == 0
+
+    streams = []
+    hook = model.model.layers[
+        -1 if read_layer is None else read_layer
+    ].register_forward_hook(lambda _module, _args, output: streams.append(output[0]))
+    ids = torch.tensor([[10, CONTROL_TOKEN_ID, 20, CONTROL_TOKEN_ID + 1]])
+    try:
+        with torch.no_grad():
+            output = model(input_ids=ids, use_cache=False, output_hidden_states=True)
+    finally:
+        hook.remove()
+    assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
+    assert model.model._last_classifier_indices.tolist() == [[0, 0, 0, 2]]
+    base, adapted = (
+        (model.model.norm(h) if read_layer is None else h)[0, -1] for h in streams[0]
+    )
+    assert not torch.allclose(adapted, base), "fixture must exercise SR adaptation"
+    if read_layer is None:
+        torch.testing.assert_close(output.hidden_states[-1][0, -1], adapted)
+    else:
+        assert not torch.allclose(adapted, output.hidden_states[-1][0, -1])
+    labels = model.config.classifier_label_token_ids[1]
+    torch.testing.assert_close(output.logits[0, -1, labels], adapted)
+    non_labels = torch.ones(VOCAB_SIZE, dtype=torch.bool)
+    non_labels[labels] = False
+    assert torch.isneginf(output.logits[0, -1, non_labels]).all()
+
+    checkpoint = tmp_path / "composed"
+    model.save_pretrained(checkpoint)
+    loaded = load_model(str(checkpoint)).eval()
+    for name in ("adapter_kind_lut", "classifier_control_lut", "classifier_slot_lut"):
+        torch.testing.assert_close(
+            getattr(loaded.model.switch, name), getattr(model.model.switch, name)
+        )
+    with torch.no_grad():
+        restored = loaded(input_ids=ids, use_cache=False)
+    torch.testing.assert_close(restored.logits, output.logits)
+    assert loaded.model._last_lora_indices[0, -1].item() == 1
+    assert loaded.model._last_classifier_indices[0, -1].item() == 2
+
+    # With no SR activation, the probe must read the base stream at that layer.
+    streams.clear()
+    hook = model.model.layers[
+        -1 if read_layer is None else read_layer
+    ].register_forward_hook(lambda _module, _args, result: streams.append(result[0]))
+    try:
+        with torch.no_grad():
+            inactive = model(
+                input_ids=torch.tensor([[10, 21, 20, CONTROL_TOKEN_ID + 1]]),
+                use_cache=False,
+            )
+    finally:
+        hook.remove()
+    expected = streams[0][0]
+    if read_layer is None:
+        expected = model.model.norm(expected)
+    torch.testing.assert_close(inactive.logits[0, -1, labels], expected[0, -1])
+
+
 # ---------------------------------------------------------------------------
 # Fixtures: compose once, save to disk, share across all tests
 # ---------------------------------------------------------------------------

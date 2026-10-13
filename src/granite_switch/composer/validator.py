@@ -65,7 +65,7 @@ def validate_control_lut(model) -> None:
 
 
 def validate_cross_stream_population(model):
-    """Check that every adapter in a Shadow Residual checkpoint loaded its
+    """Check that every SR adapter in a Shadow Residual checkpoint loaded its
     ``cross_stream`` weights.
 
     An all-zero slot means the base→adapter injection never fires for that
@@ -85,6 +85,8 @@ def validate_cross_stream_population(model):
         # slots in a freshly built model, but lora_B decides whether the branch
         # contributes anything.
         for adapter_idx in range(param.shape[0]):
+            if model.config.adapter_kinds[adapter_idx] == "classifier":
+                continue
             if bool(torch.all(param[adapter_idx] == 0)):
                 empty.append(f"{name}[{adapter_idx}]")
 

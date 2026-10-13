@@ -5,11 +5,19 @@ GPU capture/replay and packed-output transport are tested in
 ``test_classifier_chunked_prefill.py``. Request-boundary validation is deferred.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
 pytest.importorskip("vllm")
 
+from vllm.sequence import IntermediateTensors
+
+from granite_switch.vllm.decoder.interface import (
+    LoRADecoderInterface,
+    SRDecoderInterface,
+)
 from granite_switch.vllm.granite_switch_model import (
     GraniteSwitchForCausalLM,
     GraniteSwitchModel,
@@ -20,7 +28,7 @@ class _StubClassifierHead:
     """Score = slot id * hidden[:, 0], so a score shows which slot and source it read."""
 
     def __call__(self, x, classifier_indices):
-        return (classifier_indices.float() * x[:, 0]).unsqueeze(-1).expand(-1, 2)
+        return (classifier_indices.to(x.dtype) * x[:, 0]).unsqueeze(-1).expand(-1, 2)
 
 
 class _Model(torch.nn.Module):
@@ -38,7 +46,6 @@ class _Model(torch.nn.Module):
         is_classifier = [k == "classifier" for k in kinds or ["classifier"] * num_slots]
         self.config = type("Cfg", (), {"max_classifier_labels": 2})()
         self.classifier_head = _StubClassifierHead()
-        self.classifier_control_token_ids_t = torch.tensor(sorted(slot_of_marker))
         self.classifier_slot_mask_t = torch.tensor([False, *is_classifier])
         slots_by_layer = {}
         for slot, (is_clf, layer) in enumerate(
@@ -57,18 +64,12 @@ class _Model(torch.nn.Module):
                 self._classifier_layer_groups[layer] = name
 
 
-def _run(model, slot_of_marker, tokens, input_ids_override=...):
+def _run(model, slot_of_marker, tokens):
     """Call ``_compute_classifier_outputs`` on a flat token list; hidden[t] = t + 1."""
-    indices, current = [], 0
-    for t in tokens:
-        current = slot_of_marker.get(t, current)
-        indices.append(current)
-    input_ids = (
-        torch.tensor(tokens) if input_ids_override is ... else input_ids_override
-    )
+    indices = [slot_of_marker.get(t, 0) for t in tokens]
     hidden = torch.arange(1.0, len(tokens) + 1).unsqueeze(1).expand(-1, 4)
     return GraniteSwitchModel._compute_classifier_outputs(
-        model, input_ids, hidden, torch.tensor(indices), torch.zeros(len(tokens), 2)
+        model, hidden, torch.tensor(indices), torch.zeros(len(tokens), 2)
     )
 
 
@@ -110,10 +111,13 @@ def test_no_marker_is_all_zero():
     assert not scores.any()
 
 
-def test_no_input_ids_is_all_zero_slot():
+def test_transferred_marker_indices_need_no_input_ids():
     model = _Model({90: 2, 91: 3})
-    _, slot = _run(model, {90: 2, 91: 3}, [5, 90, 6], input_ids_override=None)
-    assert slot.tolist() == [0, 0, 0]
+    scores, slot = GraniteSwitchModel._compute_classifier_outputs(
+        model, torch.ones(3, 4), torch.tensor([0, 2, 0]), torch.zeros(3, 2)
+    )
+    assert slot.tolist() == [0, 2, 0]
+    assert scores.tolist() == [[0.0, 0.0], [2.0, 2.0], [0.0, 0.0]]
 
 
 def test_final_layer_scoring_leaves_intermediate_slot_scores_untouched():
@@ -121,7 +125,6 @@ def test_final_layer_scoring_leaves_intermediate_slot_scores_untouched():
     pre_scores = torch.tensor([[0.0, 0.0], [99.0, 99.0], [0.0, 0.0]])
     scores, slot = GraniteSwitchModel._compute_classifier_outputs(
         model,
-        torch.tensor([5, 90, 91]),
         torch.ones(3, 4),
         torch.tensor([0, 2, 3]),
         pre_scores,
@@ -185,10 +188,149 @@ def test_scoring_resolves_replaced_registered_buffers():
     scores = _score(model, 0, 3.0, [1, 2], torch.zeros(2, 2))
     scores, slots = GraniteSwitchModel._compute_classifier_outputs(
         model,
-        torch.tensor([90, 91]),
         torch.full((2, 4), 5.0),
         torch.tensor([1, 2]),
         scores,
     )
     assert scores.tolist() == [[5.0, 5.0], [6.0, 6.0]]
     assert slots.tolist() == [1.0, 2.0]
+
+
+@pytest.mark.parametrize("sr", [False, True], ids=["lora", "sr"])
+@pytest.mark.parametrize("stages", [2, 3])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype):
+    """Run the real forward and decoder strategies, with deterministic layer outputs.
+
+    A layer-0 probe crosses the boundary; another probe and final norm are scored
+    on the last rank. With three stages, the middle rank only relays scores.
+    Distinct values expose resets, wrong layers, stream selection and reliance
+    on input_ids. The token slice matches vLLM's PP buffer contract.
+    """
+    from granite_switch.vllm import granite_switch_model as model_module
+
+    class Switch:
+        def __call__(self, input_ids, **kwargs):
+            return (input_ids != 5).long(), input_ids
+
+        def classifier_indices_from_tokens(self, input_ids):
+            lut = torch.zeros(100, dtype=torch.long)
+            lut[90:93] = torch.tensor([2, 3, 4])
+            return lut[input_ids]
+
+        def split_indices(self, indices, probes):
+            return indices, probes
+
+    class Layer(torch.nn.Module):
+        def forward(self, positions, hidden_states, residual=None):
+            if sr:
+                base, adapted = hidden_states.chunk(2)
+                return torch.cat([base + 1, adapted + 10])
+            if residual is None:
+                residual = torch.zeros_like(hidden_states)
+            return hidden_states + 1, residual
+
+    model = _Model(
+        {90: 2, 91: 3, 92: 4},
+        read_layers=[None, 0, stages - 1, None],
+        kinds=["lora", "classifier", "classifier", "classifier"],
+    )
+    model.config.hidden_size = 4
+    model.config.embedding_multiplier = 1.0
+    model.config.fused_add_norm = False
+    model.switch = Switch()
+    model.adapter_token_ids = torch.tensor([89, 90, 91, 92])
+    model.lora_meta = model.lora_ctx = None
+    model.decoder_interface = SRDecoderInterface() if sr else LoRADecoderInterface()
+    model.layers = torch.nn.ModuleList([Layer() for _ in range(stages)])
+    model.norm = torch.nn.Identity()
+    model._compute_classifier_outputs = (
+        GraniteSwitchModel._compute_classifier_outputs.__get__(model)
+    )
+    model.start_layer, model.end_layer = 0, 1
+    monkeypatch.setattr(
+        model_module,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
+    )
+    wire = GraniteSwitchModel.forward(
+        model,
+        torch.tensor([5, 90, 91, 92, 5]),
+        torch.arange(5),
+        inputs_embeds=torch.ones(5, 4, dtype=dtype),
+    )[1:]
+    assert isinstance(wire, IntermediateTensors)
+    assert wire["classifier_indices"].tolist() == [2, 3, 4, 0]
+    assert wire["classifier_scores"][:, 0].tolist() == [22 if sr else 4, 0, 0, 0]
+    buffers = GraniteSwitchModel.make_empty_intermediate_tensors(
+        model, 4, dtype, torch.device("cpu")
+    )
+    assert buffers.tensors.keys() == wire.tensors.keys()
+    for key, tensor in wire.items():
+        assert tensor.shape == buffers[key].shape
+        assert tensor.dtype == buffers[key].dtype
+        buffers[key].copy_(tensor)
+
+    for rank in range(1, stages):
+        model.start_layer, model.end_layer = rank, rank + 1
+        group = SimpleNamespace(is_first_rank=False, is_last_rank=rank == stages - 1)
+        monkeypatch.setattr(model_module, "get_pp_group", lambda group=group: group)
+        packed = GraniteSwitchModel.forward(
+            model, None, torch.arange(4), intermediate_tensors=buffers
+        )
+        if not group.is_last_rank:
+            assert torch.equal(packed["classifier_scores"], wire["classifier_scores"])
+            for key, tensor in packed.items():
+                buffers[key].copy_(tensor)
+    assert packed[:, -1].tolist() == [2, 3, 4, 0]
+    source = 1 + (10 if sr else 1) * stages
+    expected = [22 if sr else 4, 3 * source, 4 * source, 0]
+    assert packed[:, 4].tolist() == expected
+    assert packed[-1, 0] == stages + 1  # inactive SR token reads the base stream
+
+
+def test_sr_pipeline_stack_partitions_post_attention_metadata():
+    """A later PP stage must retain 2*M through attention and metadata slicing.
+
+    Concatenating independently symbolic PP inputs produces a late 2*((A+B)//2)
+    slice bound. vLLM moves that metadata getitem to its producer's partition,
+    creating a cycle. The real SR entry hook must allow splitting and reuse for
+    changed token counts, without changing the two streams' values.
+    """
+    from vllm.compilation.backends import split_graph
+
+    @torch.library.custom_op("granite_switch_test::sr_pp_attention", mutates_args=())
+    def attention(query: torch.Tensor) -> torch.Tensor:
+        return query.clone()
+
+    @attention.register_fake
+    def fake_attention(query):
+        return torch.empty_like(query)
+
+    interface = SRDecoderInterface()
+    compilations = []
+
+    def backend(graph, inputs):
+        compilations.append(graph)
+        return split_graph(graph, ["granite_switch_test::sr_pp_attention"])[0].forward
+
+    def stage(base, adapted, indices):
+        metadata = torch.cat([torch.zeros_like(indices), indices]).unsqueeze(0)
+        hs = interface.enter_decoder_stack(base, adapted).hs
+        m = hs.shape[0] // 2
+        query = torch.cat([hs[:m], hs[m:]], dim=1)
+        attended = attention(query)
+        stacked = torch.cat([attended[:, :4], attended[:, 4:]], dim=0)
+        remapped = metadata[0, : stacked.shape[0]]
+        return stacked + remapped.unsqueeze(-1).to(stacked.dtype)
+
+    compiled = torch.compile(stage, backend=backend, dynamic=True, fullgraph=True)
+    for m in (4, 6):
+        base = torch.arange(m * 4, dtype=torch.float32).reshape(m, 4)
+        adapted = base + 17
+        indices = torch.arange(1, m + 1)
+        for tensor in (base, adapted, indices):
+            torch._dynamo.mark_dynamic(tensor, 0)
+        expected = torch.cat([base, adapted + indices.unsqueeze(-1)])
+        assert torch.equal(compiled(base, adapted, indices), expected)
+    assert len(compilations) == 1
