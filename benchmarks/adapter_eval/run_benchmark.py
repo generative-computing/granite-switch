@@ -73,6 +73,13 @@ THROUGHPUT = "throughput"
 SWITCHING = "switching"
 # The engines a release's speed is measured on: granite-switch, stock vLLM.
 ENGINES = ("gs", "native")
+# The throughput driver first checks that its first adapter changes the next
+# token's distribution on a tiled filler prompt, at least by a JSD of 1e-5, its
+# floor for the switch benchmark's random adapters. A release's first adapter
+# is a real one, and may be one whose task leaves such a prompt nearly alone:
+# the 4.1 preview's citations LoRA moves it by 9e-6 on stock vLLM. One whose
+# weights never loaded moves it by 0, so a release's floor is lower.
+RELEASE_MIN_JSD = 1e-6
 
 
 def now() -> str:
@@ -259,6 +266,7 @@ def time_engine(python: str, harness_root: Path, spec: dict) -> dict:
             spec["paths"],
             spec["settings"],
             dump,
+            spec.get("min_preflight_jsd"),
         ),
     ]
     returncode, tail = run_streamed(cmd, harness_root, "throughput")
@@ -711,6 +719,7 @@ def run_release(args, started: str) -> int:
                     "paths": [str(p) for p in natives],
                     "settings": spec.throughput.settings(),
                     "dump": str(work / "throughput" / f"release_{engine}.jsonl"),
+                    "min_preflight_jsd": RELEASE_MIN_JSD,
                 },
             )
         print(f"[throughput] release: {json.dumps(speeds(speed))}", flush=True)
@@ -743,6 +752,7 @@ def run_release(args, started: str) -> int:
                 **spec.throughput.settings(),
                 **switch_bench.PINNED,
                 "driver": switch_bench.DRIVER,
+                "min_preflight_jsd": RELEASE_MIN_JSD,
             },
             **run_meta,
         },

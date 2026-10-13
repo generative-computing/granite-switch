@@ -63,9 +63,11 @@ PRIVATE_PROVENANCE = ("hostname",)
 
 
 def command(
-    tech: str, engine: str, model: str, paths: list[str], settings: dict, dump: Path
-) -> list[str]:
-    """The driver's arguments for one engine, as ``run_block`` passes them."""
+    tech: str, engine: str, model: str, paths: list[str], settings: dict, dump: Path,
+    min_jsd: float | None = None,
+) -> list[str]:  # fmt: skip
+    """The driver's arguments for one engine, as ``run_block`` passes them.
+    ``min_jsd`` lowers its gate on the first adapter's effect (its default)."""
     arm = ARMS[tech, engine]
     n = len(paths)
     args = ["--arm", arm, "--model", model, "--num-adapters", str(n)]
@@ -85,6 +87,7 @@ def command(
         "--cudagraph-capture-size", str(PINNED["cudagraph_capture_size"]),
         "--tag", f"{arm}_N{n}",
         "--dump-iters", str(dump),
+        *(["--min-preflight-jsd", str(min_jsd)] if min_jsd is not None else []),
     ]  # fmt: skip
 
 

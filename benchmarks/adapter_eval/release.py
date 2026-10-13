@@ -72,14 +72,32 @@ def native_copies(root: Path, record: dict, dest: Path) -> list[Path]:
     """The release's adapters as stock vLLM serves them, in the checkpoint's
     order and named as the switch benchmark's drivers look for them
     (``adapter_NN``); an aLoRA without its invocation tokens, which would keep
-    it off after a one-token prompt (``staged.peft_sr_copy``)."""
+    it off after a one-token prompt (``staged.peft_sr_copy``), and none asking
+    for bias weights it does not have (``unused_bias_dropped``)."""
     leaves = []
     for k, adapter in enumerate(record["adapters"]):
         src, leaf = root / NATIVE / adapter["name"], dest / f"adapter_{k:02d}"
         if not staged.peft_sr_copy(src, leaf):
             staged.link_others(src, leaf, "")
+        unused_bias_dropped(leaf)
         leaves.append(leaf)
     return leaves
+
+
+def unused_bias_dropped(leaf: Path) -> bool:
+    """Make a config that asks for bias weights its checkpoint never saved say
+    ``bias: none``; True if it did. Stock vLLM refuses an adapter whose config
+    asks for bias, and some library aLoRAs say ``lora_only`` with no bias
+    tensor, so the weights it serves stay the same."""
+    path = leaf / staged.CONFIG_FILE
+    config = json.loads(path.read_text())
+    keys = staged.safetensors_keys(leaf / staged.WEIGHTS_FILE)
+    if config.get("bias", "none") == "none" or any("bias" in k for k in keys):
+        return False
+    config["bias"] = "none"
+    path.unlink()  # a link to the staged config, or peft_sr_copy's own copy
+    path.write_text(json.dumps(config, indent=2))
+    return True
 
 
 def switching_settings(spec, record: dict) -> dict:

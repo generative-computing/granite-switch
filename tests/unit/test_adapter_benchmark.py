@@ -3977,6 +3977,43 @@ def test_release_native_copies_serve_its_adapters_in_order(tmp_path):
     assert settings == {**SPEC.switching.settings(), "adapters": 5, "rank": 32}
 
 
+def test_release_native_copies_ask_for_no_bias_they_lack(tmp_path):
+    root = make_release_root(tmp_path / "release")
+    # A library aLoRA saying bias "lora_only" with no bias tensor, and a LoRA
+    # that has one: stock vLLM refuses both configs as they are.
+    unused = root / releases.NATIVE / "guardian-core" / staged.CONFIG_FILE
+    unused.write_text(
+        json.dumps({**json.loads(unused.read_text()), "bias": "lora_only"})
+    )
+    used = root / releases.NATIVE / "citations"
+    (used / staged.CONFIG_FILE).write_text(
+        json.dumps(
+            {**json.loads((used / staged.CONFIG_FILE).read_text()), "bias": "all"}
+        )
+    )
+    write_safetensors(
+        used / staged.WEIGHTS_FILE, {"x.lora_A.weight": [1], "x.bias": [1]}
+    )
+    leaves = releases.native_copies(root, release_record(), tmp_path / "native")
+    configs = [json.loads((p / staged.CONFIG_FILE).read_text()) for p in leaves]
+    assert configs[3]["bias"] == "none"  # guardian-core: nothing to drop but the word
+    assert configs[0]["bias"] == "all"  # citations keeps it: stock vLLM says why
+    # The staged library checkpoint is left as it is.
+    assert json.loads(unused.read_text())["bias"] == "lora_only"
+
+
+def test_throughput_command_takes_a_lower_gate():
+    args = switch_bench.command(
+        "lora", "native", "m", ["a", "b"], SPEC.throughput.settings(), Path("d")
+    )
+    assert "--min-preflight-jsd" not in args
+    lower = switch_bench.command(
+        "lora", "native", "m", ["a", "b"], SPEC.throughput.settings(), Path("d"), 1e-6
+    )
+    assert lower[: len(args)] == args
+    assert lower[len(args) :] == ["--min-preflight-jsd", "1e-06"]
+
+
 def fake_release_repos(hub: Path, build: str | None = None) -> dict[str, Path]:
     """The release and its libraries, as folders of a fake Hub."""
     repo = hub / RELEASE.repo
@@ -4195,6 +4232,12 @@ def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
     assert [Path(p).name for p in engines[1]["paths"]] == [
         f"adapter_{k:02d}" for k in range(5)
     ]
+    # A real first adapter may move the driver's filler prompt only a little.
+    assert {e["min_preflight_jsd"] for e in engines} == {run_benchmark.RELEASE_MIN_JSD}
+    assert (
+        results["run"]["throughput"]["min_preflight_jsd"]
+        == run_benchmark.RELEASE_MIN_JSD
+    )
     assert results["throughput"] == {"gs": timed(3300.0), "native": timed(1900.0)}
     assert results["run"]["switching"]["adapters"] == 5
     assert results["switching"]["native"]["p95_s"] == 60.0
