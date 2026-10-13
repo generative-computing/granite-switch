@@ -59,18 +59,20 @@ replays them side by side, each from its own start.
 - **A footer per lane**: agents done, running and waiting, then the lane's time.
 - **A metrics panel per lane**, sampled every half second: agents running,
   prefilling, decoding and waiting on a tool or round trip; tokens per second;
-  the adapter switches so far (the same in both lanes at the end: 16 per agent)
+  the adapter switches so far (the same in both lanes at the end: one per 32
+  tokens an agent generates, so 16 for 512 tokens)
   and the requests behind them (stock vLLM issues one per switch, SR one per run
   between tool calls);
   the average time to first token of its last 8 requests; and, from vLLM's own
   count of each request's cached prompt tokens:
   - **Re-prefilled**: prompt tokens computed again after an agent's first
     request. The first prefills the agent's own prompt, which no cache could
-    hold; it is the same in both lanes (about 67k tokens here) and is left out.
+    hold; it is the same in both lanes (about 67k tokens for 16 agents, 267k
+    for 64) and is left out.
   - **Context hit**: the share of the context sent again that the prefix cache
-    already held. On the recorded race, 99.9% for SR (only the end of each
-    context, short of a full 16-token cache block, is recomputed) and 9.2% for
-    stock vLLM LoRA, whose cache is keyed on the adapter.
+    already held. On the recorded races, 99.9% for SR (only the end of each
+    context, short of a full 16-token cache block, is recomputed) and between
+    3.6% and 10.2% for stock vLLM LoRA, whose cache is keyed on the adapter.
 - **The result**, once both lanes are done: each lane's time and the ratio.
 
 ## Running it
