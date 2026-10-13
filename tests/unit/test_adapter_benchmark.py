@@ -3502,9 +3502,11 @@ def test_models_without_their_own_settings_are_unchanged():
         {k: m.get(k, {}) for k in ("id", "name", "label", "bench_version", "prompt")}
         for m in raw["models"]
     ]
-    for m in SPEC.models:
+    for m, own in zip(SPEC.models, raw["models"], strict=True):
         spec = SPEC.for_model(m.id)
-        assert not m.private and not m.shared_routing and m.reference == {}
+        # A model's reference settings are its own, or none.
+        assert m.reference == own.get("reference", {})
+        assert not m.private and not m.shared_routing
         assert m.measures("throughput") and m.measures("switching")
         assert m.resources_for("bench") == {}
         assert stage.expected_table(spec) == {
@@ -3925,7 +3927,8 @@ def test_releases_in_the_spec(tmp_path, monkeypatch):
     assert RELEASE.model == "granite-4.1-3b"
     assert RELEASE.key == RELEASE.revision[:8]
     assert SPEC.releases_of("granite-4.2-3b") == ()
-    assert SPEC.public()["releases"] == [RELEASE.public()]
+    assert [r.model for r in SPEC.releases] == ["granite-4.1-3b", "granite-4.1-8b"]
+    assert SPEC.public()["releases"] == [r.public() for r in SPEC.releases]
     assert RELEASE.adapters["guardian_core"] == "guardian-core"
     with pytest.raises(ValueError, match="names 0 releases"):
         SPEC.release("deadbeef")
@@ -4417,7 +4420,7 @@ def test_render_release_table():
     assert main_tables(page) == main_tables(plain)
     tables = page.split(f"<h3>{publish.RELEASES_HEADING}</h3>")[1:]
     assert len(tables) == len(SPEC.models)
-    first, second = tables
+    first, *others = tables
     url = f"https://huggingface.co/{RELEASE.repo}/commit/{RELEASE.revision}"
     assert f'<a href="{url}"><code>{RELEASE.key}</code></a>' in first
     assert ">granite-switch-4.1-3b-preview</a></td>" in first
@@ -4431,9 +4434,9 @@ def test_render_release_table():
     # Its details: the libraries, and the commit that served it.
     assert "ibm-granite/granitelib-core-r1.0</code> <code>d0a2a96a" in first
     assert publish.COMMIT_URL.format(sha=RELEASE.serve_with) in first
-    # A model with no release says so.
-    assert "no Hugging Face release yet" in second
-    assert page.count("no Hugging Face release yet") == 1
+    # A model with no release on the page says so.
+    assert all("no Hugging Face release yet" in t for t in others)
+    assert page.count("no Hugging Face release yet") == len(SPEC.models) - 1
 
 
 def test_render_job_of_a_release(tmp_path, monkeypatch):

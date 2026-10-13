@@ -60,6 +60,13 @@ models:
       chat_template_kwargs: {enable_thinking: false}
       documents: system
       documents_by_technology: {sr: tool_json_after_question}
+  # Its Hugging Face release only, for now: no adapter is staged for it.
+  - id: granite-4.1-8b
+    name: ibm-granite/granite-4.1-8b
+    label: Granite 4.1 8B
+    bench_version: 1
+    # An 8B base keeps twice the 3B's K/V per token: half the token budget.
+    reference: {token_budget: 131072}
 
 # Composed checkpoints published on the Hugging Face Hub, benchmarked as
 # published (release.py; docs/ADAPTER_BENCHMARK.md, "Hugging Face releases"):
@@ -84,6 +91,21 @@ releases:
       ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
       ibm-granite/granitelib-guardian-r1.0: 773b254e98f993a605ec4b6259634906e0e64e8e
     # Its name for each of the benchmark's intrinsics.
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
+  - model: granite-4.1-8b
+    repo: ibm-granite/granite-switch-4.1-8b-preview
+    revision: c739556e0b2c66f21e5108dc4036f52e1893e256
+    base_revision: 1504002f650e656a0a3789d99574df12e3e94ed0
+    # The same single-switch format, the same libraries and adapter names.
+    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
+      ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
+      ibm-granite/granitelib-guardian-r1.0: 773b254e98f993a605ec4b6259634906e0e64e8e
     adapters:
       answerability: answerability
       query_clarification: query_clarification

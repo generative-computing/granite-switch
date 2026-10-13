@@ -613,6 +613,12 @@ releases:
   (`guardian-core` for `guardian_core`).
 - A later Hub commit that changes only the model card needs nothing. A new
   release is a new entry.
+- **A release of a base model with no staged adapters** (the 4.1 8B
+  preview): the base model gets an entry under `models` (`granite-4.1-8b`)
+  and a bench root of its own (`BENCH_ROOT__<id>`) holding only the eval
+  sets. Stage them with a `local/selection.<id>.json` that has only `eval`,
+  the same sources as the other models', then stage the release. Its tab
+  shows an empty table of commits above its releases.
 
 ### Commands
 
@@ -621,6 +627,9 @@ benchmarks/adapter_eval/vela/submit.sh stage --release 7a3ac02e
 benchmarks/adapter_eval/vela/submit.sh bench --release 7a3ac02e --limit 20
 benchmarks/adapter_eval/vela/submit.sh reference --release 7a3ac02e --limit 20
 ```
+
+For a model with no bench root yet, `submit.sh stage --model <id>` first,
+for its eval sets.
 
 `stage` fetches the release into `RELEASE_ROOT/<model>/<repo name>/<revision>`
 (set in `local.env`):
