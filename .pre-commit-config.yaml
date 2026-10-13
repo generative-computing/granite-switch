@@ -25,9 +25,11 @@ repos:
         # --enforce-all checks every file, not just staged additions, so the
         # hook also runs in CI's `pre-commit run --all-files` (a clean checkout
         # has nothing staged, so without this it would be a no-op there).
-        # uv.lock is intentionally large (~2.3 MB) and excluded.
+        # uv.lock (~2.3 MB) and docs/agent_race.html (~5.4 MB: its recorded
+        # races are embedded, so it opens straight from disk) are intentionally
+        # large and excluded.
         args: [--maxkb=500, --enforce-all]
-        exclude: ^uv\.lock$
+        exclude: ^(uv\.lock|docs/agent_race\.html)$
       - id: check-case-conflict
       - id: mixed-line-ending
         args: [--fix=lf]
