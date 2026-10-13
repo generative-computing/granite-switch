@@ -23,6 +23,7 @@ Code paths covered:
   - End-to-end: adapter_config.json → render (no patching)
 """
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -1423,3 +1424,161 @@ class TestShadowResidualAnchorPlacement:
             configure_chat_template(
                 tokenizer, [(self._SR_GRANITE, "answerability", "sr")]
             )
+
+
+class TestClassifierSelection:
+    """The saved template accepts independent selections through the real HF API."""
+
+    @pytest.fixture(
+        params=[_GRANITE_TEMPLATE, _CHATML_TEMPLATE], ids=["granite", "chatml"]
+    )
+    def tokenizer(self, request):
+        from tokenizers import Tokenizer, models, pre_tokenizers
+        from transformers import PreTrainedTokenizerFast
+
+        backend = Tokenizer(
+            models.WordLevel({"[UNK]": 0, "assistant": 1}, unk_token="[UNK]")
+        )
+        backend.pre_tokenizer = pre_tokenizers.Whitespace()
+        return PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            unk_token="[UNK]",
+            additional_special_tokens=[*_SRTokenizer._SPECIALS, "<context>"],
+            chat_template=request.param,
+        )
+
+    def _configure(self, tokenizer, tmp_path, kind="lora"):
+        from granite_switch.composer.tokenizer_setup import add_control_tokens
+
+        fmt = detect_template_format(tokenizer.chat_template)
+        adapter = tmp_path / "rag"
+        adapter.mkdir()
+        if kind == "sr":
+            anchor = "</think>" if fmt.name == "chatml" else "<|end_of_role|>"
+            config = {
+                "last_context_token": anchor,
+                "last_context_token_id": tokenizer.convert_tokens_to_ids(anchor),
+            }
+        else:
+            invocation = (
+                "<context>"
+                if kind == "alora"
+                else fmt.role_open_marker
+                + "assistant"
+                + ("\n" if fmt.name == "chatml" else "<|end_of_role|>")
+            )
+            config = {
+                "alora_invocation_tokens": tokenizer.encode(
+                    invocation, add_special_tokens=False
+                )
+            }
+        (adapter / "adapter_config.json").write_text(json.dumps(config))
+        discovered = [
+            (str(adapter), "rag", "alora" if kind == "alora_fallback" else kind),
+            (None, "safety", "classifier"),
+            (None, "other", "classifier"),
+        ]
+        add_control_tokens(tokenizer, discovered)
+        configure_chat_template(tokenizer, discovered)
+
+    _MESSAGES = [
+        {"role": "system", "content": "Check this."},
+        {"role": "user", "content": "first"},
+        {"role": "assistant", "content": "reply"},
+        {"role": "user", "content": "Now <context> Hello"},
+    ]
+
+    def test_classifier_only_and_legacy_are_identical(self, tokenizer, tmp_path):
+        self._configure(tokenizer, tmp_path)
+        plain = tokenizer.apply_chat_template(
+            self._MESSAGES, tokenize=False, add_generation_prompt=False
+        )
+        for kwargs in (
+            {"classifier_name": "safety"},
+            {"adapter_name": "safety"},
+            {"adapter_name": "safety", "classifier_name": "safety"},
+        ):
+            result = tokenizer.apply_chat_template(
+                self._MESSAGES, tokenize=False, add_generation_prompt=True, **kwargs
+            )
+            assert result == plain + "<|safety|>"
+
+    @pytest.mark.parametrize("kind", ["lora", "alora", "alora_fallback", "sr"])
+    @pytest.mark.parametrize("gen", [False, True])
+    def test_adapter_activation_precedes_final_probe(
+        self, tokenizer, tmp_path, kind, gen
+    ):
+        self._configure(tokenizer, tmp_path, kind)
+        for thinking in (False, True):
+            # SR and assistant-boundary aLoRA need the generation-prompt anchor.
+            # Other cases preserve the transcript-only classifier read point.
+            expected = tokenizer.apply_chat_template(
+                self._MESSAGES,
+                tokenize=False,
+                adapter_name="rag",
+                add_generation_prompt=kind in ("sr", "alora_fallback"),
+                enable_thinking=thinking,
+            )
+            kwargs = dict(
+                adapter_name="rag",
+                classifier_name="safety",
+                add_generation_prompt=gen,
+                enable_thinking=thinking,
+            )
+            result = tokenizer.apply_chat_template(
+                self._MESSAGES, tokenize=False, **kwargs
+            )
+            ids = tokenizer.apply_chat_template(
+                self._MESSAGES, tokenize=True, return_dict=True, **kwargs
+            )["input_ids"]
+            assert result == expected + "<|safety|>"
+            assert ids[-1] == tokenizer.convert_tokens_to_ids("<|safety|>")
+            assert ids.count(ids[-1]) == 1
+            assert ids.count(tokenizer.convert_tokens_to_ids("<|rag|>")) == 1
+
+    @pytest.mark.parametrize(
+        "kwargs,match",
+        [
+            ({"classifier_name": "missing"}, "classifier_name"),
+            ({"classifier_name": "rag"}, "classifier_name"),
+            ({"classifier_name": ["safety"]}, "classifier_name"),
+            (
+                {"adapter_name": "safety", "classifier_name": "other"},
+                "different classifiers",
+            ),
+            ({"adapter_name": "missing", "classifier_name": "safety"}, "adapter_name"),
+        ],
+    )
+    def test_invalid_selection_raises(self, tokenizer, tmp_path, kwargs, match):
+        from jinja2 import TemplateError
+
+        self._configure(tokenizer, tmp_path)
+        with pytest.raises(TemplateError, match=match):
+            tokenizer.apply_chat_template(self._MESSAGES, tokenize=False, **kwargs)
+
+    def test_no_probe_preserves_adapter_render(self, tokenizer, tmp_path):
+        self._configure(tokenizer, tmp_path)
+        for gen in (False, True):
+            kwargs = dict(adapter_name="rag", add_generation_prompt=gen, tokenize=False)
+            assert tokenizer.apply_chat_template(
+                self._MESSAGES, classifier_name=None, **kwargs
+            ) == (tokenizer.apply_chat_template(self._MESSAGES, **kwargs))
+
+    def test_saved_tokenizer_keeps_both_selections(self, tokenizer, tmp_path):
+        from transformers import PreTrainedTokenizerFast
+
+        self._configure(tokenizer, tmp_path)
+        kwargs = dict(
+            adapter_name="rag", classifier_name="safety", add_generation_prompt=True
+        )
+        expected = tokenizer.apply_chat_template(
+            self._MESSAGES, return_dict=True, **kwargs
+        )["input_ids"]
+        tokenizer.save_pretrained(tmp_path / "tokenizer")
+        restored = PreTrainedTokenizerFast.from_pretrained(tmp_path / "tokenizer")
+        assert (
+            restored.apply_chat_template(self._MESSAGES, return_dict=True, **kwargs)[
+                "input_ids"
+            ]
+            == expected
+        )
