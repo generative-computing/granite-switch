@@ -5,10 +5,11 @@ Runs locally, on the log of the pod that ran ``run_race.py``::
 
     python -m benchmarks.adapter_eval.race.build_page <pod.log> [--page <html>]
 
-The page holds one race per number of agents per lane, chosen on the page. The
-race is read from between the log's markers and written into the page's
-``const RACE_EVENTS_EMBEDDED = {...}; // <<RACE_EVENTS>>`` line under its number
-of agents, replacing a race of that number and keeping the others, so the page
+The page holds one race per configuration (agents per lane, agents at a time,
+tokens per agent), chosen on the page. The race is read from between the log's
+markers and written into the page's ``const RACE_EVENTS_EMBEDDED = {...}; //
+<<RACE_EVENTS>>`` line under its configuration, replacing a race of the same one
+and keeping the others, so the page
 opens straight from disk, as the ALORA-vs-LoRA race page does. A race that
 carries an absolute path anywhere is refused: the page is public, the run's
 storage is not.
@@ -42,18 +43,36 @@ def private_strings(value, where: str = "race") -> list[str]:
     return []
 
 
+def config_key(race: dict) -> str:
+    """A race's configuration: agents per lane, agents at a time and tokens per
+    agent (``mix`` for a mixed workload), e.g. ``64-8-512``."""
+    meta = race["metadata"]
+    work = meta.get("workload", {})
+    tokens = "mix" if work.get("decode_mix") else work.get("decode_tokens", 512)
+    return f"{meta['runs']}-{meta.get('concurrency', 8)}-{tokens}"
+
+
+def _order(key: str) -> tuple:
+    agents, slots, tokens = key.split("-")
+    return (
+        int(agents),
+        int(slots),
+        tokens == "mix",
+        int(tokens) if tokens.isdigit() else 0,
+    )
+
+
 def races_in(page: str) -> dict[str, dict]:
-    """The races ``page`` holds, by agents per lane. A page from before there was a
-    choice holds one race: it is the race for its number of agents."""
+    """The races ``page`` holds, by configuration, whatever key they were stored
+    under. A page from before there was a choice holds one race."""
     found = EMBED.search(page)
     if not found:
         raise ValueError("the page has no RACE_EVENTS_EMBEDDED line")
     data = json.loads(found.group(1))
     if not data:
         return {}
-    if "metadata" in data:
-        return {str(data["metadata"]["runs"]): data}
-    return data
+    stored = [data] if "metadata" in data else list(data.values())
+    return {config_key(race): race for race in stored}
 
 
 def embed(page: str, races: dict[str, dict] | None) -> str:
@@ -61,7 +80,7 @@ def embed(page: str, races: dict[str, dict] | None) -> str:
     ``{}`` empties it."""
     if not EMBED.search(page):
         raise ValueError("the page has no RACE_EVENTS_EMBEDDED line")
-    ordered = dict(sorted((races or {}).items(), key=lambda kv: int(kv[0]))) or None
+    ordered = dict(sorted((races or {}).items(), key=lambda kv: _order(kv[0]))) or None
     line = (
         f"const RACE_EVENTS_EMBEDDED = {json.dumps(ordered, separators=(',', ':'))};"
         " // <<RACE_EVENTS>>"
@@ -70,9 +89,9 @@ def embed(page: str, races: dict[str, dict] | None) -> str:
 
 
 def add_race(page: str, race: dict) -> str:
-    """``page`` with ``race`` as its race for that many agents, the others kept."""
+    """``page`` with ``race`` as its race of that configuration, the others kept."""
     races = races_in(page)
-    races[str(race["metadata"]["runs"])] = race
+    races[config_key(race)] = race
     return embed(page, races)
 
 
@@ -188,7 +207,15 @@ def main(argv: list[str] | None = None) -> int:
         page = args.page.read_text()
         fleet = lane.load_fleet(args.add_switches)
         races = races_in(page)
-        key = str(len(fleet))
+        lacking = [
+            k
+            for k, r in races.items()
+            if r["metadata"]["runs"] == len(fleet)
+            and not any(e["ev"] == "switch" for e in r["events"])
+        ]
+        if len(lacking) != 1:
+            raise SystemExit(f"expected one {len(fleet)}-agent race without switches")
+        key = lacking[0]
         races[key] = add_switches(races[key], fleet)
         args.page.write_text(embed(page, races))
         lanes = races[key]["metadata"]["lanes"]
@@ -210,9 +237,9 @@ def main(argv: list[str] | None = None) -> int:
     args.page.write_text(page)
     meta = race["metadata"]
     walls = ", ".join(f"{k} {v['wall_s']:.1f}s" for k, v in meta["lanes"].items())
-    held = ", ".join(f"{k} agents" for k in races_in(page))
+    held = ", ".join(races_in(page))
     print(
-        f"wrote {args.page}: the {meta['runs']}-agent race, {len(race['events'])} "
+        f"wrote {args.page}: the {config_key(race)} race, {len(race['events'])} "
         f"events; {walls}. The page holds: {held}"
     )
     return 0

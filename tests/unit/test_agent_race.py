@@ -9,6 +9,7 @@ page's data are checked end to end; only the engine is not real.
 from __future__ import annotations
 
 import asyncio
+import collections
 import json
 import subprocess
 import sys
@@ -358,9 +359,9 @@ def test_build_page_keeps_a_race_per_number_of_agents(tmp_path):
     for race in (race_of(64, 2.0), race_of(16, 1.0), race_of(64, 3.0)):
         log.write_text("noise\n" + run_race.encode_block(race) + "\n")
         assert build_page.main([str(log), "--page", str(out)]) == 0
-    # One race per number of agents, in order; a new run replaces its own.
-    assert held() == {"16": race_of(16, 1.0), "64": race_of(64, 3.0)}
-    assert list(held()) == ["16", "64"]
+    # One race per configuration, in order; a new run replaces its own.
+    assert held() == {"16-8-512": race_of(16, 1.0), "64-8-512": race_of(64, 3.0)}
+    assert list(held()) == ["16-8-512", "64-8-512"]
     assert out.read_text().count("<<RACE_EVENTS>>") == 1
     # A page from before the choice holds one race: it counts as its own number's.
     single = build_page.EMBED.sub(
@@ -369,9 +370,21 @@ def test_build_page_keeps_a_race_per_number_of_agents(tmp_path):
         + "; // <<RACE_EVENTS>>",
         page,
     )
-    assert build_page.races_in(single) == {"16": race_of(16, 1.0)}
+    assert build_page.races_in(single) == {"16-8-512": race_of(16, 1.0)}
     added = build_page.add_race(single, race_of(64, 2.0))
-    assert set(build_page.races_in(added)) == {"16", "64"}
+    assert set(build_page.races_in(added)) == {"16-8-512", "64-8-512"}
+    # Configurations with more agents at a time, longer or mixed lengths.
+    longer = race_of(64, 4.0)
+    longer["metadata"].update(concurrency=16, workload={"decode_tokens": 1024})
+    mixed = race_of(64, 5.0)
+    mixed["metadata"].update(
+        concurrency=16, workload={"decode_mix": [128, 256, 512, 1024]}
+    )
+    for race in (mixed, longer):
+        added = build_page.add_race(added, race)
+    assert list(build_page.races_in(added)) == [
+        "16-8-512", "64-8-512", "64-16-1024", "64-16-mix",
+    ]  # fmt: skip
     # A path from the run's storage never reaches the page.
     leaky = race_of(64, 2.0)
     leaky["metadata"]["checkpoint"] = "/mnt/storage/run/race_sr"
@@ -420,3 +433,58 @@ def test_switches_added_to_an_old_race_are_the_ones_recorded(stub_vllm, fleet):
         build_page.add_switches(upgraded, fleet)
     with pytest.raises(ValueError, match="not this fleet"):
         build_page.add_switches(before, fleet[:-1])
+
+
+def test_the_race_takes_its_agents_at_a_time_and_lengths():
+    spec = types.SimpleNamespace(
+        switching=types.SimpleNamespace(settings=lambda: dict(WORKLOAD))
+    )
+    settings = run_race.race_settings(spec, 64, concurrency=16, decode=1024)
+    assert (settings["min_agents"], settings["concurrency"], settings["decode_tokens"]) == (
+        64, 16, 1024,
+    )  # fmt: skip
+    grid = run_race.switching.grid_command(settings, Path("g.jsonl"))
+    assert grid[grid.index("--decode") + 1] == "1024"
+    # Unset, they stay the switching block's.
+    assert run_race.race_settings(spec, 64) == {**WORKLOAD, "min_agents": 64}
+
+
+def test_a_mixed_workload_has_an_equal_share_of_each_length(tmp_path):
+    settings = {**WORKLOAD, "concurrency": 16, "min_agents": 64}
+    lengths = [128, 256, 512, 1024]
+    commands = run_race.mixed_commands(settings, lengths, tmp_path)
+    assert len(commands) == 4
+    seeds = set()
+    for (cmd, out), n in zip(commands, lengths, strict=True):
+        assert cmd[cmd.index("--decode") + 1] == str(n)
+        assert cmd[cmd.index("--min-agents") + 1] == "16"
+        assert cmd[cmd.index("--concurrency") + 1] == "16"
+        seeds.add(cmd[cmd.index("--seed") + 1])
+        assert cmd[cmd.index("--out") + 1] == str(out)
+        subprocess.run([sys.executable, str(REPO_ROOT / cmd[0]), *cmd[1:]], check=True,
+                       capture_output=True)  # fmt: skip
+    assert len(seeds) == 4  # each length draws its own agents
+    parts = [lane.load_fleet(out) for _, out in commands]
+    fleet = run_race.merge_fleets(parts)
+    assert [a["agent_id"] for a in fleet] == list(range(64))
+    by_length = collections.Counter(a["decode_tokens"] for a in fleet)
+    assert by_length == {n: 16 for n in lengths}
+    # The lengths interleave, and the same parts always give the same workload,
+    # which both lanes read.
+    assert len({a["decode_tokens"] for a in fleet[:16]}) > 1
+    assert run_race.merge_fleets(parts) == fleet
+    for agent in fleet:  # each schedule ends at the agent's own length
+        assert lane.segments_of(agent)[-1]["end"] == agent["decode_tokens"]
+    with pytest.raises(SystemExit, match="split evenly"):
+        run_race.mixed_commands({**settings, "min_agents": 63}, lengths, tmp_path)
+
+
+def test_a_mixed_race_records_its_lengths(stub_vllm, fleet):
+    lanes = [
+        race(FakeEngine(), fleet, arm) for arm in ("shadow-residual", "native-lora")
+    ]
+    spec = types.SimpleNamespace(model_id="m", base_model="b")
+    settings = {**WORKLOAD, "decode_tokens": None, "decode_mix": [128, 256]}
+    meta = run_race.race_record(spec, settings, {"sha": "0" * 40}, lanes)["metadata"]
+    assert meta["workload"]["decode_mix"] == [128, 256]
+    assert "decode_tokens" not in meta["workload"]

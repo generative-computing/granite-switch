@@ -32,11 +32,13 @@ import datetime as dt
 import gzip
 import json
 import os
+import random
 import sys
 from pathlib import Path
 
 from benchmarks.adapter_eval import switching
 from benchmarks.adapter_eval.common import load_spec
+from benchmarks.adapter_eval.race.lane import load_fleet
 from benchmarks.adapter_eval.run_benchmark import (
     COMPOSER_MODULE,
     base_model_dir,
@@ -61,10 +63,50 @@ TAG = "race"
 AGENTS = 64
 
 
-def race_settings(spec, agents: int) -> dict:
+# The generator's own default seed. A mixed workload's lengths take it plus their
+# index, and its shuffle takes it as it is.
+MIX_SEED = 20260921
+
+
+def race_settings(
+    spec, agents: int, concurrency: int | None = None, decode: int | None = None
+) -> dict:
     """The switching block's settings (``switching`` in adapters.yaml), with the
-    race's number of agents per lane."""
-    return {**spec.switching.settings(), "min_agents": agents}
+    race's number of agents per lane, and its agents at a time and tokens per
+    agent where given."""
+    settings = {**spec.switching.settings(), "min_agents": agents}
+    if concurrency:
+        settings["concurrency"] = concurrency
+    if decode:
+        settings["decode_tokens"] = decode
+    return settings
+
+
+def mixed_commands(
+    settings: dict, lengths: list[int], work: Path
+) -> list[tuple[list[str], Path]]:
+    """The generator's command for each length's equal share of the agents, and
+    the file it writes. Each length draws with a seed of its own."""
+    if settings["min_agents"] % len(lengths):
+        raise SystemExit(
+            f"FATAL: {settings['min_agents']} agents do not split evenly over {lengths}"
+        )
+    per = settings["min_agents"] // len(lengths)
+    out = []
+    for i, n in enumerate(lengths):
+        part = {**settings, "decode_tokens": n, "min_agents": per}
+        f = work / f"grid_c{settings['concurrency']}_s{settings['span']}_d{n}.jsonl"
+        out.append(([*switching.grid_command(part, f), "--seed", str(MIX_SEED + i)], f))
+    return out
+
+
+def merge_fleets(parts: list[list[dict]], seed: int = MIX_SEED) -> list[dict]:
+    """One workload of ``parts``' agents, shuffled with ``seed`` so the lengths
+    interleave, and renumbered in that order. Both lanes read it, so each agent is
+    the same in both: its prompt, its schedule and its length."""
+    agents = [a for part in parts for a in part]
+    random.Random(seed).shuffle(agents)
+    return [{**a, "agent_id": k} for k, a in enumerate(agents)]
 
 
 def harness_root() -> Path:
@@ -115,15 +157,17 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
             "base_model": spec.base_model,
             "commit": commit,
             "workload": {
-                k: settings[k]
+                k: settings.get(k)
                 for k in (
                     "decode_tokens",
+                    "decode_mix",
                     "span",
                     "adapters",
                     "rank",
                     "warmup_runs",
                     "min_agents",
                 )  # fmt: skip
+                if settings.get(k) is not None
             },
             "lanes": {lane["lane"]: {k: lane.get(k) for k in keep} for lane in lanes},
         },
@@ -171,6 +215,25 @@ def main(argv: list[str] | None = None) -> int:
         help="agents per lane (at most the switching block's concurrency at a time)",
     )
     p.add_argument(
+        "--concurrency",
+        type=int,
+        default=None,
+        help="agents at a time (default: the switching block's)",
+    )
+    tokens = p.add_mutually_exclusive_group()
+    tokens.add_argument(
+        "--decode",
+        type=int,
+        default=None,
+        help="tokens each agent generates (default: the switching block's)",
+    )
+    tokens.add_argument(
+        "--decode-mix",
+        default=None,
+        metavar="N,N,...",
+        help="agents generating these lengths instead, an equal share each",
+    )
+    p.add_argument(
         "--switching-cache",
         default=None,
         help="the synthetic adapters' cache (default: the benchmark's, per model)",
@@ -178,7 +241,10 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     spec = load_spec(model=args.model)
-    settings = race_settings(spec, args.agents)
+    lengths = [int(n) for n in args.decode_mix.split(",")] if args.decode_mix else None
+    settings = race_settings(spec, args.agents, args.concurrency, args.decode)
+    if lengths:
+        settings.update(decode_tokens=None, decode_mix=lengths)
     python, root = sys.executable, harness_root()
     work = Path(args.work_dir).resolve() / "race"
     work.mkdir(parents=True, exist_ok=True)
@@ -190,14 +256,23 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(
         f"[{TAG}] {spec.model_id}: {settings['min_agents']} agents per lane, "
-        f"{settings['concurrency']} at a time",
+        f"{settings['concurrency']} at a time, "
+        f"{lengths or settings['decode_tokens']} tokens each",
         flush=True,
     )
 
     grid_file = work / f"grid_c{settings['concurrency']}_s{settings['span']}.jsonl"
-    if run_streamed([python, *switching.grid_command(settings, grid_file)], root, TAG)[
-        0
-    ]:
+    if lengths:
+        parts = []
+        for cmd, part in mixed_commands(settings, lengths, work):
+            if run_streamed([python, *cmd], root, TAG)[0]:
+                raise SystemExit("FATAL: workload generation failed")
+            parts.append(load_fleet(part))
+        grid_file = grid_file.with_name(grid_file.stem + "_mix.jsonl")
+        grid_file.write_text("".join(json.dumps(a) + "\n" for a in merge_fleets(parts)))
+    elif run_streamed(
+        [python, *switching.grid_command(settings, grid_file)], root, TAG
+    )[0]:
         raise SystemExit("FATAL: workload generation failed")
     base_dir = base_model_dir(base_model)
     vocab = json.loads((base_dir / "config.json").read_text())["vocab_size"]
