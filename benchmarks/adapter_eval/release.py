@@ -274,7 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         spec, release, args.root, args.eval_from, args.replace, downloads=args.downloads
     )
     print("\n[release] the folder now holds:")
-    for cell in staged.discover(args.root, spec):
+    for cell in discover(args.root, spec, release):
         print(f"  {cell.intrinsic}/{cell.tech}: {cell.skip_reason or 'ok'}")
     print(stage.STAGE_BEGIN)
     print(json.dumps(record, sort_keys=True))
