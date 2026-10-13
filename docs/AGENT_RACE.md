@@ -14,12 +14,27 @@ concurrency 8" cell (see [Agents switching adapters](ADAPTER_BENCHMARK.md#agents
 from the switch benchmark's own generator and agent loop, copied unchanged into
 `benchmarks/`:
 
-- **64 agents per lane, at most 8 at a time.** The next agent starts as soon as
-  any running one finishes. (The benchmark's switching block runs 16, released in
-  two fixed waves of 8.)
-- **Each agent** has a prompt of its own (256 to 16,384 tokens), generates 512
-  tokens, and switches adapter every 32 tokens over 64 synthetic adapters of rank
-  32, with its tool calls and round trips as real sleeps.
+- **Agents run in slots:** the next agent starts as soon as any running one
+  finishes. (The benchmark's switching block runs 16, released in two fixed
+  waves of 8.)
+- **Each agent** has a prompt of its own (256 to 16,384 tokens), generates its
+  tokens, and switches adapter every 32 over 64 synthetic adapters of rank 32,
+  with its tool calls and round trips as real sleeps.
+- **Both lanes run the same agents:** they read one workload file, so an agent's
+  prompt, adapter schedule and length are the same in both.
+
+The page holds four races:
+
+| Agents per lane | At a time | Tokens per agent | Options (`--extra-args`) |
+|---|---|---|---|
+| 16 | 8 | 512 | `--agents 16` |
+| 64 | 8 | 512 | (the defaults) |
+| 64 | 16 | 1,024 | `--concurrency 16 --decode 1024` |
+| 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--concurrency 16 --decode-mix 128,256,512,1024` |
+
+A mixed workload runs the generator once per length, for an equal share of the
+agents with a seed of its own, then shuffles the agents together with a fixed
+seed, so the lengths interleave and a rerun gives the same workload.
 
 **The lanes:**
 
@@ -35,8 +50,8 @@ replays them side by side, each from its own start.
 
 ## What the page shows
 
-- **A race per number of agents**, chosen above the controls: 16 or 64 agents
-  per lane, each a recorded run. The link keeps the choice (`#16`, `#64`).
+- **A race per configuration**, chosen above the controls, each a recorded run.
+  The link keeps the choice (e.g. `#64-16-mix`).
 - **A bar per agent**, filled by the tokens it has generated, colored by what it
   is doing: waiting for a slot, prefilling (with how many prompt tokens it
   submitted), decoding (with its adapter), on a round trip, on a tool call, or
@@ -70,8 +85,8 @@ replays them side by side, each from its own start.
    It takes the workload's settings from `switching` in `adapters.yaml` and the
    synthetic adapters from the benchmark's cache (built if missing), composes and
    checks the SR checkpoint, and runs both lanes. Add
-   `--extra-args "--model granite-4.2-3b"` for another model, or
-   `--extra-args "--agents 16"` for fewer agents per lane.
+   `--extra-args "--model granite-4.2-3b"` for another model, and the options in
+   the table above for the other races.
 
 2. Put the race into the page, from the pod's saved log:
 
@@ -79,8 +94,8 @@ replays them side by side, each from its own start.
    python -m benchmarks.adapter_eval.race.build_page benchmarks/adapter_eval/vela/local/logs/<job>.log
    ```
 
-   The page keeps one race per number of agents per lane: this run replaces
-   the race of its own number and keeps the others. It refuses a race that
+   The page keeps one race per configuration: this run replaces the race of
+   its own and keeps the others. It refuses a race that
    carries an absolute path anywhere.
 
    The 16-agent race was recorded (2026-10-11) before the recorder kept
