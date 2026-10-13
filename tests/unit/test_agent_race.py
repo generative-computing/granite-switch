@@ -337,24 +337,86 @@ def test_sr_adapters_are_named_as_the_fleet_names_them(tmp_path):
     assert lane.sr_adapters(tmp_path) == {5: "ad0", 6: "ad17"}
 
 
-def test_build_page_embeds_the_race(tmp_path):
-    # The page, emptied of the race it holds.
+def test_build_page_keeps_a_race_per_number_of_agents(tmp_path):
+    # The page, emptied of the races it holds.
     page = build_page.embed((REPO_ROOT / "docs" / "agent_race.html").read_text(), None)
     assert "const RACE_EVENTS_EMBEDDED = null; // <<RACE_EVENTS>>" in page
-    record = {"metadata": {"lanes": {"gs-sr-vllm": {"wall_s": 1.0}}}, "events": []}
-    log = tmp_path / "pod.log"
-    log.write_text("noise\n" + run_race.encode_block(record) + "\n")
     out = tmp_path / "agent_race.html"
     out.write_text(page)
-    assert build_page.main([str(log), "--page", str(out)]) == 0
-    embedded = out.read_text()
-    line = next(x for x in embedded.splitlines() if "<<RACE_EVENTS>>" in x)
-    assert json.loads(line.split(" = ", 1)[1].rsplit(";", 1)[0]) == record
-    # Built again, the data line is replaced, not added.
-    assert build_page.main([str(log), "--page", str(out)]) == 0
+    log = tmp_path / "pod.log"
+
+    def race_of(agents, wall):
+        return {
+            "metadata": {"runs": agents, "lanes": {"gs-sr-vllm": {"wall_s": wall}}},
+            "events": [],
+        }
+
+    def held():
+        line = next(x for x in out.read_text().splitlines() if "<<RACE_EVENTS>>" in x)
+        return json.loads(line.split(" = ", 1)[1].rsplit(";", 1)[0])
+
+    for race in (race_of(64, 2.0), race_of(16, 1.0), race_of(64, 3.0)):
+        log.write_text("noise\n" + run_race.encode_block(race) + "\n")
+        assert build_page.main([str(log), "--page", str(out)]) == 0
+    # One race per number of agents, in order; a new run replaces its own.
+    assert held() == {"16": race_of(16, 1.0), "64": race_of(64, 3.0)}
+    assert list(held()) == ["16", "64"]
     assert out.read_text().count("<<RACE_EVENTS>>") == 1
+    # A page from before the choice holds one race: it counts as its own number's.
+    single = build_page.EMBED.sub(
+        lambda _: "const RACE_EVENTS_EMBEDDED = "
+        + json.dumps(race_of(16, 1.0))
+        + "; // <<RACE_EVENTS>>",
+        page,
+    )
+    assert build_page.races_in(single) == {"16": race_of(16, 1.0)}
+    added = build_page.add_race(single, race_of(64, 2.0))
+    assert set(build_page.races_in(added)) == {"16", "64"}
     # A path from the run's storage never reaches the page.
-    record["metadata"]["checkpoint"] = "/mnt/storage/run/race_sr"
-    log.write_text(run_race.encode_block(record))
+    leaky = race_of(64, 2.0)
+    leaky["metadata"]["checkpoint"] = "/mnt/storage/run/race_sr"
+    log.write_text(run_race.encode_block(leaky))
     with pytest.raises(SystemExit, match="absolute paths"):
         build_page.main([str(log), "--page", str(out)])
+
+
+def test_switches_added_to_an_old_race_are_the_ones_recorded(stub_vllm, fleet):
+    lanes = [
+        race(FakeEngine(), fleet, arm) for arm in ("shadow-residual", "native-lora")
+    ]
+    spec = types.SimpleNamespace(
+        model_id="granite-4.1-3b", base_model="ibm-granite/granite-4.1-3b"
+    )
+    recorded = run_race.race_record(spec, WORKLOAD, {"sha": "0" * 40}, lanes)
+
+    # As the recorder kept it before 2026-10-12: no switches, SR on one adapter.
+    def old(e):
+        if e["ev"] == "switch":
+            return None
+        if e["srv"] == "gs-sr-vllm" and e["ev"] == "step_start":
+            if e["step"] == "decode" and "adapter" in e:
+                return None
+            if e["step"] == "prefill":
+                return {**e, "adapter": "ad0"}
+        return e
+
+    before = {**recorded, "events": [x for x in map(old, recorded["events"]) if x]}
+    upgraded = build_page.add_switches(before, fleet)
+
+    def same(a, b):
+        # The recorder stamps a switch a moment after the token mark that makes it;
+        # the upgrade has only the mark's time.
+        return {**a, "t": 0} == {**b, "t": 0} and abs(a["t"] - b["t"]) <= 0.002
+
+    for name in recorded["servers"]:
+        got = [e for e in upgraded["events"] if e["srv"] == name]
+        want = [e for e in recorded["events"] if e["srv"] == name]
+        assert len(got) == len(want), name
+        assert all(same(a, b) for a, b in zip(got, want, strict=True)), name
+        meta = upgraded["metadata"]["lanes"][name]
+        assert meta["switches"] == sum(a["n_switches"] for a in fleet)
+    assert upgraded["metadata"]["lanes"]["gs-sr-vllm"]["adapters_run"] == ["ad0"]
+    with pytest.raises(ValueError, match="already has its switches"):
+        build_page.add_switches(upgraded, fleet)
+    with pytest.raises(ValueError, match="not this fleet"):
+        build_page.add_switches(before, fleet[:-1])
