@@ -7,7 +7,7 @@ first prefill position — from the eager / ``FULL_AND_PIECEWISE`` reference. Th
 divergence is in the attention op *as captured inside the full CUDA graph*:
 turning off FULL (eager), or dropping attention out of the graph
 (``FULL_AND_PIECEWISE`` / ``PIECEWISE``), matches the reference exactly. See
-``docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md`` / issue #139.
+issue #139.
 
 Why FA3 + FULL specifically
 ---------------------------
@@ -91,7 +91,7 @@ def patch_flash_attn_schedule() -> None:
             "vllm.v1.attention.backends.flash_attn; the FA3 full-cudagraph "
             "downgrade is NOT installed. Under FlashAttention 3 + "
             "cudagraph_mode=FULL this will produce wrong tokens (see "
-            "docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md). vLLM internals may have "
+            "issue #139). vLLM internals may have "
             "changed; the patch needs updating."
         )
         # Not marked installed: a vLLM version bump that restores the symbol
@@ -113,7 +113,7 @@ def patch_flash_attn_schedule() -> None:
             "granite_switch: could not resolve "
             "AttentionCGSupport.UNIFORM_BATCH; the FA3 full-cudagraph downgrade "
             "is NOT installed and FlashAttention 3 + cudagraph_mode=FULL will "
-            "produce wrong tokens (see docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md). "
+            "produce wrong tokens (see issue #139). "
             "vLLM internals may have changed; the patch needs updating."
         )
         return

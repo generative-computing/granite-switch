@@ -11,7 +11,7 @@ This is load-bearing under the GPU host's NVIDIA **Exclusive_Process** compute
 mode: only one OS process may hold a device's primary CUDA context at a time, so
 if the pytest process touched ``torch.cuda`` (even a ``mem_get_info`` probe) it
 would own the device and every ``EngineCore`` child it spawned afterward would die
-with ``cudaErrorDevicesUnavailable``. See ``docs/FIXING_VLLM.md`` cluster 2.
+with ``cudaErrorDevicesUnavailable``.
 
 The engine lives entirely inside this short-lived process. Because the process
 exits after a single engine there is no back-to-back-engine handoff within it, so
@@ -48,8 +48,7 @@ def _pin_single_visible_device():
     init (``init_worker_distributed_environment`` -> NCCL) set up across both even
     at world_size=1, which widens the device-acquisition surface -- and under the
     host's NVIDIA Exclusive_Process compute mode that is exactly where engine init
-    intermittently dies with ``cudaErrorDevicesUnavailable`` (see
-    ``docs/FIXING_VLLM.md`` cluster 2). Pinning to one device removes the
+    intermittently dies with ``cudaErrorDevicesUnavailable``. Pinning to one device removes the
     cross-device NCCL step and halves the surface.
 
     WHICH device: if the parent (``run_vllm_logprobs``) set ``GS_LOGPROBS_PIN_DEVICE``,

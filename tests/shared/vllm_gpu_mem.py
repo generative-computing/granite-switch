@@ -119,7 +119,7 @@ def device_is_free() -> bool:
 
     Queried through ``nvidia-smi`` on purpose, NOT a ``torch.cuda`` probe: this
     runs in the **parent** pytest process, and under the host's
-    ``Exclusive_Process`` compute mode (see ``docs/FIXING_VLLM.md`` cluster 2) only
+    ``Exclusive_Process`` compute mode only
     one process may hold a device's primary context at a time. A
     ``torch.zeros(1, device=...)`` here would create exactly the parent context
     that then blocks the next ``EngineCore`` child -- the very failure we are
@@ -177,8 +177,8 @@ def device_is_free() -> bool:
 def wait_device_free(*, timeout: float = GPU_DEVICE_READY_TIMEOUT) -> None:
     """Block until no compute process holds a visible GPU, or ``timeout`` elapses.
 
-    Complements the memory-reclaim wait in :func:`shutdown_llm`. The cluster-2
-    evidence (``docs/FIXING_VLLM.md``) is a device that reports its memory fully
+    Complements the memory-reclaim wait in :func:`shutdown_llm`. The observed
+    evidence is a device that reports its memory fully
     free (~78.7/79.2 GiB) yet still fails a *new* engine's first host->device copy
     with ``cudaErrorDevicesUnavailable``: the exiting ``EngineCore`` child has
     released memory but not yet relinquished the device's primary context. Memory
@@ -239,8 +239,7 @@ def shutdown_llm(
     acquirable again (:func:`wait_device_free`): under ``Exclusive_Process`` the
     exiting ``EngineCore`` child can return its memory before it relinquishes the
     device's primary context, so the next engine's first CUDA op fails with
-    ``cudaErrorDevicesUnavailable`` even on a card that reports fully free. See
-    ``docs/FIXING_VLLM.md`` cluster 2.
+    ``cudaErrorDevicesUnavailable`` even on a card that reports fully free.
     """
     engine_core = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
     shutdown = getattr(engine_core, "shutdown", None)

@@ -2,7 +2,7 @@
 """Subprocess worker: FA3 AOT-schedule correctness under FULL CUDA graphs + prefix caching.
 
 Reproduces and gates the bug tracked in
-``docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md`` / issue #139: on vLLM 0.26, a
+issue #139: on vLLM 0.26, a
 Shadow-Residual (SR) MultiSwitch checkpoint served with
 ``cudagraph_mode=FULL`` AND prefix caching ON emits tokens outside the
 adapter's allowed set and distributions that diverge from the reference — but
@@ -130,8 +130,12 @@ def _write_base_model(path):
     for i in range(NUM_LAYERS):
         p = f"model.layers.{i}"
         sd[f"{p}.self_attn.q_proj.weight"] = torch.randn(qkv_out, HIDDEN)
-        sd[f"{p}.self_attn.k_proj.weight"] = torch.randn(NUM_KV_HEADS * HEAD_DIM, HIDDEN)
-        sd[f"{p}.self_attn.v_proj.weight"] = torch.randn(NUM_KV_HEADS * HEAD_DIM, HIDDEN)
+        sd[f"{p}.self_attn.k_proj.weight"] = torch.randn(
+            NUM_KV_HEADS * HEAD_DIM, HIDDEN
+        )
+        sd[f"{p}.self_attn.v_proj.weight"] = torch.randn(
+            NUM_KV_HEADS * HEAD_DIM, HIDDEN
+        )
         sd[f"{p}.self_attn.o_proj.weight"] = torch.randn(HIDDEN, qkv_out)
         sd[f"{p}.mlp.gate_proj.weight"] = torch.randn(INTERMEDIATE, HIDDEN)
         sd[f"{p}.mlp.up_proj.weight"] = torch.randn(INTERMEDIATE, HIDDEN)
@@ -218,7 +222,9 @@ def cmd_build(args):
     cfg = json.loads(open(os.path.join(out_dir, "config.json")).read())
     assert cfg["dual_stream"] is True, "composed checkpoint is not SR (dual_stream)"
     assert cfg["model_type"] == "granite_switch"
-    print(f"  dual_stream={cfg['dual_stream']} cross_stream_rank={cfg['cross_stream_rank']}")
+    print(
+        f"  dual_stream={cfg['dual_stream']} cross_stream_rank={cfg['cross_stream_rank']}"
+    )
 
     # Deterministic shared prefix (prefix-cacheable) in the plain-token range.
     # The per-adapter continuation and the "allowed set" are NOT hardcoded here:
@@ -304,8 +310,10 @@ def _probe_fa_version():
         v = get_flash_attn_version()
         print(f"  FA_VERSION={v}  (FULL cudagraph requires FA_VERSION=3)")
         if v != 3:
-            print("  WARNING: FA_VERSION != 3 — cudagraph_mode=FULL will DOWNGRADE; "
-                  "this run cannot reproduce issue #139.")
+            print(
+                "  WARNING: FA_VERSION != 3 — cudagraph_mode=FULL will DOWNGRADE; "
+                "this run cannot reproduce issue #139."
+            )
     except Exception as e:  # import path or probe may move across vLLM versions
         print(f"  FA_VERSION probe failed ({type(e).__name__}: {e})")
 
@@ -390,7 +398,7 @@ def cmd_run(args):
     decodes = {}
     dists = {}
     for ai, ctrl in enumerate(adapter_token_ids):
-        seq = list(shared_prefix) + [ctrl]
+        seq = [*shared_prefix, ctrl]
         # Each adapter decodes against the shared (prefix-cached) prefix — the
         # exact "same history, different adapter suffix" regime from the issue.
         g = llm.generate(TokensPrompt(prompt_token_ids=seq), greedy)
@@ -434,9 +442,13 @@ def _gate_distributions(R, C, label):
         mean_js = sum(jss) / len(jss)
         max_js = max(jss)
         if mean_jd > JACC_THRESH:
-            failures.append(f"{label} k={k}: mean(1-Jacc)={mean_jd:.4f} > {JACC_THRESH}")
+            failures.append(
+                f"{label} k={k}: mean(1-Jacc)={mean_jd:.4f} > {JACC_THRESH}"
+            )
         if mean_js > MEAN_JSD_THRESH:
-            failures.append(f"{label} k={k}: mean JSD={mean_js:.6f} > {MEAN_JSD_THRESH}")
+            failures.append(
+                f"{label} k={k}: mean JSD={mean_js:.6f} > {MEAN_JSD_THRESH}"
+            )
         if max_js > MAX_JSD_THRESH:
             failures.append(f"{label} k={k}: max JSD={max_js:.6f} > {MAX_JSD_THRESH}")
     return failures

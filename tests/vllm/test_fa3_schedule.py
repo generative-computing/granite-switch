@@ -5,7 +5,7 @@ On vLLM 0.26 a Shadow-Residual MultiSwitch checkpoint served with
 ``cudagraph_mode=FULL`` AND prefix caching ON emits tokens outside the adapter's
 allowed set and distributions that diverge from the reference — only on small,
 prefix-cached decode steps. Turning off EITHER FULL or prefix caching matches the
-reference exactly. Root cause and fix: ``docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md``.
+reference exactly. Root cause and fix: ``granite_switch.vllm.fa3_schedule`` / issue #139.
 
 Two tests, both built on the SR MultiSwitch checkpoint composed by the worker
 (``GraniteSwitchComposer``, CLAUDE.md gotcha #5):
@@ -38,7 +38,6 @@ Worker: _fa3_schedule_worker.py (build / run / compare phases).
 Markers: requires_model (consistent with test_generation_equivalence.py).
 """
 
-import os
 import subprocess
 import sys
 import tempfile
@@ -115,7 +114,9 @@ def require_fa3():
 def _run_step(step_name, *cmd_args, timeout):
     """Run one worker step as a subprocess and assert success (fresh CUDA ctx)."""
     cmd = [sys.executable, str(WORKER), *cmd_args]
-    print(f"\n{'=' * 60}\n  Step: {step_name}\n  {' '.join(str(c) for c in cmd)}\n{'=' * 60}")
+    print(
+        f"\n{'=' * 60}\n  Step: {step_name}\n  {' '.join(str(c) for c in cmd)}\n{'=' * 60}"
+    )
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if result.stdout:
         print(result.stdout[-4000:])
@@ -221,5 +222,5 @@ def test_fa3_config_matrix_matches_reference(require_fa3):
 
         assert not failures, (
             "FA3 schedule regression — these settings diverged from the "
-            f"(eager, prefix-off) reference:\n  " + "\n  ".join(failures)
+            "(eager, prefix-off) reference:\n  " + "\n  ".join(failures)
         )

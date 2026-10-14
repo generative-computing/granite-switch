@@ -47,7 +47,7 @@ def register():
     # graph on this vLLM line, so for a granite_switch model we report the FA2
     # cudagraph-support level (UNIFORM_BATCH), which downgrades FULL to
     # FULL_AND_PIECEWISE (attention runs eagerly, output matches the reference).
-    # See fa3_schedule and docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md.
+    # See fa3_schedule and issue #139.
     from .fa3_schedule import patch_flash_attn_schedule
 
     patch_flash_attn_schedule()

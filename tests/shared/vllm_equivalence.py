@@ -193,11 +193,12 @@ def extract_logprobs_tensor(outputs, vocab_size):
     return tensor
 
 
-#: The GPU worker that actually stands up each engine (see module docstring and
-#: docs/FIXING_VLLM.md cluster 2). Runs in its OWN process so this -- the pytest --
+#: The GPU worker that actually stands up each engine (see module docstring).
+#: Runs in its OWN process so this -- the pytest --
 #: process never creates a CUDA context.
-_LOGPROBS_WORKER = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                "_vllm_logprobs_worker.py")
+_LOGPROBS_WORKER = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "_vllm_logprobs_worker.py"
+)
 #: Per engine: HF checkpoint load + vLLM init + a single teacher-forced generate.
 #: Generous; the real gate is correctness, and a hung child should fail loudly.
 _WORKER_TIMEOUT = float(os.environ.get("GS_LOGPROBS_WORKER_TIMEOUT", "1200"))
@@ -225,7 +226,7 @@ _ROUND_ROBIN_DEVICES = not os.environ.get("GS_LOGPROBS_NO_ROUND_ROBIN")
 def _visible_device_count():
     """How many GPUs are visible to the workers, WITHOUT creating a CUDA context.
 
-    The pytest process must stay CUDA-free (``docs/FIXING_VLLM.md`` cluster 2), so
+    The pytest process must stay CUDA-free, so
     this never calls ``torch.cuda``. It reads ``CUDA_VISIBLE_DEVICES`` when set
     (the authoritative allowlist the workers also parse), else asks ``nvidia-smi``.
     Returns ``1`` on any ambiguity so the round-robin degrades to "always device 0"
@@ -254,7 +255,7 @@ def _is_transient_device_error(text: str) -> bool:
     The signature is ``cudaErrorDevicesUnavailable`` ("CUDA-capable device(s)
     is/are busy or unavailable"), raised at engine ``init_device`` -- a transient
     the host throws under NVIDIA Exclusive_Process compute mode, independent of the
-    model or weights (see docs/FIXING_VLLM.md cluster 2). Matching the worker's
+    model or weights. Matching the worker's
     FULL stdout+stderr (not a wrapped parent exception string) is why this can key
     on the real error text, which the old in-process retry could not see.
     """
@@ -276,7 +277,6 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, *, tmpdir, **llm_kw
     ``cudaErrorDevicesUnavailable``. So the engine, and every ``torch.cuda`` call,
     live entirely in ``_vllm_logprobs_worker.py``, one fresh process per engine.
     This process only writes a JSON spec, shells out, and loads back a CPU tensor.
-    See ``docs/FIXING_VLLM.md`` cluster 2.
 
     Args:
         model_dir: path to saved HF model (config.json + model.safetensors)
