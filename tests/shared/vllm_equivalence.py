@@ -208,7 +208,44 @@ _WORKER_INIT_RETRIES = int(os.environ.get("GS_LOGPROBS_WORKER_RETRIES", "4"))
 #: Seconds to let the device settle between those attempts.
 _WORKER_RETRY_DELAY = float(os.environ.get("GS_LOGPROBS_WORKER_RETRY_DELAY", "15"))
 #: Monotonic counter so each engine run gets its own handoff files inside tmpdir.
+#: Also drives the per-engine round-robin device pin (see _visible_device_count /
+#: GS_LOGPROBS_PIN_DEVICE in _vllm_logprobs_worker.py): consecutive engines land on
+#: alternating GPUs, so a worker whose EngineCore child is still releasing a device
+#: does not collide with the next worker trying to acquire the SAME device under
+#: Exclusive_Process. (The primary cluster-2 fix is keeping the worker PARENT
+#: CUDA-free -- see vllm_gpu_mem.gpu_mem_util; round-robin just spreads the two
+#: workers of a pair across the two cards so their teardown/acquire windows never
+#: overlap on one device.)
 _logprobs_run_counter = itertools.count()
+#: Set GS_LOGPROBS_NO_ROUND_ROBIN=1 to disable device round-robin (e.g. to A/B it or
+#: on a single-GPU host where it is a no-op anyway).
+_ROUND_ROBIN_DEVICES = not os.environ.get("GS_LOGPROBS_NO_ROUND_ROBIN")
+
+
+def _visible_device_count():
+    """How many GPUs are visible to the workers, WITHOUT creating a CUDA context.
+
+    The pytest process must stay CUDA-free (``docs/FIXING_VLLM.md`` cluster 2), so
+    this never calls ``torch.cuda``. It reads ``CUDA_VISIBLE_DEVICES`` when set
+    (the authoritative allowlist the workers also parse), else asks ``nvidia-smi``.
+    Returns ``1`` on any ambiguity so the round-robin degrades to "always device 0"
+    -- i.e. today's single-device pin -- rather than pointing off the end.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible is not None:
+        entries = [v.strip() for v in visible.split(",") if v.strip() != ""]
+        return max(1, len(entries))
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+        n = len([line for line in out.splitlines() if line.strip()])
+        return max(1, n)
+    except Exception:
+        return 1
 
 
 def _is_transient_device_error(text: str) -> bool:
@@ -308,10 +345,27 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, *, tmpdir, **llm_kw
     # this; eager init does not, but the adapter-live tests require non-eager for
     # the tolerance gate, so retry rather than force eager. Any OTHER failure (a
     # real config/weight/logic error) raises immediately -- it is not retried.
+    # Round-robin the pinned GPU across engines (and across retries of one engine)
+    # so consecutive spawns do not contend for the same device while a previous
+    # worker's EngineCore child is still releasing it under Exclusive_Process. A
+    # retry advances the slot too, moving a failed spawn to the OTHER GPU rather
+    # than back onto the one that just refused it. No-op on a single-GPU host
+    # (slot stays 0). This is a secondary robustness measure; the primary fix is
+    # keeping the worker parent CUDA-free (vllm_gpu_mem.gpu_mem_util).
+    device_count = _visible_device_count() if _ROUND_ROBIN_DEVICES else 1
     print(f"\n  logprobs worker: {' '.join(cmd)}")
     for attempt in range(1, _WORKER_INIT_RETRIES + 1):
+        worker_env = dict(os.environ)
+        if device_count > 1:
+            slot = (run_id + attempt - 1) % device_count
+            worker_env["GS_LOGPROBS_PIN_DEVICE"] = str(slot)
+            print(f"  round-robin device slot {slot} (of {device_count})")
         result = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=_WORKER_TIMEOUT
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=_WORKER_TIMEOUT,
+            env=worker_env,
         )
         if result.stdout:
             print(result.stdout[-4000:])

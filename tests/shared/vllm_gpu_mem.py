@@ -35,21 +35,71 @@ GPU_MEM_RECLAIM_TIMEOUT = float(os.environ.get("GS_GPU_MEM_RECLAIM_TIMEOUT", "12
 GPU_DEVICE_READY_TIMEOUT = float(os.environ.get("GS_GPU_DEVICE_READY_TIMEOUT", "60"))
 
 
+def _nvsmi_free_total_bytes():
+    """(free, total) bytes for the worker's visible GPU, via ``nvidia-smi``.
+
+    CUDA-FREE on purpose -- NOT ``torch.cuda.mem_get_info``. ``gpu_mem_util`` runs
+    in the worker *before* ``LLM()``, and ``LLM()`` spawns the ``EngineCore`` child
+    that creates the real CUDA context. Under the host's NVIDIA
+    ``Exclusive_Process`` compute mode only ONE process may hold a device's primary
+    context at a time, so if this (the parent worker) process created a context
+    first -- which ``torch.cuda.mem_get_info`` does: it flips
+    ``torch.cuda.is_initialized()`` to True -- the ``EngineCore`` child's first CUDA
+    op dies with ``cudaErrorDevicesUnavailable`` at ``init_device`` ->
+    ``MemorySnapshot`` -> ``get_memory_info``. That is the real cluster-2 Cause B
+    (the doc's "self-sustaining non-eager window" was a mis-diagnosis; the actual
+    precondition is deterministic -- parent holds a context before the child spawns;
+    minimal repro in git history / scratch). ``nvidia-smi`` reads NVML without a
+    context, so the parent stays CUDA-free.
+
+    Honours ``CUDA_VISIBLE_DEVICES`` by taking the FIRST visible index (the worker
+    pins to one device before this runs). Returns ``None`` on any failure so the
+    caller falls back to letting vLLM size itself.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    index = "0"
+    if visible is not None:
+        entries = [v.strip() for v in visible.split(",") if v.strip() != ""]
+        if not entries:
+            return None  # device explicitly hidden -- no GPU to measure
+        index = entries[0]
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                f"--id={index}",
+                "--query-gpu=memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        free_mib, total_mib = (int(x.strip()) for x in out.splitlines()[0].split(","))
+    except Exception:
+        return None
+    return free_mib * 2**20, total_mib * 2**20
+
+
 def gpu_mem_util(ceiling: float = GPU_MEM_UTIL, floor: float = GPU_MEM_UTIL_FLOOR):
     """90% of the free fraction, capped at ``ceiling``.
 
-    Returns ``None`` without CUDA, so a caller can leave the kwarg unset and let
-    vLLM pick (there is no device to measure, and no engine to start either).
+    Reads free/total memory via ``nvidia-smi`` (:func:`_nvsmi_free_total_bytes`),
+    NOT ``torch.cuda`` -- this runs in the worker before ``LLM()`` spawns the
+    ``EngineCore`` child, and creating a CUDA context here would block that child
+    under ``Exclusive_Process`` (see :func:`_nvsmi_free_total_bytes`).
+
+    Returns ``None`` when there is no visible GPU to measure (or the query fails),
+    so a caller can leave the kwarg unset and let vLLM pick.
 
     Raises ``SystemExit`` rather than returning a doomed value when the result is
     below ``floor``: at that point something else is holding the card and a test
     failure would be the wrong diagnosis.
     """
-    import torch
-
-    if not torch.cuda.is_available():
+    ft = _nvsmi_free_total_bytes()
+    if ft is None:
         return None
-    free, total = torch.cuda.mem_get_info()
+    free, total = ft
     util = min(ceiling, 0.9 * free / total)
     print(
         f"  GPU memory: {free / 2**30:.1f}/{total / 2**30:.1f} GiB free -> "

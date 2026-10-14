@@ -52,10 +52,20 @@ def _pin_single_visible_device():
     ``docs/FIXING_VLLM.md`` cluster 2). Pinning to one device removes the
     cross-device NCCL step and halves the surface.
 
-    Honours an existing allowlist: picks the FIRST entry of ``CUDA_VISIBLE_DEVICES``
-    (so a harness that already restricts/orders devices is respected), or ``"0"``
-    if unset. Must run BEFORE any ``torch``/``vllm`` import so no context has formed
-    yet. ``GS_LOGPROBS_NO_PIN=1`` opts out (e.g. to A/B this behaviour).
+    WHICH device: if the parent (``run_vllm_logprobs``) set ``GS_LOGPROBS_PIN_DEVICE``,
+    use exactly that entry of ``CUDA_VISIBLE_DEVICES``. The parent round-robins that
+    index across consecutive engines so that back-to-back non-eager spawns land on
+    DIFFERENT physical GPUs -- which is the cluster-2 Cause-B fix: the device that
+    just tore down a non-eager EngineCore gets a full engine-lifetime (~60-90 s) to
+    relinquish its primary context before the next non-eager spawn hits it, instead
+    of being re-acquired immediately into the window its own teardown opened. The
+    recovery gap the host needs is paid in parallelism (the other GPU), not in test
+    wall-clock. Falls back to the FIRST entry when the parent set nothing (single
+    engine, or an opted-out run), so a harness that already restricts/orders devices
+    is respected; or ``"0"`` if ``CUDA_VISIBLE_DEVICES`` is unset.
+
+    Must run BEFORE any ``torch``/``vllm`` import so no context has formed yet.
+    ``GS_LOGPROBS_NO_PIN=1`` opts out (e.g. to A/B this behaviour).
     """
     if os.environ.get("GS_LOGPROBS_NO_PIN"):
         return
@@ -64,9 +74,21 @@ def _pin_single_visible_device():
         chosen = "0"
     else:
         entries = [v.strip() for v in visible.split(",") if v.strip() != ""]
-        if len(entries) <= 1:
-            return  # already a single device (or none) -- nothing to narrow
-        chosen = entries[0]
+        if len(entries) == 0:
+            return  # no devices -- nothing to narrow
+        # Parent-chosen round-robin slot (modulo the real entry count, so a stale
+        # or oversized index can never point off the end of the allowlist).
+        pin_idx_raw = os.environ.get("GS_LOGPROBS_PIN_DEVICE")
+        if pin_idx_raw is not None and pin_idx_raw.strip() != "":
+            try:
+                slot = int(pin_idx_raw) % len(entries)
+            except ValueError:
+                slot = 0
+        else:
+            slot = 0
+        if len(entries) <= 1 and slot == 0:
+            return  # already a single device -- nothing to narrow
+        chosen = entries[slot]
     os.environ["CUDA_VISIBLE_DEVICES"] = chosen
     print(f"  pinned CUDA_VISIBLE_DEVICES={chosen} (was {visible!r})")
 

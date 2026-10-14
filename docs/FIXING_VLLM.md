@@ -172,30 +172,63 @@ Mitigations for Cause B, both in the worker/runner:
    it actually matches, unlike the old in-process retry). Only this error retries;
    anything else raises immediately.
 
-### Cause B is SELF-SUSTAINING under the suite's engine cadence (status: OPEN)
+### RESOLVED (2026-10-14): "Cause B" was a mis-diagnosis — it is Cause A, one level down
 
-Neither mitigation above is sufficient yet. A full `tests/vllm/test_granite4_mini.py`
-run with pin+retry still failed essentially every equivalence test — the whole
-suite red. The mechanism, now understood:
+The "self-sustaining non-eager window" story below was **wrong**. There is no
+non-eager-specific flake and no time-correlated window. Cause B is the *same bug as
+Cause A*, recurring one process level down: the **worker parent process creates a
+CUDA context before `LLM()` spawns its `EngineCore` child**, and under
+Exclusive_Process the parent then owns the device so the child's first CUDA op dies
+with `cudaErrorDevicesUnavailable`.
 
-- A **single** non-eager engine, left alone, recovers within ~1-2 min (verified:
-  the instant the suite is stopped, both eager and non-eager engines pass again).
-- But the suite spawns the next non-eager engine **immediately**, and the 15s retry
-  delay is far too short, so each engine lands in the window the previous engine's
-  teardown just opened. The device **never gets a quiet gap to recover**, so the bad
-  state is self-sustaining for the whole run. `enforce_eager=True` never triggers it.
-- The window could NOT be reproduced on a healthy device on demand (A/B 1-GPU vs
-  2-GPU passed 12/12; back-to-back non-eager passed 4/4) — it only appears under
-  sustained non-eager churn. This is why the single-GPU pin, though sound, did not
-  rescue a real bad window.
+Where the parent context came from: `_vllm_logprobs_worker.cmd_run` calls
+`gpu_mem_util()` **before** `LLM(...)`, and the old `gpu_mem_util` called
+`torch.cuda.mem_get_info()` — which creates the worker's primary CUDA context
+(`torch.cuda.is_initialized()` flips to True). The child then dies at
+`gpu_worker.init_device()` → `MemorySnapshot(device=...)` →
+`torch.accelerator.get_memory_info()`.
 
-Effective levers (a tradeoff of test wall-clock vs robustness — DECISION PENDING):
-(a) a long **recovery gap between engines** (e.g. 60-90s), not just retries, so the
-device recovers before the next non-eager spawn; (b) **eager where it is bit-exact**
-(num_adapters=0 tests: `TestGranite4FamilyEquivalence` mini, `TestAttentionOnlyNoMoE`,
-upstream) to cut the number of non-eager engines feeding the window, leaving only the
-adapter-live `TestZeroAdapter*` non-eager; (c) both. Environmental interaction, not a
-granite-switch logic bug: vLLM 0.26.0 / torch 2.11+cu130 / Exclusive_Process H100.
+Minimal, deterministic repro on a fully idle Exclusive_Process GPU: a parent that
+spawns a child which creates a CUDA context. Parent CUDA-free → child **OK**; parent
+first ran `torch.cuda.mem_get_info()` → child **fails** `cudaErrorDevicesUnavailable`,
+every time. Confirmed on the real worker: before the fix, BOTH eager and non-eager
+failed; after the fix, both pass. Eager only ever "looked rock-solid" by timing luck
+in standalone probes that happened not to call `gpu_mem_util` first — it was never
+eager-vs-non-eager.
+
+**THE FIX.** `tests/shared/vllm_gpu_mem.py::gpu_mem_util` now reads free/total memory
+via `nvidia-smi` (`--query-gpu=memory.free,memory.total`, new `_nvsmi_free_total_bytes`)
+instead of `torch.cuda.mem_get_info`, so the worker parent never creates a CUDA
+context before the EngineCore child spawns. (`shutdown_llm`'s `torch.cuda` calls run
+*after* generate and immediately before the worker exits, so a late parent context
+there blocks nothing.) Verified `gpu_mem_util()` leaves `is_initialized()` False.
+
+Consequences:
+- The non-eager tolerance constraint is a non-issue: non-eager engines run fine once
+  the parent is CUDA-free. **No eager-split and no recovery gap are needed** — the
+  levers below were chasing a phantom.
+- `run_vllm_logprobs` additionally round-robins the pinned GPU across engines/retries
+  (`GS_LOGPROBS_PIN_DEVICE`, honoured by the worker's `_pin_single_visible_device`;
+  `GS_LOGPROBS_NO_ROUND_ROBIN=1` to disable). This is secondary belt-and-suspanders:
+  it keeps the two workers of a pair on different cards so a teardown and the next
+  acquire never contend for one device. Not load-bearing; the CUDA-free parent is.
+- The fresh-worker retry (candidate #2) is kept as-is: harmless, and still a backstop
+  for any genuinely transient acquire failure.
+
+### (superseded) Cause B hypothesised as SELF-SUSTAINING under engine cadence
+
+Kept for the record; **the fix above supersedes this** — the mechanism described
+here is not real (there is no non-eager window; it was the parent-context bug all
+along). A full `tests/vllm/test_granite4_mini.py` run with pin+retry still failed
+essentially every equivalence test, which was read as:
+
+- A single non-eager engine recovers in ~1-2 min; the suite spawns the next
+  immediately so the device "never recovers". **(Not actually what was happening.)**
+- Could not be reproduced on demand on a healthy device. **(Because the trigger was
+  `gpu_mem_util`'s context, present in the suite path, absent in the ad-hoc probes.)**
+
+Levers once considered (now unnecessary): (a) a 60-90s recovery gap between engines;
+(b) eager where bit-exact (num_adapters=0); (c) both.
 
 ## Cluster 3 — Multi-adapter equivalence (NOT the bug the committed fix targeted)
 
@@ -273,8 +306,11 @@ they can still hit the cluster-2 device race. Watch those outcomes separately.
 ## Status
 
 - Cluster 1: in progress on this branch (#139).
-- Cluster 2: REAL device-availability race, reproduced on a quiet node. Needs the
-  device-readiness fix (candidate #1 above). Not yet implemented.
+- Cluster 2: **RESOLVED (2026-10-14).** Not a device-availability race and not a
+  non-eager flake — the worker *parent* created a CUDA context (via `gpu_mem_util` →
+  `torch.cuda.mem_get_info`) before spawning its `EngineCore` child, which blocks the
+  child under Exclusive_Process. Fix: `gpu_mem_util` reads memory via `nvidia-smi`, so
+  the parent stays CUDA-free. See the "RESOLVED (2026-10-14)" subsection above.
 - Cluster 3: resolved as environmental on the re-run — prepare + compose complete on
   a quiet node. No prepare-path change needed. (If a healthy prepare is still slow,
   consider splitting the 1800 s budget into download vs. synthesis.)
