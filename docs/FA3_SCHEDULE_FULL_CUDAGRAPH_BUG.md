@@ -1,124 +1,108 @@
-# FA3 AOT Schedule Is Wrong Under FULL CUDA Graphs + Prefix Caching (vLLM 0.26)
+# FA3 Attention Is Wrong When Captured in a FULL CUDA Graph (vLLM 0.26)
 
 ## Summary
 
-On vLLM 0.26, Granite Switch (Shadow-Residual / MultiSwitch checkpoints) emits wrong
-tokens **only** when `cudagraph_mode=FULL` **and** prefix caching are both enabled.
-Disabling either one makes outputs match vLLM 0.19 exactly.
+On vLLM 0.26 under FlashAttention **3**, Granite Switch emits wrong tokens whenever
+`cudagraph_mode=FULL` is used. The output diverges — grossly, from the very first
+prefill position — from the eager / `FULL_AND_PIECEWISE` reference.
 
-- A token outside the adapter's allowed set (token 0) is produced, raising a `KeyError`
-  downstream — observed on 99.8% of decisions in the failing environment.
-- Even where no token is out of range, distributions diverge from the reference
-  environment.
+- The divergence is in the **attention op as captured inside the full CUDA graph**.
+  Running attention outside the graph fixes it: eager, `PIECEWISE`, and
+  `FULL_AND_PIECEWISE` (which keeps the rest of the model in the graph but runs
+  attention eagerly) all match the reference token-for-token.
+- Prefix caching is **not** required to trigger it (an earlier writeup claimed FULL
+  *and* prefix caching were both needed; a GPU reproduction showed FULL alone, with
+  prefix caching off, diverges identically).
+- It is **not** Granite-Switch-specific in mechanism: a plain Granite base served
+  through this same vLLM 0.26 + FA3 build diverges under FULL in exactly the same way.
+  It is an upstream FA3 full-cudagraph correctness problem on this vLLM line.
 
-The fault is at the seam between Granite Switch's attention layers and FlashAttention 3's
-ahead-of-time (AOT) scheduler. The fixable part is ours: the `fa3_schedule.py` patch,
-which exists only on the vLLM 0.19 branch (`feature/doom-voice`) and must be
-re-introduced, adapted, on the 0.26 line.
+The fix is ours and narrow: for a `granite_switch` model we make the FlashAttention
+backend report the FA2 cudagraph-support level (`UNIFORM_BATCH`) instead of FA3's
+`ALWAYS`, so vLLM downgrades `FULL` to `FULL_AND_PIECEWISE` and runs attention eagerly.
+See `src/granite_switch/vllm/fa3_schedule.py`.
 
 ## Status at a glance
 
 | Item | State |
 | --- | --- |
-| Root-cause mechanism | **Traced** from pinned vLLM 0.26 source + our attention shapes (see below). Not yet reproduced on a GPU. |
-| Original experiment (the table below) | Observed by the team on an environment where **FlashAttention 3 was active**. |
-| Our reproduction attempts on Vela | **Blocked**: FA3 does not load on the Vela image, so `FULL` silently downgrades and the bug cannot appear there. See *"Reproducing this requires FlashAttention 3"*. |
-| The fix | **Designed, not yet written.** |
-| Regression tests | **Written** (`tests/vllm/test_fa3_schedule.py` + worker), but can only pass/fail meaningfully on an FA3-capable box. |
+| Root-cause mechanism | **Reproduced and confirmed on an H100 (FA3 active).** The fault is captured FA3 attention under FULL, not the AOT schedule shape (see below). |
+| Trigger | `cudagraph_mode=FULL` + FlashAttention 3. Prefix caching is irrelevant; a vanilla Granite base reproduces it too. |
+| The fix | **Written and verified**: downgrade FA3 FULL -> FULL_AND_PIECEWISE for granite_switch (`fa3_schedule.py`). The #139 repro test passes with it, fails without it. |
+| Regression tests | **Passing** on an FA3-capable box (`tests/vllm/test_fa3_schedule.py` + worker); they SKIP where FA3 is not active. |
 
-**One sentence for a busy reader:** we understand *why* the bug happens and have a fix
-designed, but we have not yet been able to re-run it on a GPU because the only trigger
-condition — FlashAttention 3 driving a FULL CUDA graph — hasn't loaded in the
-environments we've tried.
+**One sentence for a busy reader:** FA3 computes wrong attention when that attention is
+captured inside a FULL CUDA graph on vLLM 0.26, so for Granite Switch we tell vLLM the
+backend only supports `UNIFORM_BATCH` cudagraphs, which drops attention out of the graph
+(FULL -> FULL_AND_PIECEWISE) and restores correct output.
 
-## The experiment
+## Correction to an earlier (disproven) diagnosis
 
-The same 12 batches of 1–5 adapters on one growing game history, under each setting:
+An earlier version of this document, and the first `fa3_schedule.py` implementation,
+attributed the bug to FA3's **ahead-of-time (AOT) schedule** being sized from the model
+config's attention shape rather than the Shadow-Residual decoder's doubled query heads,
+and "fixed" it by resizing `num_heads_q`/`num_heads_kv`/`headdim` on the metadata builder.
+A GPU reproduction disproved this:
 
-| vLLM 0.26 setting                          | Outputs outside allowed set | Style adapters matching exactly (ref: 9) |
-| ------------------------------------------ | --------------------------- | ---------------------------------------- |
-| **ours:** `cudagraph_mode=FULL`, prefix caching on | **6 of 33**         | **4**                                    |
-| `FULL_AND_PIECEWISE` (vLLM default)        | 0                           | 9                                        |
-| eager (no CUDA graphs)                     | 0                           | 9                                        |
-| prefix caching off                         | 0                           | 9                                        |
-| async scheduling off                       | 6 of 33                     | 4                                        |
-| old environment, vLLM 0.19 (reference)     | 0                           | 9                                        |
+- With the resize in place the builder *was* sized correctly (`num_heads_q=8` for the SR
+  group, the counting/memory heads' own `head_size`), confirmed by instrumenting
+  `build()` — yet FULL still diverged, token-for-token identically to no patch at all.
+- Disabling AOT entirely (`aot_schedule=False`, `scheduler_metadata=None`,
+  `max_num_splits=0`) did **not** help either: attention was still captured in the graph.
+- A plain Granite base (no switch, no SR, no doubled heads) diverges under FULL+FA3 too,
+  so a doubled-Q schedule mismatch cannot be the cause.
 
-Read as an interaction test: turning off **either** FULL or prefix caching matches 0.19
-exactly. Turning off async scheduling changes nothing, so async scheduling is **ruled
-out**. The bug needs both FULL and prefix caching at once.
+The schedule shape was a red herring. What matters is only whether the attention op runs
+inside or outside the FULL graph, which is governed by `get_cudagraph_support`.
 
-## Root cause (validated against pinned v0.26.0 source)
+## The experiment (reproduced on an H100)
 
-FlashAttention 3 computes an **ahead-of-time schedule** — a work partition handed to the
-kernel — sized from the attention shape. vLLM's `FlashAttentionMetadataBuilder.__init__`
-derives that shape from the **model config**, not from the group's real layers
-(`vllm/v1/attention/backends/flash_attn.py:370-375`).
+Each setting below drives the SR MultiSwitch worker checkpoint
+(`tests/vllm/_fa3_schedule_worker.py`) and is compared against the `(eager, prefix-off)`
+reference. "Diverges" means the teacher-forced top-k distributions disagree grossly from
+the first prefill position (JSD ≈ 0.8–1.0), with the greedy continuation out of the
+reference's allowed set:
 
-For Granite Switch the dominant mismatch is the **Shadow-Residual decoder group**.
-`src/granite_switch/vllm/decoder/shadow_residual/decoder.py:138` builds:
+| vLLM 0.26 + FA3 setting                    | Matches `(eager, prefix-off)` reference? |
+| ------------------------------------------ | ---------------------------------------- |
+| `cudagraph_mode=FULL`, prefix caching on   | **No — diverges**                        |
+| `cudagraph_mode=FULL`, prefix caching off  | **No — diverges (identically)**          |
+| `FULL_AND_PIECEWISE` (vLLM default), on/off | Yes                                     |
+| `PIECEWISE`, on/off                        | Yes                                      |
+| eager (no CUDA graphs), on/off             | Yes                                      |
 
-```python
-# Doubled query heads (base + adapter interleaved) against base-only K/V.
-self.attn = Attention(
-    2 * self.num_heads,   # query heads are DOUBLED
-    self.head_dim,
-    self.scaling,
-    num_kv_heads=self.num_kv_heads,
-    ...
-)
-```
+Read as an isolation test: the **only** variable that flips the result is whether
+attention is captured inside the FULL graph (`FULL`) or run eagerly (every other mode,
+including `FULL_AND_PIECEWISE`, which still captures the rest of the model). Prefix caching
+makes no difference. A vanilla Granite base (no adapters) reproduces the same `FULL`
+divergence, so nothing about the switch, the SR doubled-Q heads, or the counting/memory
+heads is required.
 
-Query heads are doubled, but `num_heads_q` comes from
-`model_config.get_num_attention_heads()`, which reports the **un-doubled** count. So FA3's
-schedule is built for **half** the real query heads. (`headdim` is already correct because
-the repo overrides `get_head_size()` to `projection_head_dim`.)
+## Root cause (confirmed on-GPU)
 
-### Why it is a single-shape group, not a mixed one
+`FlashAttentionMetadataBuilder.get_cudagraph_support` reports
+`AttentionCGSupport.ALWAYS` when FA3 is active and `UNIFORM_BATCH` otherwise
+(`vllm/v1/attention/backends/flash_attn.py:341-345`). `ALWAYS` is what permits
+`cudagraph_mode=FULL` to capture the attention op for mixed prefill-decode batches. On this
+vLLM 0.26 + FA3 build that captured attention is numerically wrong — a single 49-token
+prefill is padded into a uniform-decode-shaped graph (observed: `num_actual_tokens=56,
+num_reqs=56` where `FULL_AND_PIECEWISE` sees the true `num_actual_tokens=49, num_reqs=1`)
+and the attention output no longer matches eager.
 
-KV-cache groups are keyed by the frozen `KVCacheSpec`, whose `AttentionSpec` subtype
-carries `head_size` and `num_kv_heads` (`vllm/v1/kv_cache_interface.py:99,175-178`;
-grouping at `vllm/v1/core/kv_cache_utils.py:1205`). Layers with different `head_size`
-therefore land in **separate, single-shape groups**:
-
-- The switch counting head (`head_size=counting_head_dim`) and memory head
-  (`head_size=memory_head_dim`) are in **different** single-shape groups
-  (`src/granite_switch/vllm/switch/multi.py:285,299`), not one mixed builder.
-- The dominant failure is a **single-shape group whose shape disagrees with the model
-  config** (SR doubled-Q). This is the correction path, not the mixed-group path.
-
-### Why FULL + prefix caching specifically
-
-1. `__init__` sets `aot_schedule=True` (FA3 present, `flash_attn.py:379`); the
-   `use_full_cuda_graph and aot_schedule` branch (`:400`) allocates a persistent
-   `scheduler_metadata` buffer (sized from batch only — shape-independent) and forces
-   `max_num_splits` to a config constant (`:418`).
-2. `build()` reads `num_heads_q/kv/headdim` **live** and passes them to
-   `get_scheduler_metadata` (`:518-520`); under FULL the result is frozen into the
-   persistent buffer and reused by the captured graph (`:641-649`).
-3. With a wrong `num_heads_q`, that frozen partition is invalid for a 1-token
-   prefix-cached decode (`max_seqlen_q=1`, large `max_seqlen_k`, one request) → token-0 /
-   out-of-set garbage.
-
-Non-FULL recomputes a fresh, self-consistent split on every call
-(`max_num_splits=0`, FA3 heuristics), so the wrong head count is largely self-correcting.
-Fresh-prompt batches mask the bug because the prefill shape dominates the partition — only
-the small prefix-cached decode exposes it.
-
-> **Note.** An earlier writeup framed this as an init-ordering race where the patch flips
-> `aot_schedule=False` "too late." That is not the cause on 0.26: the post-hoc disable is
-> tolerated because `build()`'s write-back is guarded, so a stale buffer is simply never
-> written. The real corruption is a **wrong-but-single shape kept with AOT enabled** in the
-> SR group.
+The AOT schedule's `num_heads_q`/`headdim` are **not** the cause. Instrumenting `build()`
+showed the schedule was already sized correctly (whether or not the old resize patch ran),
+and disabling AOT altogether did not change the divergence — because the attention op was
+still inside the captured graph either way.
 
 ## Is this a bug in FlashAttention 3 or in Granite Switch?
 
-- **Not FA3.** It sizes a schedule from the shape it is handed. Handed the model-config
-  shape for a group whose real shape differs, it computes a schedule that does not fit —
-  but it has no way to know the SR decoder doubles its query heads.
-- **Granite Switch.** The fix is ours: size FA3's AOT schedule from the group's own layers.
-  The `fa3_schedule.py` patch already does this on vLLM 0.19; it is absent on the 0.26 line
-  and must be re-introduced and adapted.
+- **Primarily upstream (FA3 + vLLM 0.26 FULL path).** A plain Granite base diverges too,
+  so the fault is in the generic captured-FA3-attention path, not in anything Granite
+  Switch adds.
+- **Ours to work around.** FULL is a Granite Switch deployment choice (latency of tiny
+  decode steps), and the backend's broad FA3-`ALWAYS` promise is wrong for us on this line.
+  We narrow it for `granite_switch` only, leaving every other model's FA3 FULL support
+  intact.
 
 ## Reproducing this requires FlashAttention 3 (and that is the hard part)
 
@@ -138,12 +122,11 @@ trigger never fired. Here is the chain, in plain terms:
      running torch/CUDA. `is_fa_version_supported(3)` must return true; otherwise vLLM
      falls back to FA2.
 
-**What we hit on Vela.** On an H100 (SM90 ✓), vLLM still selected FA2, so `FULL`
-downgraded and the bug could not appear — on both vLLM 0.26 and 0.30. The cause was
-**not** a torch version mismatch (a common wrong guess): vLLM 0.26 pins `torch==2.11`
-and the pod had exactly that. The remaining suspect is the **compiled CUDA of the bundled
-`vllm_flash_attn` kernel** versus the pod's CUDA — i.e. the FA3 kernel is present but will
-not load for that CUDA build.
+**Where it was finally reproduced.** On an H100 (SM90) with vLLM 0.26, torch
+2.11+cu130, FA3 loads (`FA_VERSION=3`) and the bug reproduces: `FULL` diverges, every
+other mode matches. Earlier attempts on Vela had `FA_VERSION=2` (FA3 kernel present but
+not loadable for that CUDA build), so `FULL` silently downgraded and nothing was tested —
+which is why the regression tests skip, not pass, when FA3 is absent.
 
 **How to tell, in one line.** The tests print the selected version at load:
 ```
@@ -161,131 +144,82 @@ means a real regression, never just an environment that lacks FA3.
 
 ## The fix
 
-Re-introduce `fa3_schedule.py` on the 0.26 line, keeping the
-wrap-`__init__`-after-original structure, with three changes:
-
-1. **Single-shape group (`len(shapes) == 1`)** — overwrite
-   `num_heads_q/num_heads_kv/headdim` from the group's own layers. This corrects the SR
-   doubled-Q group and keeps AOT on (the FULL buffer is shape-independent, so it stays
-   valid). This is the latency-preserving win.
-2. **Genuinely mixed-shape group (`len(shapes) > 1`, rare)** — disable AOT
-   **consistently**: `self.aot_schedule = False`, `self.scheduler_metadata = None`,
-   `self.max_num_splits = 0`, so the builder state is self-consistent whatever path
-   `build()` takes under FULL, regardless of future vLLM reordering.
-3. **Guard** — bail out early when the group has no `Attention` layers or when
-   `aot_schedule` is already False.
+`src/granite_switch/vllm/fa3_schedule.py` wraps
+`FlashAttentionMetadataBuilder.get_cudagraph_support` so that, **for a `granite_switch`
+model only**, it returns `AttentionCGSupport.UNIFORM_BATCH` instead of FA3's
+`AttentionCGSupport.ALWAYS`. vLLM then downgrades `cudagraph_mode=FULL` to
+`FULL_AND_PIECEWISE` on its own (logging `CUDAGraphMode.FULL is not supported ...
+setting cudagraph_mode=FULL_AND_PIECEWISE`), which keeps the MLP/projection regions in the
+graph but runs attention eagerly. Every other model keeps FA3's native support.
 
 ```python
-layers = get_layers_from_vllm_config(vllm_config, Attention, layer_names)
-if not layers:
-    return
-shapes = {(a.num_heads, a.num_kv_heads, a.head_size) for a in layers.values()}
-if len(shapes) == 1:
-    self.num_heads_q, self.num_heads_kv, self.headdim = shapes.pop()
-else:
-    self.aot_schedule = False
-    self.scheduler_metadata = None
-    self.max_num_splits = 0
+original = get_support.__func__
+
+def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+    hf = getattr(vllm_config.model_config, "hf_config", None)
+    if getattr(hf, "model_type", None) == "granite_switch":
+        return AttentionCGSupport.UNIFORM_BATCH   # FULL -> FULL_AND_PIECEWISE
+    return original(cls, vllm_config, kv_cache_spec)
+
+builder.get_cudagraph_support = classmethod(get_cudagraph_support)
 ```
+
+It is wired as the first action of `register()` in
+`src/granite_switch/vllm/__init__.py`.
 
 ### Version safety
 
-The current patch sets `_PATCHED = True` even on the `builder is None` branch, which hides
-the case where a future vLLM renames or moves the builder — the patch would silently
-install a no-op and corrupt tokens again. The 0.26 version must:
+- Soft-returns without marking `_PATCHED` on a genuine `ImportError` (vLLM absent /
+  CPU-only env), so a later call in a vLLM-capable process retries.
+- If `FlashAttentionMetadataBuilder`, its `get_cudagraph_support`, or
+  `AttentionCGSupport.UNIFORM_BATCH` is missing (a vLLM rename/move), it emits a loud
+  `logger.warning` and does **not** mark `_PATCHED` — a silent no-op would reintroduce
+  wrong tokens under FA3 + FULL.
+- Idempotent: a `_granite_switch_cg_support` flag on the builder guards re-wrapping.
 
-- soft-return without marking `_PATCHED` on a genuine `ImportError` (vLLM absent / CPU-only
-  env);
-- if vLLM is present but the expected symbol or attributes are missing, **not** mark
-  `_PATCHED` and emit a loud `logger.warning` (prefer raising — a silent miss produces
-  wrong tokens);
-- after `original(...)`, assert the builder exposes `num_heads_q`, `num_heads_kv`,
-  `headdim`, `aot_schedule`, and each layer exposes `num_heads`, `num_kv_heads`,
-  `head_size`;
-- optionally warn when `vllm.__version__` is outside `>=0.26,<0.31`.
+## Files
 
-### Branch
-
-Create `fix/fa3-aot-schedule-0.26` off `feature/vllm-0.26-to-0.30` (pins `vllm>=0.26,<0.31`,
-matches CI legs `vllm26`/`vllm30`). That branch currently lacks `fa3_schedule.py` and its
-`register()` does not call the patch, so this reintroduces and wires the module adapted to
-0.26 — not a merge of the 0.19 file.
-
-## Files to modify
-
-- `src/granite_switch/vllm/fa3_schedule.py` — **create** (0.26-adapted patch).
-- `src/granite_switch/vllm/__init__.py` — call `patch_flash_attn_schedule()` first thing in
-  `register()` (absent on the 0.26 branch).
-- `tests/vllm/test_fa3_schedule.py` + `tests/vllm/_fa3_schedule_worker.py` — **create**
-  (zero existing coverage), following the repo's `test_*.py` + `_*_worker.py` subprocess
-  convention.
-
-Reference only: `decoder/shadow_residual/decoder.py:138` (doubled-Q source),
-`switch/multi.py:285,299` (counting/memory head shapes).
+- `src/granite_switch/vllm/fa3_schedule.py` — the `get_cudagraph_support` downgrade patch.
+- `src/granite_switch/vllm/__init__.py` — calls `patch_flash_attn_schedule()` first thing
+  in `register()`.
+- `tests/vllm/test_fa3_schedule.py` + `tests/vllm/_fa3_schedule_worker.py` — the repro /
+  regression tests (SKIP when FA3 is not active).
 
 ## Verification
 
-vLLM is not installable in the local dev environment; GPU tests run via the `gsw-tests`
-MCP tool.
+GPU tests require an FA3-capable (Hopper) box; they SKIP when `FA_VERSION != 3`, so the
+first thing to confirm in any run is `FA_VERSION=3` in the log — otherwise the result is
+inconclusive.
 
-**This requires an FA3-capable environment** (see *"Reproducing this requires
-FlashAttention 3"*). The tests skip when `FA_VERSION != 3`, so the first thing to confirm
-in any run is `FA_VERSION=3` in the log — otherwise the result is inconclusive.
+**Reproduction / regression (authoritative):** `tests/vllm/test_fa3_schedule.py` composes
+a small SR MultiSwitch checkpoint and runs the matrix
+`{FULL, FULL_AND_PIECEWISE, eager} x {prefix on/off}` against an `(eager, prefix-off)`
+reference. Each setting is teacher-forced over the *same* token sequence (the reference's
+own output defines each adapter's "allowed set"):
 
-**Reproduction / regression (authoritative):** serve a composed SR MultiSwitch checkpoint
-on vLLM 0.26 with `enable_prefix_caching=True`, and run the toggle matrix
-`{FULL, non-FULL} x {prefix cache on, off}`. Each setting is compared to an
-`(eager, prefix-off)` reference run; the reference's own output defines each adapter's
-"allowed set", and every setting is teacher-forced over the *same* token sequence so the
-distributions are comparable:
-
-- Fresh-prompt batch → passes pre- and post-fix.
-- One game/conversation served alone, then a 1-token prefix-cached decode → **fails
-  pre-fix** (tokens the reference never produced; distributions diverge), **passes
-  post-fix**: tokens match the reference's allowed set and distributions match within the
-  fused-vs-native floor.
-- Only `FULL + prefix-on` should differ pre-fix; the other cells match the reference.
-- Re-run the 12-batch experiment: expect 0 outputs outside the allowed set and 9/9 style
-  adapters matching (vs 6/33 and 4/9 pre-fix).
-
-**Patch unit test (vLLM-26 CI leg):** build a minimal `VllmConfig` with
-`hf_config.model_type == "granite_switch"` and a group whose `Attention` layers report the
-doubled SR `num_heads`; instantiate `FlashAttentionMetadataBuilder` with the patch
-installed and assert:
-
-- `builder.num_heads_q` equals the layer (doubled) value, not the model-config value;
-- for a synthetic mixed group: `aot_schedule is False`, `scheduler_metadata is None`,
-  `max_num_splits == 0`;
-- idempotency: calling `patch_flash_attn_schedule()` twice leaves one wrapper;
-- version-safety: with the builder symbol monkey-missing, the patch logs/raises and does
-  not set `_PATCHED`.
+- **Pre-fix:** `FULL` (prefix on *and* off) diverges — tokens the reference never
+  produced, teacher-forced JSD ≈ 0.8–1.0 from the first prefill position. Every other cell
+  matches.
+- **Post-fix:** every cell, `FULL` included, matches the reference token-for-token
+  (verified on an H100: both tests pass).
 
 **Note (CLAUDE.md gotcha #11):** the FULL-cudagraph GPU test runs real graphs (not
-`enforce_eager`), so it cannot read the eager-only debug attributes — assert on generated
-tokens/logprobs, not on `_debug_*`.
+`enforce_eager`), so it cannot read the eager-only debug attributes — it asserts on
+generated tokens/logprobs, not on `_debug_*`.
 
 ## Why it matters
 
-FULL was chosen for latency: launch overhead dominates these tiny decode steps. On 0.19 a
-single decision ran ~6 ms with FULL versus ~17 ms without; the patch's own 0.26 numbers put
-a correct FULL decision at 7.8 ms p50 against FlashAttention 2's 23.6 ms. Falling back to
-the vLLM default (`FULL_AND_PIECEWISE`) buys correctness at a real latency cost. This fix
-keeps FULL both fast and correct.
+FULL was chosen for the launch-overhead savings on tiny decode steps. The downgrade to
+`FULL_AND_PIECEWISE` keeps everything except the attention op in the CUDA graph, so most of
+that saving is retained; the cost is the per-attention-launch overhead, which is the price
+of correctness until the upstream FA3 full-cudagraph path is fixed on this vLLM line. The
+alternative — leaving `FULL` on and getting wrong tokens — is not an option.
 
 ## Caveat
 
-The mechanism is traced from pinned v0.26.0 source plus the repo's attention shapes; it
-has **not yet been reproduced on a GPU**, because the environments tried so far did not
-load FlashAttention 3 (see *"Reproducing this requires FlashAttention 3"*). The
-reproduction above (fails pre-fix, passes post-fix) is what will convert "traced and
-consistent" into "confirmed" — once it runs with `FA_VERSION=3`.
-
-Two things could still shift the picture when it does run:
-
-- If the SR group turns out not to be the dominant trigger in practice, the per-group
-  correction still fixes **any** single-shape group whose shape disagrees with the model
-  config, so the fix holds — only the test's specific assertions would need adjusting.
-- The bug lives in vLLM 0.26's metadata builder, which changed by 0.30. On an FA3-capable
-  0.30 box the bug could already be absent upstream; a pass there would not disprove the
-  0.26 problem. The test is therefore meaningful **per vLLM line**, and the demo's own
-  line (0.26) is the one that matters.
+The bug lives in vLLM 0.26's FA3 full-cudagraph path, which changed by 0.30. On an
+FA3-capable 0.30 box the upstream bug could already be absent; the patch is still safe
+there (it only ever makes attention *eager*, never wrong), but if a future vLLM line is
+confirmed correct under FA3 + FULL, the model-type gate can be narrowed to the affected
+versions to recover full-graph attention. The regression test is meaningful **per vLLM
+line**; keep it in the FA3-capable CI leg.

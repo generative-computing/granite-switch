@@ -38,6 +38,7 @@ from .asr import (
     DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
     DEFAULT_ASR_MODEL_ID,
     get_transcriber,
+    resolve_driver_device,
     resolve_generate_kwargs,
 )
 
@@ -90,7 +91,13 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
 
     def _asr_device(self) -> str:
         cfg = self.get_hf_config()
-        return getattr(cfg, "asr_device", "cuda") or "cuda"
+        requested = getattr(cfg, "asr_device", "cuda") or "cuda"
+        # The transcriber runs in the vLLM *driver* process (multimodal input
+        # preprocessing), not the EngineCore subprocess. Under Exclusive_Process
+        # the driver cannot share the device the engine already holds, so a
+        # "cuda" request is downgraded to CPU there to avoid cudaErrorDevices-
+        # Unavailable. Default compute mode and explicit devices pass through.
+        return resolve_driver_device(requested)
 
     def _asr_dtype(self) -> str | None:
         cfg = self.get_hf_config()

@@ -12,6 +12,8 @@ what makes it fast); dtype follows the device unless a checkpoint sets
 
 from __future__ import annotations
 
+import os
+import subprocess
 import threading
 from collections.abc import Mapping
 from typing import Any, Union
@@ -56,6 +58,66 @@ _ASR_DTYPE_ALIASES = {
     "fp32": "float32",
     "float": "float32",
 }
+
+
+def gpu_is_exclusive_process() -> bool:
+    """True if any visible GPU is in the ``Exclusive_Process`` compute mode.
+
+    Queried through ``nvidia-smi`` on purpose: it must NOT create a CUDA context
+    in the calling process. That is the whole point of the caller
+    (:func:`resolve_driver_device`) -- under ``Exclusive_Process`` only one
+    process may hold a device's primary context, and in vLLM serving the audio
+    multimodal preprocessing runs in the *driver* process while the ``EngineCore``
+    subprocess already owns the device. A ``torch.cuda`` probe here would create
+    exactly the parent context we are trying to avoid.
+
+    Honours ``CUDA_VISIBLE_DEVICES`` so a partitioned host is read correctly, and
+    is conservative: any error (no ``nvidia-smi``, no GPU, parse failure) returns
+    False, leaving the requested device unchanged.
+    """
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=index,compute_mode", "--format=csv,noheader"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except Exception:
+        return False
+
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    allowed = (
+        {v.strip() for v in visible.split(",") if v.strip() != ""}
+        if visible is not None
+        else None
+    )
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) != 2:
+            continue
+        index, mode = parts
+        if allowed is not None and index not in allowed:
+            continue
+        if mode == "Exclusive_Process":
+            return True
+    return False
+
+
+def resolve_driver_device(device: str) -> str:
+    """Device for an ASR transcriber that runs in the vLLM *driver* process.
+
+    ``"cuda"`` is downgraded to ``"cpu"`` when a visible GPU is in
+    ``Exclusive_Process`` mode: there the driver cannot acquire a second context
+    on the device the ``EngineCore`` subprocess already holds, so loading the ASR
+    model onto CUDA in the driver dies with ``cudaErrorDevicesUnavailable`` (and
+    leaks a partial parent context). The ASR encoder is small and runs on short
+    clips, so CPU in the driver is the correct, working fallback. Any explicit
+    non-``"cuda"`` device, and the normal ``Default`` compute mode, pass through
+    unchanged.
+    """
+    if device == "cuda" and gpu_is_exclusive_process():
+        return "cpu"
+    return device
 
 
 def _resolve_torch_dtype(dtype: str | None, device: str) -> Any:

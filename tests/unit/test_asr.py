@@ -558,3 +558,66 @@ class TestLoadMergesPipelineKwargs:
         assert kwargs["task"] == "automatic-speech-recognition"
         assert kwargs["chunk_length_s"] == 15  # overrode the default 30
         assert kwargs["batch_size"] == 4  # extra kwarg passed through
+
+
+def _smi(csv_text):
+    """mock.patch target: a subprocess.run result whose stdout is ``csv_text``."""
+    return mock.Mock(return_value=mock.Mock(stdout=csv_text))
+
+
+class TestExclusiveProcessDetection:
+    """gpu_is_exclusive_process reads nvidia-smi WITHOUT creating a CUDA context.
+
+    The driver-side ASR transcriber must decide CPU-vs-CUDA before touching the
+    device: under Exclusive_Process the vLLM EngineCore subprocess already owns
+    it, so a torch.cuda probe in the driver would be the very fault we avoid.
+    """
+
+    def test_exclusive_mode_detected(self):
+        with mock.patch.object(asr.subprocess, "run",
+                               _smi("0, Exclusive_Process\n")):
+            assert asr.gpu_is_exclusive_process() is True
+
+    def test_default_mode_is_not_exclusive(self):
+        with mock.patch.object(asr.subprocess, "run", _smi("0, Default\n")):
+            assert asr.gpu_is_exclusive_process() is False
+
+    def test_nvidia_smi_missing_is_conservative_false(self):
+        with mock.patch.object(asr.subprocess, "run",
+                               mock.Mock(side_effect=FileNotFoundError)):
+            assert asr.gpu_is_exclusive_process() is False
+
+    def test_only_visible_devices_are_considered(self, monkeypatch):
+        # GPU 1 is exclusive but not visible; the visible GPU 0 is Default.
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+        with mock.patch.object(
+            asr.subprocess, "run",
+            _smi("0, Default\n1, Exclusive_Process\n"),
+        ):
+            assert asr.gpu_is_exclusive_process() is False
+
+    def test_visible_exclusive_device_is_seen(self, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
+        with mock.patch.object(
+            asr.subprocess, "run",
+            _smi("0, Default\n1, Exclusive_Process\n"),
+        ):
+            assert asr.gpu_is_exclusive_process() is True
+
+
+class TestResolveDriverDevice:
+    """cuda -> cpu only under Exclusive_Process; everything else passes through."""
+
+    def test_cuda_downgraded_under_exclusive(self):
+        with mock.patch.object(asr, "gpu_is_exclusive_process", lambda: True):
+            assert asr.resolve_driver_device("cuda") == "cpu"
+
+    def test_cuda_kept_in_default_mode(self):
+        with mock.patch.object(asr, "gpu_is_exclusive_process", lambda: False):
+            assert asr.resolve_driver_device("cuda") == "cuda"
+
+    def test_explicit_cpu_never_probes_and_passes_through(self):
+        # An explicit non-cuda device must not even query compute mode.
+        probe = mock.Mock(side_effect=AssertionError("should not be called"))
+        with mock.patch.object(asr, "gpu_is_exclusive_process", probe):
+            assert asr.resolve_driver_device("cpu") == "cpu"

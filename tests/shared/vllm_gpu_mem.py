@@ -16,6 +16,7 @@ in-pod with the second GPU completely idle. The guard is byte-identical back to
 
 import gc
 import os
+import subprocess
 import time
 
 #: Ceiling, i.e. what to ask for on an empty card.
@@ -29,6 +30,9 @@ GPU_MEM_RECLAIM_TARGET = float(os.environ.get("GS_GPU_MEM_RECLAIM_TARGET", "0.80
 #: How long to wait for that. Generous, because the alternative to waiting is a
 #: spurious red, and a shut-down engine normally releases within a few seconds.
 GPU_MEM_RECLAIM_TIMEOUT = float(os.environ.get("GS_GPU_MEM_RECLAIM_TIMEOUT", "120"))
+#: How long to wait for the DEVICE itself (not its memory) to become acquirable by
+#: a new CUDA context after an engine exits. See device_is_free / wait_device_free.
+GPU_DEVICE_READY_TIMEOUT = float(os.environ.get("GS_GPU_DEVICE_READY_TIMEOUT", "60"))
 
 
 def gpu_mem_util(ceiling: float = GPU_MEM_UTIL, floor: float = GPU_MEM_UTIL_FLOOR):
@@ -60,11 +64,100 @@ def gpu_mem_util(ceiling: float = GPU_MEM_UTIL, floor: float = GPU_MEM_UTIL_FLOO
     return util
 
 
+def device_is_free() -> bool:
+    """True if no compute process is holding a visible GPU, per ``nvidia-smi``.
+
+    Queried through ``nvidia-smi`` on purpose, NOT a ``torch.cuda`` probe: this
+    runs in the **parent** pytest process, and under the host's
+    ``Exclusive_Process`` compute mode (see ``docs/FIXING_VLLM.md`` cluster 2) only
+    one process may hold a device's primary context at a time. A
+    ``torch.zeros(1, device=...)`` here would create exactly the parent context
+    that then blocks the next ``EngineCore`` child -- the very failure we are
+    guarding against. So we observe the device from the outside instead.
+
+    Honours ``CUDA_VISIBLE_DEVICES``. Conservative: any error (no ``nvidia-smi``,
+    parse failure) returns ``True`` so a probe failure never wedges a run -- the
+    engine start itself remains the real gate.
+    """
+    try:
+        out = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-compute-apps=gpu_uuid",
+                "--format=csv,noheader",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).stdout
+    except Exception:
+        return True
+
+    # Map visible indices -> UUIDs so CUDA_VISIBLE_DEVICES is respected. If that
+    # query fails, fall back to "any running compute app means busy".
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+    allowed_uuids = None
+    if visible is not None:
+        allowed = {v.strip() for v in visible.split(",") if v.strip() != ""}
+        try:
+            idx_out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index,uuid", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+            allowed_uuids = set()
+            for line in idx_out.splitlines():
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) == 2 and parts[0] in allowed:
+                    allowed_uuids.add(parts[1])
+        except Exception:
+            allowed_uuids = None
+
+    for line in out.splitlines():
+        uuid = line.strip()
+        if not uuid:
+            continue
+        if allowed_uuids is not None and uuid not in allowed_uuids:
+            continue
+        return False
+    return True
+
+
+def wait_device_free(*, timeout: float = GPU_DEVICE_READY_TIMEOUT) -> None:
+    """Block until no compute process holds a visible GPU, or ``timeout`` elapses.
+
+    Complements the memory-reclaim wait in :func:`shutdown_llm`. The cluster-2
+    evidence (``docs/FIXING_VLLM.md``) is a device that reports its memory fully
+    free (~78.7/79.2 GiB) yet still fails a *new* engine's first host->device copy
+    with ``cudaErrorDevicesUnavailable``: the exiting ``EngineCore`` child has
+    released memory but not yet relinquished the device's primary context. Memory
+    free != device acquirable. We wait for the child to actually drop off
+    ``nvidia-smi``'s compute-app list before letting the next engine start.
+
+    A timeout prints and returns rather than raising: like the memory wait, a
+    spurious red is worse than a bounded wait, and the engine start is still the
+    authoritative gate.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if device_is_free():
+            return
+        if time.monotonic() >= deadline:
+            print(
+                f"  WARNING: a compute process still holds the device after "
+                f"{timeout:g}s; continuing and letting the engine start rule on it"
+            )
+            return
+        time.sleep(1.0)
+
+
 def shutdown_llm(
     llm,
     *,
     target: float = GPU_MEM_RECLAIM_TARGET,
     timeout: float = GPU_MEM_RECLAIM_TIMEOUT,
+    device_ready_timeout: float = GPU_DEVICE_READY_TIMEOUT,
 ) -> None:
     """Stop an ``LLM``'s EngineCore and wait for the device memory to come back.
 
@@ -91,6 +184,13 @@ def shutdown_llm(
     A timeout prints and returns instead of raising. ``gpu_mem_util`` is the one
     place that decides a card is too full to use, and two components disagreeing
     about that is worse than waiting a bounded time and letting it rule.
+
+    After the memory wait, this also waits for the **device** itself to become
+    acquirable again (:func:`wait_device_free`): under ``Exclusive_Process`` the
+    exiting ``EngineCore`` child can return its memory before it relinquishes the
+    device's primary context, so the next engine's first CUDA op fails with
+    ``cudaErrorDevicesUnavailable`` even on a card that reports fully free. See
+    ``docs/FIXING_VLLM.md`` cluster 2.
     """
     engine_core = getattr(getattr(llm, "llm_engine", None), "engine_core", None)
     shutdown = getattr(engine_core, "shutdown", None)
@@ -114,12 +214,16 @@ def shutdown_llm(
                 f"  GPU memory reclaimed: {free / 2**30:.1f}/{total / 2**30:.1f} GiB "
                 f"free ({frac:.2f} >= {target:g})"
             )
-            return
+            break
         if time.monotonic() >= deadline:
             print(
                 f"  WARNING: {free / 2**30:.1f}/{total / 2**30:.1f} GiB free "
                 f"({frac:.2f}) still below {target:g} after {timeout:g}s; "
                 "continuing and letting gpu_mem_util rule on it"
             )
-            return
+            break
         time.sleep(1.0)
+
+    # Memory can be back while the device is momentarily unacquirable by a NEW
+    # CUDA context -- the device-availability race in cluster 2. Wait that out too.
+    wait_device_free(timeout=device_ready_timeout)

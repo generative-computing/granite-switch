@@ -43,9 +43,10 @@ def register():
     """
     from vllm import ModelRegistry
 
-    # FA3's ahead-of-time schedule must be sized for the switch's own attention
-    # layers (SR's doubled query heads, the counting/memory heads), not the model
-    # config, or FULL cudagraphs produce wrong tokens under FlashAttention 3.
+    # FlashAttention 3 computes wrong attention when captured inside a FULL CUDA
+    # graph on this vLLM line, so for a granite_switch model we report the FA2
+    # cudagraph-support level (UNIFORM_BATCH), which downgrades FULL to
+    # FULL_AND_PIECEWISE (attention runs eagerly, output matches the reference).
     # See fa3_schedule and docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md.
     from .fa3_schedule import patch_flash_attn_schedule
 

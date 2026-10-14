@@ -134,9 +134,7 @@ def served_uncached(audio_checkpoint):
     a separate test it would only skip itself, leaving the rest of the module
     green while silently running the cached path.
     """
-    import gc
-
-    import torch
+    from tests.integration.conftest import shutdown_llm
 
     cache_kwargs = _cache_disabling_kwargs()
     if not cache_kwargs:
@@ -173,9 +171,10 @@ def served_uncached(audio_checkpoint):
             "tokenizer": llm.get_tokenizer(),
         }
     finally:
-        del llm
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Shut the EngineCore subprocess down (not just empty_cache) so it hands
+        # the GPU back before the next parametrized checkpoint boots its engine;
+        # under Exclusive_Process a leaked engine kills the next one.
+        shutdown_llm(llm)
 
 
 @pytest.fixture(scope="module")

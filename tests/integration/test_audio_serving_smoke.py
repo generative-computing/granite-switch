@@ -108,9 +108,7 @@ def served(audio_checkpoint):
     Tokenizer init stays ON (unlike the argmax-equivalence test): the ASR
     processor needs it to encode the prompt and the transcript.
     """
-    import gc
-
-    import torch
+    from tests.integration.conftest import shutdown_llm
 
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     from vllm import LLM
@@ -124,9 +122,10 @@ def served(audio_checkpoint):
     try:
         yield {"llm": llm, "config": llm.llm_engine.model_config.hf_config}
     finally:
-        del llm
-        gc.collect()
-        torch.cuda.empty_cache()
+        # Shut the EngineCore subprocess down (not just empty_cache) so it hands
+        # the GPU back before the next parametrized checkpoint boots its engine;
+        # under Exclusive_Process a leaked engine kills the next one.
+        shutdown_llm(llm)
 
 
 def _tone(seconds: float = 1.0, freq: float = 440.0):
