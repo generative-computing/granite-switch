@@ -135,7 +135,7 @@ class TestChunkedTranscribe:
     def test_self_chunks_true_is_single_call(self):
         t = asr.ASRTranscriber(model_id="x", device="cpu")
         calls = []
-        t._pipeline = lambda inp, **k: (calls.append(len(inp["raw"])) or {"text": "x"})
+        t._pipeline = lambda inp, **k: calls.append(len(inp["raw"])) or {"text": "x"}
         # 70s clip; with self_chunks the whole thing goes in one call.
         t.transcribe(
             np.zeros(70 * 16000, dtype=np.float32),
@@ -574,8 +574,7 @@ class TestExclusiveProcessDetection:
     """
 
     def test_exclusive_mode_detected(self):
-        with mock.patch.object(asr.subprocess, "run",
-                               _smi("0, Exclusive_Process\n")):
+        with mock.patch.object(asr.subprocess, "run", _smi("0, Exclusive_Process\n")):
             assert asr.gpu_is_exclusive_process() is True
 
     def test_default_mode_is_not_exclusive(self):
@@ -583,15 +582,17 @@ class TestExclusiveProcessDetection:
             assert asr.gpu_is_exclusive_process() is False
 
     def test_nvidia_smi_missing_is_conservative_false(self):
-        with mock.patch.object(asr.subprocess, "run",
-                               mock.Mock(side_effect=FileNotFoundError)):
+        with mock.patch.object(
+            asr.subprocess, "run", mock.Mock(side_effect=FileNotFoundError)
+        ):
             assert asr.gpu_is_exclusive_process() is False
 
     def test_only_visible_devices_are_considered(self, monkeypatch):
         # GPU 1 is exclusive but not visible; the visible GPU 0 is Default.
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
         with mock.patch.object(
-            asr.subprocess, "run",
+            asr.subprocess,
+            "run",
             _smi("0, Default\n1, Exclusive_Process\n"),
         ):
             assert asr.gpu_is_exclusive_process() is False
@@ -599,7 +600,8 @@ class TestExclusiveProcessDetection:
     def test_visible_exclusive_device_is_seen(self, monkeypatch):
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
         with mock.patch.object(
-            asr.subprocess, "run",
+            asr.subprocess,
+            "run",
             _smi("0, Default\n1, Exclusive_Process\n"),
         ):
             assert asr.gpu_is_exclusive_process() is True
