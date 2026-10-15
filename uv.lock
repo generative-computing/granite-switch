@@ -1575,7 +1575,7 @@ wheels = [
 
 [[package]]
 name = "granite-switch"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-14-granite-switch-dev' or extra == 'group-14-granite-switch-test' or extra == 'group-14-granite-switch-vllm26' or (extra == 'group-14-granite-switch-dev-latest' and extra == 'group-14-granite-switch-dev-vllm27') or (extra == 'group-14-granite-switch-dev-latest' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-dev-vllm27' and extra == 'group-14-granite-switch-dev-vllm30') or (extra == 'group-14-granite-switch-dev-vllm27' and extra == 'group-14-granite-switch-vllm30') or (extra == 'group-14-granite-switch-dev-vllm30' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-vllm27' and extra == 'group-14-granite-switch-vllm30')" },
