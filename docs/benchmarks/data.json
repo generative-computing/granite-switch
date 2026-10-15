@@ -1859,6 +1859,373 @@
         "cells": {
           "answerability": {
             "alora": {
+              "accuracy": 0.8549789621318373,
+              "answerable_f1": 0.8929464732366184,
+              "n": 3565,
+              "score_version": 1,
+              "truncated": 0,
+              "unanswerable_f1": 0.8487903225806451,
+              "weighted_f1": 0.8369777104541051
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "guardian_core": {
+            "alora": {
+              "accuracy": 0.8170507565906823,
+              "accuracy_pooled": 0.8370494403807174,
+              "balanced_accuracy": 0.8158291239812542,
+              "f1": 0.7846623329518391,
+              "n": 11347,
+              "parse_failures": 0,
+              "score_version": 1,
+              "truncated": 0
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "query_clarification": {
+            "alora": {
+              "clear_hard_accuracy": 0.94,
+              "clear_random_accuracy": 1.0,
+              "n": 279,
+              "overall_accuracy": 0.953405017921147,
+              "score_version": 1,
+              "truncated": 0,
+              "underspecified_accuracy": 0.8734177215189873
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "requirement_check": {
+            "alora": {
+              "accuracy": 0.6853466168534662,
+              "balanced_accuracy": 0.6825821917912043,
+              "invalid": 0,
+              "n": 2409,
+              "no_f1": 0.5993657505285414,
+              "score_version": 1,
+              "truncated": 0,
+              "weighted_f1": 0.6914587221834677,
+              "yes_f1": 0.7409432672590568
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          }
+        },
+        "model": "granite-4.1-3b",
+        "release": {
+          "date": "2026-05-24T09:23:06+00:00",
+          "repo": "ibm-granite/granite-switch-4.1-3b-preview",
+          "revision": "7a3ac02e07868411424ac89440397b475da66fa7",
+          "title": "Updating GraniteSwitch 4.1 3b"
+        },
+        "release_version": 1,
+        "run": {
+          "adapters": {
+            "answerability/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T06:54:14Z",
+              "weights_sha256": "765e85650d39b89e055634c8da0c2d469c3bfa436df271df17f516ad7466d6ca"
+            },
+            "guardian_core/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T06:54:24Z",
+              "weights_sha256": "372b1054d27b06c760056107fb58b1955aec5eaa421ef9aa3b0af5e11eb9cf60"
+            },
+            "query_clarification/alora": {
+              "rank": 32,
+              "staged_at": "2026-10-13T06:54:20Z",
+              "weights_sha256": "e1a8bdf9dda6667e745847b492ac47e46a2abc54f57035e11d5a4a0f66c82157"
+            },
+            "requirement_check/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T06:54:28Z",
+              "weights_sha256": "d436e7c4a6a27bee5166d48d6dc4674623016b902dfbdf06c2b3fb6bd9b20fb6"
+            }
+          },
+          "base_revision": "c0650403e44e78ec0262dab1c90914c65b196c4e",
+          "enforce_eager": false,
+          "finished": "2026-10-15T16:07:27Z",
+          "gpu": "NVIDIA A100-SXM4-80GB",
+          "harness_dirty": false,
+          "harness_sha": "7ef8c25a24c01e0f9e11b44d550ddf62db312930",
+          "limit": null,
+          "max_model_len": 32768,
+          "only": null,
+          "prefix_caching": false,
+          "run_ts": "20261015T154116Z",
+          "scheduler": {
+            "chunked_prefill": true,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 256
+          },
+          "started": "2026-10-15T15:42:16Z",
+          "switching": {
+            "adapters": 12,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32,
+            "warmup_runs": 1
+          },
+          "tensor_parallel_size": 1,
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "min_preflight_jsd": 1e-06,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.10.0",
+          "transformers": "5.9.0",
+          "vllm": "0.19.1"
+        },
+        "served_by": {
+          "pypi": "0.1.0"
+        },
+        "switching": {
+          "gs": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              26.87,
+              27.13,
+              27.32,
+              27.33,
+              27.46,
+              27.57,
+              27.87,
+              27.95,
+              42.76,
+              42.92,
+              43.01,
+              43.02,
+              43.43,
+              43.44,
+              43.48,
+              43.52
+            ],
+            "median_s": 35.35,
+            "min_agents": 16,
+            "p95_s": 43.48,
+            "prefill_cached": 272256,
+            "prefill_recomputed": 858992,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              43.51
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              29.27,
+              29.55,
+              29.74,
+              29.75,
+              29.92,
+              29.94,
+              30.32,
+              30.41,
+              46.31,
+              46.35,
+              46.47,
+              46.49,
+              46.91,
+              46.92,
+              46.96,
+              47.0
+            ],
+            "median_s": 38.36,
+            "min_agents": 16,
+            "p95_s": 46.96,
+            "prefill_cached": 271936,
+            "prefill_recomputed": 859312,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              47.08
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "throughput": {
+          "gs": {
+            "adapters": 12,
+            "arm": "gs-lora-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 2.4686,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 2.7256078925091517e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-lora-vllm",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 12,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 50176,
+              "num_hidden_layers": 41,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.10.0+cu128",
+              "transformers": "5.9.0",
+              "triton": "3.6.0",
+              "vllm": "0.19.1",
+              "vocab_size": 100364
+            },
+            "runs_s": [
+              2.4686,
+              2.469,
+              2.4687,
+              2.467,
+              2.4682
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "45",
+              "93.48 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "49",
+              "228.24 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 1659.3
+          },
+          "native": {
+            "adapters": 12,
+            "arm": "native-lora",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 2.3352,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 5.813622537595721e-06,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-lora",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 51300,
+              "num_hidden_layers": 40,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.10.0+cu128",
+              "transformers": "5.9.0",
+              "triton": "3.6.0",
+              "vllm": "0.19.1",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              2.3393,
+              2.3346,
+              2.3343,
+              2.3352,
+              2.3352
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "52",
+              "231.56 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "49",
+              "230.63 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 1754.0
+          }
+        }
+      },
+      {
+        "cells": {
+          "answerability": {
+            "alora": {
               "accuracy": 0.8546984572230014,
               "answerable_f1": 0.8927231807951987,
               "n": 3565,
@@ -2756,6 +3123,373 @@
               "0x0000000000000000"
             ],
             "tokens_per_s": 1227.4
+          }
+        }
+      },
+      {
+        "cells": {
+          "answerability": {
+            "alora": {
+              "accuracy": 0.8415147265077139,
+              "answerable_f1": 0.8828282828282827,
+              "n": 3565,
+              "score_version": 1,
+              "truncated": 0,
+              "unanswerable_f1": 0.8310653833388648,
+              "weighted_f1": 0.8243918713206311
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "guardian_core": {
+            "alora": {
+              "accuracy": 0.8264593895629474,
+              "accuracy_pooled": 0.8469198907200141,
+              "balanced_accuracy": 0.8297176920984303,
+              "f1": 0.8029467330580001,
+              "n": 11347,
+              "parse_failures": 2,
+              "score_version": 1,
+              "truncated": 1
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "query_clarification": {
+            "alora": {
+              "clear_hard_accuracy": 0.92,
+              "clear_random_accuracy": 1.0,
+              "n": 279,
+              "overall_accuracy": 0.946236559139785,
+              "score_version": 1,
+              "truncated": 0,
+              "underspecified_accuracy": 0.8607594936708861
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "requirement_check": {
+            "alora": {
+              "accuracy": 0.7314238273142383,
+              "balanced_accuracy": 0.7015155970756715,
+              "invalid": 0,
+              "n": 2409,
+              "no_f1": 0.6104756170981336,
+              "score_version": 1,
+              "truncated": 0,
+              "weighted_f1": 0.7305426715223566,
+              "yes_f1": 0.7950585999366487
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          }
+        },
+        "model": "granite-4.1-8b",
+        "release": {
+          "date": "2026-05-24T08:17:30+00:00",
+          "repo": "ibm-granite/granite-switch-4.1-8b-preview",
+          "revision": "c739556e0b2c66f21e5108dc4036f52e1893e256",
+          "title": "Updating GraniteSwitch 4.1 8b"
+        },
+        "release_version": 1,
+        "run": {
+          "adapters": {
+            "answerability/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T10:25:21Z",
+              "weights_sha256": "ac27118f66d7fb80f7bf56b552d808329dd652b2139f7f20d0323a430518b064"
+            },
+            "guardian_core/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T10:25:35Z",
+              "weights_sha256": "332223d680ed8ee17ad1410b4b52922644ed9e7aa29541ff7d7dbfbeac8ccc8c"
+            },
+            "query_clarification/alora": {
+              "rank": 32,
+              "staged_at": "2026-10-13T10:25:29Z",
+              "weights_sha256": "5f7989128091fe33f2019ea37f0dd69ad43a6eafc0a19ffd981fbb3dcf656770"
+            },
+            "requirement_check/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-13T10:25:39Z",
+              "weights_sha256": "2410d6665b6aa2845e58477065552c995c92ce6048e4e19763e6277310143776"
+            }
+          },
+          "base_revision": "1504002f650e656a0a3789d99574df12e3e94ed0",
+          "enforce_eager": false,
+          "finished": "2026-10-15T16:21:43Z",
+          "gpu": "NVIDIA A100-SXM4-80GB",
+          "harness_dirty": false,
+          "harness_sha": "7ef8c25a24c01e0f9e11b44d550ddf62db312930",
+          "limit": null,
+          "max_model_len": 32768,
+          "only": null,
+          "prefix_caching": false,
+          "run_ts": "20261015T154128Z",
+          "scheduler": {
+            "chunked_prefill": true,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 256
+          },
+          "started": "2026-10-15T15:42:30Z",
+          "switching": {
+            "adapters": 12,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32,
+            "warmup_runs": 1
+          },
+          "tensor_parallel_size": 1,
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "min_preflight_jsd": 1e-06,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 1,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.10.0",
+          "transformers": "5.9.0",
+          "vllm": "0.19.1"
+        },
+        "served_by": {
+          "pypi": "0.1.0"
+        },
+        "switching": {
+          "gs": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              46.75,
+              47.13,
+              47.42,
+              47.42,
+              47.59,
+              47.7,
+              48.18,
+              48.3,
+              91.81,
+              91.81,
+              92.69,
+              93.43,
+              95.29,
+              95.37,
+              95.41,
+              95.45
+            ],
+            "median_s": 70.05,
+            "min_agents": 16,
+            "p95_s": 95.41,
+            "prefill_cached": 123808,
+            "prefill_recomputed": 1007440,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              95.51
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              49.49,
+              49.88,
+              50.17,
+              50.17,
+              50.37,
+              50.5,
+              51.0,
+              51.11,
+              96.28,
+              96.28,
+              97.49,
+              98.28,
+              100.13,
+              100.22,
+              100.24,
+              100.28
+            ],
+            "median_s": 73.7,
+            "min_agents": 16,
+            "p95_s": 100.24,
+            "prefill_cached": 123344,
+            "prefill_recomputed": 1007904,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              100.12
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "throughput": {
+          "gs": {
+            "adapters": 12,
+            "arm": "gs-lora-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 3.6515,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 1.8696079483313904e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-lora-vllm",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 12,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 20928,
+              "num_hidden_layers": 41,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.10.0+cu128",
+              "transformers": "5.9.0",
+              "triton": "3.6.0",
+              "vllm": "0.19.1",
+              "vocab_size": 100364
+            },
+            "runs_s": [
+              3.6521,
+              3.6521,
+              3.6515,
+              3.6484,
+              3.6515
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "52",
+              "291.73 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "48",
+              "288.70 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 1121.7
+          },
+          "native": {
+            "adapters": 12,
+            "arm": "native-lora",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 3.4531,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 2.0819601892002e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-lora",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 1,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 21399,
+              "num_hidden_layers": 40,
+              "python": "3.12.11",
+              "tensor_parallel_size": 1,
+              "torch": "2.10.0+cu128",
+              "transformers": "5.9.0",
+              "triton": "3.6.0",
+              "vllm": "0.19.1",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              3.4552,
+              3.4552,
+              3.453,
+              3.4526,
+              3.4531
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "51",
+              "295.95 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "47",
+              "288.10 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 1186.2
           }
         }
       },
