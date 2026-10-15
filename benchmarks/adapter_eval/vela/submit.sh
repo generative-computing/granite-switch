@@ -21,8 +21,9 @@
 #   submit.sh stage --release <rev>      a Hugging Face release (releases in
 #   submit.sh bench --release <rev> ...  adapters.yaml, named by its revision):
 #   submit.sh reference --release <rev>  fetch it into its folder, run it as
-#                                  published on its serving commit, run its
-#                                  library adapters under HF + PEFT
+#                                  published, run its library adapters under
+#                                  HF + PEFT. bench serves it from PyPI; with
+#                                  --serve commit, on its serving commit.
 #
 # Any mode takes --model <id> (an adapters.yaml model; default: its first) and
 # --dry-run (render the job and stop). Settings come from the gitignored
@@ -79,7 +80,7 @@ MODE=${1:-}
 SHA="" LIMIT="" ONLY="" EXTRA_ARGS="" NO_CACHE="" PUBLISH=1 REPLACE="" DRY_RUN="" JOB=""
 MODEL=""
 SCRIPT=""
-RELEASE="" REF=""
+RELEASE="" REF="" SERVE=""
 case "$MODE" in
 bench)
     # A release names its own serving commit: then there is no ref.
@@ -115,6 +116,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1 && shift ;;
     --model) MODEL=$2 && shift 2 ;;
     --release) RELEASE=$2 && shift 2 ;;
+    --serve) SERVE=$2 && shift 2 ;;
     *) usage ;;
     esac
 done
@@ -124,6 +126,8 @@ if [[ -n "$RELEASE" ]]; then
     *) die "--release is for stage, bench and reference" ;;
     esac
     [[ -z "$REF" ]] || die "a release runs on its own serving commit: give no ref"
+elif [[ -n "$SERVE" ]]; then
+    die "--serve is for bench --release"
 elif [[ "$MODE" == bench && -z "$REF" ]]; then
     usage
 fi
@@ -342,18 +346,36 @@ esac
 if [[ -n "$RELEASE" ]]; then
     render_args+=(--release "$RELEASE")
     JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-$STAMP"
-    # Served by its commit, or by its granite-switch version from PyPI.
-    if [[ "$MODE" == bench && "$REL_PYPI" != - ]]; then
-        render_args+=(--pypi "$REL_PYPI")
-        say "served by granite-switch $REL_PYPI from PyPI"
-    elif [[ "$MODE" == bench ]]; then
-        SHA=$REL_SERVE
-        render_args+=(--sha "$SHA")
+    # Served by its granite-switch version from PyPI, as its users install it;
+    # a release current code no longer loads also by its commit (--serve).
+    check_args=()
+    if [[ "$MODE" == bench ]]; then
+        if [[ -z "$SERVE" ]]; then
+            SERVE=commit
+            if [[ "$REL_PYPI" != - ]]; then SERVE=pypi; fi
+        fi
+        case "$SERVE" in
+        pypi)
+            [[ "$REL_PYPI" != - ]] || die "release ${RELEASE:0:8} has no PyPI version (serve_pypi)"
+            render_args+=(--pypi "$REL_PYPI")
+            check_args=(--served "pypi:$REL_PYPI")
+            JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-p-$STAMP"
+            say "served by granite-switch $REL_PYPI from PyPI"
+            ;;
+        commit)
+            [[ "$REL_SERVE" != - ]] || die "release ${RELEASE:0:8} has no serving commit (serve_with)"
+            SHA=$REL_SERVE
+            render_args+=(--sha "$SHA")
+            check_args=(--served "sha:$SHA")
+            say "served by commit ${SHA:0:8}"
+            ;;
+        *) die "--serve is pypi or commit" ;;
+        esac
     fi
     if [[ "$MODE" != stage && -z "$NO_CACHE$LIMIT$ONLY" ]]; then
         check=check-release
         if [[ "$MODE" == reference ]]; then check=check-release-reference; fi
-        if publish "$check" "$RELEASE"; then
+        if publish "$check" "$RELEASE" ${check_args[@]+"${check_args[@]}"}; then
             say "release ${RELEASE:0:8} is cached; nothing to run (--no-cache to re-run)"
             exit 0
         fi

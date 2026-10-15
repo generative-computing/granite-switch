@@ -62,6 +62,7 @@ from .common import (
     format_results_block,
     is_scored,
     load_spec,
+    served_label,
     skipped,
 )
 from .scorers import ScoreContext, ScorerUnavailable, get_scorer
@@ -97,17 +98,21 @@ def commit_info(repo_dir: Path) -> dict:
     return {"sha": sha, "date": date, "subject": subject}
 
 
-def served_by(release, repo_dir: Path) -> dict:
-    """What serves a release: its commit, or its granite-switch version from PyPI,
-    which must be the one installed (there is no checkout to record then)."""
-    if not release.serve_pypi:
+def served_by(release, repo_dir: Path, pypi: str | None) -> dict:
+    """What serves a release's run: the granite-switch version from PyPI the pod
+    installed (``--pypi``), which must be the one adapters.yaml names and the
+    one installed, with no checkout to record; else its commit's checkout."""
+    if not pypi:
         return commit_info(repo_dir)
-    installed = versions(("granite-switch",))["granite-switch"]
-    if installed != release.serve_pypi:
+    if pypi != release.serve_pypi:
         raise SystemExit(
-            f"granite-switch {installed} is installed, not {release.serve_pypi}"
+            f"adapters.yaml serves release {release.key} from PyPI with "
+            f"{release.serve_pypi or 'no version'}, not {pypi}"
         )
-    return {"pypi": release.serve_pypi}
+    installed = versions(("granite-switch",))["granite-switch"]
+    if installed != pypi:
+        raise SystemExit(f"granite-switch {installed} is installed, not {pypi}")
+    return {"pypi": pypi}
 
 
 def with_gpus(spec, settings: dict) -> dict:
@@ -690,8 +695,8 @@ def run_release(args, started: str) -> int:
     base_model = args.base_model or str(
         base_model_dir(spec.base_model, release.base_revision)
     )
-    commit = served_by(release, args.repo_dir)
-    print(f"[release] {release.repo}@{release.key}, served by {release.served}")
+    commit = served_by(release, args.repo_dir, args.pypi)
+    print(f"[release] {release.repo}@{release.key}, served by {served_label(commit)}")
 
     cells: dict[str, dict[str, dict]] = {}
     runnable = []
@@ -849,6 +854,10 @@ def main(argv: list[str] | None = None) -> int:
         "(default: <work-dir>/models); local disk is much faster than a COS mount",
     )
     p.add_argument("--repo-dir", required=True, type=Path, help="commit checkout")
+    p.add_argument(
+        "--pypi",
+        help="a release served from PyPI: the granite-switch version the pod installed",
+    )
     p.add_argument(
         "--model", default=None, help="adapters.yaml model id (default: the first)"
     )

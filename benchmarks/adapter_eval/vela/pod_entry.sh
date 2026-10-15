@@ -65,8 +65,11 @@ install_pypi() {
     REPO=${ADAPTER_BENCH_CHECKOUT:-/workspace/granite-switch}
     mkdir -p "$REPO"
     uv venv --quiet --python 3.12 "$REPO/.venv"
+    # A version from before the audio extra (0.1.0) installs without it.
     uv pip install --quiet --python "$REPO/.venv/bin/python" \
-        "granite-switch[vllm,audio,hf]==${ADAPTER_BENCH_PYPI:?}" pyyaml
+        "granite-switch[vllm,audio,hf]==${ADAPTER_BENCH_PYPI:?}" pyyaml ||
+        uv pip install --quiet --python "$REPO/.venv/bin/python" \
+            "granite-switch[vllm,hf]==${ADAPTER_BENCH_PYPI}" pyyaml
     echo "[pod] installed granite-switch $("$REPO/.venv/bin/python" -c 'from importlib.metadata import version; print(version("granite-switch"), "with vllm", version("vllm"))') from PyPI"
 }
 
@@ -112,6 +115,7 @@ bench)
     )
     if [[ -n "$MODEL" ]]; then args+=(--model "$MODEL"); fi
     if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then args+=(--release "$ADAPTER_BENCH_RELEASE"); fi
+    if [[ -n "${ADAPTER_BENCH_PYPI:-}" ]]; then args+=(--pypi "$ADAPTER_BENCH_PYPI"); fi
     if [[ -n "${ADAPTER_BENCH_LIMIT:-}" ]]; then args+=(--limit "$ADAPTER_BENCH_LIMIT"); fi
     if [[ -n "${ADAPTER_BENCH_ONLY:-}" ]]; then args+=(--only "$ADAPTER_BENCH_ONLY"); fi
     if [[ -n "${ADAPTER_BENCH_BASE_MODEL:-}" ]]; then

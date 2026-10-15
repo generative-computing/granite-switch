@@ -213,9 +213,9 @@ class Release:
     sources: dict
     # The release's name for each of the benchmark's intrinsics it has.
     adapters: dict
-    # What serves it, one of the two: the granite-switch commit (a checkpoint
-    # loads only on code that still reads its format), or the granite-switch
-    # version on PyPI, installed as its users install it.
+    # What serves it, a row each: the granite-switch version on PyPI, installed
+    # as its users install it (how a release is served), and, for a release
+    # current code no longer loads, the granite-switch commit that still does.
     serve_with: str = ""
     serve_pypi: str = ""
     # Another release of the model whose reference columns this one shows, not
@@ -229,13 +229,16 @@ class Release:
         return self.revision[:8]
 
     @property
+    def servings(self) -> tuple[dict, ...]:
+        """Each way it is served, as a run's ``served_by`` names it: its PyPI
+        version first, then its commit."""
+        found = ({"pypi": self.serve_pypi}, {"sha": self.serve_with})
+        return tuple(s for s in found if next(iter(s.values())))
+
+    @property
     def served(self) -> str:
-        """What serves it, for logs."""
-        return (
-            f"granite-switch {self.serve_pypi} (PyPI)"
-            if self.serve_pypi
-            else self.serve_with[:8]
-        )
+        """What serves it by default, its first serving, for logs."""
+        return served_label(self.servings[0])
 
     def public(self) -> dict:
         return vars(self).copy()
@@ -464,10 +467,8 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     for r in spec.releases:
         if spec.get_model(r.model).private:
             raise ValueError(f"release {r.repo}: {r.model} is a private model")
-        if bool(r.serve_with) == bool(r.serve_pypi):
-            raise ValueError(
-                f"release {r.repo}: give serve_with or serve_pypi, not both"
-            )
+        if not (r.serve_with or r.serve_pypi):
+            raise ValueError(f"release {r.repo}: give serve_pypi, serve_with or both")
         if r.serve_pypi and not PYPI_VERSION.fullmatch(str(r.serve_pypi)):
             raise ValueError(
                 f"release {r.repo}: serve_pypi must be a version, e.g. 0.1.1"
@@ -506,6 +507,19 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
                 "revision or other adapters"
             )
     return spec.for_model(model)
+
+
+def served_label(served: dict) -> str:
+    """What served a release's run (its ``served_by``): its PyPI version, or
+    its commit."""
+    if served.get("pypi"):
+        return f"granite-switch {served['pypi']} (PyPI)"
+    return served["sha"][:8]
+
+
+def serving_of(served: dict) -> tuple[str, str]:
+    """A ``served_by``'s identity, whatever else it records (a commit's date)."""
+    return ("pypi", served["pypi"]) if served.get("pypi") else ("sha", served["sha"])
 
 
 def adapter_name(intrinsic_id: str, tech_id: str) -> str:
