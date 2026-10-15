@@ -21,6 +21,7 @@ pytestmark = [
 ]
 
 if _VLLM_AVAILABLE:
+    from granite_switch.vllm.audio import asr as asr_mod
     from granite_switch.vllm.audio import processor as proc_mod
     from granite_switch.vllm.audio.asr import DEFAULT_ASR_MODEL_ID
     from granite_switch.vllm.audio.processor import (
@@ -81,8 +82,21 @@ class TestProcessingInfoAsrAccessors:
         info = _make_info(asr_enabled=True, asr_model_id="openai/whisper-small")
         assert info._asr_model_id() == "openai/whisper-small"
 
-    def test_device_default_cuda(self):
+    def test_device_default_cuda(self, monkeypatch):
+        # The config default is "cuda". _asr_device() downgrades it to "cpu" when
+        # the GPU is in Exclusive_Process mode (the ASR transcriber runs in the
+        # driver process and can't take a second context on the engine's device);
+        # that host-dependent downgrade is covered separately below. Here we pin
+        # the pure config default, so force the non-exclusive branch. The name is
+        # resolved inside resolve_driver_device (asr module), so patch it there.
+        monkeypatch.setattr(asr_mod, "gpu_is_exclusive_process", lambda: False)
         assert _make_info(asr_enabled=True)._asr_device() == "cuda"
+
+    def test_device_default_cuda_downgrades_under_exclusive_process(self, monkeypatch):
+        # On an Exclusive_Process host a "cuda" default is downgraded to "cpu" in
+        # the driver process to avoid cudaErrorDevicesUnavailable.
+        monkeypatch.setattr(asr_mod, "gpu_is_exclusive_process", lambda: True)
+        assert _make_info(asr_enabled=True)._asr_device() == "cpu"
 
     def test_pipeline_and_generate_kwargs_default_empty(self):
         info = _make_info(asr_enabled=True)
