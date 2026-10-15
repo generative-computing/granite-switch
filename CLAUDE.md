@@ -105,6 +105,8 @@ granite-switch/
 │       ├── rescore.py                   # In-pod: score saved answers again after a scoring change
 │       ├── common.py                    # Spec loading, cell helpers, results-block format
 │       ├── scorers/                     # One scorer per intrinsic
+│       ├── race/                        # Agent race, SR vs stock vLLM LoRA (docs/AGENT_RACE.md):
+│       │                                #   lane.py, run_race.py (pod), build_page.py -> docs/agent_race.html
 │       └── vela/                        # Vela job rendering + submit.sh (settings in gitignored local/)
 │
 ├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
@@ -482,6 +484,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
 - `docs/ADAPTER_BENCHMARK.md` - Adapter accuracy benchmark: running it, caching, adding adapters
+- `docs/AGENT_RACE.md` - Agent race page: granite-switch SR against stock vLLM LoRA, agents switching adapters
 
 ## Git Workflow
 
