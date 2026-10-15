@@ -471,6 +471,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 
 ## Documentation
 
+- `CONTRIBUTING.md` - Contribution guidelines, uv/dev setup, and DCO sign-off
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture

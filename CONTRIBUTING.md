@@ -12,6 +12,18 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 Or via pip: `pip install uv`
 
+> **Keep `uv.lock` at `revision = 3`.** The `revision` field at the top of `uv.lock` is the lockfile
+> *format* version, bumped automatically by newer uv releases (uv 0.12.x writes `revision = 5`). It is
+> **not** a dependency change, and we pin it at `3` so the committed lockfile stays readable by the uv
+> versions the team and CI use. If `git diff uv.lock` shows only `revision = 3` → `revision = 5` (or
+> similar) after a `uv sync`/`uv lock`, that bump is spurious — revert it before committing:
+> ```bash
+> git checkout uv.lock   # if revision is the only change
+> ```
+> If you also changed dependencies, re-lock and then reset just the first line back to `revision = 3`
+> by hand (edit `uv.lock` line 2) so only the real dependency changes land. Do not commit a bare
+> `revision` bump.
+
 ## Getting Started
 
 1. Fork the repository

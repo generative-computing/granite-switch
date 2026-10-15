@@ -44,7 +44,7 @@ on the theory that a mis-sized schedule was the cause. A GPU reproduction
 disproved it: the AOT head count was already being resized correctly, yet FULL
 still diverged, and disabling AOT entirely did not help either (attention stayed
 captured). The schedule shape was a red herring; the capture of attention itself
-is the fault. See the doc for the full trace.
+is the fault. See issue #139 for the full trace.
 
 This costs the FULL-vs-FULL_AND_PIECEWISE latency delta on attention launches,
 which is the price of correctness until the upstream FA3 full-cudagraph path is

@@ -16,7 +16,7 @@ raise ``scheduler_metadata must have shape (metadata_size)``; CUDA-graph steps
 compute wrong attention silently. It shows only in small, prefix-cached steps
 (one conversation or one game served alone), so parity checks on batches of
 fresh prompts pass while the served model misreads its context. See
-``docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md`` / issue #139.
+issue #139 for the full trace.
 
 This patch wraps ``FlashAttentionMetadataBuilder.__init__`` and, for a
 ``granite_switch`` model, resizes the schedule from the group's *own* layers:
@@ -49,6 +49,8 @@ where the downgrade is a no-op, so this schedule-resizing patch is reinstated
 """
 
 from __future__ import annotations
+
+import inspect
 
 _PATCHED = False
 
@@ -88,9 +90,8 @@ def patch_flash_attn_aot_schedule() -> None:
             "vllm.v1.attention.backends.flash_attn; FA3 AOT-schedule patch NOT "
             "installed. Under FlashAttention 3 this will crash eager steps with "
             "'scheduler_metadata must have shape (metadata_size)' and produce "
-            "wrong tokens under cudagraph_mode=FULL (see "
-            "docs/FA3_SCHEDULE_FULL_CUDAGRAPH_BUG.md). vLLM internals may have "
-            "changed; the patch needs updating."
+            "wrong tokens under cudagraph_mode=FULL (see issue #139). vLLM "
+            "internals may have changed; the patch needs updating."
         )
         # Not marked installed: a vLLM version bump that restores the symbol
         # (or a fixed patch) should get another chance.
@@ -101,9 +102,34 @@ def patch_flash_attn_aot_schedule() -> None:
         return
 
     original = builder.__init__
+    original_sig = inspect.signature(original)
 
-    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
-        original(self, kv_cache_spec, layer_names, vllm_config, device)
+    def __init__(self, *args, **kwargs):
+        # Forward verbatim: never re-positionalise. vLLM 0.26-0.30 construct the
+        # builder with a mix of positional and keyword arguments that differs by
+        # line, so a fixed four-positional signature here would raise TypeError at
+        # engine init on any line that passes one of these by keyword (the same
+        # reason ``_apply_hf_processor_main`` in audio/processor.py takes **kwargs).
+        original(self, *args, **kwargs)
+
+        # Resolve the two arguments the correction needs by *name*, binding against
+        # the real signature so it does not matter whether the caller passed them
+        # positionally or as keywords. A rename (not a reorder) is the only thing
+        # that can defeat this, and it surfaces loudly below rather than silently.
+        try:
+            bound = original_sig.bind(self, *args, **kwargs)
+            bound.apply_defaults()
+            vllm_config = bound.arguments["vllm_config"]
+            layer_names = bound.arguments["layer_names"]
+        except (TypeError, KeyError):
+            logger.warning(
+                "granite_switch: could not resolve vllm_config/layer_names from "
+                "FlashAttentionMetadataBuilder.__init__%s; FA3 AOT-schedule "
+                "correction skipped. vLLM internals may have changed; the patch "
+                "needs updating (see issue #139).",
+                original_sig,
+            )
+            return
 
         hf = getattr(vllm_config.model_config, "hf_config", None)
         if getattr(hf, "model_type", None) != "granite_switch":
