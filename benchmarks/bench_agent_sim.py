@@ -227,6 +227,9 @@ def _make_engine(model: str, args) -> tuple[object, str]:
         max_cpu_loras=args.max_cpu_loras,
         max_lora_rank=args.lora_rank,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        # Added in granite-switch, not in the staging copy: how many GPUs the
+        # engine spreads over, for a model too big for one. 1 unless given.
+        tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
         disable_log_stats=False,  # keep stats: the prefix-cache hit rate is a result here
     )
     try:
@@ -648,6 +651,7 @@ def main():
     )
     ap.add_argument("--lora-rank", type=int, default=32)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    ap.add_argument("--tensor-parallel-size", type=int, default=1)  # granite-switch
     ap.add_argument("--vocab-lo", type=int, default=1000)
     ap.add_argument("--vocab-hi", type=int, default=30000)
     ap.add_argument("--deciles", type=int, default=10)

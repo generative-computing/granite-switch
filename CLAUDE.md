@@ -88,6 +88,7 @@ granite-switch/
 │   ├── bench_switch_repro.py            # The switch benchmark's throughput driver, copied unchanged
 │   ├── make_synth_fleet.py, verify_composed.py, gen_switching_grid.py,
 │   │   bench_switching_grid.py, bench_agent_sim.py  # Its switching experiment, copied unchanged
+│   │                                    #   but for a --tensor-parallel-size flag (default 1)
 │   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
 │       ├── adapters.yaml                # Benchmark definition: models, intrinsics, technologies, versions
 │       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block

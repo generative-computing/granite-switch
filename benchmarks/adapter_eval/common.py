@@ -90,6 +90,10 @@ class Model:
     serving: dict = field(default_factory=dict)
     # Settings of the HF + PEFT columns (reference.py): REFERENCE_KEYS.
     reference: dict = field(default_factory=dict)
+    # How many GPUs each of its vLLM engines spreads its weights over (tensor
+    # parallelism): a model too big for one GPU, with that many GPUs in its
+    # bench pods (``resources``).
+    tensor_parallel_size: int = 1
     # Never published: defined in the private models file (PRIVATE_MODELS_ENV).
     private: bool = False
 
@@ -443,6 +447,13 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
             not isinstance(v, bool) for v in m.serving.values()
         ):
             raise ValueError(f"model {m.id}: bad serving settings {m.serving}")
+        tp = m.tensor_parallel_size
+        if not isinstance(tp, int) or isinstance(tp, bool) or tp < 1:
+            raise ValueError(f"model {m.id}: tensor_parallel_size must be a GPU count")
+        if int(m.resources_for("bench").get("gpus", 1)) < tp:
+            raise ValueError(
+                f"model {m.id}: its bench pods need {tp} GPUs (resources: bench: gpus)"
+            )
         if set(m.reference) - REFERENCE_KEYS:
             raise ValueError(f"model {m.id}: bad reference settings {m.reference}")
     if set(REFERENCE_COLUMNS) != grouped | {BASE_COLUMN}:

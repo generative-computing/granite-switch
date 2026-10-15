@@ -154,6 +154,10 @@ def arm_command(
         "--out",
         str(out),
     ]
+    # A model too big for one GPU (adapters.yaml: tensor_parallel_size).
+    gpus = int(settings.get("tensor_parallel_size", 1))
+    if gpus > 1:
+        common += ["--tensor-parallel-size", str(gpus)]
     if engine == "native":
         return [
             DRIVER, "--arm", "native-lora", "--base-model", model,

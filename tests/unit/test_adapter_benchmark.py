@@ -2408,6 +2408,108 @@ def test_their_scripts_take_every_flag_given(tmp_path):
     assert done.value.code == 0
 
 
+def models_file(tmp_path: Path, model_id: str, **changes) -> Path:
+    """adapters.yaml with one of its models changed."""
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["models"] = [
+        {**m, **changes} if m["id"] == model_id else m for m in raw["models"]
+    ]
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
+
+
+def test_a_model_split_over_gpus(tmp_path, monkeypatch):
+    big = SPEC.for_model("granite-4.1-30b")
+    assert big.model.tensor_parallel_size == 2
+    assert big.model.resources_for("bench")["gpus"] == 2
+    assert SPEC.model.tensor_parallel_size == 1
+    # A GPU count, with as many GPUs in its bench pods.
+    for bad in (
+        {"tensor_parallel_size": 0},
+        {"tensor_parallel_size": "2"},
+        {"tensor_parallel_size": True},
+        {"resources": {"bench": {"gpus": 1}}},
+    ):
+        with pytest.raises(ValueError, match="tensor_parallel_size|bench pods need"):
+            common.load_spec(models_file(tmp_path, "granite-4.1-30b", **bad))
+
+    # Each speed driver gets its GPUs; a model on one GPU runs as before.
+    sw = SPEC.switching.settings()
+    assert run_benchmark.with_gpus(SPEC, sw) == sw
+    split = run_benchmark.with_gpus(big, sw)
+    assert split == {**sw, "tensor_parallel_size": 2}
+    out = tmp_path / "o"
+    for tech, engine, root in (
+        ("lora", "native", out),
+        ("sr", "gs", None),
+        ("alora", "gs", None),
+    ):
+        args = switching.arm_command(tech, engine, "m", out, root, split, out)
+        assert args[args.index("--tensor-parallel-size") + 1] == "2"
+        one = switching.arm_command(tech, engine, "m", out, root, sw, out)
+        assert "--tensor-parallel-size" not in one
+    settings = run_benchmark.with_gpus(big, big.throughput.settings())
+    cmd = switch_bench.command("lora", "native", "b", ["a"], settings, Path("d"))
+    assert cmd[cmd.index("--tensor-parallel-size") + 1] == "2"
+    one = switch_bench.command(
+        "lora", "native", "b", ["a"], SPEC.throughput.settings(), Path("d")
+    )
+    assert one[one.index("--tensor-parallel-size") + 1] == "1"
+
+    # The copied scripts take the flag, and pass it to the engine they share.
+    for script in (switching.DRIVER, "benchmarks/bench_agent_sim.py"):
+        help_text = subprocess.run(
+            [sys.executable, str(REPO_ROOT / script), "--help"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        assert "--tensor-parallel-size" in help_text, script
+    from benchmarks import bench_agent_sim
+
+    given = {}
+
+    class EngineArgs:
+        def __init__(self, **kw):
+            given.update(kw)
+
+    class AsyncLLM:
+        @staticmethod
+        def from_engine_args(engine_args):
+            return "engine"
+
+    vllm = types.ModuleType("vllm")
+    vllm.AsyncEngineArgs = EngineArgs
+    async_llm = types.ModuleType("vllm.v1.engine.async_llm")
+    async_llm.AsyncLLM = AsyncLLM
+    for name, module in {
+        "vllm": vllm,
+        "vllm.v1": types.ModuleType("vllm.v1"),
+        "vllm.v1.engine": types.ModuleType("vllm.v1.engine"),
+        "vllm.v1.engine.async_llm": async_llm,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    ns = types.SimpleNamespace(
+        arm="native-lora", max_model_len=8, max_loras=1, max_cpu_loras=1,
+        lora_rank=8, gpu_memory_utilization=0.9, tensor_parallel_size=2,
+    )  # fmt: skip
+    assert bench_agent_sim._make_engine("m", ns) == ("engine", "v1")
+    assert given["tensor_parallel_size"] == 2
+    del ns.tensor_parallel_size  # one GPU unless told
+    bench_agent_sim._make_engine("m", ns)
+    assert given["tensor_parallel_size"] == 1
+
+    # The row's details say so.
+    assert publish._gpu({"gpu": "A100", "tensor_parallel_size": 2}) == (
+        "A100 &times; 2, the model split over them"
+    )
+    assert publish._gpu({"gpu": "A100", "tensor_parallel_size": 1}) == "A100"
+    assert publish._gpu({"gpu": "A100"}) == "A100"
+
+
 def test_switching_entry_takes_their_p95(tmp_path):
     def run(offset):
         return [
@@ -3508,7 +3610,9 @@ def test_models_without_their_own_settings_are_unchanged():
         assert m.reference == own.get("reference", {})
         assert not m.private and not m.shared_routing
         assert m.measures("throughput") and m.measures("switching")
-        assert m.resources_for("bench") == {}
+        # Its pod sizes and GPUs per engine are its own, or the defaults.
+        assert m.resources_for("bench") == own.get("resources", {}).get("bench", {})
+        assert m.tensor_parallel_size == own.get("tensor_parallel_size", 1)
         assert stage.expected_table(spec) == {
             t: {**e, "names": tuple(e["names"])} for t, e in stage.EXPECTED.items()
         }
@@ -3931,6 +4035,7 @@ def test_releases_in_the_spec(tmp_path, monkeypatch):
         "granite-4.1-3b",
         "granite-4.1-8b",
         "granite-4.1-8b",
+        "granite-4.1-30b",
     ]
     assert SPEC.public()["releases"] == [r.public() for r in SPEC.releases]
     assert RELEASE.adapters["guardian_core"] == "guardian-core"
@@ -4293,6 +4398,12 @@ def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
     assert run_benchmark.main(argv) == 0
 
     results = json.loads((tmp_path / "work" / "results.json").read_text())
+    # A model on one GPU: its engines are told so, and nothing else changes.
+    assert generated[0]["llm"]["tensor_parallel_size"] == 1
+    assert all("tensor_parallel_size" not in e["settings"] for e in engines)
+    assert "tensor_parallel_size" not in switched[0][-1]
+    assert results["run"]["tensor_parallel_size"] == 1
+    assert results["run"]["throughput"]["tensor_parallel_size"] == 1
     assert results["release"] == {
         k: release_record()[k] for k in ("repo", "revision", "date", "title")
     }
@@ -4621,13 +4732,16 @@ def test_a_release_served_from_pypi(tmp_path, monkeypatch):
 
 
 def releases_file(tmp_path: Path, last: dict, **changes) -> Path:
-    """adapters.yaml with its last release changed by ``last``, and the
-    release before it by ``changes``."""
+    """adapters.yaml with the PyPI release changed by ``last``, and the release
+    whose reference it shows by ``changes``."""
     import yaml
 
     raw = yaml.safe_load(common.SPEC_PATH.read_text())
-    raw["releases"][-1] = {**raw["releases"][-1], **last}
-    raw["releases"][-2] = {**raw["releases"][-2], **changes}
+    for r in raw["releases"]:
+        if r["revision"] == PYPI_RELEASE.revision:
+            r.update(last)
+        elif r["revision"] == PYPI_RELEASE.reference_from:
+            r.update(changes)
     path = tmp_path / "adapters.yaml"
     path.write_text(yaml.safe_dump(raw))
     return path

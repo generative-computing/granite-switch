@@ -59,7 +59,9 @@ Each block has the same three groups:
 | Speedup | LoRA, aLoRA | how much faster granite-switch is, in whole percent (+34% is 1.34 times the tokens per second, or agents done in 1/1.34 of the time; a negative value is slower, -13% being agents done in 1/0.87 of the time); SR shows `—` |
 
 Both blocks are measured in each commit's run, both engines on the same GPU,
-by the switch benchmark's own scripts, copied unchanged into `benchmarks/`.
+by the switch benchmark's own scripts, copied into `benchmarks/` unchanged but
+for one flag: how many GPUs an engine spreads over, for a model too big for
+one (`tensor_parallel_size`, below).
 
 HF + PEFT and Base are the **reference columns**. They show what the
 checkpoints score outside granite-switch, and what the base model scores
@@ -512,6 +514,7 @@ behaviour:
 | `resources.<mode>` | the pod size of a launcher mode: `gpus`, `cpus`, `memory` |
 | `serving.throughput`, `serving.switching` | `false` leaves that serving block out: not measured, not needed for a cache hit, no columns |
 | `reference` | `token_budget` and `max_batch` of the HF + PEFT generation, and `serial_loads`: load one cell's model at a time, for a large base |
+| `tensor_parallel_size` | how many GPUs each of its vLLM engines spreads its weights over, for a model too big for one: its generation, both engines' throughput and switching. Its bench pods need that many (`resources.bench.gpus`). The row's details show it next to the GPU. The HF + PEFT columns still run a cell per GPU. |
 
 For example, for a mixture-of-experts model whose adapters can target
 attention only, and whose SR adapters must route experts with the base
@@ -634,6 +637,11 @@ releases:
   sets. Stage them with a `local/selection.<id>.json` that has only `eval`,
   the same sources as the other models', then stage the release. Its tab
   shows an empty table of commits above its releases.
+- **A release too big for one GPU** (the 4.1 30B preview, 60 GB of bf16
+  weights): its model sets `tensor_parallel_size: 2` and
+  `resources: {bench: {gpus: 2, ...}}`, so each engine of its bench runs
+  spreads over two GPUs; its `reference` settings give the HF + PEFT cells a
+  smaller `token_budget` and `serial_loads`.
 
 ### Commands
 
@@ -771,8 +779,10 @@ technology, and an engine start per engine and technology.
 
 The second throughput block is one cell of the switch benchmark's
 concurrency-by-switching grid (its `grid_concurrency` figure), measured by its
-own scripts, copied unchanged from the staging repository's
-`feature/switch-benchmark` branch:
+own scripts, copied from the staging repository's `feature/switch-benchmark`
+branch, unchanged but for a `--tensor-parallel-size` flag (default 1) on
+`bench_switching_grid.py` and `bench_agent_sim.py`, which their shared engine
+takes:
 
 | Script | Its part |
 |---|---|

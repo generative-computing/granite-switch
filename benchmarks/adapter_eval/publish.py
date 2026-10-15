@@ -1212,6 +1212,15 @@ def _items(pairs) -> str:
     return f"<dl>{body}</dl>"
 
 
+def _gpu(run: dict) -> str:
+    """The GPU a run's engines ran on, and how many each spread over."""
+    gpu = _esc(run.get("gpu") or "")
+    gpus = run.get("tensor_parallel_size") or 1
+    return (
+        f"{gpu} &times; {gpus}, the model split over them" if gpu and gpus > 1 else gpu
+    )
+
+
 def _code(run: dict) -> str:
     """The benchmark's own code that ran, as a link to its commit."""
     sha = run.get("harness_sha")
@@ -1244,7 +1253,7 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
             [
                 ("finished", _esc(run.get("finished", "")[:16].replace("T", " "))),
                 ("libraries", versions),
-                ("GPU", _esc(run.get("gpu") or "")),
+                ("GPU", _gpu(run)),
                 (
                     "context",
                     f"{run['max_model_len']:,} tokens"
@@ -1647,7 +1656,7 @@ def _release_details(row: dict, release, spec: Spec, reference: dict | None) -> 
                         _esc(_libraries(run, ("vllm", "torch", "transformers")))
                         or "not recorded",
                     ),
-                    ("GPU", _esc(run.get("gpu") or "")),
+                    ("GPU", _gpu(run)),
                     (
                         "context",
                         f"{run['max_model_len']:,} tokens"

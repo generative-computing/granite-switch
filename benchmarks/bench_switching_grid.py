@@ -248,6 +248,8 @@ def main():
     ap.add_argument("--max-cpu-loras", type=int, default=64)
     ap.add_argument("--lora-rank", type=int, default=32)
     ap.add_argument("--gpu-memory-utilization", type=float, default=0.90)
+    # Added in granite-switch (bench_agent_sim._make_engine): GPUs per engine.
+    ap.add_argument("--tensor-parallel-size", type=int, default=1)
     ap.add_argument("--vocab-lo", type=int, default=1000)
     ap.add_argument("--vocab-hi", type=int, default=30000)
     ap.add_argument("--deciles", type=int, default=10)

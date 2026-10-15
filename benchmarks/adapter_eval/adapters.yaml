@@ -67,6 +67,19 @@ models:
     bench_version: 1
     # An 8B base keeps twice the 3B's K/V per token: half the token budget.
     reference: {token_budget: 131072}
+  # Its Hugging Face release only, for now: no adapter is staged for it. Its
+  # 60 GB of bf16 weights leave one 80 GB GPU too little room for the speed
+  # tests' contexts, so each of its vLLM engines spreads over two GPUs.
+  - id: granite-4.1-30b
+    name: ibm-granite/granite-4.1-30b
+    label: Granite 4.1 30B
+    bench_version: 1
+    tensor_parallel_size: 2
+    resources: {bench: {gpus: 2, cpus: 32, memory: 256Gi}}
+    # A 30B base keeps 1.6 times the 8B's K/V per token and its weights fill
+    # three quarters of a GPU: a quarter of the 8B's token budget, and its four
+    # copies (a cell per GPU) loaded one at a time.
+    reference: {token_budget: 32768, serial_loads: true}
 
 # Composed checkpoints published on the Hugging Face Hub, benchmarked as
 # published (release.py; docs/ADAPTER_BENCHMARK.md, "Hugging Face releases"):
@@ -133,6 +146,23 @@ releases:
       ibm-granite/granitelib-rag-r1.0: 167c451abc01c140c1059ed88d4bb39db9533ae9
       ibm-granite/granitelib-core-r1.0: 9771650e7d3a1c5d3cc54e2a1b5026aa108531ec
       ibm-granite/granitelib-guardian-r1.0: 1a1a488a51d0d5307e30e5b3c1e66b4a5237d18a
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
+  # The 30B preview, published on 2026-05-24 with the 3B and 8B ones: the same
+  # single-switch format, libraries and adapter names, so the same serving
+  # commit. Its base's latest revision then is still its latest.
+  - model: granite-4.1-30b
+    repo: ibm-granite/granite-switch-4.1-30b-preview
+    revision: b2d1c82bbd5913f8a07e35c911b402783d1423e1
+    base_revision: 4fae6278f7132abf5e971f9de49ebbad09c54cce
+    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
+      ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
+      ibm-granite/granitelib-guardian-r1.0: 773b254e98f993a605ec4b6259634906e0e64e8e
     adapters:
       answerability: answerability
       query_clarification: query_clarification

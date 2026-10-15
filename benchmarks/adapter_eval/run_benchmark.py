@@ -110,6 +110,13 @@ def served_by(release, repo_dir: Path) -> dict:
     return {"pypi": release.serve_pypi}
 
 
+def with_gpus(spec, settings: dict) -> dict:
+    """A speed driver's ``settings`` with the model's GPUs per engine, when it
+    needs more than one (adapters.yaml: ``tensor_parallel_size``)."""
+    gpus = spec.model.tensor_parallel_size
+    return {**settings, "tensor_parallel_size": gpus} if gpus > 1 else settings
+
+
 def composer_flags(python: str, repo_dir: Path) -> set[str]:
     """Flags this commit's composer accepts, read from its ``--help``."""
     res = subprocess.run(
@@ -351,7 +358,7 @@ def run_switching(
     """Per technology, the p95 time for agents switching adapters to complete,
     granite-switch's and stock vLLM's (``switching.py``). ``sr_anchor`` returns
     the SR anchor."""
-    settings = spec.switching.settings()
+    settings = with_gpus(spec, spec.switching.settings())
     target = spec.model_id
     grid = work / "switching" / "grid"
     grid_file = grid / f"grid_c{settings['concurrency']}_s{settings['span']}.jsonl"
@@ -537,7 +544,7 @@ def run_throughput(
                     "engine": engine,
                     "model": str(checkpoint if engine == "gs" else base_model),
                     "paths": [str(f["native"]) for f in fleet],
-                    "settings": spec.throughput.settings(),
+                    "settings": with_gpus(spec, spec.throughput.settings()),
                     "dump": str(work / "throughput" / f"{tech.id}_{engine}.jsonl"),
                 },
             )
@@ -596,6 +603,7 @@ def generate_and_score(
             "llm": {
                 "max_model_len": args.max_model_len,
                 "gpu_memory_utilization": args.gpu_memory_utilization,
+                "tensor_parallel_size": spec.model.tensor_parallel_size,
                 "enforce_eager": args.enforce_eager,
                 "enable_prefix_caching": args.prefix_caching,
                 "enable_chunked_prefill": not args.no_chunked_prefill,
@@ -730,14 +738,14 @@ def run_release(args, started: str) -> int:
                     "engine": engine,
                     "model": str(checkpoint) if engine == "gs" else base_model,
                     "paths": [str(p) for p in natives],
-                    "settings": spec.throughput.settings(),
+                    "settings": with_gpus(spec, spec.throughput.settings()),
                     "dump": str(work / "throughput" / f"release_{engine}.jsonl"),
                     "min_preflight_jsd": RELEASE_MIN_JSD,
                 },
             )
         print(f"[throughput] release: {json.dumps(speeds(speed))}", flush=True)
     switching_results = None
-    settings = releases.switching_settings(spec, record)
+    settings = with_gpus(spec, releases.switching_settings(spec, record))
     if measure_switching:
         switching_results = release_switching(
             args, harness_root, work, checkpoint, base_model, natives, settings
@@ -761,9 +769,11 @@ def run_release(args, started: str) -> int:
             "harness_sha": os.environ.get("ADAPTER_BENCH_HARNESS_SHA"),
             "run_ts": os.environ.get("RUN_TS"),
             "harness_dirty": os.environ.get("ADAPTER_BENCH_HARNESS_DIRTY") == "1",
+            # GPUs each engine spread over (adapters.yaml: tensor_parallel_size).
+            "tensor_parallel_size": spec.model.tensor_parallel_size,
             "throughput": {
                 **spec.throughput.settings(),
-                **switch_bench.PINNED,
+                **with_gpus(spec, switch_bench.PINNED),
                 "driver": switch_bench.DRIVER,
                 "min_preflight_jsd": RELEASE_MIN_JSD,
             },
@@ -1062,9 +1072,11 @@ def main(argv: list[str] | None = None) -> int:
             # The run's folder under the work root, where its answers stay.
             "run_ts": os.environ.get("RUN_TS"),
             "harness_dirty": os.environ.get("ADAPTER_BENCH_HARNESS_DIRTY") == "1",
+            # GPUs each engine spread over (adapters.yaml: tensor_parallel_size).
+            "tensor_parallel_size": spec.model.tensor_parallel_size,
             "throughput": {
                 **spec.throughput.settings(),
-                **switch_bench.PINNED,
+                **with_gpus(spec, switch_bench.PINNED),
                 "driver": switch_bench.DRIVER,
             },
             **run_meta,
