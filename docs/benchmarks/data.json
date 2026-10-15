@@ -584,6 +584,376 @@
         "cells": {
           "answerability": {
             "alora": {
+              "accuracy": 0.867882187938289,
+              "answerable_f1": 0.9047856430707878,
+              "n": 3565,
+              "score_version": 1,
+              "truncated": 0,
+              "unanswerable_f1": 0.863605671843349,
+              "weighted_f1": 0.8494375249576688
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "guardian_core": {
+            "alora": {
+              "accuracy": 0.8343380966360657,
+              "accuracy_pooled": 0.851326341764343,
+              "balanced_accuracy": 0.8357966696331169,
+              "f1": 0.8113984036192962,
+              "n": 11347,
+              "parse_failures": 0,
+              "score_version": 1,
+              "truncated": 0
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "query_clarification": {
+            "alora": {
+              "clear_hard_accuracy": 0.96,
+              "clear_random_accuracy": 0.9933333333333333,
+              "n": 279,
+              "overall_accuracy": 0.931899641577061,
+              "score_version": 1,
+              "truncated": 1,
+              "underspecified_accuracy": 0.7974683544303798
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          },
+          "requirement_check": {
+            "alora": {
+              "accuracy": 0.755085097550851,
+              "balanced_accuracy": 0.7348140917104109,
+              "invalid": 0,
+              "n": 2409,
+              "no_f1": 0.6557759626604435,
+              "score_version": 1,
+              "truncated": 0,
+              "weighted_f1": 0.7560449152205392,
+              "yes_f1": 0.8099226804123711
+            },
+            "lora": {
+              "skipped": "not in this release"
+            },
+            "sr": {
+              "skipped": "not in this release"
+            }
+          }
+        },
+        "model": "granite-4.1-30b",
+        "release": {
+          "date": "2026-10-15T13:51:55+00:00",
+          "repo": "ibm-granite/granite-switch-4.1-30b-preview",
+          "revision": "ff87bdee615a296d6e2f9e2828583aa46e661a92",
+          "title": "Updated 30b model with audio"
+        },
+        "release_version": 1,
+        "run": {
+          "adapters": {
+            "answerability/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-15T14:26:01Z",
+              "weights_sha256": "286fef9495f3eb2cd1f37ce85dcdf97baa3d21d1a426cb9a5351c60a2c7bcdb1"
+            },
+            "guardian_core/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-15T14:26:40Z",
+              "weights_sha256": "e30f451e7756624b3f703d69baae38e515138df6e85ad437e011be354a2ed226"
+            },
+            "query_clarification/alora": {
+              "rank": 32,
+              "staged_at": "2026-10-15T14:26:27Z",
+              "weights_sha256": "a40143a4bee4063230fff35c8d5de06c383956beedc265cc8ee2fd1f46f74388"
+            },
+            "requirement_check/alora": {
+              "rank": 16,
+              "staged_at": "2026-10-15T14:26:48Z",
+              "weights_sha256": "db8112f456cc90b5f81c6b41d0f499f7a15cb59c70ef5452b576ee752c18464e"
+            }
+          },
+          "base_revision": "4fae6278f7132abf5e971f9de49ebbad09c54cce",
+          "enforce_eager": false,
+          "finished": "2026-10-15T15:45:19Z",
+          "gpu": "NVIDIA A100-SXM4-80GB",
+          "harness_dirty": false,
+          "harness_sha": "5079eef590a245a57d81af85cbffa0fc4f3be743",
+          "limit": null,
+          "max_model_len": 32768,
+          "only": null,
+          "prefix_caching": false,
+          "run_ts": "20261015T143733Z",
+          "scheduler": {
+            "chunked_prefill": true,
+            "max_num_batched_tokens": 8192,
+            "max_num_seqs": 256
+          },
+          "started": "2026-10-15T14:38:23Z",
+          "switching": {
+            "adapters": 12,
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "min_agents": 16,
+            "rank": 32,
+            "span": 32,
+            "tensor_parallel_size": 2,
+            "warmup_runs": 1
+          },
+          "tensor_parallel_size": 2,
+          "throughput": {
+            "adapter_fraction": 100,
+            "batch": 32,
+            "cudagraph_capture_size": 1024,
+            "driver": "benchmarks/bench_switch_repro.py",
+            "generated_tokens": 128,
+            "max_model_len": 4096,
+            "min_preflight_jsd": 1e-06,
+            "prompt_tokens": 1,
+            "tensor_parallel_size": 2,
+            "timed_runs": 5,
+            "warmup_runs": 2
+          },
+          "torch": "2.13.0",
+          "transformers": "5.17.0",
+          "vllm": "0.30.0"
+        },
+        "served_by": {
+          "pypi": "0.1.1"
+        },
+        "switching": {
+          "gs": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "gs-lora-switch",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              64.15,
+              65.12,
+              65.13,
+              65.39,
+              65.39,
+              65.41,
+              66.12,
+              66.28,
+              127.47,
+              128.24,
+              128.6,
+              133.27,
+              133.35,
+              133.46,
+              133.52,
+              133.58
+            ],
+            "median_s": 96.87,
+            "min_agents": 16,
+            "p95_s": 133.52,
+            "prefill_cached": 123808,
+            "prefill_recomputed": 1007440,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tensor_parallel_size": 2,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              133.39
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          },
+          "native": {
+            "adapters": 12,
+            "agents": 16,
+            "arm": "native-lora",
+            "concurrency": 8,
+            "decode_tokens": 512,
+            "elapsed_s": [
+              85.74,
+              89.27,
+              89.72,
+              90.57,
+              90.98,
+              91.4,
+              94.25,
+              94.31,
+              154.7,
+              155.96,
+              156.38,
+              156.39,
+              159.54,
+              159.69,
+              159.73,
+              159.81
+            ],
+            "median_s": 124.5,
+            "min_agents": 16,
+            "p95_s": 159.73,
+            "prefill_cached": 62224,
+            "prefill_recomputed": 1069024,
+            "rank": 32,
+            "span": 32,
+            "switches": 256,
+            "tensor_parallel_size": 2,
+            "tool_calls": 16,
+            "warmup_p95_s": [
+              159.7
+            ],
+            "warmup_runs": 1,
+            "waves": 2
+          }
+        },
+        "throughput": {
+          "gs": {
+            "adapters": 12,
+            "arm": "gs-lora-vllm",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 3.7498,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 1.434848961570847e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "gs-lora-vllm",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": false,
+              "enable_prefix_caching": false,
+              "gpu_count": 2,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": 12,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "granite-switch",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 20197,
+              "num_hidden_layers": 66,
+              "python": "3.12.11",
+              "tensor_parallel_size": 2,
+              "torch": "2.13.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.7.1",
+              "vllm": "0.30.0",
+              "vocab_size": 100365
+            },
+            "runs_s": [
+              3.7541,
+              3.7473,
+              3.7515,
+              3.7122,
+              3.7498
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "52",
+              "332.45 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "47",
+              "329.09 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 1092.3
+          },
+          "native": {
+            "adapters": 12,
+            "arm": "native-lora",
+            "batch": 32,
+            "generated_tokens": 128,
+            "gpu": "NVIDIA A100-SXM4-80GB",
+            "median_s": 6.1698,
+            "preflight": {
+              "checked": true,
+              "preflight_jsd": 1.7339379782814044e-05,
+              "probe_tokens": 256
+            },
+            "prompt_tokens": 1,
+            "prompt_tokens_realized": 32,
+            "provenance": {
+              "arm": "native-lora",
+              "cross_stream_rank": null,
+              "cudagraph_mode": "FULL_AND_PIECEWISE",
+              "dtype": "torch.bfloat16",
+              "dual_stream": null,
+              "enable_prefix_caching": false,
+              "gpu_count": 2,
+              "gpu_name": "NVIDIA A100-SXM4-80GB",
+              "gs_commit": null,
+              "gs_dirty": null,
+              "hf_num_adapters": null,
+              "lora_skip_prefixes": null,
+              "max_cudagraph_capture_size": 1024,
+              "max_model_len": 4096,
+              "max_num_batched_tokens": 8192,
+              "max_num_seqs": 256,
+              "model_type": "native-lora",
+              "num_adapters_declared": 12,
+              "num_gpu_blocks_frontend": 18817,
+              "num_hidden_layers": 64,
+              "python": "3.12.11",
+              "tensor_parallel_size": 2,
+              "torch": "2.13.0+cu130",
+              "transformers": "5.17.0",
+              "triton": "3.7.1",
+              "vllm": "0.30.0",
+              "vocab_size": 100352
+            },
+            "runs_s": [
+              6.1613,
+              6.1698,
+              6.1665,
+              6.1817,
+              6.1924
+            ],
+            "smi_after": [
+              "1410 MHz",
+              "1593 MHz",
+              "44",
+              "118.67 W",
+              "0x0000000000000000"
+            ],
+            "smi_before": [
+              "1410 MHz",
+              "1593 MHz",
+              "46",
+              "209.57 W",
+              "0x0000000000000000"
+            ],
+            "tokens_per_s": 663.9
+          }
+        }
+      },
+      {
+        "cells": {
+          "answerability": {
+            "alora": {
               "accuracy": 0.8608695652173913,
               "answerable_f1": 0.89738430583501,
               "n": 3565,
@@ -5134,7 +5504,7 @@
         "reference_from": "",
         "repo": "ibm-granite/granite-switch-4.1-3b-preview",
         "revision": "7a3ac02e07868411424ac89440397b475da66fa7",
-        "serve_pypi": "",
+        "serve_pypi": "0.1.0",
         "serve_with": "24aa420f71b6703f96e40533d83041ce311c30ae",
         "sources": {
           "ibm-granite/granitelib-core-r1.0": "d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43",
@@ -5154,7 +5524,7 @@
         "reference_from": "",
         "repo": "ibm-granite/granite-switch-4.1-8b-preview",
         "revision": "c739556e0b2c66f21e5108dc4036f52e1893e256",
-        "serve_pypi": "",
+        "serve_pypi": "0.1.0",
         "serve_with": "24aa420f71b6703f96e40533d83041ce311c30ae",
         "sources": {
           "ibm-granite/granitelib-core-r1.0": "d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43",
@@ -5194,7 +5564,7 @@
         "reference_from": "",
         "repo": "ibm-granite/granite-switch-4.1-30b-preview",
         "revision": "b2d1c82bbd5913f8a07e35c911b402783d1423e1",
-        "serve_pypi": "",
+        "serve_pypi": "0.1.0",
         "serve_with": "24aa420f71b6703f96e40533d83041ce311c30ae",
         "sources": {
           "ibm-granite/granitelib-core-r1.0": "d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43",
