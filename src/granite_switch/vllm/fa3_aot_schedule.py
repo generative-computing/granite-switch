@@ -129,9 +129,7 @@ def patch_flash_attn_aot_schedule() -> None:
             # This builder serves a non-attention group; nothing to resize.
             return
 
-        shapes = {
-            (a.num_heads, a.num_kv_heads, a.head_size) for a in layers.values()
-        }
+        shapes = {(a.num_heads, a.num_kv_heads, a.head_size) for a in layers.values()}
         if len(shapes) == 1:
             # One real shape for the whole group — size the schedule to it. This
             # corrects the SR doubled-Q decoder group (and any switch group whose
