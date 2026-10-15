@@ -35,6 +35,8 @@ RELEASE_REFERENCE_END = "=== ADAPTER_BENCH_RELEASE_REFERENCE_END ==="
 NOT_IN_RELEASE = "not in this release"
 # A Hub revision or git commit, in full.
 FULL_SHA = re.compile(r"[0-9a-f]{40}")
+# A release-version number of a PyPI package (serve_pypi).
+PYPI_VERSION = re.compile(r"\d+(\.\d+)*")
 
 # Technologies composed into the same checkpoint. SR is a whole-checkpoint
 # dual-stream mode and the composer refuses to mix it with LoRA / aLoRA.
@@ -203,18 +205,33 @@ class Release:
     revision: str
     # Its base model's revision when it was composed, for the HF + PEFT columns.
     base_revision: str
-    # The granite-switch commit that serves it: a checkpoint loads only on code
-    # that still reads its format.
-    serve_with: str
     # Each Hub library its adapters come from, at the revision its BUILD.md names.
     sources: dict
     # The release's name for each of the benchmark's intrinsics it has.
     adapters: dict
+    # What serves it, one of the two: the granite-switch commit (a checkpoint
+    # loads only on code that still reads its format), or the granite-switch
+    # version on PyPI, installed as its users install it.
+    serve_with: str = ""
+    serve_pypi: str = ""
+    # Another release of the model whose reference columns this one shows, not
+    # run again: the same base at the same revision and the same adapter files
+    # (``publish.merge_release`` compares their checksums).
+    reference_from: str = ""
 
     @property
     def key(self) -> str:
         """Its short name in job names and on the command line."""
         return self.revision[:8]
+
+    @property
+    def served(self) -> str:
+        """What serves it, for logs."""
+        return (
+            f"granite-switch {self.serve_pypi} (PyPI)"
+            if self.serve_pypi
+            else self.serve_with[:8]
+        )
 
     def public(self) -> dict:
         return vars(self).copy()
@@ -305,6 +322,13 @@ class Spec:
 
     def releases_of(self, model_id: str) -> tuple[Release, ...]:
         return tuple(r for r in self.releases if r.model == model_id)
+
+    def reference_release(self, release: Release) -> Release:
+        """The release whose reference columns ``release`` shows: its own, or
+        those of the release its ``reference_from`` names."""
+        return (
+            self.release(release.reference_from) if release.reference_from else release
+        )
 
     def select(self, only: list[str] | None) -> tuple[Intrinsic, ...]:
         if not only:
@@ -429,7 +453,17 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     for r in spec.releases:
         if spec.get_model(r.model).private:
             raise ValueError(f"release {r.repo}: {r.model} is a private model")
-        pinned = [r.revision, r.base_revision, r.serve_with, *r.sources.values()]
+        if bool(r.serve_with) == bool(r.serve_pypi):
+            raise ValueError(
+                f"release {r.repo}: give serve_with or serve_pypi, not both"
+            )
+        if r.serve_pypi and not PYPI_VERSION.fullmatch(str(r.serve_pypi)):
+            raise ValueError(
+                f"release {r.repo}: serve_pypi must be a version, e.g. 0.1.1"
+            )
+        pinned = [r.revision, r.base_revision, *r.sources.values()]
+        pinned += [r.serve_with] if r.serve_with else []
+        pinned += [r.reference_from] if r.reference_from else []
         if not all(isinstance(v, str) and FULL_SHA.fullmatch(v) for v in pinned):
             raise ValueError(f"release {r.repo}: pin every revision by its full sha")
         if (
@@ -442,6 +476,24 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     keys = [r.key for r in spec.releases]
     if len(set(keys)) != len(keys):
         raise ValueError(f"release revisions must differ in their first 8: {keys}")
+    by_revision = {r.revision: r for r in spec.releases}
+    for r in spec.releases:
+        if not r.reference_from:
+            continue
+        source = by_revision.get(r.reference_from)
+        if source is None or source is r or source.model != r.model:
+            raise ValueError(
+                f"release {r.key}: reference_from must name another release of {r.model}"
+            )
+        if source.reference_from:
+            raise ValueError(
+                f"release {r.key}: reference_from {source.key} shows another's reference"
+            )
+        if (source.base_revision, source.adapters) != (r.base_revision, r.adapters):
+            raise ValueError(
+                f"release {r.key}: reference_from {source.key} has another base "
+                "revision or other adapters"
+            )
     return spec.for_model(model)
 
 

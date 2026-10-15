@@ -236,7 +236,10 @@ def build(args) -> dict:
     if mode in ("bench", "reference", "script"):
         need("BENCH_ROOT")
         need("WORK_ROOT")
-        if mode != "reference":
+        # A release served from PyPI installs that version; anything else, a commit.
+        if mode == "bench" and args.pypi:
+            env.append(env_var("ADAPTER_BENCH_PYPI", args.pypi))
+        elif mode != "reference":
             env.append(env_var("ADAPTER_BENCH_COMMIT", args.sha))
         if args.limit:
             env.append(env_var("ADAPTER_BENCH_LIMIT", args.limit))
@@ -294,6 +297,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run-ts", required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--sha", help="bench: full commit sha")
+    p.add_argument(
+        "--pypi",
+        help="bench --release: the granite-switch version on PyPI that serves it",
+    )
     p.add_argument("--model", help="adapters.yaml model id (default: the first)")
     p.add_argument("--limit", type=int)
     p.add_argument("--only")
@@ -321,8 +328,10 @@ def main(argv: list[str] | None = None) -> int:
         help='the model\'s pod size for this mode, JSON: {"gpus", "cpus", "memory"}',
     )
     args = p.parse_args(argv)
-    if args.mode in ("bench", "script") and not args.sha:
+    if args.mode in ("bench", "script") and not (args.sha or args.pypi):
         fail(f"--sha is required for {args.mode}")
+    if args.pypi and not (args.mode == "bench" and args.release):
+        fail("--pypi is for bench --release")
     if args.mode == "rescore" and not args.targets:
         fail("--targets is required for rescore")
     if args.mode == "script" and not args.script:

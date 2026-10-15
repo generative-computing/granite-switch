@@ -260,11 +260,19 @@ if [[ -n "$RELEASE" ]]; then
     RELEASE_INFO=$(local_py -c 'import sys
 from benchmarks.adapter_eval.common import load_spec
 r = load_spec().release(sys.argv[1])
-print(r.model, r.revision, r.serve_with, r.repo.rsplit("/", 1)[-1])' "$RELEASE") ||
+print(r.model, r.revision, r.serve_with or "-", r.repo.rsplit("/", 1)[-1],
+      r.serve_pypi or "-", r.reference_from or "-")' "$RELEASE") ||
         die "unknown release $RELEASE"
-    read -r REL_MODEL RELEASE REL_SERVE REL_NAME <<<"$RELEASE_INFO"
+    read -r REL_MODEL RELEASE REL_SERVE REL_NAME REL_PYPI REL_REFERENCE <<<"$RELEASE_INFO"
     [[ -z "$MODEL" || "$MODEL" == "$REL_MODEL" ]] || die "that release is of $REL_MODEL"
     MODEL=$REL_MODEL
+    # Its reference columns may be another release's, the same adapters on the
+    # same base: those are never run for it.
+    if [[ "$MODE" == reference && "$REL_REFERENCE" != - ]]; then
+        say "release ${RELEASE:0:8} shows release ${REL_REFERENCE:0:8}'s reference columns" \
+            "(reference_from in adapters.yaml): nothing to run"
+        exit 0
+    fi
 fi
 MODEL=${MODEL:-$DEFAULT_MODEL}
 local_py -c 'import sys
@@ -334,7 +342,11 @@ esac
 if [[ -n "$RELEASE" ]]; then
     render_args+=(--release "$RELEASE")
     JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-$STAMP"
-    if [[ "$MODE" == bench ]]; then
+    # Served by its commit, or by its granite-switch version from PyPI.
+    if [[ "$MODE" == bench && "$REL_PYPI" != - ]]; then
+        render_args+=(--pypi "$REL_PYPI")
+        say "served by granite-switch $REL_PYPI from PyPI"
+    elif [[ "$MODE" == bench ]]; then
         SHA=$REL_SERVE
         render_args+=(--sha "$SHA")
     fi

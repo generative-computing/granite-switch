@@ -3927,14 +3927,23 @@ def test_releases_in_the_spec(tmp_path, monkeypatch):
     assert RELEASE.model == "granite-4.1-3b"
     assert RELEASE.key == RELEASE.revision[:8]
     assert SPEC.releases_of("granite-4.2-3b") == ()
-    assert [r.model for r in SPEC.releases] == ["granite-4.1-3b", "granite-4.1-8b"]
+    assert [r.model for r in SPEC.releases] == [
+        "granite-4.1-3b",
+        "granite-4.1-8b",
+        "granite-4.1-8b",
+    ]
     assert SPEC.public()["releases"] == [r.public() for r in SPEC.releases]
     assert RELEASE.adapters["guardian_core"] == "guardian-core"
     with pytest.raises(ValueError, match="names 0 releases"):
         SPEC.release("deadbeef")
     with pytest.raises(ValueError):  # too short to name one
         SPEC.release(RELEASE.revision[:6])
+    # Served by a commit or by a PyPI version, never both and never neither.
+    assert common.load_spec(spec_file(tmp_path, serve_with="", serve_pypi="0.1.1"))
     for bad in (
+        {"serve_pypi": "0.1.1"},
+        {"serve_with": ""},
+        {"serve_with": "", "serve_pypi": "latest"},
         {"revision": RELEASE.key},  # every pin is a full sha
         {"serve_with": "main"},
         {"sources": {"ibm-granite/granitelib-rag-r1.0": "main"}},
@@ -4486,3 +4495,252 @@ def test_render_job_of_a_release(tmp_path, monkeypatch):
         RELEASE.revision,
         RELEASE.serve_with,
     )
+
+
+# The 8B preview recomposed on 2026-10-15: served from PyPI.
+PYPI_RELEASE = SPEC.release("8a22410a")
+VELA = Path(stage.__file__).parent / "vela"
+
+
+def test_a_release_served_from_pypi(tmp_path, monkeypatch):
+    assert (PYPI_RELEASE.serve_pypi, PYPI_RELEASE.serve_with) == ("0.1.1", "")
+    assert PYPI_RELEASE.served == "granite-switch 0.1.1 (PyPI)"
+    # What serves it is what is installed: there is no checkout to record.
+    installed = {"version": "0.1.1"}
+    monkeypatch.setattr(
+        run_benchmark,
+        "versions",
+        lambda names: {n: installed["version"] for n in names},
+    )
+    monkeypatch.setattr(
+        run_benchmark, "commit_info", lambda repo: pytest.fail("no checkout")
+    )
+    assert run_benchmark.served_by(PYPI_RELEASE, tmp_path) == {"pypi": "0.1.1"}
+    installed["version"] = "0.1.0"
+    with pytest.raises(SystemExit, match="0.1.0 is installed, not 0.1.1"):
+        run_benchmark.served_by(PYPI_RELEASE, tmp_path)
+
+    # Its results merge only as served by that version.
+    results = {
+        **release_results(),
+        "model": PYPI_RELEASE.model,
+        "release": {
+            **release_results()["release"],
+            "repo": PYPI_RELEASE.repo,
+            "revision": PYPI_RELEASE.revision,
+        },
+        "served_by": {"pypi": "0.1.1"},
+    }
+    data = page_data(results_for())
+    row = publish.merge_release(data, results, SPEC)
+    assert data["releases"][PYPI_RELEASE.model] == [row]
+    for served in ({"pypi": "0.1.0"}, {"sha": RELEASE.serve_with, "subject": "s"}):
+        with pytest.raises(ValueError, match="not by what adapters.yaml says"):
+            publish.merge_release(
+                page_data(results_for()), {**results, "served_by": served}, SPEC
+            )
+    # Its details name the version, linked to PyPI.
+    spec = SPEC.for_model(PYPI_RELEASE.model)
+    details = publish._release_details(row, PYPI_RELEASE, spec, None)
+    assert publish.PYPI_URL.format(version="0.1.1") in details
+    assert "<code>granite-switch 0.1.1</code></a> from PyPI" in details
+    assert "served by granite-switch 0.1.1 (PyPI)" in publish._release_details_text(row)
+
+
+def releases_file(tmp_path: Path, last: dict, **changes) -> Path:
+    """adapters.yaml with its last release changed by ``last``, and the
+    release before it by ``changes``."""
+    import yaml
+
+    raw = yaml.safe_load(common.SPEC_PATH.read_text())
+    raw["releases"][-1] = {**raw["releases"][-1], **last}
+    raw["releases"][-2] = {**raw["releases"][-2], **changes}
+    path = tmp_path / "adapters.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    return path
+
+
+def pypi_release_block(block: dict, release) -> dict:
+    """A results or reference block of ``release``, made from one of RELEASE."""
+    return {
+        **block,
+        "model": release.model,
+        "release": {
+            **block["release"],
+            "repo": release.repo,
+            "revision": release.revision,
+        },
+    }
+
+
+def test_a_release_shows_an_earlier_releases_reference(tmp_path):
+    source = SPEC.release("c739556e")
+    assert PYPI_RELEASE.reference_from == source.revision
+    assert SPEC.reference_release(PYPI_RELEASE) == source
+    assert SPEC.reference_release(source) == source
+    # Of another release of the model, on the same base, with the same adapters.
+    assert common.load_spec(releases_file(tmp_path, {}))
+    for bad, changes in (
+        ({"reference_from": RELEASE.revision}, {}),  # another model's
+        ({"reference_from": PYPI_RELEASE.revision}, {}),  # its own
+        ({"reference_from": source.key}, {}),  # a full sha
+        ({"base_revision": "a" * 40}, {}),
+        ({"adapters": {**PYPI_RELEASE.adapters, "answerability": "other"}}, {}),
+        ({}, {"reference_from": PYPI_RELEASE.revision}),  # one that shows another's
+    ):
+        with pytest.raises(ValueError, match="reference_from|full sha"):
+            common.load_spec(releases_file(tmp_path, bad, **changes))
+
+    fingerprints = {
+        f"{i.id}/alora": {"rank": 16, "weights_sha256": "f" * 64}
+        for i in SPEC.intrinsics
+    }
+    data = page_data(results_for())
+    reference = pypi_release_block(release_reference(), source)
+    reference["run"]["adapters"] = fingerprints
+    publish.merge_release_reference(data, reference, SPEC)
+    results = {
+        **pypi_release_block(release_results(), PYPI_RELEASE),
+        "served_by": {"pypi": "0.1.1"},
+    }
+    # Its adapters must be the ones that reference ran, by their checksums.
+    changed = {**fingerprints, "requirement_check/alora": {"weights_sha256": "e" * 64}}
+    with pytest.raises(ValueError, match="requirement_check/alora differ"):
+        publish.merge_release(
+            data, {**results, "run": {**results["run"], "adapters": changed}}, SPEC
+        )
+    row = publish.merge_release(data, results, SPEC)
+    assert "reference" not in row
+    # It has no reference of its own, and a new one of the source must still fit.
+    with pytest.raises(ValueError, match="none of its own"):
+        publish.merge_release_reference(
+            data, pypi_release_block(reference, PYPI_RELEASE), SPEC
+        )
+    other = {**reference, "run": {**reference["run"], "adapters": changed}}
+    with pytest.raises(
+        ValueError, match=f"release {PYPI_RELEASE.key} shows this reference"
+    ):
+        publish.merge_release_reference(data, other, SPEC)
+
+    # Its row shows the source's reference columns, and says where they are from.
+    tables = publish.render(data, SPEC).split(f"<h3>{publish.RELEASES_HEADING}</h3>")[
+        1:
+    ]
+    table = next(t for t in tables if PYPI_RELEASE.key in t)
+    assert ">1.50</td>" in table  # (0.8 - 0.5) / (0.7 - 0.5), from its reference
+    url = publish.RELEASE_URL.format(repo=source.repo, revision=source.revision)
+    assert f'Those of release <a href="{url}"><code>{source.key}</code></a>' in table
+    assert table.count("Those of release") == 1  # the source's row shows its own
+
+
+def test_the_launcher_runs_no_reference_for_a_release_that_shows_another(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    # The harness in a checkout of its own, with settings that reach no cluster.
+    harness = tmp_path / "repo" / "benchmarks" / "adapter_eval"
+    shutil.copytree(
+        VELA.parent, harness, ignore=shutil.ignore_patterns("local", "__pycache__")
+    )
+    (harness.parent / "__init__.py").write_text("")
+    (harness / "vela" / "local").mkdir()
+    (harness / "vela" / "local" / "local.env").write_text("NAMESPACE=nowhere\n")
+    done = subprocess.run(
+        [
+            "bash",
+            str(harness / "vela" / "submit.sh"),
+            "reference",
+            "--release",
+            PYPI_RELEASE.key,
+        ],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(tmp_path), "LOCAL_PYTHON": sys.executable},
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert (
+        f"release {PYPI_RELEASE.key} shows release c739556e's reference columns"
+        in done.stdout
+    )
+
+
+def test_render_job_of_a_release_served_from_pypi(tmp_path, monkeypatch):
+    render_job = load_render_job()
+    monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))
+    for k in ("NAMESPACE", "CONTAINER_IMAGE", "IMAGE_PULL_SECRET", "PVC_NAME"):
+        monkeypatch.setenv(k, "x")
+    for k, v in {
+        "PVC_MOUNT": "/m",
+        "BENCH_ROOT": "/m/r",
+        "WORK_ROOT": "/m/runs",
+    }.items():
+        monkeypatch.setenv(k, v)
+    out = tmp_path / "values.json"
+    argv = ["--job-name", "j", "--run-ts", "T", "--out", str(out)]
+    argv += ["--release", PYPI_RELEASE.revision]
+    assert render_job.main(["--mode", "bench", *argv, "--pypi", "0.1.1"]) == 0
+    env = {
+        e["name"]: e.get("value")
+        for e in json.loads(out.read_text())["environmentVariables"]
+    }
+    assert env["ADAPTER_BENCH_PYPI"] == "0.1.1"
+    assert "ADAPTER_BENCH_COMMIT" not in env
+    with pytest.raises(SystemExit):  # only a release's bench is served from PyPI
+        render_job.main(["--mode", "reference", *argv, "--pypi", "0.1.1"])
+
+
+def fake_tool(path: Path, body: str) -> Path:
+    """An executable bash script at ``path`` that runs ``body``."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("#!/usr/bin/env bash\n" + body)
+    path.chmod(0o755)
+    return path
+
+
+def test_the_pod_installs_a_release_from_pypi(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    bin_dir = tmp_path / "bin"
+    checkout = tmp_path / "gs"
+    venv_python = checkout / ".venv" / "bin" / "python"
+    log_args = 'printf "%s\\n" "$*" >> "$FAKE_LOGS/$(basename "$0").log"\n'
+    # uv makes the venv's python, which logs what it runs and answers versions.
+    fake_tool(
+        bin_dir / "uv",
+        log_args + f'if [[ "$1" == venv ]]; then mkdir -p "$(dirname {venv_python})"; '
+        f'cp "$FAKE_PYTHON" {venv_python}; fi\n',
+    )
+    fake_python = fake_tool(
+        tmp_path / "python",
+        log_args + '[[ "$1" == -c ]] && echo "0.1.1 with vllm 0.30.0"\nexit 0\n',
+    )
+    fake_tool(bin_dir / "nvidia-smi", "exit 0\n")
+    fake_tool(bin_dir / "git", log_args + "exit 1\n")
+    env = {
+        "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        "HOME": str(tmp_path),
+        "FAKE_LOGS": str(logs),
+        "FAKE_PYTHON": str(fake_python),
+        "ADAPTER_BENCH_MODE": "bench",
+        "ADAPTER_BENCH_PYPI": "0.1.1",
+        "ADAPTER_BENCH_RELEASE": PYPI_RELEASE.revision,
+        "ADAPTER_BENCH_CHECKOUT": str(checkout),
+        "ADAPTER_BENCH_ROOT": "/m/r",
+        "ADAPTER_BENCH_WORK_ROOT": "/m/runs",
+        "RUN_TS": "R1",
+    }
+    done = subprocess.run(
+        ["bash", str(VELA / "pod_entry.sh")], env=env, capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    uv = (logs / "uv.log").read_text().splitlines()
+    assert uv[0] == f"venv --quiet --python 3.12 {checkout}/.venv"
+    assert uv[1].endswith(" granite-switch[vllm,audio,hf]==0.1.1 pyyaml")
+    assert "installed granite-switch 0.1.1 with vllm 0.30.0 from PyPI" in done.stdout
+    run = (logs / "python.log").read_text().splitlines()[-1]
+    assert run.startswith("-m benchmarks.adapter_eval.run_benchmark")
+    assert f"--release {PYPI_RELEASE.revision}" in run
+    assert f"--work-dir /m/runs/releases/{PYPI_RELEASE.revision[:12]}/R1" in run
+    # Nothing is cloned.
+    assert not (logs / "git.log").exists()

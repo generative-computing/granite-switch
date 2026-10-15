@@ -572,8 +572,8 @@ Hub revision rather than by a git commit. A model with no release says so.
 
 | Columns | What they are |
 |---|---|
-| granite-switch (vLLM) | the release's checkpoint as published, served by the granite-switch commit that loads it; each intrinsic under the release's own name for its adapter |
-| HF + PEFT | the library adapters it was composed from, at the revisions its BUILD.md records, under PEFT on the base model at its revision of the time |
+| granite-switch (vLLM) | the release's checkpoint as published, served by the granite-switch commit that loads it, or by a granite-switch version from PyPI; each intrinsic under the release's own name for its adapter |
+| HF + PEFT | the library adapters it was composed from, at the revisions its BUILD.md records, under PEFT on the base model at its revision of the time; for a release composed from the same adapter files as an earlier one, that one's (`reference_from`) |
 | Base | the base model alone, as in the main table |
 | Throughput, switching | the main table's two cells, over all of the release's own adapters: its checkpoint against stock vLLM serving the same library adapters (an aLoRA without its invocation tokens) |
 
@@ -600,12 +600,27 @@ releases:
     adapters: {answerability: answerability, guardian_core: guardian-core, ...}
 ```
 
-- **`revision`**, **`base_revision`**, **`serve_with`** and every `sources`
-  revision are full shas: a branch would move under the row.
-- **`serve_with`**: a checkpoint loads only on code that still reads its
-  format. The 4.1 preview was composed for the single-switch engine, which
-  `6013c7ff` (#131) removed; its parent, `24aa420f`, is the last commit that
-  loads it. A release of the current engine is served by a current commit.
+- **`revision`**, **`base_revision`**, **`serve_with`**, `reference_from`
+  and every `sources` revision are full shas: a branch would move under the
+  row.
+- **`serve_with`** or **`serve_pypi`**, one of the two: what serves it.
+  - `serve_with`, a commit: a checkpoint loads only on code that still reads
+    its format. The first 4.1 previews were composed for the single-switch
+    engine, which `6013c7ff` (#131) removed; its parent, `24aa420f`, is the
+    last commit that loads them.
+  - `serve_pypi`, a version (`"0.1.1"`): the pod installs that granite-switch
+    from PyPI, as its users install it, with the `vllm`, `audio` and `hf`
+    extras (a checkpoint with ASR loads its audio model when it starts), and
+    no checkout. The release's details box links the version.
+- **`reference_from`** (optional): an earlier release of the same model whose
+  HF + PEFT and Base columns this one shows. Use it when both were composed
+  from the same adapter files on the same base revision, e.g. the 8B preview
+  recomposed on 2026-10-15: its libraries' newer revisions changed only model
+  cards and one `io.yaml`, which the reference never reads.
+  - `submit.sh reference --release` runs nothing for it.
+  - Publishing its row checks every adapter's weights checksum against the
+    reference run it shows, and refuses a difference: then drop
+    `reference_from` and run its own.
 - **`sources`**: the libraries its BUILD.md names, at their revisions. Each
   adapter's folder there is `<name>/<base>/<technology>`, from the
   checkpoint's `adapter_index.json`.
@@ -645,7 +660,7 @@ model.json, release.json      the model; what was fetched, from which Hub commit
 It refuses a library revision the release's BUILD.md does not name, and an
 adapter whose files are not of the technology the release says. `bench` and
 `reference` then run in that folder; `--limit N` makes a smoke run, never
-published.
+published. A release with `reference_from` needs no `reference` run.
 
 ### Cache
 
@@ -653,7 +668,8 @@ A release's row is a cache hit when it has the current `release_version`,
 every cell (one scored with an older `score_version` runs again: releases are
 not re-scored), and its throughput and switching measured with the current
 settings; its reference columns, when they have the current
-`reference_version` and `release_version`. Bump `release_version` when a
+`reference_version` and `release_version` (with `reference_from`, those of the
+release it names). Bump `release_version` when a
 change alters how releases are benchmarked: every release runs again.
 
 ## Cache rules

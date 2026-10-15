@@ -73,8 +73,12 @@ models:
 # a table of their own under their model's, a row per release, named by its Hub
 # revision. Each runs on its model's eval sets, its adapters against the same
 # library checkpoints under HF + PEFT. A new release is a new entry; a later Hub
-# commit that changes only the model card needs nothing. Bump release_version
-# when a change alters how releases are benchmarked: every one runs again.
+# commit that changes only the model card needs nothing. Each is served by a
+# granite-switch commit (serve_with) or by a granite-switch version from PyPI
+# (serve_pypi). A release composed from the same adapter files on the same base
+# as an earlier one shows that one's reference columns (reference_from) instead
+# of running them again. Bump release_version when a change alters how releases
+# are benchmarked: every one runs again.
 release_version: 1
 releases:
   - model: granite-4.1-3b
@@ -106,6 +110,29 @@ releases:
       ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
       ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
       ibm-granite/granitelib-guardian-r1.0: 773b254e98f993a605ec4b6259634906e0e64e8e
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
+  # The 8B preview recomposed on 2026-10-15 for the current engine, with audio
+  # input through ASR; its text path is the earlier one's, and it runs the same
+  # way. The same 12 adapters and names, from its libraries' newer revisions.
+  - model: granite-4.1-8b
+    repo: ibm-granite/granite-switch-4.1-8b-preview
+    revision: 8a22410af7cbbfa2cbbd39a3af281ba98c2df846
+    base_revision: 1504002f650e656a0a3789d99574df12e3e94ed0
+    # Served by granite-switch from PyPI, as its users install it.
+    serve_pypi: "0.1.1"
+    # Its HF + PEFT and Base columns are the earlier 8B release's. The base is
+    # at the same revision, and at the libraries' newer revisions each of its
+    # 8B adapters has the same weights and config. Only model cards changed, and
+    # one io.yaml (requirement-check's aLoRA), which the reference never reads.
+    reference_from: c739556e0b2c66f21e5108dc4036f52e1893e256
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 167c451abc01c140c1059ed88d4bb39db9533ae9
+      ibm-granite/granitelib-core-r1.0: 9771650e7d3a1c5d3cc54e2a1b5026aa108531ec
+      ibm-granite/granitelib-guardian-r1.0: 1a1a488a51d0d5307e30e5b3c1e66b4a5237d18a
     adapters:
       answerability: answerability
       query_clarification: query_clarification

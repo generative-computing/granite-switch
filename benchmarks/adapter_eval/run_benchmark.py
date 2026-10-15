@@ -97,6 +97,19 @@ def commit_info(repo_dir: Path) -> dict:
     return {"sha": sha, "date": date, "subject": subject}
 
 
+def served_by(release, repo_dir: Path) -> dict:
+    """What serves a release: its commit, or its granite-switch version from PyPI,
+    which must be the one installed (there is no checkout to record then)."""
+    if not release.serve_pypi:
+        return commit_info(repo_dir)
+    installed = versions(("granite-switch",))["granite-switch"]
+    if installed != release.serve_pypi:
+        raise SystemExit(
+            f"granite-switch {installed} is installed, not {release.serve_pypi}"
+        )
+    return {"pypi": release.serve_pypi}
+
+
 def composer_flags(python: str, repo_dir: Path) -> set[str]:
     """Flags this commit's composer accepts, read from its ``--help``."""
     res = subprocess.run(
@@ -669,8 +682,8 @@ def run_release(args, started: str) -> int:
     base_model = args.base_model or str(
         base_model_dir(spec.base_model, release.base_revision)
     )
-    commit = commit_info(args.repo_dir)
-    print(f"[release] {release.repo}@{release.key}, served by {commit['sha'][:8]}")
+    commit = served_by(release, args.repo_dir)
+    print(f"[release] {release.repo}@{release.key}, served by {release.served}")
 
     cells: dict[str, dict[str, dict]] = {}
     runnable = []

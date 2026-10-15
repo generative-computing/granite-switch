@@ -83,6 +83,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_PATH = REPO_ROOT / "docs" / "benchmarks" / "data.json"
 PAGE_PATH = REPO_ROOT / "docs" / "benchmarks" / "index.html"
 COMMIT_URL = "https://github.com/generative-computing/granite-switch/commit/{sha}"
+# A granite-switch version on PyPI, for a release served from there.
+PYPI_URL = "https://pypi.org/project/granite-switch/{version}/"
 PAGE_URL = "https://generative-computing.github.io/granite-switch/benchmarks/"
 # rescore-targets' exit status when no cell needs scoring again (a crash is 1).
 NOTHING_TO_RESCORE = 3
@@ -371,7 +373,8 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
 # under ``releases`` by model, named by its Hub revision: its run as published
 # (``run_benchmark.py --release``) and, as its ``reference``, the library
 # adapters it was composed from under HF + PEFT, with the base model
-# (``reference.py --release``).
+# (``reference.py --release``). A release with ``reference_from`` has no
+# reference of its own: its row shows that release's.
 
 RELEASE_URL = "https://huggingface.co/{repo}/commit/{revision}"
 HUB_URL = "https://huggingface.co/{repo}/tree/{revision}"
@@ -472,6 +475,23 @@ def release_reference_hit(row: dict | None, spec: Spec) -> bool:
     return row is not None and not release_reference_missing(row, spec)
 
 
+def reference_mismatch(
+    row: dict, reference: dict | None, partial: bool = False
+) -> list[str]:
+    """The adapters (``intrinsic/tech``) a reference run used whose checksum
+    differs in a release's run, or is missing from it: what keeps the release
+    from showing that run's columns (``reference_from``). A ``partial`` run
+    (``--only``) is compared on what it ran."""
+    ran = (row.get("run") or {}).get("adapters") or {}
+    used = ((reference or {}).get("run") or {}).get("adapters") or {}
+    return sorted(
+        key
+        for key, f in used.items()
+        if not (partial and key not in ran)
+        and (ran.get(key) or {}).get("weights_sha256") != f.get("weights_sha256")
+    )
+
+
 def _release_holder(data: dict, block: dict, spec: Spec):
     """The release a block is of, its model's definition and its stored row."""
     release = spec.release(block["release"]["revision"])
@@ -487,7 +507,8 @@ def merge_release(data: dict, results: dict, spec: Spec) -> dict:
 
     A full run replaces the row's own cells and speed, and keeps its reference;
     an ``--only`` run replaces just what it ran, in a row of the same
-    ``release_version``.
+    ``release_version``. A release that shows another's reference
+    (``reference_from``) must have run the adapters that reference ran.
     """
     release, spec, old = _release_holder(data, results, spec)
     run = results["run"]
@@ -496,11 +517,25 @@ def merge_release(data: dict, results: dict, spec: Spec) -> dict:
             f"results are release_version {results.get('release_version')}, "
             f"adapters.yaml has {spec.release_version}"
         )
-    if results["served_by"]["sha"] != release.serve_with:
+    served = results["served_by"]
+    if (served.get("pypi") or served.get("sha")) != (
+        release.serve_pypi or release.serve_with
+    ):
         raise ValueError(
-            f"served by {results['served_by']['sha'][:8]}, not by the release's "
-            f"{release.serve_with[:8]} (adapters.yaml)"
+            f"served by {_served_label(served)}, not by what adapters.yaml says "
+            f"serves it ({release.served})"
         )
+    if release.reference_from:
+        source = find_release(data, spec.release(release.reference_from))
+        differ = reference_mismatch(
+            results, (source or {}).get("reference"), partial=bool(run.get("only"))
+        )
+        if differ:
+            raise ValueError(
+                f"release {release.key} shows release {release.reference_from[:8]}'s "
+                f"reference columns, but its {', '.join(differ)} differ from what "
+                "that reference ran: drop reference_from and run its own"
+            )
     rows = data.setdefault("releases", {}).setdefault(spec.model_id, [])
     if (
         run.get("only")
@@ -528,7 +563,23 @@ def merge_release_reference(data: dict, reference: dict, spec: Spec) -> dict:
     """Put a release's reference run into its row, made if it has none yet;
     returns the stored reference. An ``--only`` run replaces just its cells in
     a stored reference of the same versions."""
-    _, spec, row = _release_holder(data, reference, spec)
+    release, spec, row = _release_holder(data, reference, spec)
+    if release.reference_from:
+        raise ValueError(
+            f"release {release.key} shows release {release.reference_from[:8]}'s "
+            "reference columns (reference_from in adapters.yaml): it has none of its own"
+        )
+    for other in spec.releases_of(spec.model_id):
+        shown = (
+            find_release(data, other)
+            if other.reference_from == release.revision
+            else None
+        )
+        if shown and (differ := reference_mismatch(shown, reference)):
+            raise ValueError(
+                f"release {other.key} shows this reference, but its "
+                f"{', '.join(differ)} differ from what it ran"
+            )
     if not release_reference_current(reference, spec):
         raise ValueError(
             f"reference is reference_version {reference.get('reference_version')}, "
@@ -1476,7 +1527,8 @@ RELEASES_HEADING = "Hugging Face releases"
 RELEASES_NOTE = (
     "Composed checkpoints published on Hugging Face, a row per release, named by "
     "its Hub revision. Each runs as published, on the granite-switch commit that "
-    f"loads it; {REFERENCE_LABEL} runs the library adapters it was composed from. "
+    "loads it or on a granite-switch version from PyPI; "
+    f"{REFERENCE_LABEL} runs the library adapters it was composed from. "
     "Its speed is over all of its own adapters, against stock vLLM serving the "
     "same library adapters, so it does not compare with the table above."
 )
@@ -1527,8 +1579,16 @@ def _release_speedup_html(row: dict, block: str, extra: str, spec: Spec) -> str:
     return f'<td{_classes(cls, extra)} title="{_esc(title)}">{text}</td>'
 
 
-def _release_details(row: dict, release, spec: Spec) -> str:
-    """The details box of a release's row, as HTML."""
+def _shown_reference(row: dict, release, stored: dict) -> dict | None:
+    """The reference a release's row shows: its own, or that of the release
+    its ``reference_from`` names (``stored``: the model's rows by revision)."""
+    if release is None or not release.reference_from:
+        return row.get("reference")
+    return (stored.get(release.reference_from) or {}).get("reference")
+
+
+def _release_details(row: dict, release, spec: Spec, reference: dict | None) -> str:
+    """The details box of a release's row, with the reference it shows, as HTML."""
     rel, run, served = row["release"], row.get("run") or {}, row.get("served_by")
     out = [
         "<h4>Release</h4>",
@@ -1565,15 +1625,22 @@ def _release_details(row: dict, release, spec: Spec) -> str:
     if served is None:
         out.append("<p>not run yet</p>")
     else:
-        sha = served["sha"]
+        if served.get("pypi"):
+            version = served["pypi"]
+            served_html = (
+                f'<a href="{_esc(PYPI_URL.format(version=version))}">'
+                f"<code>granite-switch {_esc(version)}</code></a> from PyPI"
+            )
+        else:
+            sha = served["sha"]
+            served_html = (
+                f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
+                f"<code>{_esc(sha[:8])}</code></a> {_esc(served['subject'])}"
+            )
         out.append(
             _items(
                 [
-                    (
-                        "served by",
-                        f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
-                        f"<code>{_esc(sha[:8])}</code></a> {_esc(served['subject'])}",
-                    ),
+                    ("served by", served_html),
                     ("finished", _esc(run.get("finished", "")[:16].replace("T", " "))),
                     (
                         "libraries",
@@ -1617,8 +1684,14 @@ def _release_details(row: dict, release, spec: Spec) -> str:
             "<p>The release's name for each, its rank and the first 8 characters of "
             "its library checkpoint's SHA-256 checksum.</p>",
         ]
-    reference = row.get("reference")
     out.append(f"<h4>{_esc(REFERENCE_LABEL)} and {_esc(BASE_LABEL)}</h4>")
+    if release is not None and release.reference_from:
+        source = spec.release(release.reference_from)
+        out.append(
+            f'<p>Those of release <a href="{_esc(RELEASE_URL.format(**vars(source)))}">'
+            f"<code>{_esc(source.key)}</code></a>: the same adapters, on the same "
+            "base.</p>"
+        )
     gap = _release_gap(reference, spec)
     if gap:
         out.append(f"<p>{_esc(gap)}</p>")
@@ -1648,11 +1721,18 @@ def _release_details(row: dict, release, spec: Spec) -> str:
     return "".join(out)
 
 
+def _served_label(served: dict) -> str:
+    """What served a release's run: its PyPI version, or its commit."""
+    if served.get("pypi"):
+        return f"granite-switch {served['pypi']} (PyPI)"
+    return served["sha"][:8]
+
+
 def _release_details_text(row: dict) -> str:
     """A plain-text summary of a release's details box, for browsers without scripts."""
     run, served = row.get("run") or {}, row.get("served_by")
     parts = [
-        f"served by {served['sha'][:8]}" if served else "not run yet",
+        f"served by {_served_label(served)}" if served else "not run yet",
         _libraries(run, ("vllm", "torch", "transformers")),
         run.get("gpu"),
     ]
@@ -1690,10 +1770,12 @@ def _release_table(rows: list[dict], spec: Spec) -> str:
                 f'<th class="grp-thr start" rowspan="2">{_esc(engine_label)}</th>'
             )
     by_revision = {r.revision: r for r in spec.releases_of(spec.model_id)}
+    stored = {r["release"]["revision"]: r for r in rows}
     body = []
     for row in rows:
         rel = row["release"]
-        reference = row.get("reference")
+        release = by_revision.get(rel["revision"])
+        reference = _shown_reference(row, release, stored)
         gap = _release_gap(reference, spec)
         cells = [
             '<td class="commit">'
@@ -1702,7 +1784,7 @@ def _release_table(rows: list[dict], spec: Spec) -> str:
             f'<button class="info" type="button" aria-label="Release details" '
             f'title="{_esc(_release_details_text(row))}">i</button>'
             '<div class="details" hidden>'
-            f"{_release_details(row, by_revision.get(rel['revision']), spec)}</div>"
+            f"{_release_details(row, release, spec, reference)}</div>"
             f'<div class="date">{_esc(rel["date"][:10])}</div></td>',
             f'<td class="subject" title="{_esc(rel["repo"])}">'
             f'<a href="{_esc(HUB_URL.format(**rel))}">'
@@ -2173,6 +2255,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "check-release":
             hit, missing = release_hit(row, spec), release_missing(row, spec)
         else:
+            if release.reference_from:
+                print(
+                    f"release {release.key} shows release "
+                    f"{release.reference_from[:8]}'s reference columns"
+                )
+                row = find_release(data, spec.reference_release(release))
             hit, missing = (
                 release_reference_hit(row, spec),
                 release_reference_missing(row, spec),

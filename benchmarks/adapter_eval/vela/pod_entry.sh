@@ -7,7 +7,8 @@
 #
 #   discover  list adapter checkpoints and eval files under the source roots
 #   stage     copy the selection shipped in extra/ into the bench root
-#   bench     clone + install the commit, then run run_benchmark.py
+#   bench     clone + install the commit, then run run_benchmark.py (a release
+#             served from PyPI installs that granite-switch version instead)
 #   reference install pinned torch / transformers / peft in their own
 #             virtualenv, then run reference.py (no commit involved)
 #   script    clone + install the commit, then run the Python file shipped as
@@ -57,6 +58,18 @@ install_commit() {
     (cd "$REPO" && uv sync --frozen ${ADAPTER_BENCH_UV_SYNC_ARGS:---group dev})
 }
 
+# A release served from PyPI: that granite-switch version, installed as its
+# users install it (with vLLM, and the audio extra a checkpoint with ASR needs
+# to start), in the environment the rest of the run uses. No checkout.
+install_pypi() {
+    REPO=${ADAPTER_BENCH_CHECKOUT:-/workspace/granite-switch}
+    mkdir -p "$REPO"
+    uv venv --quiet --python 3.12 "$REPO/.venv"
+    uv pip install --quiet --python "$REPO/.venv/bin/python" \
+        "granite-switch[vllm,audio,hf]==${ADAPTER_BENCH_PYPI:?}" pyyaml
+    echo "[pod] installed granite-switch $("$REPO/.venv/bin/python" -c 'from importlib.metadata import version; print(version("granite-switch"), "with vllm", version("vllm"))') from PyPI"
+}
+
 case "$MODE" in
 discover)
     : "${ADAPTER_BENCH_ADAPTER_SOURCES:?set ADAPTER_SOURCE_ROOTS in local.env}"
@@ -82,10 +95,12 @@ stage)
     harness_py -m benchmarks.adapter_eval.stage apply "${args[@]}" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}
     ;;
 bench)
-    install_commit
-    work=${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}
+    if [[ -n "${ADAPTER_BENCH_PYPI:-}" ]]; then install_pypi; else install_commit; fi
+    # A release has no commit when it is served from PyPI.
     if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then
-        work=$ADAPTER_BENCH_WORK_ROOT/releases/${ADAPTER_BENCH_RELEASE:0:12}/${RUN_TS:-run}
+        work=${ADAPTER_BENCH_WORK_ROOT:?}/releases/${ADAPTER_BENCH_RELEASE:0:12}/${RUN_TS:-run}
+    else
+        work=${ADAPTER_BENCH_WORK_ROOT:?}/${MODEL:-default}/${SHA:0:12}/${RUN_TS:-run}
     fi
     args=(
         --repo-dir "$REPO"
