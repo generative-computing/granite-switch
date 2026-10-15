@@ -168,6 +168,42 @@ releases:
       query_clarification: query_clarification
       guardian_core: guardian-core
       requirement_check: requirement-check
+  # The 3B and 30B previews recomposed on 2026-10-15 like the 8B one: the
+  # current engine with audio input through ASR, the same 12 adapters from the
+  # libraries' newer revisions, served from PyPI. Their HF + PEFT and Base
+  # columns are their earlier releases': each model's adapters have the same
+  # weights and config at those revisions (only model cards and the
+  # requirement-check aLoRA's io.yaml changed), on the same base revision.
+  - model: granite-4.1-3b
+    repo: ibm-granite/granite-switch-4.1-3b-preview
+    revision: daf8e650d23e5f3574ec2cb1cc6e346a2f90d116
+    base_revision: c0650403e44e78ec0262dab1c90914c65b196c4e
+    serve_pypi: "0.1.1"
+    reference_from: 7a3ac02e07868411424ac89440397b475da66fa7
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 167c451abc01c140c1059ed88d4bb39db9533ae9
+      ibm-granite/granitelib-core-r1.0: 9771650e7d3a1c5d3cc54e2a1b5026aa108531ec
+      ibm-granite/granitelib-guardian-r1.0: 1a1a488a51d0d5307e30e5b3c1e66b4a5237d18a
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
+  - model: granite-4.1-30b
+    repo: ibm-granite/granite-switch-4.1-30b-preview
+    revision: ff87bdee615a296d6e2f9e2828583aa46e661a92
+    base_revision: 4fae6278f7132abf5e971f9de49ebbad09c54cce
+    serve_pypi: "0.1.1"
+    reference_from: b2d1c82bbd5913f8a07e35c911b402783d1423e1
+    sources:
+      ibm-granite/granitelib-rag-r1.0: 167c451abc01c140c1059ed88d4bb39db9533ae9
+      ibm-granite/granitelib-core-r1.0: 9771650e7d3a1c5d3cc54e2a1b5026aa108531ec
+      ibm-granite/granitelib-guardian-r1.0: 1a1a488a51d0d5307e30e5b3c1e66b4a5237d18a
+    adapters:
+      answerability: answerability
+      query_clarification: query_clarification
+      guardian_core: guardian-core
+      requirement_check: requirement-check
 
 technologies:
   - id: lora

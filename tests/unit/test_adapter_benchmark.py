@@ -4036,6 +4036,8 @@ def test_releases_in_the_spec(tmp_path, monkeypatch):
         "granite-4.1-8b",
         "granite-4.1-8b",
         "granite-4.1-30b",
+        "granite-4.1-3b",
+        "granite-4.1-30b",
     ]
     assert SPEC.public()["releases"] == [r.public() for r in SPEC.releases]
     assert RELEASE.adapters["guardian_core"] == "guardian-core"
