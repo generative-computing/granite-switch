@@ -4066,12 +4066,28 @@ def fake_release_repos(hub: Path, build: str | None = None) -> dict[str, Path]:
     return {name: hub / name for name in (RELEASE.repo, *RELEASE.sources)}
 
 
-def fake_hub(monkeypatch, repos: dict[str, Path]) -> list:
-    """huggingface_hub, serving ``repos`` from local folders; returns its downloads."""
-    downloads = []
+class Fetches(list):
+    """A fake Hub's snapshot downloads, as ``(repo, revision, patterns)``, and
+    its single-file ones in ``files``, as ``(repo, path)``."""
+
+    def __init__(self):
+        super().__init__()
+        self.files: list[tuple[str, str]] = []
+
+
+def fake_hub(monkeypatch, repos: dict[str, Path], checksums: dict | None = None):
+    """huggingface_hub, serving ``repos`` from local folders; returns its
+    downloads. ``checksums`` replaces the sha256 it gives a file's path."""
+    downloads = Fetches()
     hub = types.ModuleType("huggingface_hub")
 
-    def snapshot_download(repo_id, revision=None, local_dir=None, allow_patterns=None):
+    def snapshot_download(
+        repo_id,
+        revision=None,
+        local_dir=None,
+        allow_patterns=None,
+        ignore_patterns=None,
+    ):
         downloads.append((repo_id, revision, allow_patterns))
         src = repos[repo_id]
         for f in sorted(src.rglob("*")):
@@ -4079,11 +4095,22 @@ def fake_hub(monkeypatch, repos: dict[str, Path]) -> list:
             wanted = allow_patterns is None or any(
                 fnmatch.fnmatch(rel, p) for p in allow_patterns
             )
+            if ignore_patterns and any(
+                fnmatch.fnmatch(rel, p) for p in ignore_patterns
+            ):
+                wanted = False
             if f.is_file() and wanted:
                 dest = Path(local_dir) / rel
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(f, dest)
         return str(local_dir)
+
+    def hf_hub_download(repo_id, filename, revision=None, local_dir=None):
+        downloads.files.append((repo_id, filename))
+        dest = Path(local_dir) / filename
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(repos[repo_id] / filename, dest)
+        return str(dest)
 
     class HfApi:
         def list_repo_files(self, repo_id, revision=None):
@@ -4092,13 +4119,29 @@ def fake_hub(monkeypatch, repos: dict[str, Path]) -> list:
                 f.relative_to(src).as_posix() for f in src.rglob("*") if f.is_file()
             ]
 
+        def list_repo_tree(self, repo_id, revision=None, recursive=False):
+            src = repos[repo_id]
+            for f in sorted(src.rglob("*")):
+                rel = f.relative_to(src).as_posix()
+                if f.is_dir():
+                    yield types.SimpleNamespace(path=rel)
+                    continue
+                sha = (checksums or {}).get(rel, stage.sha256(f))
+                lfs = types.SimpleNamespace(sha256=sha, size=f.stat().st_size)
+                yield types.SimpleNamespace(
+                    path=rel,
+                    size=f.stat().st_size,
+                    lfs=lfs if rel.endswith(".safetensors") else None,
+                )
+
         def list_repo_commits(self, repo_id, revision=None):
             when = datetime.datetime(2026, 5, 24, 9, 23, 6, tzinfo=datetime.UTC)
             return [
                 types.SimpleNamespace(commit_id=revision, created_at=when, title="t")
             ]
 
-    hub.snapshot_download, hub.HfApi = snapshot_download, HfApi
+    hub.snapshot_download, hub.hf_hub_download = snapshot_download, hf_hub_download
+    hub.HfApi = HfApi
     monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
     return downloads
 
@@ -4118,6 +4161,11 @@ def test_stage_release_from_the_hub(tmp_path, monkeypatch):
     assert (root / releases.CHECKPOINT / "model.safetensors").is_file()
     assert not (root / f"{releases.CHECKPOINT}.staging").exists()
     assert not downloads.exists()
+    # Its weights one file at a time, each with the Hub's checksum.
+    assert fetches.files == [(RELEASE.repo, "model.safetensors")]
+    assert record["checkpoint_weights"] == {
+        "model.safetensors": hashlib.sha256(b"weights").hexdigest()
+    }
     assert [a["name"] for a in record["adapters"]] == [
         n for n, _, _ in RELEASE_ADAPTERS
     ]
@@ -4161,6 +4209,31 @@ def test_stage_release_from_the_hub(tmp_path, monkeypatch):
         == record
     )
     assert json.loads((root / releases.RELEASE_FILE).read_text()) == record
+
+
+def test_stage_release_refuses_weights_with_another_checksum(tmp_path, monkeypatch):
+    fake_hub(
+        monkeypatch,
+        fake_release_repos(tmp_path / "hub"),
+        checksums={"model.safetensors": "0" * 64},
+    )
+    bench = tmp_path / "bench"
+    for intrinsic_id in RELEASE.adapters:
+        write_eval(staged.eval_path(bench, intrinsic_id))
+    root = tmp_path / "release"
+    with pytest.raises(
+        OSError, match="model.safetensors: checksum .* is not the Hub's"
+    ):
+        releases.stage_release(
+            SPEC.for_model(RELEASE.model),
+            RELEASE,
+            root,
+            bench,
+            False,
+            downloads=tmp_path / "downloads",
+        )
+    assert not (root / releases.CHECKPOINT).exists()
+    assert not (root / releases.RELEASE_FILE).exists()
 
 
 def test_stage_release_refuses_sources_its_build_does_not_name(tmp_path, monkeypatch):

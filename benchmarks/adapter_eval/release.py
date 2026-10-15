@@ -14,7 +14,8 @@ The release's folder (``RELEASE_ROOT/<model>/<repo name>/<revision>``)::
     adapters/<intrinsic>/<tech>/  the benchmark's intrinsics among them, as a bench
                                   root holds them, for HF + PEFT (reference.py)
     eval/<intrinsic>/evaluation.jsonl   the model's eval sets, copied from its root
-    model.json, release.json      the model; what was staged, from which Hub commits
+    model.json, release.json      the model; what was staged, from which Hub commits,
+                                  with each weights file's checksum
 
 An adapter's library folder is ``<name>/<base>/<technology>``, the granitelib
 repositories' layout, with its name and technology from the checkpoint's
@@ -26,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import fnmatch
 import json
 import shutil
 import sys
@@ -41,6 +43,9 @@ INDEX_FILE = "adapter_index.json"
 BUILD_FILE = "BUILD.md"
 # What the benchmark uses of an adapter's library folder.
 LEAF_FILES = (staged.CONFIG_FILE, staged.WEIGHTS_FILE, "io.yaml")
+# A checkpoint's weights, fetched one file at a time: the pod's disk holds one
+# of them at once, however big the checkpoint (a 30B one is 65 GB).
+WEIGHTS = "*.safetensors"
 
 
 def read_release(root: Path, release) -> dict:
@@ -115,7 +120,7 @@ def stage_release(
 ) -> dict:
     """Fetch ``release`` into ``root``, through ``downloads``: the Hub's downloads
     go to local disk first (its locks need one), then onto the volume."""
-    from huggingface_hub import HfApi, snapshot_download
+    from huggingface_hub import HfApi, hf_hub_download, snapshot_download
 
     if (root / RELEASE_FILE).is_file() and not replace:
         print(f"[release] {root} already holds it (--replace to fetch it again)")
@@ -124,7 +129,12 @@ def stage_release(
     root.mkdir(parents=True, exist_ok=True)
     shutil.rmtree(downloads, ignore_errors=True)
     local = downloads / CHECKPOINT
-    snapshot_download(release.repo, revision=release.revision, local_dir=local)
+    snapshot_download(
+        release.repo,
+        revision=release.revision,
+        local_dir=local,
+        ignore_patterns=[WEIGHTS],
+    )
     index = json.loads((local / INDEX_FILE).read_text())
     build = (local / BUILD_FILE).read_text()
     unnamed = [
@@ -226,7 +236,8 @@ def stage_release(
         i: [name, techs[name]] for i, name in release.adapters.items()
     }
 
-    # The checkpoint onto the volume, every file checked for its size.
+    # The checkpoint onto the volume, every file checked for its size; its
+    # weights one at a time, each checked for the Hub's checksum first.
     tmp = root / f"{CHECKPOINT}.staging"
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(local, tmp, ignore=shutil.ignore_patterns(".cache"))
@@ -235,6 +246,32 @@ def stage_release(
         if f.is_file() and ".cache" not in rel.parts:
             if (tmp / rel).stat().st_size != f.stat().st_size:
                 raise OSError(f"size mismatch copying {rel}")
+    record["checkpoint_weights"] = {}
+    tree = api.list_repo_tree(release.repo, revision=release.revision, recursive=True)
+    for f in tree:
+        if not fnmatch.fnmatch(f.path, WEIGHTS):
+            continue
+        got = Path(
+            hf_hub_download(
+                release.repo,
+                f.path,
+                revision=release.revision,
+                local_dir=downloads / "weights",
+            )
+        )
+        digest = stage.sha256(got)
+        lfs = getattr(f, "lfs", None)
+        if lfs is None or digest != lfs.sha256:
+            raise OSError(f"{f.path}: checksum {digest[:8]} is not the Hub's")
+        (tmp / f.path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(got, tmp / f.path)
+        if (tmp / f.path).stat().st_size != got.stat().st_size:
+            raise OSError(f"size mismatch copying {f.path}")
+        got.unlink()
+        record["checkpoint_weights"][f.path] = digest
+        print(f"[release] {f.path}: copied, checksum {digest[:8]}", flush=True)
+    if not record["checkpoint_weights"]:
+        raise ValueError(f"{release.repo}@{release.key} has no {WEIGHTS} file")
     shutil.rmtree(root / CHECKPOINT, ignore_errors=True)
     tmp.rename(root / CHECKPOINT)
     shutil.rmtree(downloads, ignore_errors=True)
