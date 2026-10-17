@@ -154,3 +154,86 @@ def apply_token_exchange(
     sub_id_per_pos = lut[input_ids]
     is_control = sub_id_per_pos >= 0
     return torch.where(is_control, sub_id_per_pos, input_ids)
+
+
+def build_adapter_kind_lut(config) -> torch.Tensor | None:
+    """Bool LUT over adapter indices marking which slots are classifiers.
+
+    ``[num_adapters + 1]``, indexed by ADAPTER INDEX: entry ``i`` is True when
+    adapter index ``i`` is a classifier slot (index 0, base, is always False).
+    ``None`` when no slot is a classifier. This supports the legacy split when
+    no token-derived classifier probe indices are supplied. Built from
+    ``config.adapter_kinds``, so both backends agree on the table.
+    """
+    kinds = getattr(config, "adapter_kinds", None) if config is not None else None
+    if kinds is None or not any(k == "classifier" for k in kinds):
+        return None
+    lut = torch.zeros(len(kinds) + 1, dtype=torch.bool)
+    for slot, kind in enumerate(kinds):  # slot is the 0-based adapter position
+        if kind == "classifier":
+            lut[slot + 1] = True  # adapter index is slot + 1
+    return lut
+
+
+def build_classifier_control_luts(
+    config,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Build token-id LUTs for classifier markers.
+
+    The first LUT marks classifier control tokens; the second returns the
+    classifier head slot (1-based) for each token.  These LUTs are separate
+    from ``adapter_kind_lut`` because an orthogonal classifier probe must not
+    replace the persistent LoRA adapter selected earlier in the request.
+    """
+    kinds = getattr(config, "adapter_kinds", None)
+    control_ids = getattr(config, "adapter_token_ids", None)
+    if not kinds or not control_ids or not any(k == "classifier" for k in kinds):
+        return None, None
+    offset = len(control_ids) - len(kinds)
+    if offset not in (0, 1):
+        raise ValueError(
+            "adapter_token_ids must have one id per adapter, optionally with "
+            "a leading base-reset token"
+        )
+    vocab_size = max(
+        int(getattr(config, "vocab_size", 0)),
+        max(control_ids) + 1,
+    )
+    is_marker = torch.zeros(vocab_size, dtype=torch.bool)
+    slot_lut = torch.zeros(vocab_size, dtype=torch.long)
+    for slot, kind in enumerate(kinds, start=1):
+        if kind != "classifier":
+            continue
+        token_id = control_ids[slot - 1 + offset]
+        is_marker[token_id] = True
+        slot_lut[token_id] = slot
+    return is_marker, slot_lut
+
+
+def split_adapter_indices(
+    kind_lut: torch.Tensor | None,
+    adapter_indices: torch.Tensor,
+    classifier_probe_indices: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Split a per-token index stream into LoRA and classifier streams.
+
+    Shapes are preserved (``[batch, seq_len]`` on HF, ``[total_tokens]`` on
+    vLLM), so this serves both backends:
+
+      - When classifier marker indices are provided, they select the classifier
+        head independently and the active adapter stream is preserved.
+      - Without marker indices, the legacy kind LUT split is used.
+
+    With ``kind_lut`` None (no classifier slots) the LoRA stream passes through
+    and the classifier stream is all zeros.
+    """
+    if classifier_probe_indices is not None:
+        return adapter_indices, classifier_probe_indices
+    if kind_lut is None:
+        return adapter_indices, torch.zeros_like(adapter_indices)
+    is_classifier = kind_lut[adapter_indices]
+    zeros = torch.zeros_like(adapter_indices)
+    return (
+        torch.where(is_classifier, zeros, adapter_indices),
+        torch.where(is_classifier, adapter_indices, zeros),
+    )

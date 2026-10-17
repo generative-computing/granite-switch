@@ -27,12 +27,13 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
     substitution.
 
     Args:
-        num_adapters (int): Number of LoRA adapters available. Default: 0 (no adapters).
-            This counts real LoRA adapters only (not base). Index 0 always means "base / no adapter".
+        num_adapters (int): Number of adapter slots available (LoRA and
+            classifier). Default: 0. Index 0 always means "base / no adapter".
         adapter_token_ids (List[int]): Token IDs for adapter control.
-            Length: num_adapters (one token per real adapter). Must be unique.
-            adapter_token_ids[i] activates adapter i+1 (1-indexed output).
-            Output 0 = base (implicit default, no token needed to return to base).
+            Length: num_adapters (or num_adapters + 1 with a leading base-reset
+            token). Must be unique. A LoRA control token selects that adapter;
+            a classifier control token selects its head without changing the
+            active adapter. Output 0 = base.
         adapter_substitute_token_ids (List[int]): Token IDs whose embeddings
             replace the control-token embeddings before the decoder runs.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
@@ -181,6 +182,10 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Shadow Residual (SR) parameters
         cross_stream_rank: int | None = None,
         dual_stream: bool = False,
+        # Classifier substitution parameters
+        adapter_kinds: list[str] | None = None,
+        classifier_label_token_ids: list[list[int] | None] | None = None,
+        classifier_read_layers: list[int | None] | None = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -380,6 +385,110 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
 
         self.max_lora_rank = max_lora_rank
         self.adapter_ranks = adapter_ranks
+
+        # Each adapter slot is either a LoRA adapter ("lora", the default) or
+        # a classifier head ("classifier"). Classifier markers are orthogonal
+        # probes: they select a head without replacing the currently active
+        # adapter selection. The probe slot is looked up from the marker token.
+        _VALID_KINDS = ("lora", "classifier")
+        if adapter_kinds is None:
+            adapter_kinds = ["lora"] * num_adapters
+        else:
+            if len(adapter_kinds) != num_adapters:
+                raise ValueError(
+                    f"adapter_kinds length ({len(adapter_kinds)}) must equal "
+                    f"num_adapters ({num_adapters})."
+                )
+            invalid = [k for k in adapter_kinds if k not in _VALID_KINDS]
+            if invalid:
+                raise ValueError(
+                    f"adapter_kinds values must be one of {_VALID_KINDS}; "
+                    f"got invalid entries {invalid}"
+                )
+        self.adapter_kinds = adapter_kinds
+        # Classifier metadata resolved at compose time.
+        if classifier_label_token_ids is not None:
+            if len(classifier_label_token_ids) != num_adapters:
+                raise ValueError(
+                    f"classifier_label_token_ids length "
+                    f"({len(classifier_label_token_ids)}) must equal num_adapters "
+                    f"({num_adapters}); it is indexed by adapter_index - 1, with "
+                    f"None on non-classifier slots."
+                )
+            for i, (kind, ids) in enumerate(
+                zip(adapter_kinds, classifier_label_token_ids)
+            ):
+                if kind == "classifier":
+                    if not ids:
+                        raise ValueError(
+                            f"classifier slot {i} must declare its label token ids; "
+                            f"got {ids!r}."
+                        )
+                    if any(tid < 0 for tid in ids):
+                        raise ValueError(
+                            f"classifier_label_token_ids[{i}] must all be >= 0 "
+                            f"(real token ids); got {ids}"
+                        )
+                elif ids:
+                    raise ValueError(
+                        f"non-classifier slot {i} must have no label token ids; "
+                        f"got {ids!r}."
+                    )
+        elif any(k == "classifier" for k in adapter_kinds):
+            raise ValueError(
+                "adapter_kinds declares a classifier slot but "
+                "classifier_label_token_ids is unset. The classifier exit emits its "
+                "verdict as a label word, so the per-label token ids are required. "
+                "Re-compose so config.json carries classifier_label_token_ids."
+            )
+        self.classifier_label_token_ids = classifier_label_token_ids
+
+        # Per slot: zero-based decoder layer a classifier reads (switch cache
+        # layers excluded); None reads the final post-norm hidden state.
+        if classifier_read_layers is not None:
+            if len(classifier_read_layers) != num_adapters:
+                raise ValueError(
+                    f"classifier_read_layers length ({len(classifier_read_layers)}) "
+                    f"must equal num_adapters ({num_adapters})."
+                )
+            num_decoder_layers = self.num_hidden_layers - SWITCH_CACHE_LAYERS
+            for i, (kind, layer) in enumerate(
+                zip(adapter_kinds, classifier_read_layers)
+            ):
+                if layer is None:
+                    continue
+                if kind != "classifier":
+                    raise ValueError(
+                        f"non-classifier slot {i} must have no read layer; got {layer!r}."
+                    )
+                # bool is an int subclass.
+                if (
+                    not isinstance(layer, int)
+                    or isinstance(layer, bool)
+                    or not 0 <= layer < num_decoder_layers
+                ):
+                    raise ValueError(
+                        f"classifier_read_layers[{i}] = {layer!r} must be an int in "
+                        f"0..{num_decoder_layers - 1}; omit it for the final layer."
+                    )
+        self.classifier_read_layers = classifier_read_layers
+
+        # Derived: per-slot label counts (0 on LoRA slots) and the padded bank
+        # width the classifier head is built with.
+        self.classifier_num_labels_per_slot = [
+            len(ids) if ids else 0 for ids in (classifier_label_token_ids or [])
+        ] or [0] * num_adapters
+        self.max_classifier_labels = max(self.classifier_num_labels_per_slot, default=0)
+
+        # Derived: the control-token ids that mark a classifier slot. Both backends
+        # locate a verdict's read point by matching these in the original input_ids,
+        # so the id set is defined once here.
+        classifier_token_offset = len(adapter_token_ids or []) - num_adapters
+        self.classifier_control_token_ids = [
+            (adapter_token_ids or [])[i + classifier_token_offset]
+            for i, kind in enumerate(adapter_kinds)
+            if kind == "classifier" and adapter_token_ids is not None
+        ]
 
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.

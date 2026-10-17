@@ -306,6 +306,10 @@ class DecoderInterface(abc.ABC):
         """
 
     @abc.abstractmethod
+    def layer_output(self, state, adapter_indices) -> torch.Tensor:
+        """Read this layer's per-token residual stream before the final norm."""
+
+    @abc.abstractmethod
     def exit_decoder_stack(self, state, adapter_indices, norm, config) -> torch.Tensor:
         """Last-rank finalize: produce the final ``[M, H]`` hidden states."""
 
@@ -423,6 +427,11 @@ class LoRADecoderInterface(DecoderInterface):
 
     def to_intermediate(self, state):
         return state.hidden_states, state.residual
+
+    def layer_output(self, state, adapter_indices):
+        if state.residual is None:
+            return state.hidden_states
+        return state.residual + state.hidden_states
 
     def exit_decoder_stack(self, state, adapter_indices, norm, config):
         # Fold in the last residual via rms_norm_select so the same fused/separate
@@ -567,7 +576,10 @@ class SRDecoderInterface(DecoderInterface):
         if residual is None:
             hs = torch.cat([hidden_states, hidden_states], dim=0)  # [2M, H]
         else:
-            hs = torch.cat([hidden_states, residual], dim=0)  # [2M, H]
+            # Both PP halves have M rows. Stack preserves that relation in the
+            # symbolic shape (2*M), avoiding a late slice-bound dependency when
+            # vLLM partitions post-attention LoRA metadata reads.
+            hs = torch.stack([hidden_states, residual], dim=0).flatten(0, 1)
         return SRStackState(hs=hs)
 
     def run_layer(self, layer, positions, state):
@@ -580,15 +592,17 @@ class SRDecoderInterface(DecoderInterface):
         m = state.hs.shape[0] // 2
         return state.hs[:m].contiguous(), state.hs[m:].contiguous()
 
-    def exit_decoder_stack(self, state, adapter_indices, norm, config):
+    def layer_output(self, state, adapter_indices):
         hs = state.hs
         m = adapter_indices.shape[0]
-        # Per-token merge: adapter-active tokens read the adapter stream, the rest
-        # read the (base-equivalent) base stream. SR uses plain norm, not
-        # rms_norm_select (its residual is materialized inside each layer).
+        # Read after the layer's cross-stream shunt: active tokens use the
+        # adapted stream, inactive tokens use the base stream.
         select = (adapter_indices > 0).unsqueeze(1)  # [M, 1]
-        merged = torch.where(select, hs[m:], hs[:m])
-        return norm(merged)
+        return torch.where(select, hs[m:], hs[:m])
+
+    def exit_decoder_stack(self, state, adapter_indices, norm, config):
+        # SR materializes residuals inside each layer, so use a plain norm.
+        return norm(self.layer_output(state, adapter_indices))
 
 
 # --------------------------------------------------------------------------- #

@@ -8,11 +8,13 @@ tiers — not LoRA-specific despite the historical ``lora`` naming:
 - lora_kernel_meta: Bitmask + remap metadata for the fused kernel
 """
 
+from .classifier import SwitchedClassifierHead
 from .lora import SwitchedLoRALinear
 from .lora_kernel_meta import FusedLoRAKernelMeta, LoRAContext
 
 __all__ = [
     "FusedLoRAKernelMeta",
     "LoRAContext",
+    "SwitchedClassifierHead",
     "SwitchedLoRALinear",
 ]

@@ -168,6 +168,59 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
+        # Classifier markers share the control-token machinery but select the
+        # classifier head independently, preserving the active adapter. The head
+        # scores each slot at its read layer (the final post-norm state by default).
+        if "classifier" in getattr(config, "adapter_kinds", []):
+            from .core import SwitchedClassifierHead
+
+            self.classifier_head = SwitchedClassifierHead(
+                hidden_size=config.hidden_size,
+                num_classifier_slots=config.num_adapters,
+                max_num_labels=config.max_classifier_labels,
+            )
+
+            # Packed verdicts assume the ordinary sampler's row selection.
+            if vllm_config.speculative_config is not None:
+                raise ValueError(
+                    "Classifier slots do not support speculative decoding."
+                )
+            if vllm_config.parallel_config.use_ubatching:
+                raise ValueError("Classifier slots do not support microbatching.")
+
+            is_classifier = [kind == "classifier" for kind in config.adapter_kinds]
+            # Index 0 is a sentinel so a 1-based slot id indexes it directly.
+            self.register_buffer(
+                "classifier_slot_mask_t",
+                torch.tensor([False, *is_classifier]),
+                persistent=False,
+            )
+
+            # One buffer of slot ids per read layer (None = final). Store buffer
+            # names, not tensors: Module.to() replaces registered buffers.
+            read_layers = config.classifier_read_layers or [None] * num_adapters
+            slots_by_layer: dict[int | None, list[int]] = {}
+            for slot, (is_clf, layer) in enumerate(
+                zip(is_classifier, read_layers), start=1
+            ):
+                if is_clf:
+                    slots_by_layer.setdefault(layer, []).append(slot)
+            self._classifier_final_layer_group = None
+            self._classifier_layer_groups: dict[int, str] = {}
+            for layer, slot_ids in slots_by_layer.items():
+                name = f"_classifier_slots_{'final' if layer is None else layer}"
+                self.register_buffer(
+                    name, torch.tensor(slot_ids, dtype=torch.long), persistent=False
+                )
+                if layer is None:
+                    self._classifier_final_layer_group = name
+                else:
+                    self._classifier_layer_groups[layer] = name
+        else:
+            self.classifier_head = None
+            self._classifier_final_layer_group = None
+            self._classifier_layer_groups = {}
+
         # 3. Base transformer layers with custom LoRA
         #
         # When adapters are present, config.num_hidden_layers includes placeholder
@@ -246,6 +299,15 @@ class GraniteSwitchModel(nn.Module):
                 device=device,
             ),
         }
+        if self.classifier_head is not None:
+            tensors["classifier_indices"] = torch.zeros(
+                batch_size, dtype=torch.long, device=device
+            )
+            tensors["classifier_scores"] = torch.zeros(
+                (batch_size, self.config.max_classifier_labels),
+                dtype=dtype,
+                device=device,
+            )
 
         return IntermediateTensors(tensors)
 
@@ -317,39 +379,39 @@ class GraniteSwitchModel(nn.Module):
                 )
                 modified_input_ids = input_ids
 
-            # Prepare kernel metadata ONCE for all decoder layers (adaptation-specific).
-            if self.lora_meta is not None and self.lora_ctx is not None:
-                self.decoder_interface.prepare_kernel_meta(
-                    self.lora_meta, adapter_indices, self.lora_ctx
+            # Marker-only probe indices are independent of persistent adapter
+            # routing. They travel across PP stages along with their scores.
+            if self.switch is not None:
+                classifier_probe_indices = (
+                    self.switch.classifier_indices_from_tokens(input_ids)
+                    if input_ids is not None
+                    else None
                 )
-
-            # Store metadata in intermediate_tensors for pipeline parallelism.
-            if intermediate_tensors is None:
-                intermediate_tensors = IntermediateTensors({})
-            intermediate_tensors["adapter_indices"] = adapter_indices
-        else:
-            # Subsequent ranks: recompute fixed-size LoRA metadata from
-            # token-leading adapter_indices received through PP.
-            if intermediate_tensors is not None:
-                adapter_indices = intermediate_tensors["adapter_indices"]
-                if self.lora_ctx is not None:
-                    self.decoder_interface.prepare_kernel_meta(
-                        self.lora_meta, adapter_indices, self.lora_ctx
-                    )
+                lora_indices, classifier_indices = self.switch.split_indices(
+                    adapter_indices, classifier_probe_indices
+                )
             else:
-                # Fallback: no metadata available (should not happen in normal operation)
-                num_tokens = input_ids.shape[0] if input_ids is not None else 0
-                if input_ids is not None:
-                    fallback_device = input_ids.device
-                elif self.lora_meta is not None:
-                    fallback_device = self.lora_meta.device
-                else:
-                    fallback_device = self.embed_tokens.weight.device
-                adapter_indices = torch.zeros(
-                    num_tokens,
-                    dtype=torch.long,
-                    device=fallback_device,
-                )
+                lora_indices = adapter_indices
+                classifier_indices = torch.zeros_like(adapter_indices)
+
+        else:
+            assert intermediate_tensors is not None
+            adapter_indices = intermediate_tensors["adapter_indices"]
+            # Later stages need no input ids: rank zero already identified the
+            # markers, without turning them into persistent adapter selection.
+            classifier_indices = (
+                intermediate_tensors["classifier_indices"]
+                if self.classifier_head is not None
+                else torch.zeros_like(adapter_indices)
+            )
+            lora_indices = adapter_indices
+
+        # Rebuild this rank's fixed-size kernel metadata from token-leading
+        # adapter ids; classifier markers preserve the active adapter.
+        if self.lora_meta is not None and self.lora_ctx is not None:
+            self.decoder_interface.prepare_kernel_meta(
+                self.lora_meta, lora_indices, self.lora_ctx
+            )
 
         # ═══════════════════════════════════════════════════════════════
         # Get embeddings (or hidden states from previous pipeline stage)
@@ -377,17 +439,52 @@ class GraniteSwitchModel(nn.Module):
         # threads (hidden_states, residual); SR re-stacks to [2M,H] rank-locally
         # in enter_decoder_stack and collapses it in exit_decoder_stack. All
         # per-forward metadata (kernel meta + hiding masks) is on the shared ctx.
+        # Classifier slots reading an intermediate layer are scored as soon as
+        # that layer runs; only the small score tensor is carried forward.
+        if self.classifier_head is not None:
+            if get_pp_group().is_first_rank:
+                classifier_scores = torch.zeros(
+                    classifier_indices.shape[0],
+                    self.config.max_classifier_labels,
+                    device=classifier_indices.device,
+                    dtype=hidden_states.dtype,
+                )
+            else:
+                classifier_scores = intermediate_tensors["classifier_scores"]
         state = self.decoder_interface.enter_decoder_stack(hidden_states, residual)
         for i in range(self.start_layer, self.end_layer):
             state = self.decoder_interface.run_layer(self.layers[i], positions, state)
+            group = self._classifier_layer_groups.get(i)
+            if group is not None:
+                classifier_scores = self._score_group(
+                    group,
+                    self.decoder_interface.layer_output(state, adapter_indices),
+                    classifier_indices,
+                    classifier_scores,
+                )
 
         if get_pp_group().is_last_rank:
             # Adaptation-specific finalize: LoRA folds the last residual via
             # rms_norm_select (fused/separate convention); SR does the per-token
-            # where-merge of its two streams then a plain norm.
-            return self.decoder_interface.exit_decoder_stack(
+            # where-merge of its two streams then a plain norm. The returned
+            # [M, H] tensor is the final post-norm hidden state (what the LM head
+            # consumes).
+            hidden_states = self.decoder_interface.exit_decoder_stack(
                 state, adapter_indices, self.norm, self.config
             )
+
+            # Pack scores and slot ids onto the hidden states so vLLM's own
+            # logits_indices gather selects them; compute_logits unpacks them.
+            if self.classifier_head is not None:
+                classifier_scores, classifier_slot = self._compute_classifier_outputs(
+                    hidden_states, classifier_indices, classifier_scores
+                )
+                hidden_states = torch.cat(
+                    [hidden_states, classifier_scores, classifier_slot.unsqueeze(-1)],
+                    dim=-1,
+                )
+
+            return hidden_states
         else:
             # Non-last rank: ship two token-leading [M,H] tensors so vLLM's
             # per-token IntermediateTensors slice stays correct. LoRA sends
@@ -397,7 +494,47 @@ class GraniteSwitchModel(nn.Module):
             h_out, r_out = self.decoder_interface.to_intermediate(state)
             intermediate_tensors["hidden_states"] = h_out
             intermediate_tensors["residual"] = r_out
+            intermediate_tensors["adapter_indices"] = adapter_indices
+            if self.classifier_head is not None:
+                intermediate_tensors["classifier_indices"] = classifier_indices
+                intermediate_tensors["classifier_scores"] = classifier_scores
             return intermediate_tensors
+
+    def _score_group(
+        self,
+        group: str,
+        hidden: torch.Tensor,
+        classifier_indices: torch.Tensor,
+        classifier_scores: torch.Tensor,
+    ) -> torch.Tensor:
+        """Write the scores of the slots in buffer ``group``, read from ``hidden``."""
+        in_group = torch.isin(classifier_indices, getattr(self, group))
+        slot_logits = self.classifier_head(hidden, classifier_indices)
+        return torch.where(in_group.unsqueeze(-1), slot_logits, classifier_scores)
+
+    def _compute_classifier_outputs(
+        self,
+        final_hidden_states: torch.Tensor,
+        classifier_indices: torch.Tensor,
+        classifier_scores: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Add final-layer scores and return per-token (scores, slot ids).
+
+        ``classifier_indices`` identifies only this forward's marker tokens,
+        computed on the first PP rank and passed unchanged between stages.
+        Callers must place one classifier marker last in each request;
+        misplaced or duplicate markers are not rejected (request-boundary
+        validation is deferred).
+        """
+        classifier_slot = classifier_indices.to(final_hidden_states.dtype)
+        if self._classifier_final_layer_group is not None:
+            classifier_scores = self._score_group(
+                self._classifier_final_layer_group,
+                final_hidden_states,
+                classifier_indices,
+                classifier_scores,
+            )
+        return classifier_scores, classifier_slot
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -582,14 +719,13 @@ class GraniteSwitchForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        """Forward pass returning hidden states."""
-        hidden_states = self.model(
+        """Forward pass returning hidden states (classifier columns packed on)."""
+        return self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
-        return hidden_states
 
     def compute_logits(
         self,
@@ -605,8 +741,61 @@ class GraniteSwitchForCausalLM(
         per-token adapter_indices computed in forward(). Any suppression would
         have to act where adapter_indices and hidden_states still share the
         same token dimension.
+
+        Classifier exit: the classifier request reports its verdict as a
+        generated token, like a guardian LoRA. With a classifier head the
+        hidden states carry packed (scores, slot id) columns; split them off,
+        run the LM head on the real hidden state, then rewrite each classifier
+        row: the whole vocab to -inf and the per-label scores onto the label
+        words' token ids (``classifier_label_token_ids``). Other rows keep
+        their LM logits.
         """
-        return self.logits_processor(self.lm_head, hidden_states)
+        if self.model.classifier_head is not None:
+            hidden_size = self.config.hidden_size
+            real_hidden = hidden_states[:, :hidden_size]
+            verdict = hidden_states[:, hidden_size:-1]
+            slot = hidden_states[:, -1]
+        else:
+            real_hidden = hidden_states
+            verdict = slot = None
+        logits = self.logits_processor(self.lm_head, real_hidden)
+        return self._apply_classifier_verdict(logits, verdict, slot)
+
+    def _apply_classifier_verdict(
+        self,
+        logits: torch.Tensor | None,
+        verdict: torch.Tensor | None,
+        slot: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Rewrite classifier requests' logit rows to emit their label word.
+
+        Rows are classified by the slot mask, not just ``slot > 0``: vLLM's
+        profiling sampler run feeds random hidden states, so the packed slot
+        column can land on a LoRA slot, which has no label ids.
+        """
+        if logits is None or verdict is None or slot is None:
+            return logits
+
+        slot_mask = self.model.classifier_slot_mask_t
+        num_slots = slot_mask.shape[0] - 1
+        slot_int = slot.round().long()
+        # Out-of-range values land on the sentinel row 0.
+        safe_idx = slot_int.clamp(min=0, max=num_slots)
+        is_classifier = (slot_int == safe_idx) & slot_mask[safe_idx]
+        if not bool(is_classifier.any()):
+            return logits
+
+        # Each row writes only its own slot's real label count; padded
+        # columns are never read.
+        per_slot_label_ids = self.config.classifier_label_token_ids
+        rows = is_classifier.nonzero(as_tuple=True)[0]
+        logits[rows] = float("-inf")
+        for r in rows.tolist():
+            row_slot = int(slot_int[r])
+            ids = per_slot_label_ids[row_slot - 1]
+            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
+            logits[r, label_ids] = verdict[r, : len(ids)].to(logits.dtype)
+        return logits
 
     def sample(
         self,

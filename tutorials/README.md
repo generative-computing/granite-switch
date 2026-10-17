@@ -26,6 +26,7 @@ Step-by-step walkthroughs covering adapter function invocation, pipeline constru
 |-------|-------------|
 | [Using Mellea with Granite Switch](guides/mellea_with_granite_switch.md) | Connect Mellea to a Granite Switch model |
 | [Bring Your Own Adapter](guides/build_your_own_adapter.md) | Train, compose, and use custom adapters |
+| [Classifier Slots](guides/classifier_slots.md) | Compose and serve a classifier head that emits a label word |
 | [Compare Inference Throughput](guides/compare_inference_throughput.md) | Compare LoRA vs aLoRA based models in an inference race setup |
 
 

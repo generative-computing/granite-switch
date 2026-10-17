@@ -17,7 +17,11 @@ from .adapter_loader import (
 )
 from .arch import resolve_arch
 from .validator import validate_all_parameters, validate_cross_stream_population
-from .weight_transfer import transfer_adapter_weights, transfer_base_weights
+from .weight_transfer import (
+    transfer_adapter_weights,
+    transfer_base_weights,
+    transfer_classifier_weights,
+)
 
 
 class GraniteSwitchComposer:
@@ -80,17 +84,45 @@ class GraniteSwitchComposer:
         num_built_in = len(built_in_adapter_names)
         num_total = num_external + num_built_in
 
+        # Partition external slots by kind.
+        ext_kinds = kwargs.get("adapter_kinds")
+        if ext_kinds is None:
+            ext_kinds = ["lora"] * num_external
+        else:
+            ext_kinds = list(ext_kinds)[:num_external]
+        lora_slots = [i for i in range(num_external) if ext_kinds[i] != "classifier"]
+        classifier_slots = [
+            i for i in range(num_external) if ext_kinds[i] == "classifier"
+        ]
+
+        # Compose orders LoRAs first, classifiers last, so classifier slots must
+        # form a contiguous suffix (LoRAs occupy 0..k-1, classifiers k..).
+        if classifier_slots and classifier_slots != list(
+            range(lora_slots[-1] + 1 if lora_slots else 0, num_external)
+        ):
+            raise ValueError(
+                "Classifier slots must form a contiguous suffix (all LoRA slots "
+                f"first, then classifiers); got kinds {ext_kinds}. Order the "
+                "adapters LoRAs-first (compose does this automatically)."
+            )
+        lora_adapter_paths = [adapter_paths[i] for i in lora_slots]
+        classifier_adapter_paths = [adapter_paths[i] for i in classifier_slots]
+        lora_adapter_names = (
+            [adapter_names[i] for i in lora_slots]
+            if adapter_names is not None
+            else None
+        )
+
         # --- Step 1: Resolve architecture ---
         # Pre-scan for cross_stream (SR dual-stream) to select the right arch.
         print(f"Loading config from {base_model_name_or_path}...")
         base_config = load_base_config(base_model_name_or_path)
 
-        # Classify every adapter as single-stream (LoRA/aLoRA) or dual-stream
-        # (Shadow Residual).  A checkpoint holds one kind or the other: the whole
-        # decoder runs in one mode, chosen from ``dual_stream``.
+        # Classify adapting slots as single-stream (LoRA/aLoRA) or dual-stream
+        # (Shadow Residual). Classifier heads can read either decoder mode.
         sr_adapters = []
         non_sr_adapters = []
-        for ap in adapter_paths:
+        for ap in lora_adapter_paths:
             if is_shadow_residual_adapter(ap):
                 sr_adapters.append(ap)
             else:
@@ -140,15 +172,28 @@ class GraniteSwitchComposer:
                 f"(cross_stream_rank={cross_stream_rank})"
             )
 
-        if adapter_paths:
-            lora_rank, _lora_alpha, adapter_ranks, adapter_alphas = detect_lora_config(
-                adapter_paths
+        # adapter_ranks/adapter_alphas stay full external width (one entry per
+        # slot, classifiers included) so config.adapter_ranks is length
+        # num_adapters. A classifier slot itself has no LoRA weights. A
+        # separately selected LoRA slot can remain active through a classifier
+        # marker because classifier selection does not overwrite adapter state.
+        if lora_adapter_paths:
+            lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
+                lora_adapter_paths
             )
             lora_target_modules, source_analysis = detect_present_modules(
-                adapter_paths,
+                lora_adapter_paths,
                 arch,
-                adapter_names=adapter_names,
+                adapter_names=lora_adapter_names,
             )
+
+            # LoRAs lead, classifiers follow, so the full lists are a concat:
+            # detected LoRA values, then a placeholder per classifier slot. The
+            # placeholder is the detected max rank, keeping max(adapter_ranks) ==
+            # max_lora_rank.
+            num_ext_classifier = num_external - len(lora_slots)
+            adapter_ranks = list(lora_ranks) + [lora_rank] * num_ext_classifier
+            adapter_alphas = list(lora_alphas) + [float(lora_rank)] * num_ext_classifier
 
             # Extend adapter_ranks with built-in entries
             if num_built_in > 0:
@@ -162,21 +207,22 @@ class GraniteSwitchComposer:
                     list(adapter_ranks) + [built_in_lora_rank] * num_built_in
                 )
                 lora_rank = max(lora_rank, built_in_lora_rank)
+        elif classifier_adapter_paths or num_built_in > 0:
+            # No LoRA slots but the model still has slots (classifier and/or
+            # built-in). Give every slot a placeholder LoRA rank so the
+            # (unused) LoRA bank is well-formed and config validation passes.
+            lora_rank = built_in_lora_rank
+            adapter_ranks = [built_in_lora_rank] * num_total
+            adapter_alphas = {}
+            lora_target_modules = None
+            source_analysis = {}
         else:
-            # Built-in only or zero-adapter skinning
-            if num_built_in > 0:
-                lora_rank = built_in_lora_rank
-                adapter_ranks = [built_in_lora_rank] * num_built_in
-                adapter_alphas = {}
-                # Auto-detect lora_target_modules (attention-only switch model)
-                lora_target_modules = None
-                source_analysis = {}
-            else:
-                lora_rank = 0
-                adapter_ranks = None
-                adapter_alphas = {}
-                lora_target_modules = []
-                source_analysis = {}
+            # Zero-adapter skinning (base model only).
+            lora_rank = 0
+            adapter_ranks = None
+            adapter_alphas = {}
+            lora_target_modules = []
+            source_analysis = {}
 
         # --- Step 4: Build switch config from arch descriptor ---
         # Copy config fields driven by architecture descriptor
@@ -261,10 +307,20 @@ class GraniteSwitchComposer:
             base_model_name_or_path, model, switch_config, arch
         )
 
-        if adapter_paths:
-            # --- Step 7: Transfer adapter weights ---
+        adapter_mapping = {}
+        classifier_mapping = {}
+
+        if lora_adapter_paths:
+            # --- Step 7: Transfer LoRA adapter weights ---
+            # LoRAs are the contiguous leading slots, so the leading k entries of
+            # adapter_ranks/adapter_alphas are exactly the LoRA slots' values and
+            # each path's list position is its bank row (no slot remapping).
+            n_lora = len(lora_adapter_paths)
             adapter_mapping = transfer_adapter_weights(
-                adapter_paths, model, adapter_alphas, arch
+                lora_adapter_paths,
+                model,
+                list(adapter_alphas)[:n_lora],
+                arch,
             )
 
             # --- Step 8: Validate ---
@@ -273,14 +329,30 @@ class GraniteSwitchComposer:
             validate_all_parameters(
                 model,
                 arch,
-                adapter_paths=adapter_paths,
-                adapter_names=adapter_names[:num_external],
+                adapter_paths=lora_adapter_paths,
+                adapter_names=(
+                    [adapter_names[i] for i in lora_slots]
+                    if adapter_names is not None
+                    else None
+                ),
                 target_module_sets=target_module_sets,
             )
             if dual_stream:
                 validate_cross_stream_population(model)
         else:
             adapter_mapping = {}
+
+        if classifier_adapter_paths:
+            # --- Step 7b: Transfer trained classifier-head weights ---
+            # Each slot's head is validated against its own label count and
+            # copied into the top rows of the padded bank.
+            classifier_mapping = transfer_classifier_weights(
+                classifier_adapter_paths,
+                classifier_slots,
+                model,
+                num_labels_per_slot=switch_config.classifier_num_labels_per_slot,
+                hidden_size=switch_config.hidden_size,
+            )
 
         print("\nModel created successfully!")
         print(f"  Base model: {base_model_name_or_path}")
@@ -295,6 +367,7 @@ class GraniteSwitchComposer:
         model._build_mappings = {
             "base": base_mapping,
             "adapter": adapter_mapping,
+            "classifier": classifier_mapping,
             "source_analysis": source_analysis,
             # Per-external-adapter alpha, parallel to adapter_paths. When no
             # external adapters are provided, detect_lora_config isn't called

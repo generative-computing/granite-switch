@@ -49,12 +49,16 @@ def generate_adapter_population_table(
 
     if target_module_sets is None:
         target_module_sets = load_adapter_target_modules(adapter_paths)
+    # target_module_sets covers LoRA slots only (classifier slots carry no LoRA
+    # weights, so source analysis never produced a target set for them).
     adapter_configs = [
         {
             "rank": adapter_ranks[i] if adapter_ranks else max_rank,
-            "target_modules": target_module_sets[i],
+            "target_modules": target_module_sets[i]
+            if i < len(target_module_sets)
+            else set(),
         }
-        for i in range(len(adapter_paths))
+        for i in range(num_adapters)
     ]
 
     # Define module types (rows) — only modules in lora_target_modules
