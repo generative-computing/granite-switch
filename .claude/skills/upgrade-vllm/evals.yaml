@@ -1,0 +1,163 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The four scored accuracy evals, as data.
+#
+# Extracted from the hand-maintained job-eval-v30fix2-*.yaml set so that changing
+# an adapter, a checkpoint or a bar is an edit HERE rather than a 34 KB YAML
+# copied four ways and drifted. `render_eval_jobs.py` turns this into one
+# AppWrapper per config for whichever vLLM line is under test.
+#
+# NO SECRETS IN THIS FILE. It is committed. `HF_TOKEN` and `GITHUB_COM_TOKEN` are
+# supplied at render time from the environment and land only in the rendered
+# output, which is gitignored. See `render_eval_jobs.py --help`.
+#
+# WHAT THESE MEASURE, and why it is not what tests/eval/ measures:
+#
+#   tests/eval/      distribution drift on 4 prompts, minutes, catches "the
+#                    adapter stopped firing" -- runs in the GPU leg on every PR
+#   this file        answerability accuracy on 3565 rows against a fixed bar,
+#                    hours, catches "the model got worse"
+#
+# Both are needed. A dead adapter and a degraded adapter are different failures
+# and the cheap check cannot see the second one.
+
+# ── cluster ───────────────────────────────────────────────────────────────────
+# Where these run. Unchanged from the hand-written jobs; edit if the queue, the
+# PVC or the image moves.
+cluster:
+  namespace: security
+  queue: default-queue
+  image: us.icr.io/cil15-shared-registry/sec-rl-neo:latest
+  image_pull_secret: all-icr-io
+  priority_class: default-priority
+  # The PVC carrying the harness, the checkpoints and the dataset. Everything
+  # under `paths` is relative to its mount point.
+  pvc: danieloh-cos
+  mount: /danieloh_cos
+  job_prefix: itzikv-eval
+  resources:
+    cpu: 8
+    memory: 400Gi
+    gpu: 1
+  # /dev/shm. vLLM needs more than the 64 MB default.
+  shm_size: 16Gi
+  # An AppWrapper that fails keeps its pod this long so the log is readable. The
+  # jobs also `sleep` after a failure for the same reason -- a pod that exits
+  # immediately takes its logs with it.
+  failure_grace: 2h
+  retry_limit: 1
+
+# ── shared paths on the PVC ───────────────────────────────────────────────────
+paths:
+  harness: /danieloh_cos/granite-switch/eval_harness
+  dataset: /danieloh_cos/granite-switch/datasets/answerability
+  checkpoints: /danieloh_cos/granite-switch/composed_models/v26
+  results: /danieloh_cos/granite-switch/eval_results
+  logs: /danieloh_cos/granite-switch/test_logs
+  # HF cache. Shared and pre-warmed; a cold cache adds a base-model download to
+  # every job.
+  hf_home: /danieloh_cos/antonp_hf_cache
+
+# ── defaults, overridable per config ──────────────────────────────────────────
+defaults:
+  adapter: answerability
+  dtype: bfloat16
+  # Must exceed the longest rendered prompt + generated tokens. The render gate
+  # asserts this rather than trusting it: vLLM would silently truncate, and the
+  # only symptom would be a lower score that looks like a regression.
+  max_model_len: 16384
+  dep_extra: hf,vllm,compose
+  # |accuracy - bar| within this is a MATCH. 0.006 absorbs the HF->vLLM gap for
+  # bars that were measured on the HF path; see each config's `bar_note`.
+  tolerance: 0.006
+  # Below this, the result is not "slightly worse" but structurally broken --
+  # ~0.40 is the unanswerable base rate, i.e. the model answering from the
+  # question alone. Dropped documents, a dead adapter, or thinking mode left on.
+  stack_bug_floor: 0.60
+  # Rows PER FILE for the smoke run, and there are 5 files -- so 20 is 100 rows.
+  # The smoke gates the sweep: a broken stack must not cost hours of GPU.
+  smoke_rows_per_file: 20
+  # FlashInfer's sampler fails to build on the CUDA 12.4 images (`nvcc fatal:
+  # Unknown option '--compress-mode=size'`), which presents as 171 engine-start
+  # failures rather than a build error. Same setting tests/conftest.py applies.
+  flashinfer_sampler: false
+
+# ── the four configs ──────────────────────────────────────────────────────────
+# `mode` is the harness's --mode: `switch-vllm` for the vLLM backend, `switch`
+# for the HF backend.
+#
+# `expect_experts` is the anti-mismount guard. Each job asserts the checkpoint it
+# actually loaded has (or has not) routed experts, because mounting the G5 path
+# for the 4.2 job produces a plausible score for the wrong model -- a duplicate
+# run masquerading as independent coverage.
+configs:
+  granite42_dense:
+    description: Granite 4.2 3B DENSE + answerability aLoRA, vLLM backend
+    checkpoint: ans-4p2-3b-v2-lctx
+    mode: switch-vllm
+    bar: 0.9052
+    expect_experts: false
+    bar_note: >-
+      Measured on the switch-HF path, not vLLM, so a small POSITIVE delta is the
+      expected shape rather than a regression. This config's unique coverage is
+      the dense decoder: no MoE path, no expert bank.
+    # 4.2 carries a trap the MoE configs do not: its ChatML template has no
+    # `documents` support, so render_chat must route documents in as a `tool`
+    # message. If that breaks, every row loses its evidence and the score lands
+    # at the base rate -- indistinguishable from a bad adapter unless asserted.
+    # A `<think>` preamble would also spend the 6 generated tokens on reasoning
+    # instead of the verdict.
+    extra_render_checks: [chatml_documents, no_thinking]
+
+  granite5_lora:
+    description: Granite 5.0 20B sparse MoE + answerability LoRA, vLLM backend
+    checkpoint: g5-20b-answerability-lora
+    mode: switch-vllm
+    bar: 0.9196
+    expect_experts: true
+    # The only config with two bars. Compare against both before calling a
+    # drift: a move toward the HF number is convergence, not regression.
+    secondary_bar: 0.9168
+    bar_note: >-
+      0.9196 is vLLM 0.19.1; 0.9168 is the switch-HF number. The 2026-09-27 run
+      landed 0.9172, i.e. 0.0004 from the HF bar -- convergence toward HF, not a
+      regression. Compare against BOTH.
+
+  granite5_sr:
+    description: Granite 5.0 20B sparse MoE + answerability SR (dual-stream), vLLM backend
+    checkpoint: g5-20b-answerability-sr
+    mode: switch-vllm
+    bar: 0.8948
+    expect_experts: true
+    bar_note: >-
+      The load-bearing run. The only scored test that pushes a doubled [2M, H]
+      stack through one cat([logits, logits]) shared-routing call into vLLM's
+      MoERunner on real weights. A miswired expert bank cannot land near 0.8948;
+      it collapses toward the base rate.
+
+  granite5_sr_hf:
+    description: Granite 5.0 20B + answerability SR, HuggingFace backend
+    # Deliberately the same checkpoint as granite5_sr: identical weights, same
+    # render, same dtype, so the pair isolates the backend as the only variable.
+    checkpoint: g5-20b-answerability-sr
+    mode: switch
+    mode_args: --batch-size 4 --device cuda
+    bar: 0.8948
+    expect_experts: true
+    # Tighter than the others BECAUSE 0.8948 is itself the HF number -- this
+    # comparison folds in no HF->vLLM gap, so there is no slack to allow for.
+    tolerance: 0.002
+    bar_note: >-
+      0.8948 IS the HF number, so the tolerance is tight. This is also the only
+      scored cover for hf/modeling_granite_switch.py -- a break confined to the
+      HF path cannot hide behind the three green vLLM legs.
+
+# ── harness markers ───────────────────────────────────────────────────────────
+# Symbols that must be present in the harness on the PVC. The harness is NOT
+# versioned with this repo, so a stale copy is entirely possible, and both of
+# these failures are silent: without dtype plumbing the eval runs at the wrong
+# precision, and without ChatML document routing the 4.2 rows lose their
+# evidence. Checked before any model loads, so a stale harness costs seconds.
+harness_markers:
+  - vllm_dtype
+  - _is_chatml_tokenizer
