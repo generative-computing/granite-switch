@@ -83,17 +83,16 @@ models:
 
 # Composed checkpoints published on the Hugging Face Hub, benchmarked as
 # published (release.py; docs/ADAPTER_BENCHMARK.md, "Hugging Face releases"):
-# a table of their own under their model's, a row per release and serving,
-# named by its Hub revision. Each runs on its model's eval sets, its adapters
-# against the same library checkpoints under HF + PEFT. A new release is a new
-# entry; a later Hub commit that changes only the model card needs nothing.
-# A release is served by granite-switch from PyPI, as its users install it
-# (serve_pypi); one that current code no longer loads can also be served by the
-# last commit that does (serve_with), a row each, with one set of reference
-# columns. A release composed from the same adapter files on the same base as
-# an earlier one shows that one's reference columns (reference_from) instead of
-# running them again. Bump release_version when a change alters how releases
-# are benchmarked: every one runs again.
+# a table of their own under their model's, a row per release, named by its
+# Hub revision. Each runs on its model's eval sets, its adapters against the
+# same library checkpoints under HF + PEFT. A new release is a new entry; a
+# later Hub commit that changes only the model card needs nothing. Each is
+# served by a specific granite-switch version from PyPI, as its users install
+# it (serve_pypi): the one that loads its format. A release composed from the
+# same adapter files on the same base as an earlier one shows that one's
+# reference columns (reference_from) instead of running them again. Bump
+# release_version when a change alters how releases are benchmarked: every one
+# runs again.
 release_version: 1
 releases:
   - model: granite-4.1-3b
@@ -102,10 +101,8 @@ releases:
     # The base model's latest revision when the release was composed.
     base_revision: c0650403e44e78ec0262dab1c90914c65b196c4e
     # Composed for the single-switch engine, which 6013c7ff (#131) removed on
-    # 2026-09-10: served from PyPI by 0.1.0 (2026-07-07), the last version before
-    # that, and by #131's parent, the last commit that loads it.
+    # 2026-09-10: served by 0.1.0 (2026-07-07), the last version before that.
     serve_pypi: "0.1.0"
-    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
     # The libraries of its adapters, at the revisions its BUILD.md records.
     sources:
       ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
@@ -123,7 +120,6 @@ releases:
     base_revision: 1504002f650e656a0a3789d99574df12e3e94ed0
     # The same single-switch format, the same libraries and adapter names.
     serve_pypi: "0.1.0"
-    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
     sources:
       ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
       ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43
@@ -157,14 +153,13 @@ releases:
       guardian_core: guardian-core
       requirement_check: requirement-check
   # The 30B preview, published on 2026-05-24 with the 3B and 8B ones: the same
-  # single-switch format, libraries and adapter names, so the same serving
-  # commit. Its base's latest revision then is still its latest.
+  # single-switch format, libraries and adapter names, so the same PyPI version.
+  # Its base's latest revision then is still its latest.
   - model: granite-4.1-30b
     repo: ibm-granite/granite-switch-4.1-30b-preview
     revision: b2d1c82bbd5913f8a07e35c911b402783d1423e1
     base_revision: 4fae6278f7132abf5e971f9de49ebbad09c54cce
     serve_pypi: "0.1.0"
-    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
     sources:
       ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
       ibm-granite/granitelib-core-r1.0: d0a2a96a4cd07e96f0fe7ca29a42bfe088299d43

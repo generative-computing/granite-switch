@@ -77,7 +77,6 @@ from .common import (
     iter_cells,
     load_spec,
     served_label,
-    serving_of,
 )
 from .throughput import ARMS
 
@@ -151,10 +150,7 @@ def save_data(path: Path, data: dict, spec: Spec) -> None:
     data["spec"] = spec.public()
     data["rows"].sort(key=lambda r: r["commit"]["date"], reverse=True)
     for rows in data.get("releases", {}).values():
-        rows.sort(
-            key=lambda r: (r["release"]["date"], "pypi" in (r.get("served_by") or {})),
-            reverse=True,
-        )
+        rows.sort(key=lambda r: r["release"]["date"], reverse=True)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n")
 
@@ -378,10 +374,9 @@ def merge_reference(data: dict, reference: dict, spec: Spec) -> dict:
 # under ``releases`` by model, named by its Hub revision: its run as published
 # (``run_benchmark.py --release``) and, as its ``reference``, the library
 # adapters it was composed from under HF + PEFT, with the base model
-# (``reference.py --release``). A release served more than one way has a row
-# per serving (``Release.servings``), and its reference columns once, in one
-# of its rows, which all show them. A release with ``reference_from`` has no
-# reference of its own: its rows show that release's.
+# (``reference.py --release``). Each is served by its granite-switch version
+# from PyPI (``serve_pypi``). A release with ``reference_from`` has no
+# reference of its own: its row shows that release's.
 
 RELEASE_URL = "https://huggingface.co/{repo}/commit/{revision}"
 HUB_URL = "https://huggingface.co/{repo}/tree/{revision}"
@@ -391,27 +386,15 @@ def release_rows(data: dict, model_id: str) -> list[dict]:
     return data.get("releases", {}).get(model_id, [])
 
 
-def rows_of(data: dict, release) -> list[dict]:
-    """A release's stored rows, a serving each."""
-    return [
-        r
-        for r in release_rows(data, release.model)
-        if r["release"]["revision"] == release.revision
-    ]
-
-
-def find_release(data: dict, release, served: dict | None = None) -> dict | None:
-    """A release's stored row: the one ``served`` (a run's ``served_by``) ran,
-    else one not run yet; without ``served``, the one holding its reference
-    columns, else its first."""
-    rows = rows_of(data, release)
-    if served is not None:
-        ran = [r for r in rows if r.get("served_by")]
-        return next(
-            (r for r in ran if serving_of(r["served_by"]) == serving_of(served)),
-            next((r for r in rows if not r.get("served_by")), None),
-        )
-    return next((r for r in rows if r.get("reference")), rows[0] if rows else None)
+def find_release(data: dict, release) -> dict | None:
+    return next(
+        (
+            r
+            for r in release_rows(data, release.model)
+            if r["release"]["revision"] == release.revision
+        ),
+        None,
+    )
 
 
 def release_speed(row: dict, block: str, engine: str, spec: Spec) -> float | None:
@@ -482,10 +465,13 @@ def release_reference_missing(row: dict | None, spec: Spec) -> list[str]:
 
 
 def release_hit(row: dict | None, spec: Spec) -> bool:
+    """Whether a release's row is complete, served by its PyPI version."""
+    if row is None:
+        return False
+    release = spec.release(row["release"]["revision"])
     return (
-        row is not None
-        and row.get("release_version") == spec.release_version
-        and "served_by" in row
+        row.get("release_version") == spec.release_version
+        and (row.get("served_by") or {}).get("pypi") == release.serve_pypi
         and not release_missing(row, spec)
     )
 
@@ -537,12 +523,12 @@ def merge_release(data: dict, results: dict, spec: Spec) -> dict:
             f"adapters.yaml has {spec.release_version}"
         )
     served = results["served_by"]
-    if serving_of(served) not in {serving_of(s) for s in release.servings}:
+    if served.get("pypi") != release.serve_pypi:
         raise ValueError(
-            f"served by {served_label(served)}, not by what adapters.yaml says "
-            f"serves it ({', '.join(served_label(s) for s in release.servings)})"
+            f"served by {served.get('pypi') or 'a commit'}, not by the PyPI version "
+            f"adapters.yaml says serves it ({release.served})"
         )
-    old = find_release(data, release, served)
+    old = find_release(data, release)
     if release.reference_from:
         source = find_release(data, spec.release(release.reference_from))
         differ = reference_mismatch(
@@ -589,14 +575,20 @@ def merge_release_reference(data: dict, reference: dict, spec: Spec) -> dict:
             "reference columns (reference_from in adapters.yaml): it has none of its own"
         )
     for other in spec.releases_of(spec.model_id):
-        if other.reference_from != release.revision:
-            continue
-        for shown in rows_of(data, other):
-            if "run" in shown and (differ := reference_mismatch(shown, reference)):
-                raise ValueError(
-                    f"release {other.key} shows this reference, but its "
-                    f"{', '.join(differ)} differ from what it ran"
-                )
+        shown = (
+            find_release(data, other)
+            if other.reference_from == release.revision
+            else None
+        )
+        if (
+            shown
+            and "run" in shown
+            and (differ := reference_mismatch(shown, reference))
+        ):
+            raise ValueError(
+                f"release {other.key} shows this reference, but its "
+                f"{', '.join(differ)} differ from what it ran"
+            )
     if not release_reference_current(reference, spec):
         raise ValueError(
             f"reference is reference_version {reference.get('reference_version')}, "
@@ -1552,9 +1544,9 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
 RELEASES_HEADING = "Hugging Face releases"
 RELEASES_NOTE = (
     "Composed checkpoints published on Hugging Face, a row per release, named by "
-    "its Hub revision. Each runs as published, on the granite-switch commit that "
-    "loads it or on a granite-switch version from PyPI; "
-    f"{REFERENCE_LABEL} runs the library adapters it was composed from. "
+    "its Hub revision. Each runs as published, served by the granite-switch "
+    f"version from PyPI that loads it; {REFERENCE_LABEL} runs the library adapters "
+    "it was composed from. "
     "Its speed is over all of its own adapters, against stock vLLM serving the "
     "same library adapters, so it does not compare with the table above."
 )
@@ -1606,22 +1598,17 @@ def _release_speedup_html(row: dict, block: str, extra: str, spec: Spec) -> str:
 
 
 def _shown_reference(row: dict, release, references: dict) -> dict | None:
-    """The reference a release's row shows: its own, another of its rows', or
-    that of the release its ``reference_from`` names (``references``: the
-    model's by revision)."""
+    """The reference a release's row shows: its own, or that of the release
+    its ``reference_from`` names (``references``: the model's by revision)."""
     if release is not None and release.reference_from:
         return references.get(release.reference_from)
-    return row.get("reference") or references.get(row["release"]["revision"])
+    return row.get("reference")
 
 
 def _served_short(row: dict) -> str:
     """What served a release's row, in a few words, under its revision."""
     served = row.get("served_by")
-    if not served:
-        return "not run yet"
-    if served.get("pypi"):
-        return f"PyPI {served['pypi']}"
-    return f"commit {served['sha'][:8]}"
+    return f"PyPI {served['pypi']}" if served else "not run yet"
 
 
 def _release_details(row: dict, release, spec: Spec, reference: dict | None) -> str:
@@ -1662,18 +1649,11 @@ def _release_details(row: dict, release, spec: Spec, reference: dict | None) -> 
     if served is None:
         out.append("<p>not run yet</p>")
     else:
-        if served.get("pypi"):
-            version = served["pypi"]
-            served_html = (
-                f'<a href="{_esc(PYPI_URL.format(version=version))}">'
-                f"<code>granite-switch {_esc(version)}</code></a> from PyPI"
-            )
-        else:
-            sha = served["sha"]
-            served_html = (
-                f'<a href="{_esc(COMMIT_URL.format(sha=sha))}">'
-                f"<code>{_esc(sha[:8])}</code></a> {_esc(served['subject'])}"
-            )
+        version = served["pypi"]
+        served_html = (
+            f'<a href="{_esc(PYPI_URL.format(version=version))}">'
+            f"<code>granite-switch {_esc(version)}</code></a> from PyPI"
+        )
         out.append(
             _items(
                 [
@@ -1800,10 +1780,9 @@ def _release_table(rows: list[dict], spec: Spec) -> str:
                 f'<th class="grp-thr start" rowspan="2">{_esc(engine_label)}</th>'
             )
     by_revision = {r.revision: r for r in spec.releases_of(spec.model_id)}
-    references = {}
-    for r in rows:
-        if r.get("reference"):
-            references.setdefault(r["release"]["revision"], r["reference"])
+    references = {
+        r["release"]["revision"]: r["reference"] for r in rows if r.get("reference")
+    }
     body = []
     for row in rows:
         rel = row["release"]
@@ -2185,11 +2164,6 @@ def main(argv: list[str] | None = None) -> int:
     ):
         cl = sub.add_parser(name, help=f"exit 0 and print {what} on a cache hit")
         cl.add_argument("release", help="its revision (8+ characters)")
-        cl.add_argument(
-            "--served",
-            help="pypi:<version> or sha:<commit>, the serving whose row to check "
-            "(default: its first)",
-        )
     mrl = sub.add_parser("merge-release", help="add a release's run to the page data")
     mrl.add_argument("results", type=Path)
     mrr = sub.add_parser(
@@ -2292,17 +2266,6 @@ def main(argv: list[str] | None = None) -> int:
         spec = spec.for_model(release.model)
         row = find_release(data, release)
         if args.cmd == "check-release":
-            served = release.servings[0]
-            if args.served:
-                kind, _, value = args.served.partition(":")
-                served = {kind: value}
-                if kind not in ("pypi", "sha") or serving_of(served) not in {
-                    serving_of(s) for s in release.servings
-                }:
-                    raise SystemExit(
-                        f"release {release.key} is not served by {args.served}"
-                    )
-            row = find_release(data, release, served)
             hit, missing = release_hit(row, spec), release_missing(row, spec)
         else:
             if release.reference_from:

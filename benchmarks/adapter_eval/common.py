@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 
 from .prompts import DOCUMENT_STYLES
@@ -213,11 +213,9 @@ class Release:
     sources: dict
     # The release's name for each of the benchmark's intrinsics it has.
     adapters: dict
-    # What serves it, a row each: the granite-switch version on PyPI, installed
-    # as its users install it (how a release is served), and, for a release
-    # current code no longer loads, the granite-switch commit that still does.
-    serve_with: str = ""
-    serve_pypi: str = ""
+    # The granite-switch version on PyPI that serves it, installed as its users
+    # install it: the one that loads its format.
+    serve_pypi: str
     # Another release of the model whose reference columns this one shows, not
     # run again: the same base at the same revision and the same adapter files
     # (``publish.merge_release`` compares their checksums).
@@ -229,19 +227,21 @@ class Release:
         return self.revision[:8]
 
     @property
-    def servings(self) -> tuple[dict, ...]:
-        """Each way it is served, as a run's ``served_by`` names it: its PyPI
-        version first, then its commit."""
-        found = ({"pypi": self.serve_pypi}, {"sha": self.serve_with})
-        return tuple(s for s in found if next(iter(s.values())))
-
-    @property
     def served(self) -> str:
-        """What serves it by default, its first serving, for logs."""
-        return served_label(self.servings[0])
+        """What serves it, for logs."""
+        return served_label({"pypi": self.serve_pypi})
 
     def public(self) -> dict:
         return vars(self).copy()
+
+
+def make_release(raw: dict) -> Release:
+    """A ``releases`` entry, refusing keys it does not know: ``serve_with`` was
+    a commit that served a release, which only PyPI does now."""
+    unknown = sorted(set(raw) - {f.name for f in fields(Release)})
+    if unknown:
+        raise ValueError(f"release {raw.get('repo')}: unknown keys {unknown}")
+    return Release(**raw)
 
 
 @dataclass(frozen=True)
@@ -401,7 +401,7 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         model_id=ids[0],
         throughput=Throughput(**raw.get("throughput", {})),
         switching=Switching(**raw.get("switching", {})),
-        releases=tuple(Release(**r) for r in raw.get("releases") or ()),
+        releases=tuple(make_release(r) for r in raw.get("releases") or ()),
         release_version=int(raw.get("release_version", 1)),
     )
 
@@ -467,14 +467,11 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
     for r in spec.releases:
         if spec.get_model(r.model).private:
             raise ValueError(f"release {r.repo}: {r.model} is a private model")
-        if not (r.serve_with or r.serve_pypi):
-            raise ValueError(f"release {r.repo}: give serve_pypi, serve_with or both")
-        if r.serve_pypi and not PYPI_VERSION.fullmatch(str(r.serve_pypi)):
+        if not PYPI_VERSION.fullmatch(str(r.serve_pypi)):
             raise ValueError(
                 f"release {r.repo}: serve_pypi must be a version, e.g. 0.1.1"
             )
         pinned = [r.revision, r.base_revision, *r.sources.values()]
-        pinned += [r.serve_with] if r.serve_with else []
         pinned += [r.reference_from] if r.reference_from else []
         if not all(isinstance(v, str) and FULL_SHA.fullmatch(v) for v in pinned):
             raise ValueError(f"release {r.repo}: pin every revision by its full sha")
@@ -510,16 +507,8 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
 
 
 def served_label(served: dict) -> str:
-    """What served a release's run (its ``served_by``): its PyPI version, or
-    its commit."""
-    if served.get("pypi"):
-        return f"granite-switch {served['pypi']} (PyPI)"
-    return served["sha"][:8]
-
-
-def serving_of(served: dict) -> tuple[str, str]:
-    """A ``served_by``'s identity, whatever else it records (a commit's date)."""
-    return ("pypi", served["pypi"]) if served.get("pypi") else ("sha", served["sha"])
+    """What served a release's run (its ``served_by``): its PyPI version."""
+    return f"granite-switch {served['pypi']} (PyPI)"
 
 
 def adapter_name(intrinsic_id: str, tech_id: str) -> str:

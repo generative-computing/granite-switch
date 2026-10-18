@@ -8,7 +8,7 @@
 #   discover  list adapter checkpoints and eval files under the source roots
 #   stage     copy the selection shipped in extra/ into the bench root
 #   bench     clone + install the commit, then run run_benchmark.py (a release
-#             served from PyPI installs that granite-switch version instead)
+#             installs its granite-switch version from PyPI instead)
 #   reference install pinned torch / transformers / peft in their own
 #             virtualenv, then run reference.py (no commit involved)
 #   script    clone + install the commit, then run the Python file shipped as
@@ -58,7 +58,7 @@ install_commit() {
     (cd "$REPO" && uv sync --frozen ${ADAPTER_BENCH_UV_SYNC_ARGS:---group dev})
 }
 
-# A release served from PyPI: that granite-switch version, installed as its
+# A release, served from PyPI: that granite-switch version, installed as its
 # users install it (with vLLM, and the audio extra a checkpoint with ASR needs
 # to start), in the environment the rest of the run uses. No checkout.
 install_pypi() {
@@ -99,7 +99,7 @@ stage)
     ;;
 bench)
     if [[ -n "${ADAPTER_BENCH_PYPI:-}" ]]; then install_pypi; else install_commit; fi
-    # A release has no commit when it is served from PyPI.
+    # A release has no commit: it is served from PyPI.
     if [[ -n "${ADAPTER_BENCH_RELEASE:-}" ]]; then
         work=${ADAPTER_BENCH_WORK_ROOT:?}/releases/${ADAPTER_BENCH_RELEASE:0:12}/${RUN_TS:-run}
     else

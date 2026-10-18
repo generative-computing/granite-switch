@@ -4045,16 +4045,15 @@ def test_releases_in_the_spec(tmp_path, monkeypatch):
         SPEC.release("deadbeef")
     with pytest.raises(ValueError):  # too short to name one
         SPEC.release(RELEASE.revision[:6])
-    # Served from PyPI, by a commit, or both, a row each; never neither.
-    assert RELEASE.servings == ({"pypi": "0.1.0"}, {"sha": RELEASE.serve_with})
+    # Every release is served by a specific granite-switch version from PyPI.
+    assert RELEASE.serve_pypi == "0.1.0"
     assert RELEASE.served == "granite-switch 0.1.0 (PyPI)"
-    assert common.load_spec(spec_file(tmp_path, serve_with=""))
-    assert common.load_spec(spec_file(tmp_path, serve_pypi=""))
+    assert all(r.serve_pypi for r in SPEC.releases)
     for bad in (
-        {"serve_with": "", "serve_pypi": ""},
+        {"serve_pypi": ""},
         {"serve_pypi": "latest"},
+        {"serve_with": RELEASE.revision},  # a commit no longer serves a release
         {"revision": RELEASE.key},  # every pin is a full sha
-        {"serve_with": "main"},
         {"sources": {"ibm-granite/granitelib-rag-r1.0": "main"}},
         {"adapters": {"unknown_intrinsic": "x"}},
         {"adapters": {}},
@@ -4363,10 +4362,17 @@ def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
     root = make_release_root(tmp_path / "release")
     base = write_base(tmp_path / "base")
     monkeypatch.setattr(
-        run_benchmark,
-        "commit_info",
-        lambda repo: {"sha": RELEASE.serve_with, "date": "2026-09-08", "subject": "s"},
+        run_benchmark, "commit_info", lambda repo: pytest.fail("no checkout")
     )
+    installed = run_benchmark.versions
+
+    def versions(names):
+        found = installed(names)
+        return (
+            {**found, "granite-switch": "0.1.0"} if "granite-switch" in names else found
+        )
+
+    monkeypatch.setattr(run_benchmark, "versions", versions)
     generated = []
 
     def fake_generate(python, harness_root, jobs_path, spec):
@@ -4397,7 +4403,7 @@ def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
     argv = [
         "--bench-root", str(root), "--work-dir", str(tmp_path / "work"),
         "--repo-dir", str(tmp_path), "--base-model", str(base),
-        "--release", RELEASE.key,
+        "--release", RELEASE.key, "--pypi", RELEASE.serve_pypi,
     ]  # fmt: skip
     assert run_benchmark.main(argv) == 0
 
@@ -4411,7 +4417,7 @@ def test_run_release_serves_the_checkpoint_as_published(tmp_path, monkeypatch):
     assert results["release"] == {
         k: release_record()[k] for k in ("repo", "revision", "date", "title")
     }
-    assert results["served_by"]["sha"] == RELEASE.serve_with
+    assert results["served_by"] == {"pypi": RELEASE.serve_pypi}
     assert results["release_version"] == SPEC.release_version
     answerability = results["cells"]["answerability"]
     assert (
@@ -4491,11 +4497,7 @@ def release_results(value: float = 0.8, **run) -> dict:
         "release": {
             k: release_record()[k] for k in ("repo", "revision", "date", "title")
         },
-        "served_by": {
-            "sha": RELEASE.serve_with,
-            "date": "2026-09-08T11:55:00+03:00",
-            "subject": "Remove irrelevant documents (#121)",
-        },
+        "served_by": {"pypi": RELEASE.serve_pypi},
         "cells": {
             i.id: {
                 "lora": common.skipped(common.NOT_IN_RELEASE),
@@ -4573,12 +4575,15 @@ def test_release_rows_merge_and_cache():
     # Its own adapter count and rank are its own, not a mismatch.
     assert publish.release_speed(row, "switching", "native", SPEC) == 60.0
 
-    with pytest.raises(ValueError, match="served by"):
-        publish.merge_release(
-            data,
-            {**release_results(), "served_by": {"sha": SHA_A, "subject": ""}},
-            SPEC,
-        )
+    # Served by anything but its PyPI version: refused.
+    for served in ({"sha": SHA_A, "subject": ""}, {"pypi": "0.1.1"}):
+        with pytest.raises(ValueError, match="served by"):
+            publish.merge_release(
+                data, {**release_results(), "served_by": served}, SPEC
+            )
+    # A stored row a commit served is no cache hit.
+    stale = {**publish.find_release(data, RELEASE), "served_by": {"sha": SHA_A}}
+    assert not publish.release_hit(stale, SPEC)
     with pytest.raises(ValueError, match="--limit"):
         publish.merge_release(data, release_results(limit=20), SPEC)
     stale = release_reference()
@@ -4628,9 +4633,10 @@ def test_render_release_table():
     assert ">+74%</td>" in first  # 3,300 against 1,900 tokens/s
     assert ">+50%</td>" in first  # 40 against 60 s at p95
     assert "the release&#x27;s 12 adapters, rank up to 32" in first
-    # Its details: the libraries, and the commit that served it.
+    # Its details: the libraries, and the PyPI version that served it.
     assert "ibm-granite/granitelib-core-r1.0</code> <code>d0a2a96a" in first
-    assert publish.COMMIT_URL.format(sha=RELEASE.serve_with) in first
+    assert publish.PYPI_URL.format(version=RELEASE.serve_pypi) in first
+    assert f'<div class="date">PyPI {RELEASE.serve_pypi}</div>' in first
     # A model with no release on the page says so.
     assert all("no Hugging Face release yet" in t for t in others)
     assert page.count("no Hugging Face release yet") == len(SPEC.models) - 1
@@ -4674,15 +4680,20 @@ def test_render_job_of_a_release(tmp_path, monkeypatch):
     ) as tar:
         assert "extra/selection.json" not in tar.getnames()
         assert "benchmarks/adapter_eval/release.py" in tar.getnames()
-    assert render_job.main(["--mode", "bench", *argv, "--sha", RELEASE.serve_with]) == 0
+    # Its bench is served by its PyPI version, never a commit.
+    with pytest.raises(SystemExit):
+        render_job.main(["--mode", "bench", *argv, "--sha", SHA_A])
+    pypi = ["--pypi", RELEASE.serve_pypi]
+    assert render_job.main(["--mode", "bench", *argv, *pypi]) == 0
     env = {
         e["name"]: e.get("value")
         for e in json.loads(out.read_text())["environmentVariables"]
     }
-    assert (env["ADAPTER_BENCH_RELEASE"], env["ADAPTER_BENCH_COMMIT"]) == (
+    assert (env["ADAPTER_BENCH_RELEASE"], env["ADAPTER_BENCH_PYPI"]) == (
         RELEASE.revision,
-        RELEASE.serve_with,
+        RELEASE.serve_pypi,
     )
+    assert "ADAPTER_BENCH_COMMIT" not in env
 
 
 # The 8B preview recomposed on 2026-10-15: served from PyPI.
@@ -4691,7 +4702,7 @@ VELA = Path(stage.__file__).parent / "vela"
 
 
 def test_a_release_served_from_pypi(tmp_path, monkeypatch):
-    assert (PYPI_RELEASE.serve_pypi, PYPI_RELEASE.serve_with) == ("0.1.1", "")
+    assert PYPI_RELEASE.serve_pypi == "0.1.1"
     assert PYPI_RELEASE.served == "granite-switch 0.1.1 (PyPI)"
     # What serves it is what is installed: there is no checkout to record.
     installed = {"version": "0.1.1"}
@@ -4703,12 +4714,14 @@ def test_a_release_served_from_pypi(tmp_path, monkeypatch):
     monkeypatch.setattr(
         run_benchmark, "commit_info", lambda repo: pytest.fail("no checkout")
     )
-    assert run_benchmark.served_by(PYPI_RELEASE, tmp_path, "0.1.1") == {"pypi": "0.1.1"}
-    with pytest.raises(SystemExit, match="with 0.1.1, not 0.1.0"):
-        run_benchmark.served_by(PYPI_RELEASE, tmp_path, "0.1.0")
+    assert run_benchmark.served_by(PYPI_RELEASE, "0.1.1") == {"pypi": "0.1.1"}
+    with pytest.raises(SystemExit, match="0.1.1 from PyPI, not 0.1.0"):
+        run_benchmark.served_by(PYPI_RELEASE, "0.1.0")
+    with pytest.raises(SystemExit, match="not a checkout"):  # a release needs --pypi
+        run_benchmark.served_by(PYPI_RELEASE, None)
     installed["version"] = "0.1.0"
     with pytest.raises(SystemExit, match="0.1.0 is installed, not 0.1.1"):
-        run_benchmark.served_by(PYPI_RELEASE, tmp_path, "0.1.1")
+        run_benchmark.served_by(PYPI_RELEASE, "0.1.1")
 
     # Its results merge only as served by that version.
     results = {
@@ -4724,8 +4737,8 @@ def test_a_release_served_from_pypi(tmp_path, monkeypatch):
     data = page_data(results_for())
     row = publish.merge_release(data, results, SPEC)
     assert data["releases"][PYPI_RELEASE.model] == [row]
-    for served in ({"pypi": "0.1.0"}, {"sha": RELEASE.serve_with, "subject": "s"}):
-        with pytest.raises(ValueError, match="not by what adapters.yaml says"):
+    for served in ({"pypi": "0.1.0"}, {"sha": SHA_A, "subject": "s"}):
+        with pytest.raises(ValueError, match="not by the PyPI version"):
             publish.merge_release(
                 page_data(results_for()), {**results, "served_by": served}, SPEC
             )
@@ -4854,51 +4867,6 @@ def test_the_launcher_runs_no_reference_for_a_release_that_shows_another(tmp_pat
         f"release {PYPI_RELEASE.key} shows release c739556e's reference columns"
         in done.stdout
     )
-
-
-def test_a_release_served_two_ways(tmp_path, capsys):
-    """RELEASE is served from PyPI and by its commit: a row each, and its
-    reference columns once, which both rows show."""
-    data = page_data(results_for())
-    publish.merge_release_reference(data, release_reference(), SPEC)
-    by_commit = release_results()
-    by_pypi = {**release_results(0.7), "served_by": {"pypi": "0.1.0"}}
-    publish.merge_release(data, by_commit, SPEC)
-    publish.merge_release(data, by_pypi, SPEC)
-    assert len(publish.rows_of(data, RELEASE)) == 2
-    # The commit's run took the row its reference was waiting in.
-    commit_row = publish.find_release(data, RELEASE, {"sha": RELEASE.serve_with})
-    pypi_row = publish.find_release(data, RELEASE, {"pypi": "0.1.0"})
-    assert "reference" in commit_row and "reference" not in pypi_row
-    assert publish.find_release(data, RELEASE) is commit_row  # its reference's row
-    # Each serving is its own cache entry; run again, a serving keeps its row.
-    assert publish.release_hit(pypi_row, SPEC) and publish.release_hit(commit_row, SPEC)
-    publish.merge_release(data, {**by_pypi, "cells": by_commit["cells"]}, SPEC)
-    assert len(publish.rows_of(data, RELEASE)) == 2
-    with pytest.raises(ValueError, match="not by what adapters.yaml says"):
-        publish.merge_release(data, {**by_pypi, "served_by": {"pypi": "0.1.1"}}, SPEC)
-    # Newest first, a release's PyPI row before its commit row.
-    path = tmp_path / "data.json"
-    publish.save_data(path, data, SPEC)
-    saved = json.loads(path.read_text())["releases"][RELEASE.model]
-    assert [r["served_by"].get("pypi") for r in saved] == ["0.1.0", None]
-    # The cache check asks for one serving's row.
-    argv = ["--data", str(path)]
-    served = ("pypi:0.1.0", f"sha:{RELEASE.serve_with}")
-    for s in served:
-        assert publish.main([*argv, "check-release", RELEASE.key, "--served", s]) == 0
-    with pytest.raises(SystemExit, match="not served by pypi:0.1.1"):
-        publish.main([*argv, "check-release", RELEASE.key, "--served", "pypi:0.1.1"])
-    capsys.readouterr()
-    # Both rows show the reference columns, and say what served them.
-    page = publish.render(json.loads(path.read_text()), SPEC)
-    first = page.split(f"<h3>{publish.RELEASES_HEADING}</h3>")[1]
-    # (0.8 - 0.5) / (0.7 - 0.5) in both rows: the PyPI run was run again with
-    # the commit's scores.
-    assert first.count(">1.50</td>") == 2 * len(SPEC.intrinsics)
-    assert '<div class="date">PyPI 0.1.0</div>' in first
-    assert f'<div class="date">commit {RELEASE.serve_with[:8]}</div>' in first
-    assert "reference not computed yet" not in first
 
 
 def test_render_job_of_a_release_served_from_pypi(tmp_path, monkeypatch):

@@ -98,16 +98,14 @@ def commit_info(repo_dir: Path) -> dict:
     return {"sha": sha, "date": date, "subject": subject}
 
 
-def served_by(release, repo_dir: Path, pypi: str | None) -> dict:
+def served_by(release, pypi: str | None) -> dict:
     """What serves a release's run: the granite-switch version from PyPI the pod
     installed (``--pypi``), which must be the one adapters.yaml names and the
-    one installed, with no checkout to record; else its commit's checkout."""
-    if not pypi:
-        return commit_info(repo_dir)
+    one installed. There is no checkout to record."""
     if pypi != release.serve_pypi:
         raise SystemExit(
-            f"adapters.yaml serves release {release.key} from PyPI with "
-            f"{release.serve_pypi or 'no version'}, not {pypi}"
+            f"adapters.yaml serves release {release.key} with granite-switch "
+            f"{release.serve_pypi} from PyPI, not {pypi or 'a checkout'}"
         )
     installed = versions(("granite-switch",))["granite-switch"]
     if installed != pypi:
@@ -671,8 +669,9 @@ def run_release(args, started: str) -> int:
     adapters.yaml), from the folder ``release.py`` staged it in.
 
     Nothing is composed: the release's own checkpoint answers each of the
-    benchmark's intrinsics under its name for it, on the commit that loads it
-    (``--repo-dir``). Its decode throughput and agents switching are measured
+    benchmark's intrinsics under its name for it, served by the granite-switch
+    version from PyPI the pod installed (``--pypi``). Its decode throughput and
+    agents switching are measured
     over all of its adapters, against stock vLLM serving the library checkpoints
     it was composed from.
     """
@@ -695,7 +694,7 @@ def run_release(args, started: str) -> int:
     base_model = args.base_model or str(
         base_model_dir(spec.base_model, release.base_revision)
     )
-    commit = served_by(release, args.repo_dir, args.pypi)
+    commit = served_by(release, args.pypi)
     print(f"[release] {release.repo}@{release.key}, served by {served_label(commit)}")
 
     cells: dict[str, dict[str, dict]] = {}
@@ -897,7 +896,7 @@ def main(argv: list[str] | None = None) -> int:
         "--release",
         default=None,
         help="benchmark this Hugging Face release (its revision) as published, from "
-        "its folder (--bench-root) on its serving commit (--repo-dir)",
+        "its folder (--bench-root), served by its PyPI version (--pypi)",
     )
     args = p.parse_args(argv)
 

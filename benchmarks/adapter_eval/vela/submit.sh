@@ -21,9 +21,9 @@
 #   submit.sh stage --release <rev>      a Hugging Face release (releases in
 #   submit.sh bench --release <rev> ...  adapters.yaml, named by its revision):
 #   submit.sh reference --release <rev>  fetch it into its folder, run it as
-#                                  published, run its library adapters under
-#                                  HF + PEFT. bench serves it from PyPI; with
-#                                  --serve commit, on its serving commit.
+#                                  published (served by its granite-switch
+#                                  version from PyPI), run its library
+#                                  adapters under HF + PEFT
 #
 # Any mode takes --model <id> (an adapters.yaml model; default: its first) and
 # --dry-run (render the job and stop). Settings come from the gitignored
@@ -80,7 +80,7 @@ MODE=${1:-}
 SHA="" LIMIT="" ONLY="" EXTRA_ARGS="" NO_CACHE="" PUBLISH=1 REPLACE="" DRY_RUN="" JOB=""
 MODEL=""
 SCRIPT=""
-RELEASE="" REF="" SERVE=""
+RELEASE="" REF=""
 case "$MODE" in
 bench)
     # A release names its own serving commit: then there is no ref.
@@ -116,7 +116,6 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY_RUN=1 && shift ;;
     --model) MODEL=$2 && shift 2 ;;
     --release) RELEASE=$2 && shift 2 ;;
-    --serve) SERVE=$2 && shift 2 ;;
     *) usage ;;
     esac
 done
@@ -125,9 +124,7 @@ if [[ -n "$RELEASE" ]]; then
     stage | bench | reference) ;;
     *) die "--release is for stage, bench and reference" ;;
     esac
-    [[ -z "$REF" ]] || die "a release runs on its own serving commit: give no ref"
-elif [[ -n "$SERVE" ]]; then
-    die "--serve is for bench --release"
+    [[ -z "$REF" ]] || die "a release is served by its PyPI version: give no ref"
 elif [[ "$MODE" == bench && -z "$REF" ]]; then
     usage
 fi
@@ -259,15 +256,16 @@ fi
 # and are never used for another model.
 DEFAULT_MODEL=$(local_py -c 'from benchmarks.adapter_eval.common import load_spec
 print(load_spec().model_id)')
-# A release is of one model, and runs in a folder of its own on its own commit.
+# A release is of one model, and runs in a folder of its own, served by its
+# granite-switch version from PyPI.
 if [[ -n "$RELEASE" ]]; then
     RELEASE_INFO=$(local_py -c 'import sys
 from benchmarks.adapter_eval.common import load_spec
 r = load_spec().release(sys.argv[1])
-print(r.model, r.revision, r.serve_with or "-", r.repo.rsplit("/", 1)[-1],
-      r.serve_pypi or "-", r.reference_from or "-")' "$RELEASE") ||
+print(r.model, r.revision, r.repo.rsplit("/", 1)[-1], r.serve_pypi,
+      r.reference_from or "-")' "$RELEASE") ||
         die "unknown release $RELEASE"
-    read -r REL_MODEL RELEASE REL_SERVE REL_NAME REL_PYPI REL_REFERENCE <<<"$RELEASE_INFO"
+    read -r REL_MODEL RELEASE REL_NAME REL_PYPI REL_REFERENCE <<<"$RELEASE_INFO"
     [[ -z "$MODEL" || "$MODEL" == "$REL_MODEL" ]] || die "that release is of $REL_MODEL"
     MODEL=$REL_MODEL
     # Its reference columns may be another release's, the same adapters on the
@@ -346,36 +344,15 @@ esac
 if [[ -n "$RELEASE" ]]; then
     render_args+=(--release "$RELEASE")
     JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-$STAMP"
-    # Served by its granite-switch version from PyPI, as its users install it;
-    # a release current code no longer loads also by its commit (--serve).
-    check_args=()
+    # Served by its granite-switch version from PyPI, as its users install it.
     if [[ "$MODE" == bench ]]; then
-        if [[ -z "$SERVE" ]]; then
-            SERVE=commit
-            if [[ "$REL_PYPI" != - ]]; then SERVE=pypi; fi
-        fi
-        case "$SERVE" in
-        pypi)
-            [[ "$REL_PYPI" != - ]] || die "release ${RELEASE:0:8} has no PyPI version (serve_pypi)"
-            render_args+=(--pypi "$REL_PYPI")
-            check_args=(--served "pypi:$REL_PYPI")
-            JOB="$JOB_PREFIX-release-$MODE-${RELEASE:0:8}-p-$STAMP"
-            say "served by granite-switch $REL_PYPI from PyPI"
-            ;;
-        commit)
-            [[ "$REL_SERVE" != - ]] || die "release ${RELEASE:0:8} has no serving commit (serve_with)"
-            SHA=$REL_SERVE
-            render_args+=(--sha "$SHA")
-            check_args=(--served "sha:$SHA")
-            say "served by commit ${SHA:0:8}"
-            ;;
-        *) die "--serve is pypi or commit" ;;
-        esac
+        render_args+=(--pypi "$REL_PYPI")
+        say "served by granite-switch $REL_PYPI from PyPI"
     fi
     if [[ "$MODE" != stage && -z "$NO_CACHE$LIMIT$ONLY" ]]; then
         check=check-release
         if [[ "$MODE" == reference ]]; then check=check-release-reference; fi
-        if publish "$check" "$RELEASE" ${check_args[@]+"${check_args[@]}"}; then
+        if publish "$check" "$RELEASE"; then
             say "release ${RELEASE:0:8} is cached; nothing to run (--no-cache to re-run)"
             exit 0
         fi

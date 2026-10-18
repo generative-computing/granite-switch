@@ -332,6 +332,8 @@ def main(argv: list[str] | None = None) -> int:
         fail(f"--sha is required for {args.mode}")
     if args.pypi and not (args.mode == "bench" and args.release):
         fail("--pypi is for bench --release")
+    if args.mode == "bench" and args.release and not args.pypi:
+        fail("a release is served by its PyPI version: give --pypi")
     if args.mode == "rescore" and not args.targets:
         fail("--targets is required for rescore")
     if args.mode == "script" and not args.script:

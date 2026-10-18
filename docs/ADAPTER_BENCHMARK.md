@@ -575,7 +575,7 @@ Hub revision rather than by a git commit. A model with no release says so.
 
 | Columns | What they are |
 |---|---|
-| granite-switch (vLLM) | the release's checkpoint as published, served by granite-switch from PyPI as its users install it, and for a checkpoint current code no longer loads also by the last commit that does, a row each; each intrinsic under the release's own name for its adapter |
+| granite-switch (vLLM) | the release's checkpoint as published, served by the specific granite-switch version from PyPI that loads it, as its users install it; each intrinsic under the release's own name for its adapter |
 | HF + PEFT | the library adapters it was composed from, at the revisions its BUILD.md records, under PEFT on the base model at its revision of the time; for a release composed from the same adapter files as an earlier one, that one's (`reference_from`) |
 | Base | the base model alone, as in the main table |
 | Throughput, switching | the main table's two cells, over all of the release's own adapters: its checkpoint against stock vLLM serving the same library adapters (an aLoRA without its invocation tokens) |
@@ -596,31 +596,29 @@ releases:
     repo: ibm-granite/granite-switch-4.1-3b-preview
     revision: 7a3ac02e07868411424ac89440397b475da66fa7
     base_revision: c0650403e44e78ec0262dab1c90914c65b196c4e
-    serve_with: 24aa420f71b6703f96e40533d83041ce311c30ae
+    serve_pypi: "0.1.0"
     sources:
       ibm-granite/granitelib-rag-r1.0: 2f0b2c79c6731068625aca8045c2eb2e8912b353
       ...
     adapters: {answerability: answerability, guardian_core: guardian-core, ...}
 ```
 
-- **`revision`**, **`base_revision`**, **`serve_with`**, `reference_from`
-  and every `sources` revision are full shas: a branch would move under the
-  row.
-- **`serve_pypi`**, **`serve_with`**, or both: what serves it, a row each.
-  - `serve_pypi`, a version (`"0.1.1"`): how a release is served. The pod
-    installs that granite-switch from PyPI, as its users install it, with the
-    `vllm`, `audio` and `hf` extras (a checkpoint with ASR loads its audio
-    model when it starts; a version with no `audio` extra just installs
-    without it), and no checkout. The details box links the version. For a
-    checkpoint of an older format, the last version that loads it: the first
-    4.1 previews, composed for the single-switch engine that `6013c7ff` (#131)
-    removed on 2026-09-10, are served by 0.1.0 (2026-07-07).
-  - `serve_with`, a commit: for a checkpoint current code no longer loads,
-    also the last commit that loads it, `24aa420f` (#131's parent) for the
-    first 4.1 previews.
-  - Each row says under its revision what served it. A release's rows share
-    one set of HF + PEFT and Base columns, which do not depend on what serves
-    it: `reference` runs them once.
+- **`revision`**, **`base_revision`**, `reference_from` and every `sources`
+  revision are full shas: a branch would move under the row.
+- **`serve_pypi`** (required), a version such as `"0.1.1"`: a release is
+  served by a specific granite-switch version from PyPI, never by a git
+  commit.
+  - The version is the one that loads the release's format. A release of
+    the current engine gets the latest, 0.1.1 for the audio-enabled previews
+    of 2026-10-15. An older format gets the last version before it was
+    removed: the first 4.1 previews, composed for the single-switch engine
+    that `6013c7ff` (#131) removed on 2026-09-10, get 0.1.0 (2026-07-07).
+  - The pod installs that version from PyPI, as its users install it, with
+    the `vllm`, `audio` and `hf` extras, and no checkout. A checkpoint with
+    ASR loads its audio model when it starts; a version with no `audio`
+    extra installs without it.
+  - The row says under its revision which version served it, and the
+    details box links it.
 - **`reference_from`** (optional): an earlier release of the same model whose
   HF + PEFT and Base columns this one shows. Use it when both were composed
   from the same adapter files on the same base revision, e.g. the 8B preview
@@ -657,8 +655,8 @@ benchmarks/adapter_eval/vela/submit.sh bench --release 7a3ac02e --limit 20
 benchmarks/adapter_eval/vela/submit.sh reference --release 7a3ac02e --limit 20
 ```
 
-`bench` serves the release from PyPI; `--serve commit` serves it by its
-commit instead. Each is its own cache entry and row.
+`bench` installs the release's granite-switch version from PyPI; a row
+served by anything else is not a cache hit.
 
 For a model with no bench root yet, `submit.sh stage --model <id>` first,
 for its eval sets.
