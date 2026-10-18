@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from benchmarks.adapter_eval.race import build_page, lane, run_race
+from benchmarks.adapter_eval.race import build_page, lane, react, run_race
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # The race's workload, as the switching block sets it (adapters.yaml).
@@ -401,6 +401,11 @@ def test_switches_added_to_an_old_race_are_the_ones_recorded(stub_vllm, fleet):
         model_id="granite-4.1-3b", base_model="ibm-granite/granite-4.1-3b"
     )
     recorded = run_race.race_record(spec, WORKLOAD, {"sha": "0" * 40}, lanes)
+    # The recorder now names each step's node (2026-10-18), which the upgrade, of
+    # a race recorded before it, does not add.
+    recorded["events"] = [
+        {k: v for k, v in e.items() if k != "node"} for e in recorded["events"]
+    ]
 
     # As the recorder kept it before 2026-10-12: no switches, SR on one adapter.
     def old(e):
@@ -488,3 +493,104 @@ def test_a_mixed_race_records_its_lengths(stub_vllm, fleet):
     meta = run_race.race_record(spec, settings, {"sha": "0" * 40}, lanes)["metadata"]
     assert meta["workload"]["decode_mix"] == [128, 256]
     assert "decode_tokens" not in meta["workload"]
+
+
+@pytest.fixture(scope="module")
+def react_fleet() -> list[dict]:
+    """The paper's ReAct agents, as the fifth race builds them: 64, 16 at each length."""
+    return react.build(REPO_ROOT)
+
+
+def test_react_agents_are_the_generators(react_fleet):
+    gen = react._load(REPO_ROOT, react.GENERATOR)
+    assert len(react_fleet) == 64
+    assert collections.Counter(a["decode_tokens"] for a in react_fleet) == {
+        n: 16 for n in react.LENGTHS
+    }
+    assert len({a["decode_tokens"] for a in react_fleet[:16]}) > 1  # interleaved
+    assert {a["rtt_category"] for a in react_fleet} == {3}  # the same datacenter
+    assert {a["cycle"] for a in react_fleet} == set(gen.CYCLES)
+    steps = collections.Counter(n["type"] for a in react_fleet for n in a["nodes"])
+    assert set(steps) == set(
+        gen.NODE_TYPES
+    )  # think, prepare_call, act, observe, reflect
+    # The switching workload's prompts: its ladder, four agents a rung.
+    assert sorted({a["prompt_tokens"] for a in react_fleet}) == sorted(
+        react._load(REPO_ROOT, react.GRID).ladder()
+    )
+    for agent in react_fleet:
+        # Each step's segments add up to its length, and the agent's to its own.
+        assert sum(n["span"] for n in agent["nodes"]) == agent["decode_tokens"]
+        for node in agent["nodes"]:
+            assert sum(d["tokens"] for d in node["segments_detail"]) == node["span"]
+            if node["type"] == "prepare_call":  # too short to be cut
+                assert len(node["segments_detail"]) == 1
+        planned = sum(1 for s in lane.segments_of(agent) if s["switch"])
+        assert planned == agent["n_switches"]
+    assert react.build(REPO_ROOT) == react_fleet  # the same agents in both lanes
+
+
+def test_react_steps_keep_their_lengths_and_switch_rates(react_fleet):
+    """Every step but the one closing an agent keeps its drawn length, so their
+    medians and switch rates are the generator's (NODE_TYPES)."""
+    gen = react._load(REPO_ROOT, react.GENERATOR)
+    by = collections.defaultdict(list)
+    for agent in react.build(REPO_ROOT, agents=400, seed=7):
+        for node in agent["nodes"]:
+            if not node["tool"] and not node.get("chunk_closer"):
+                by[node["type"]].append(node)
+    for step, nodes in by.items():
+        spec = gen.NODE_TYPES[step]
+        median = sorted(n["span"] for n in nodes)[len(nodes) // 2]
+        assert abs(median - spec["median"]) <= 0.25 * spec["median"] + 2, step
+        rate = sum(n["switch"] for n in nodes) / len(nodes)
+        assert abs(rate - spec["p_switch"]) < 0.08, step
+
+
+@pytest.mark.parametrize("arm", ["native-lora", "shadow-residual"])
+def test_a_react_race_names_its_steps(stub_vllm, react_fleet, arm):
+    fleet = react_fleet[:16]
+    report = race(FakeEngine(), fleet, arm)
+    gen_steps = {"think", "prepare_call", "observe", "reflect"}
+    named = {
+        e["node"]
+        for e in report["events"]
+        if e["ev"] == "step_start" and e["step"] in ("prefill", "decode")
+    }
+    assert named <= gen_steps and len(named) >= 3
+    switches = [e for e in report["events"] if e["ev"] == "switch"]
+    assert len(switches) == report["switches"] == sum(a["n_switches"] for a in fleet)
+    steps = {e["step"] for e in report["events"] if e["ev"] == "step_start"}
+    if arm == "native-lora":
+        assert "rtt" in steps and report["requests"] == sum(
+            a["n_segments"] for a in fleet
+        )
+    else:
+        assert "rtt" not in steps
+        assert report["requests"] == sum(
+            sum(1 for u in lane.units_of(a, arm) if u["kind"] == "gen") for a in fleet
+        )
+
+
+def test_a_react_race_has_its_own_key():
+    spec = types.SimpleNamespace(
+        switching=types.SimpleNamespace(settings=lambda: dict(WORKLOAD))
+    )
+    settings = {
+        **run_race.race_settings(spec, 64, concurrency=16),
+        "decode_tokens": None, "decode_mix": [128, 256, 512, 1024],
+        "agents": "react", "span": None,
+    }  # fmt: skip
+    meta = run_race.race_record(
+        types.SimpleNamespace(model_id="m", base_model="b"), settings, {"sha": "0" * 40},
+        [{"lane": "gs-sr-vllm", "wall_s": 1.0, "agents": 64, "events": [], "rows": []}],
+    )["metadata"]  # fmt: skip
+    assert meta["workload"]["agents"] == "react" and "span" not in meta["workload"]
+    race = {"metadata": meta}
+    assert build_page.config_key(race) == "64-16-mix-react"
+    keys = ["64-16-mix-react", "64-16-mix", "16-8-512"]
+    assert sorted(keys, key=build_page._order) == [
+        "16-8-512",
+        "64-16-mix",
+        "64-16-mix-react",
+    ]

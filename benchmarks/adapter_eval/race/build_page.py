@@ -45,16 +45,19 @@ def private_strings(value, where: str = "race") -> list[str]:
 
 def config_key(race: dict) -> str:
     """A race's configuration: agents per lane, agents at a time and tokens per
-    agent (``mix`` for a mixed workload), e.g. ``64-8-512``."""
+    agent (``mix`` for a mixed workload), e.g. ``64-8-512``; ``-react`` for the
+    paper's ReAct agents, e.g. ``64-16-mix-react``."""
     meta = race["metadata"]
     work = meta.get("workload", {})
     tokens = "mix" if work.get("decode_mix") else work.get("decode_tokens", 512)
-    return f"{meta['runs']}-{meta.get('concurrency', 8)}-{tokens}"
+    kind = "-react" if work.get("agents") == "react" else ""
+    return f"{meta['runs']}-{meta.get('concurrency', 8)}-{tokens}{kind}"
 
 
 def _order(key: str) -> tuple:
-    agents, slots, tokens = key.split("-")
+    agents, slots, tokens, *kind = key.split("-")
     return (
+        bool(kind),
         int(agents),
         int(slots),
         tokens == "mix",

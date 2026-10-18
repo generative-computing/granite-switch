@@ -75,6 +75,7 @@ def units_of(agent: dict, arm: str) -> list[dict]:
                         tokens=d["tokens"],
                         adapter=d["adapter"],
                         switch=d["switch"],
+                        step=node["type"],
                     )
                 )
         return units
@@ -94,12 +95,21 @@ def units_of(agent: dict, arm: str) -> list[dict]:
 
 def segments_of(agent: dict) -> list[dict]:
     """The agent's segments as its schedule names them, in token order: where each
-    ends, its adapter, and whether the adapter changes after it."""
+    ends, its adapter, its step (``segment`` in the switching workload; think,
+    prepare_call, observe or reflect for a ReAct agent), and whether the adapter
+    changes after it."""
     out, at = [], 0
     for unit in units_of(agent, "native-lora"):
         if unit["kind"] == "gen":
             at += unit["tokens"]
-            out.append(dict(end=at, adapter=unit["adapter"], switch=unit["switch"]))
+            out.append(
+                dict(
+                    end=at,
+                    adapter=unit["adapter"],
+                    switch=unit["switch"],
+                    step=unit["step"],
+                )
+            )
     return out
 
 
@@ -179,6 +189,11 @@ class Recorder:
         segs, seg = self.segments[agent_id], self.state[agent_id]["seg"]
         return segs[seg]["adapter"] if seg < len(segs) else None
 
+    def _shown_step(self, agent_id: int) -> str | None:
+        """The step the agent's next token belongs to."""
+        segs, seg = self.segments[agent_id], self.state[agent_id]["seg"]
+        return segs[seg]["step"] if seg < len(segs) else None
+
     def _switch(self, agent_id: int, adapter: str | None, to: str | None) -> None:
         self.switches += 1
         self.emit("switch", agent_id, adapter=adapter, to=to)
@@ -197,13 +212,17 @@ class Recorder:
             adapter = self._shown_adapter(agent_id)
         self.started_at[agent_id, ui] = self.now()
         self._phase(
-            agent_id, "prefill", unit=ui, adapter=adapter, prompt_tokens=prompt_tokens
-        )
+            agent_id, "prefill", unit=ui, adapter=adapter, prompt_tokens=prompt_tokens,
+            node=self._shown_step(agent_id),
+        )  # fmt: skip
 
     def first_token(self, agent_id: int, ui: int) -> None:
         ttft = self.now() - self.started_at.pop((agent_id, ui), self.now())
         self.ttfts.append(ttft)
-        self._phase(agent_id, "decode", unit=ui, ttft=round(ttft, 4))
+        self._phase(
+            agent_id, "decode", unit=ui, ttft=round(ttft, 4),
+            node=self._shown_step(agent_id),
+        )  # fmt: skip
 
     def tokens(self, agent_id: int, delta: int) -> None:
         st = self.state[agent_id]
@@ -212,16 +231,23 @@ class Recorder:
         if st["tokens"] // PROGRESS_EVERY > st["shown"] // PROGRESS_EVERY:
             st["shown"] = st["tokens"]
             self.emit("progress", agent_id, tokens=st["tokens"])
-        if self.arm != "shadow-residual":
-            return
+        # Each segment the tokens finished. Stock vLLM ends its request there (its
+        # switch is counted where the agent loop takes its round trip, as the
+        # request ends); SR's generation runs on into the next segment, its switch
+        # counted at the same place and its adapter and step shown changing.
         segs = self.segments[agent_id]
         while st["seg"] < len(segs) and st["tokens"] >= segs[st["seg"]]["end"]:
             ended = segs[st["seg"]]
             st["seg"] += 1
+            if self.arm != "shadow-residual":
+                continue
             if ended["switch"]:
                 self._switch(agent_id, ended["adapter"], self._shown_adapter(agent_id))
             if st["seg"] < len(segs) and st["tokens"] < st["req_end"]:
-                self._phase(agent_id, "decode", adapter=self._shown_adapter(agent_id))
+                self._phase(
+                    agent_id, "decode", adapter=self._shown_adapter(agent_id),
+                    node=self._shown_step(agent_id),
+                )  # fmt: skip
 
     def request_end(
         self, agent_id: int, ui: int, prompt_tokens: int, cached: int | None

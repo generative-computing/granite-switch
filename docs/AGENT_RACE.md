@@ -23,18 +23,41 @@ from the switch benchmark's own generator and agent loop, copied unchanged into
 - **Both lanes run the same agents:** they read one workload file, so an agent's
   prompt, adapter schedule and length are the same in both.
 
-The page holds four races:
+The page holds five races:
 
-| Agents per lane | At a time | Tokens per agent | Options (`--extra-args`) |
-|---|---|---|---|
-| 16 | 8 | 512 | `--agents 16` |
-| 64 | 8 | 512 | (the defaults) |
-| 64 | 16 | 1,024 | `--concurrency 16 --decode 1024` |
-| 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--concurrency 16 --decode-mix 128,256,512,1024` |
+| Agents | Per lane | At a time | Tokens per agent | Options (`--extra-args`) |
+|---|---|---|---|---|
+| the switching block's | 16 | 8 | 512 | `--agents 16` |
+| the switching block's | 64 | 8 | 512 | (the defaults) |
+| the switching block's | 64 | 16 | 1,024 | `--concurrency 16 --decode 1024` |
+| the switching block's | 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--concurrency 16 --decode-mix 128,256,512,1024` |
+| the paper's ReAct agents | 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--agents-kind react --concurrency 16 --decode-mix 128,256,512,1024` |
 
 A mixed workload runs the generator once per length, for an equal share of the
 agents with a seed of its own, then shuffles the agents together with a fixed
 seed, so the lengths interleave and a rerun gives the same workload.
+
+**The ReAct agents** are the switch benchmark's agent study's
+(`benchmarks/gen_agent_configs.py`, copied unchanged; built by
+`benchmarks/adapter_eval/race/react.py`). Each walks a ReAct cycle of typed
+steps, at the generator's lengths and switch rates:
+
+| Step | Median tokens | Switches adapter | Inside the step |
+|---|---|---|---|
+| think | 120 | 35% of the time | 1 + Poisson(2) segments, a switch each |
+| prepare_call | 10 | 95% | one segment |
+| act | 0: a tool call | | the tool's latency, slept for real |
+| observe | 35 | 80% | 1 + Poisson(0.5) segments |
+| reflect | 90 | 70% | 1 + Poisson(1.5) segments |
+
+over its three cycles (classic5, toolheavy10, shortadapters), choosing adapters
+novelty-first over the 64. Three settings are the race's, so its agents are
+comparable with the other races': 128 to 1,024 tokens (the paper's agents
+generate 10,000), the switching workload's prompts (256 to 16,384 tokens), and a
+round trip within one datacenter (the paper draws a mix of distances). The
+generator closes every tenth of an agent's tokens on a step boundary, for the
+paper's stopwatch; here an agent is one chunk, closed by its last step, and
+every other step keeps its drawn length. They switch about every 35 tokens.
 
 **The lanes:**
 
@@ -43,6 +66,15 @@ seed, so the lengths interleave and a rerun gives the same workload.
 | `gs-sr-vllm` | granite-switch SR: the 64 SR adapters composed by the commit, the switch benchmark's shadow-residual arm | nothing: its K/V come from the base model, so one generation runs until a tool call. The page shows its adapter switching on the same schedule as stock vLLM's, as many times; the switch itself is not implemented yet, so the run kept one adapter per agent, and on the GPU SR costs the same with or without one. |
 | `lora-vllm` | stock vLLM serving the 64 LoRA adapters (its native-lora arm) | ends the request and starts a new one, prefilling the agent's whole context again; vLLM's prefix cache is keyed on the LoRA, so only an adapter served before hits it |
 
+**Adapter switching (rtt):** stock vLLM sets a LoRA per request, so it can't
+change adapter inside a generation. At each switch, its tokens go back to the
+agent's software, which sends a new request on the next adapter. That round trip
+is what the page calls an adapter switching (rtt): 2 to 10 ms (the same
+datacenter), drawn uniformly per switch and slept for real, so the GPU serves
+the other agents meanwhile. A tool call (act) is the other wait: both lanes stop
+for it, sleeping the same tools' latencies. SR has no adapter switching (rtt):
+its adapter changes in place.
+
 **How it is measured:** both lanes run on one GPU, one after the other, each in
 an engine of its own with fresh compile caches and after one untimed warm-up
 run of the whole fleet, with the prefix cache reset before every run. The page
@@ -50,20 +82,25 @@ replays them side by side, each from its own start.
 
 ## What the page shows
 
-- **The experiment**, in a few lines, and a diagram: one agent's ReAct loop
-  (its prompt, 32-token steps switching adapter at each, a tool call between), then
-  what each lane does at a switch. Hovering a step or a metric's label explains it.
+- **The experiment**, in a few lines, and a diagram of the race's agents: the
+  switching block's (its prompt, 32-token generations switching adapter at each, a
+  tool call between) or, for the ReAct race, a ReAct agent's steps at their own
+  lengths; then what each lane does at a switch, and what an adapter switching
+  (rtt) takes. Hovering a step or a metric's label explains it.
 - **A race per configuration**, chosen above the controls, each a recorded run.
   The link keeps the choice (e.g. `#64-16-mix`).
 - **A bar per agent**, filled by the tokens it has generated, colored by what it
-  is doing: waiting for a slot, prefilling (with how many prompt tokens it
-  submitted), decoding (with its adapter), on a round trip, on a tool call, or
-  done (with its time).
+  is doing: waiting for a slot; prefilling, with the prompt tokens it computes and
+  those vLLM's prefix cache already held (e.g. `prefill 3 tok · 2.6k cached`);
+  generating, with its step and adapter (e.g. `think (generation) ad26`, or
+  `generation ad26` for the switching block's agents); on an adapter switching
+  (rtt); on a tool call (act); or done, with its time.
 - **A footer per lane**: agents done, running and waiting, then the lane's time.
 - **A metrics panel per lane**, sampled every half second: agents running,
-  prefilling, decoding and waiting on a tool or round trip; tokens per second;
-  the adapter switches so far (the same in both lanes at the end: one per 32
-  tokens an agent generates, so 16 for 512 tokens)
+  prefilling, decoding and waiting on a tool call or an adapter switching (rtt);
+  tokens per second; the adapter switches so far (the same in both lanes at the
+  end: for the switching block's agents one per 32 tokens they generate, so 16
+  for 512 tokens)
   and the requests behind them (stock vLLM issues one per switch, SR one per run
   between tool calls);
   the average time to first token of its last 8 requests; and, from vLLM's own
@@ -132,6 +169,9 @@ run's storage, no host name.
 |---|---|
 | `benchmarks/adapter_eval/race/lane.py` | one lane: slots, recording, metrics |
 | `benchmarks/adapter_eval/race/run_race.py` | the pod's run: workload, adapters, SR checkpoint, both lanes |
+| `benchmarks/adapter_eval/race/react.py` | the ReAct race's agents, from the switch benchmark's generator |
+| `benchmarks/gen_agent_configs.py` | that generator, copied unchanged |
 | `benchmarks/adapter_eval/race/build_page.py` | the race into the page |
 | `docs/agent_race.html` | the page |
+| `docs/generation/generate_race_diagram.py` | the page's diagrams, and `docs/media/agent_race_diagram*.svg` |
 | `tests/unit/test_agent_race.py` | the race end to end on CPU, with a fake engine |

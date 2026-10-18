@@ -38,6 +38,7 @@ from pathlib import Path
 
 from benchmarks.adapter_eval import switching
 from benchmarks.adapter_eval.common import load_spec
+from benchmarks.adapter_eval.race import react
 from benchmarks.adapter_eval.race.lane import load_fleet
 from benchmarks.adapter_eval.run_benchmark import (
     COMPOSER_MODULE,
@@ -159,6 +160,7 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
             "workload": {
                 k: settings.get(k)
                 for k in (
+                    "agents",
                     "decode_tokens",
                     "decode_mix",
                     "span",
@@ -234,6 +236,14 @@ def main(argv: list[str] | None = None) -> int:
         help="agents generating these lengths instead, an equal share each",
     )
     p.add_argument(
+        "--agents-kind",
+        choices=("grid", "react"),
+        default="grid",
+        help="the agents: the switching block's (a switch every span tokens), or "
+        "the paper's ReAct agents (react.py), whose steps set their lengths and "
+        "switches; react takes --decode-mix for its lengths",
+    )
+    p.add_argument(
         "--switching-cache",
         default=None,
         help="the synthetic adapters' cache (default: the benchmark's, per model)",
@@ -242,9 +252,14 @@ def main(argv: list[str] | None = None) -> int:
 
     spec = load_spec(model=args.model)
     lengths = [int(n) for n in args.decode_mix.split(",")] if args.decode_mix else None
+    if args.agents_kind == "react" and not lengths:
+        p.error("--agents-kind react needs --decode-mix")
     settings = race_settings(spec, args.agents, args.concurrency, args.decode)
     if lengths:
         settings.update(decode_tokens=None, decode_mix=lengths)
+    if args.agents_kind == "react":
+        # The steps set each switch, so there is no span.
+        settings.update(agents="react", span=None)
     python, root = sys.executable, harness_root()
     work = Path(args.work_dir).resolve() / "race"
     work.mkdir(parents=True, exist_ok=True)
@@ -255,14 +270,22 @@ def main(argv: list[str] | None = None) -> int:
         or Path(os.environ["ADAPTER_BENCH_WORK_ROOT"]) / "synthetic" / spec.model_id
     )
     print(
-        f"[{TAG}] {spec.model_id}: {settings['min_agents']} agents per lane, "
+        f"[{TAG}] {spec.model_id}: {settings['min_agents']} "
+        f"{'ReAct ' if args.agents_kind == 'react' else ''}agents per lane, "
         f"{settings['concurrency']} at a time, "
         f"{lengths or settings['decode_tokens']} tokens each",
         flush=True,
     )
 
     grid_file = work / f"grid_c{settings['concurrency']}_s{settings['span']}.jsonl"
-    if lengths:
+    if args.agents_kind == "react":
+        grid_file = react.write(
+            react.build(
+                root, settings["min_agents"], tuple(lengths), settings["adapters"]
+            ),
+            work / f"react_c{settings['concurrency']}.jsonl",
+        )
+    elif lengths:
         parts = []
         for cmd, part in mixed_commands(settings, lengths, work):
             if run_streamed([python, *cmd], root, TAG)[0]:
