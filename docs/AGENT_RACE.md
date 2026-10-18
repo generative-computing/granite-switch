@@ -50,6 +50,9 @@ replays them side by side, each from its own start.
 
 ## What the page shows
 
+- **The experiment**, in a few lines, and a diagram: one agent's ReAct loop
+  (its prompt, 32-token steps switching adapter at each, a tool call between), then
+  what each lane does at a switch. Hovering a step or a metric's label explains it.
 - **A race per configuration**, chosen above the controls, each a recorded run.
   The link keeps the choice (e.g. `#64-16-mix`).
 - **A bar per agent**, filled by the tokens it has generated, colored by what it
