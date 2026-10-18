@@ -46,11 +46,19 @@ if command -v uv >/dev/null 2>&1; then
     if [ "$HAVE_UV" = "$REQUIRED_UV" ]; then
         ok "uv $HAVE_UV (matches the uv-lock hook rev)"
     else
-        # Not fatal: `uvx uv@<rev>` can relock with the right version. But the
-        # skill must know to use it rather than plain `uv lock`.
-        bad "uv $HAVE_UV != $REQUIRED_UV (the uv-lock pre-commit hook's rev)"
-        note "relock with: uvx uv@$REQUIRED_UV lock"
-        note "or pin the toolchain: uv self update $REQUIRED_UV"
+        # The local uv version does not matter, because every relock in this skill
+        # goes through `uvx uv@$REQUIRED_UV`. What matters is that the pin RESOLVES
+        # -- offline or behind a proxy it will not, and the skill would then relock
+        # with the local uv, write a different lockfile revision, and fail the
+        # uv-lock hook at commit time with "files were modified by this hook".
+        # So: check the pin, not the local version.
+        if uvx "uv@$REQUIRED_UV" --version >/dev/null 2>&1; then
+            ok "uv $HAVE_UV locally, but uvx uv@$REQUIRED_UV resolves (relock uses the pin)"
+        else
+            bad "uv $HAVE_UV locally and uvx uv@$REQUIRED_UV does not resolve"
+            note "the uv-lock hook needs $REQUIRED_UV; relocking with $HAVE_UV fails the hook"
+            note "fix: restore network access to PyPI, or: uv self update $REQUIRED_UV"
+        fi
     fi
 else
     bad "uv is not installed"

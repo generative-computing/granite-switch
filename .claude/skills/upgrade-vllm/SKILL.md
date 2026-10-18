@@ -130,8 +130,14 @@ and hand-editing it is where this goes wrong. The script never removes a group.
 Then relock and move the CI ceiling:
 
 ```bash
-uv lock          # must be uv 0.8.4 — preflight verified this
+uvx uv@0.8.4 lock   # NOT bare `uv lock`
 ```
+
+Always the pinned form, even when the local `uv` happens to be 0.8.4 — the local
+version is not guaranteed and a newer one writes a different lockfile revision,
+which the `uv-lock` pre-commit hook then rewrites and fails on. Take the version
+from `.pre-commit-config.yaml`'s `uv-pre-commit` rev rather than this line, so a
+hook bump cannot leave the skill relocking with the wrong one.
 
 Edit `.github/workflows/gpu-tests.yaml`'s matrix so the two legs are the **ends of
 the new supported range** (floor + new ceiling), matching the rationale already
