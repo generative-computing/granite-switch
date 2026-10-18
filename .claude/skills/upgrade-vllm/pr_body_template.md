@@ -67,10 +67,10 @@ test asserts the effect rather than the call.>
 | CPU tests (3.12) | | |
 | GPU `vllmXX` (floor) | | |
 | GPU `vllmZZ` (new ceiling) | | |
-| eval `granite42_vllm` | | |
-| eval `granite5_vllm` | | |
-| eval `sr_vllm` | | |
-| eval `granite42_hf` | | |
+| drift eval `granite42_vllm` | | |
+| drift eval `granite5_vllm` | | |
+| drift eval `sr_vllm` | | |
+| drift eval `granite42_hf` | | |
 
 GPU legs were dispatched with `no_cache=true` — the test pod pins
 `vllm/vllm-openai:latest`, so a cached pass would answer "what did this commit do"
@@ -81,7 +81,33 @@ were verified out of band for this PR: <result>. The two legs are the ends of th
 range, where breakage actually lands — a deleted API shows up at the ceiling and an
 API that does not exist yet shows up at the floor.
 
-## Eval baselines
+## Scored accuracy evals
+
+3565 answerability rows per config on the Vela cluster, against the bars in
+`.claude/skills/upgrade-vllm/evals.yaml`. These answer a question the drift evals
+above cannot: *did the model get worse.* A model that answers confidently and
+wrongly has a perfectly normal top-k distribution.
+
+| config | backend | bar | accuracy | delta | verdict |
+|---|---|---|---|---|---|
+| `granite42_dense` | vLLM | 0.9052 | | | |
+| `granite5_lora` | vLLM | 0.9196 | | | |
+| `granite5_sr` | vLLM | 0.8948 | | | |
+| `granite5_sr_hf` | HF | 0.8948 | | | |
+
+Tolerance is ±0.006 for the vLLM configs, which absorbs the HF→vLLM gap for bars
+measured on the HF path, and ±0.002 for `granite5_sr_hf`, whose bar *is* the HF
+number so there is no gap to allow for.
+
+`granite5_lora` has a second bar at 0.9168 (the switch-HF number). A move toward it
+is convergence on HF, not a regression — compare against both before calling drift.
+
+`granite5_sr` and `granite5_sr_hf` run the **same checkpoint** through the two
+backends, so the pair isolates the backend as the only variable; `granite5_sr_hf`
+is also the only scored cover for `hf/modeling_granite_switch.py`, which a break
+confined to the HF path could otherwise hide behind three green vLLM legs.
+
+## Drift eval baselines
 
 Baselines in `tests/eval/baselines/` were recorded on vLLM 0.YY (the previously
 supported ceiling) and are **unchanged** by this PR. <If any baseline was

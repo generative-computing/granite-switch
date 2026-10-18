@@ -203,6 +203,15 @@ with a comment naming the version and the error — is the fix.
 
 After each fix: amend nothing, add a **new** commit, push, re-dispatch.
 
+Once the two version legs and the drift eval are green, launch the **scored**
+evals (tier 2 — see below) against the PR head sha. They take hours, so start them
+as soon as the cheap gates pass rather than at the end:
+
+```bash
+.claude/skills/upgrade-vllm/scripts/render_eval_jobs.py --vllm <new-ceiling> --sha $(git rev-parse HEAD)
+kubectl apply -f scratch/eval-jobs/
+```
+
 ### Phase 9 — PR body and hand-off
 
 Generate the body from `pr_body_template.md` in this directory. It must contain:
@@ -216,34 +225,93 @@ Generate the body from `pr_body_template.md` in this directory. It must contain:
 - One paragraph per Phase 3 finding: the upstream change, how it manifested here,
   and how it is gated.
 - Any dependency ceiling raised (`transformers`, `torch`).
-- The gate results table: CPU 3.11/3.12, each GPU leg, each of the four evals,
-  with run links.
+- The gate results table: CPU 3.11/3.12, each GPU leg, each of the four drift
+  evals, with run links.
+- The scored-accuracy table: for each of the four `evals.yaml` configs, the bar,
+  the measured accuracy, the delta and the verdict.
 - A note that the change was prepared with AI assistance (required by the
   contribution guidance; must **not** be a commit trailer).
 
 Then `gh pr ready <n>` and report the PR URL. **Do not merge.**
 
-## The four evaluation jobs
+## Evaluation: two tiers, both required
 
-`tests/eval/` is a GPU suite dispatched as `--suite eval`. The four configs are
-`granite42_vllm`, `granite5_vllm`, `sr_vllm`, and `granite42_hf` — Granite 4.2 and
-Granite 5 with LoRA/aLoRA adapters on vLLM, an SR adapter on vLLM, and one adapter
-on the HF backend.
+|  | what it catches | cost | where it runs |
+|---|---|---|---|
+| **Tier 1** — distribution drift | the adapter stopped firing, or the logits moved | minutes | `tests/eval/`, inside the GPU leg |
+| **Tier 2** — scored accuracy | the model got **worse** | hours | `evals.yaml` → Vela AppWrapper |
 
-Each reads its checkpoint from a pre-staged path on the GPU cluster
-(`GSW_EVAL_*_DIR`) and compares against a **committed baseline** in
-`tests/eval/baselines/`, which records the top-k logprob distributions for a fixed
-prompt set together with the vLLM version they were captured on. A config whose env
-var is unset skips with a reason — it does not silently pass.
+Both are needed and neither substitutes for the other. A *dead* adapter and a
+*degraded* adapter are different failures, and tier 1 cannot see the second one: a
+model that answers confidently and wrongly has a perfectly normal top-k
+distribution.
 
-The baseline is the regression gate, so it must be captured on a **known-good**
-version. Capture it from the current ceiling *before* porting:
+### Tier 1 — distribution drift (`tests/eval/`)
+
+A GPU suite dispatched as `--suite eval`. Four configs — `granite42_vllm`,
+`granite5_vllm`, `sr_vllm`, `granite42_hf` — each reading its checkpoint from a
+pre-staged cluster path (`GSW_EVAL_*_DIR`) and comparing against a **committed
+baseline** in `tests/eval/baselines/`, which records top-k logprob distributions
+for a fixed prompt set plus the vLLM version they were captured on. A config whose
+env var is unset skips with a reason; it does not silently pass.
+
+The baseline is the gate, so capture it on a **known-good** version — the current
+ceiling, *before* porting:
 
 ```bash
 uv run --group dev-vllm<old-ceiling> \
   .claude/skills/upgrade-vllm/scripts/record_eval_baseline.py --config all
 ```
 
-Only re-record a baseline when the user explicitly accepts a quality change.
-Re-recording to make a failing eval pass destroys the gate — if an eval fails,
-that is the signal the upgrade was looking for. Report it and stop.
+Only re-record when the user explicitly accepts a quality change. Re-recording to
+make a failing eval pass destroys the gate: a failure here is the signal the whole
+upgrade was looking for. Report it and stop.
+
+### Tier 2 — scored accuracy (`evals.yaml`)
+
+3565 answerability rows per config against a fixed accuracy bar, on the Vela
+cluster. Defined as data in `evals.yaml`; `render_eval_jobs.py` turns it into one
+AppWrapper per config for the line under test.
+
+```bash
+export HF_TOKEN=...            # NOT committed; injected at render time
+export GITHUB_COM_TOKEN=...    # needs read access to this repo
+.claude/skills/upgrade-vllm/scripts/render_eval_jobs.py --vllm 0.31 --sha <pr-head-sha>
+kubectl apply -f scratch/eval-jobs/
+kubectl -n security get appwrappers | grep v031
+```
+
+Output lands in `scratch/eval-jobs/` (gitignored) because it contains the live
+tokens. The renderer warns and writes `${HF_TOKEN}` placeholders if the vars are
+unset, which produces jobs that fail at the clone — so set them.
+
+The four configs and their bars:
+
+| config | checkpoint | backend | bar | unique coverage |
+|---|---|---|---|---|
+| `granite42_dense` | `ans-4p2-3b-v2-lctx` | vLLM | 0.9052 | dense decoder, ChatML document routing |
+| `granite5_lora` | `g5-20b-answerability-lora` | vLLM | 0.9196 (also 0.9168 HF) | sparse MoE + LoRA |
+| `granite5_sr` | `g5-20b-answerability-sr` | vLLM | 0.8948 | SR dual-stream through the MoE runner |
+| `granite5_sr_hf` | `g5-20b-answerability-sr` | HF | 0.8948 (±0.002) | the only scored cover for `hf/modeling_granite_switch.py` |
+
+Reading the verdict each job prints:
+
+- **MATCH** — `|accuracy - bar| <= tolerance` (0.006 for the vLLM configs, which
+  absorbs the HF→vLLM gap; 0.002 for `granite5_sr_hf`, whose bar *is* the HF
+  number so there is no gap to allow for).
+- **DRIFT** — faithful band but off the bar. Investigate before merging. For
+  `granite5_lora`, compare against **both** bars first: a move toward 0.9168 is
+  convergence on the HF number, not a regression.
+- **STACK BUG** — below 0.60. Not "slightly worse" but structurally broken: ~0.40
+  is the unanswerable base rate, i.e. the model answering from the question alone.
+  Means dropped documents, a dead adapter, or thinking mode left on. The rendered
+  job's render gate is designed to catch this in seconds rather than hours, so a
+  STACK BUG verdict that got past it is worth a careful look.
+
+The last two pairs are deliberate: `granite5_sr` and `granite5_sr_hf` use the
+**same checkpoint**, same render, same dtype, so the pair isolates the backend as
+the only variable.
+
+**To change an adapter, a checkpoint, a bar or the cluster, edit `evals.yaml` —
+never the rendered YAML.** That file is the whole reason the four jobs are not four
+34 KB copies drifting apart.
