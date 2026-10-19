@@ -120,7 +120,9 @@ replays them side by side, each from its own start.
 ## Running it
 
 1. Run the race on a pod, through the benchmark's script mode, which installs
-   the commit and ships the harness:
+   the commit and ships the harness. A job ships the race's code only when its
+   script is in `race/`, with the switch benchmark's scripts; every other job
+   leaves it out, keeping the harness within its size limit:
 
    ```bash
    benchmarks/adapter_eval/vela/submit.sh script b7e54212f5d73b9d971c00ba2cb58b6612178f33 benchmarks/adapter_eval/race/run_race.py
