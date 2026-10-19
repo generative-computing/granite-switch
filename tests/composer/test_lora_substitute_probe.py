@@ -53,14 +53,20 @@ class TestOnRealGraniteTokenizer:
     def test_granite_4_2_chatml(self):
         """Granite 4.2 (ChatML): the probe returns <|im_start|> (id 100256).
 
-        The 4.2 base ships on a local path (env GRANITE_4_2_BASE), not the Hub;
-        skips when unavailable so the suite still runs locally.
+        The ChatML counterpart of the two tests above: 4.0/4.1 use the
+        <|start_of_role|> role-marker template and 4.2 uses ChatML, so the probe
+        has to derive the substitute token from the template instead of
+        hardcoding either. ``GRANITE_4_2_BASE`` still overrides the source so a
+        local/pre-release 4.2 can be pointed at, but it is no longer required:
+        ibm-granite/granite-4.2-3b is public and ungated, and only its tokenizer
+        is needed (no weights, no GPU). ``_tok`` still skips on a fetch failure,
+        so an offline run degrades to a skip rather than a failure.
         """
-        path = os.environ.get("GRANITE_4_2_BASE")
-        if not path or not os.path.exists(path):
-            pytest.skip("GRANITE_4_2_BASE not set / path missing")
-        tok = self._tok(path)
+        tok = self._tok(
+            os.environ.get("GRANITE_4_2_BASE") or "ibm-granite/granite-4.2-3b"
+        )
         sub_id = _probe_lora_substitute_token_id(tok)
+        assert sub_id == 100256
         assert tok.convert_ids_to_tokens([sub_id])[0] == "<|im_start|>"
 
 
