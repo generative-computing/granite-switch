@@ -15,25 +15,50 @@ absorbed by `hasattr` capability checks at the call site.
 |---|---|---|
 | `pyproject.toml` `[project.optional-dependencies]` | `vllm = ["vllm>=0.26.0,<0.31.0"]` | **the supported-range claim** |
 | `pyproject.toml` `[dependency-groups]` | `vllm26`, `vllm27`, `vllm30` | per-line pins |
-| `pyproject.toml` `[dependency-groups]` | `dev`, `dev-vllm27`, `dev-vllm30` | what the GPU matrix's `dep_group` names |
+| `pyproject.toml` `[dependency-groups]` | `dev`, `dev-vllm27`, `dev-vllm30` | what a leg's `dep_group` names |
+| `pyproject.toml` `[dependency-groups]` | `dev-latest` | **the upper GPU leg's identity** — repoint per line |
 | `pyproject.toml` `[tool.uv] default-groups` | `["vllm26"]` | the implicit version for `uv sync`/CPU CI |
-| `pyproject.toml` `[tool.uv] conflicts` | 12 cross-line pairs | **regenerate, never hand-edit** |
+| `pyproject.toml` `[tool.uv] conflicts` | 16 entries at 3 lines | **regenerate, never hand-edit** |
 | `pyproject.toml` `dependencies` | `transformers>=5.16,<=5.17.0` | ceiling a new vLLM often forces up |
-| `.github/workflows/gpu-tests.yaml` | matrix `include:` (`vllm26`/`vllm30`) | the two GPU legs |
+| `/opt/gsw/derive_legs.py` (runner image) | reads the tested commit's `dev` + `dev-latest` | the ≤2 GPU legs — **not editable from this repo** |
 | `.github/workflows/gpu-tests.yaml` | `options: [full, short, dev, audio, multi, eval]` | suite list, **flow style only** |
 | `uv.lock` | ~1.8 MB | relock with **uv 0.8.4** |
 | `README.md`, `tutorials/PREREQUISITES.md`, `docs/AUDIO.md` | prose version ranges | must match the extra |
 
-`default-groups = ["vllm26"]` is deliberately *not* bumped with the ceiling: CPU CI
-runs `uv sync --frozen --group dev ...` and `dev` pins the floor. Leaving it alone
-keeps the cheap CPU leg on the floor, where "an API that does not exist yet" breaks.
+**The floor has three names and they move together.** `vllm26` appears as the
+`vllm` extra's lower bound, as `dev`'s `include-group` (the lower GPU leg), and as
+`default-groups` (bare `uv sync` and CPU CI). Raising the floor without moving all
+three is not merely untidy: `default-groups` left below the extra's new lower bound
+makes `uv sync` **unsatisfiable**, which is the failure pyproject's own comment
+records. `plumb_pyproject.py --floor` moves all three.
+
+`default-groups` is *not* bumped with the **ceiling**, though — only with the
+floor. CPU CI runs `uv sync --frozen --group dev ...` and `dev` pins the floor, so
+leaving it there keeps the cheap CPU leg where "an API that does not exist yet"
+breaks.
 
 ## 2. The conflicts table
 
-uv requires an explicit entry for every pair of groups that could pull two
-different vLLM lines into one environment. With `N` declared lines, each having a
-bare (`vllmNN`) and a dev (`dev-vllmNN`) flavour — and noting `dev` *is* the floor's
-dev flavour — that is `N*(N-1)/2 * 4` entries. Three lines → 12. Four → 24.
+uv needs an entry for every pair of groups that could pull two different vLLM lines
+into one environment. Each declared line has a bare (`vllmNN`) and a dev flavour,
+with two asymmetries that defeat a naive `N*(N-1)/2 * 4` formula:
+
+- the **floor**'s dev flavour is bare `dev`, not `dev-vllmNN`;
+- the line `dev-latest` points at has a **third** name, so it appears in more pairs.
+
+Today's three lines → **16** committed entries, not 12. Five lines with the alias →
+48. Because the alias's membership moves, repointing `dev-latest` regenerates the
+table; `--point-latest` does both.
+
+**What uv actually enforces vs. what the file states.** uv *infers* conflicts
+through the `include-group` chain: strip the `vllm31`/`dev-latest` pairs and
+`uv sync --no-default-groups --group vllm31 --group dev-latest` still refuses, with
+"transitively inferred conflicts" (verified, 2026-10-18). So the alias entries are
+not load-bearing for resolution — `test` is left implicit for exactly that reason.
+They are written out because main's committed table writes them, and `--check`
+compares against that form. Do not "optimize" them away: a table that claims
+`vllm31` conflicts with `dev-latest` after the alias moved to 0.32 is false
+documentation, which is the failure mode that matters here.
 
 `test` is absent on purpose: it reaches the floor through `include-group = "dev"`
 and uv derives that transitively.
@@ -70,18 +95,21 @@ watches most closely:
 
 ## 4. Why a dependency group must never be deleted
 
-`workflow_dispatch` executed through the `/gpu-test` comment path always runs the
-workflow file from the **default branch** (`gpu_test_command.sh` hardcodes
-`--ref <default branch>`) while checking out the PR's commit. So main's matrix
-decides which `dep_group` values get synced against your tree.
+A group is not just a declaration — it is a leg that something still asks for:
 
-A branch that deleted `dev-vllm27` while main's matrix still named it produced
+- **`dev-latest` can be repointed at any declared line**, and during an upgrade it
+  is (one commit per line; see §6). A line whose group was deleted cannot be
+  evidenced.
+- **`derive_legs.py` resolves groups against the *tested commit*.** The group has
+  to exist in the tree being checked out, not in the tree you are reading.
+
+A branch that deleted `dev-vllm27` while something still named it produced
 `uv sync --group dev-vllm27` → no such group → the leg died before pytest started.
-The signature is a **log under 1.1 KB**: "suite never started".
+The signature is a **log under 1.1 KB**: "suite never started". It reads like a
+test failure and is not one.
 
-The skill sidesteps the stale-matrix problem by dispatching with
-`--ref <pr-branch>` directly. Keep the groups anyway — the comment path is still
-what humans use on the PR.
+`plumb_pyproject.py` never removes a group, including when `--floor` drops a line
+from the supported range: only the extra's lower bound moves.
 
 ## 5. CI topology
 
@@ -122,30 +150,6 @@ delimiter in the job template). A bare `-m <marker>` **replaces** `pyproject.tom
 `addopts = ["-m", "not deep"]` rather than adding to it — always write
 `and not deep`.
 
-### Adding a version leg
-
-`matrix.include` entries are `{label, dep_group}`. The label is the line
-(`vllm31`); `dep_group` is its **dev** flavour, because the bare `vllmNN` groups
-omit pytest. The floor's dev flavour is plain `dev`, not `dev-vllm26` — that
-asymmetry is real, and `plumb_pyproject.py` encodes it:
-
-```yaml
-        include:
-          - label: vllm26
-            dep_group: dev            # the FLOOR's dev flavour is bare `dev`
-          - label: vllm31
-            dep_group: dev-vllm31
-```
-
-A leg's group must exist in `pyproject.toml` **on the dispatched ref**, or
-`uv sync --group` fails before pytest starts and the log comes back under 1.1 KB.
-Legs cannot share a venv (the `conflicts` table forbids it), so each gets its own
-pod; `fail-fast: false` is what stops one red line from hiding the others.
-
-During an upgrade the matrix carries **one leg per line being added**, so every
-added version has its own evidence rather than inheriting the newest line's result.
-It returns to the two ends of the range afterwards — see SKILL.md Phase 5.
-
 ### Known-stale things not to trust
 
 - `tests/vllm/test_single_switch.py` — the `dev` suite's target — **does not exist**.
@@ -158,7 +162,52 @@ It returns to the two ends of the range afterwards — see SKILL.md Phase 5.
   `continue-on-error: true` that actually enforces it is missing). **The workflow
   files' inline comments are the spec.**
 
-## 6. Authorization
+## 6. The legs are derived, not written — and how per-line evidence works
+
+**There is no matrix in `gpu-tests.yaml` to edit.** A `legs` job runs
+`/opt/gsw/derive_legs.py`, baked into the runner image alongside the other
+`/opt/gsw` scripts and **not editable from this repository**. It reads the *tested
+commit's own* `pyproject.toml` and emits `matrix.include` entries of
+`{label, dep_group}` from exactly two groups:
+
+| leg | group | label |
+|---|---|---|
+| lower | `dev` | the floor's line, e.g. `vllm26` |
+| upper | `dev-latest` | whatever line the alias points at |
+
+So **at most two legs**, and a third cannot be added by any change a PR can make.
+The label is the vLLM minor the group's requirements pin, which the GPU harness
+asserts the pod really installed — a mislabelled leg fails rather than reporting
+the wrong line's result. When both groups pin the same minor it collapses to one
+leg. `dep_group` is always a **dev** flavour because the bare `vllmNN` groups omit
+pytest, and the floor's dev flavour is plain `dev`, not `dev-vllm26`.
+
+Two consequences worth stating plainly, because the workflow's own comment frames
+them as the design:
+
+- Moving to a new vLLM line is a **pyproject edit and nothing else**. The workflow
+  file is identical in every repo however far apart their vLLM lines are.
+- The PR that makes the bump **tests its own new lines**, because the legs come
+  from the commit under test rather than from `main`.
+
+### Per-line evidence: one commit per line, dispatched by sha
+
+Two legs cannot cover four added lines at one commit. They can cover one added line
+at each of four commits. The enabling detail is that workflow concurrency is
+`group: gpu-tests-${{ inputs.sha }}-${{ inputs.suite }}` — **keyed on the sha**, so
+dispatches at different commits run in parallel instead of cancelling each other.
+Were it keyed on the branch, each dispatch would kill the previous line's run.
+
+`plumb_pyproject.py --add` parks `dev-latest` on the lowest added line;
+`--point-latest LINE` walks it up, one commit each; `--check --final` refuses the
+merge state until the alias is back on the ceiling (otherwise CI's upper leg would
+never test the top supported line). The floor is re-tested on *every* dispatch
+since it is always the lower leg. See SKILL.md Phase 5.
+
+Dispatch needs **both** `--ref` (which workflow file) and `--sha` (which commit);
+`--sha` defaults to the branch tip, which would test the last commit N times.
+
+## 7. Authorization
 
 `gpu-tests.yaml`'s first step outside the runner is
 `/opt/gsw/check_role.sh "$ACTOR"`, which authorizes only `admin` or `maintain`
@@ -167,7 +216,7 @@ role-checked upstream). A plain `write` collaborator or a generic PAT bot is
 **declined**. Whatever identity `gh` is authenticated as must hold Maintain or
 Admin — `preflight.sh` checks this.
 
-## 7. Commit conventions
+## 8. Commit conventions
 
 - `git commit -s` always (DCO is a blocking check).
 - **No `Co-authored-by: Claude` trailer.** Removed deliberately on 2026-10-06

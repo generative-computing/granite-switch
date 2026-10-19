@@ -23,7 +23,9 @@ the end. The four exceptions are enumerated in operating rule 9.
 3. **Port the code** so every new line works, capability-gated (rule 1).
 4. **Verify every added line independently** — CPU, GPU and the regression/eval
    tiers — rather than testing the newest and inferring the rest. "0.31 and 0.32
-   were added" means 0.31 and 0.32 each have their own green evidence.
+   were added" means 0.31 and 0.32 each have their own green evidence. The GPU
+   workflow gives at most two legs per commit, so this costs **one commit per
+   added line** (Phase 5); it is not optional and there is no shortcut.
 5. **A PR body with per-version proof tables.** One column per added line, a ✅
    per gate that actually ran and passed on that line, and a separate table giving
    the regression/eval numbers **against the existing baseline** for each added
@@ -40,26 +42,29 @@ These are not suggestions. Each one is a failure this repo has actually hit.
    to detect the API shape. A `vllm.__version__` comparison is wrong the moment
    upstream renames something, and it does not state the actual requirement. There
    is currently **zero** version-number branching in `src/` — keep it that way.
-2. **Never delete a dependency group that main's GPU matrix still names.** See
-   REFERENCE.md §4. Deleting one makes the leg's `uv sync --group X` fail before
-   pytest starts, producing a sub-1.1-KB log that looks like a test failure.
+2. **Never delete a dependency group.** Every declared `vllmNN`/`dev-vllmNN` group
+   is a leg some commit's `dev-latest` can point at, and `derive_legs.py` resolves
+   groups against the *tested* commit. See REFERENCE.md §4. Deleting one makes that
+   leg's `uv sync --group X` fail before pytest starts, producing a sub-1.1-KB log
+   that looks like a test failure.
 3. **Relock with uv 0.8.4 exactly** — the `rev` of the `uv-lock` pre-commit hook.
    A newer uv writes a different lockfile revision and the hook fails CI.
 4. **Every commit needs `git commit -s`.** The DCO workflow blocks the PR otherwise.
    Do **not** add a `Co-authored-by: Claude` trailer; disclose AI assistance in the
-   PR body instead. (Project rule — see CLAUDE.md and REFERENCE.md §7.)
+   PR body instead. (Project rule — see CLAUDE.md and REFERENCE.md §8.)
 5. **Never `--no-verify`.** Fix what the hook complains about.
-6. **Dispatch GPU tests at the PR branch ref, not the default branch.** `gh workflow
-   run gpu-tests.yaml --ref <branch>` runs *that branch's* workflow file, so new
-   matrix legs take effect immediately. The `/gpu-test` comment path cannot do this
-   (it hardcodes `--ref <default branch>`), which is why this skill bypasses it.
+6. **Dispatch at the PR branch ref AND an explicit `--sha`.** `--ref <branch>` runs
+   *that branch's* workflow file (the `/gpu-test` comment path cannot: it hardcodes
+   `--ref <default branch>`, which is why this skill bypasses it). `--sha` picks the
+   commit, and since each added line is evidenced by its own commit (Phase 5),
+   omitting it tests the branch tip N times instead of N lines once each.
 7. **Always pass `no_cache=true`.** The GPU result cache is keyed on sha+leg, and
    the test pod pins `vllm/vllm-openai:latest`, so a cached pass answers "what did
    this commit do" when the question is "is this still true today".
 8. **Open the PR as a draft** and only mark it ready when every gate is green.
    A human seeing a ready PR assumes the gates passed.
 9. **Do not ask the user to approve the routine steps.** Branching, editing
-   `src/`, relocking, widening the matrix, committing, pushing, dispatching GPU
+   `src/`, relocking, walking `dev-latest` per line, committing, pushing, dispatching GPU
    runs, submitting the eval jobs, opening the PR and marking it ready are all
    pre-authorized by invoking this skill. Narrate what you are doing; do not stop
    for a yes. There are exactly four reasons to stop and ask:
@@ -162,13 +167,16 @@ Apply the fixes with capability gating. Two things to decide explicitly and reco
 ```
 
 The ceiling is **derived** from the highest `--add`, so there is no `--ceiling`
-flag. The only other flag is `--floor`, which *drops* support below it.
+flag. The other flags are `--floor` (which *drops* support below it),
+`--point-latest` (below), and `--check [--final]`.
 
 This edits `pyproject.toml` to add each new line's `vllmNN` group, its `dev-vllmNN`
-group, widen the `vllm` extra's upper bound, and **regenerate the entire
-`[tool.uv] conflicts` table** from the set of declared lines. Regenerating is the
-point: the table needs every cross-line pair (`N` lines → `N*(N-1)/2 * 4` entries),
-and hand-editing it is where this goes wrong. The script never removes a group.
+group, widen the `vllm` extra's upper bound, point `dev-latest` at the lowest added
+line, and **regenerate the entire `[tool.uv] conflicts` table** from the set of
+declared lines. Regenerating is the point: the table needs every pair of groups
+that would pull two lines into one venv, it grows quadratically, and a *missing*
+pair does not fail loudly — it lets `uv sync` resolve two vLLM wheels into one
+environment. The script never removes a group.
 
 Then relock and move the CI ceiling:
 
@@ -182,31 +190,70 @@ which the `uv-lock` pre-commit hook then rewrites and fails on. Take the version
 from `.pre-commit-config.yaml`'s `uv-pre-commit` rev rather than this line, so a
 hook bump cannot leave the skill relocking with the wrong one.
 
-Then the GPU matrix in `.github/workflows/gpu-tests.yaml`. **Two distinct matrices
-are involved and conflating them is how a version ships untested:**
+#### There is no GPU matrix to edit. Per-line evidence comes from one commit per line.
 
-- **The in-PR matrix — one leg per added line, plus the floor.** Every line this
-  PR adds needs its own green evidence (contract item 4), and a leg is the only
-  thing that produces it. Adding 0.31 and 0.32 means four legs this run: `vllm26`
-  (floor, `dep_group: dev`), `vllm30` (old ceiling), `vllm31`, `vllm32`. They
-  cannot share a venv — `[tool.uv] conflicts` forbids it — so each is its own pod,
-  and `fail-fast: false` keeps one red leg from hiding the others.
-- **The matrix left behind on merge — back to the two ends** (floor + new
-  ceiling), matching the rationale already written in `pyproject.toml`'s
-  `[dependency-groups]` comment. Per-run cost is why: a middle line is bracketed
-  by two tested lines, so it adds install time without adding a failure mode the
-  ends would miss.
+This is the single most important mechanical fact in the skill, and the thing most
+likely to be remembered wrong, because an older version of this document said
+"widen the matrix" — which is **impossible**.
 
-So the sequence is: widen the matrix to cover every added line, dispatch, collect
-the per-line results that become the PR tables, then narrow it back to the two ends
-in a **final commit** whose message records which lines were verified out of band
-and in which run. That last commit is what makes the existing `[dependency-groups]`
-comment true again — it already claims the middle lines were "verified together out
-of band", and this is the step that earns the claim.
+`.github/workflows/gpu-tests.yaml` does not contain its legs. A `legs` job runs
+`/opt/gsw/derive_legs.py`, which is **baked into the runner image and not editable
+from this repository**. It reads the *tested commit's own* `pyproject.toml` and
+emits **at most two legs**: one from the `dev` group (the floor) and one from
+`dev-latest` (the ceiling alias). A fifth leg cannot be added by any edit a PR can
+make.
 
-Do **not** delete a group when its leg goes away (rule 2). Update that comment and
-the `vllm` extra's comment to name the new range — a stale comment claiming the old
-range is a review failure in this repo.
+So "every added line gets its own green evidence" (contract item 4) is bought a
+different way: **make each added line be `dev-latest` at some commit, and dispatch
+at that commit's sha.** Two properties make this work rather than merely sound
+clever:
+
+- `derive_legs.py` reads the *tested* commit, so a commit whose `dev-latest` points
+  at 0.31 produces a 0.31 leg, regardless of what `main` says.
+- Workflow concurrency is `group: gpu-tests-${{ inputs.sha }}-${{ inputs.suite }}`
+  — **keyed on the sha**. Dispatches at different commits therefore run in
+  **parallel** and do not cancel one another. If it were keyed on the branch, each
+  new dispatch would kill the previous line's run and per-line coverage would cost
+  N sequential rounds instead of one.
+
+`plumb_pyproject.py` implements the walk. `--add` parks `dev-latest` on the
+**lowest** added line; one `--point-latest` commit per remaining line walks it up;
+the last one lands it on the true ceiling, which is also the correct state to
+merge:
+
+```bash
+# commit A: declares every line, dev-latest -> 0.31  (legs: floor + 0.31)
+.claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --add 0.31 0.32
+uvx uv@0.8.4 lock && git commit -s -a && git push
+
+# commit B: dev-latest -> 0.32  (legs: floor + 0.32)
+.claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --point-latest 0.32
+uvx uv@0.8.4 lock && git commit -s -a && git push
+
+# the state that merges: alias on the ceiling
+.claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --check --final
+```
+
+Every line in the gap gets a leg, the floor gets one on every single dispatch (it
+is always the lower leg), and the old ceiling keeps its coverage because it is
+still a declared line that one of these commits points at. **Dispatch at each
+commit's sha as you create it** — Phase 8 does the collecting.
+
+`--check --final` is the merge gate: it fails while `dev-latest` is parked on an
+intermediate line. Merging in that state would leave the top supported line
+permanently untested by CI, which is exactly the failure the per-line walk exists
+to prevent.
+
+Two things `--point-latest` does that are easy to get wrong by hand, and which is
+why it exists rather than a note saying "edit the alias": `dev-latest` is a *third
+group name* for whichever line it points at, so uv's `conflicts` table must move
+with it (otherwise `uv sync --group vllm31 --group dev-latest` resolves two vLLM
+wheels into one venv), and the prose comment above the alias names the line and
+goes stale.
+
+Do **not** delete a group when the alias moves off it (rule 2). Update the
+`[dependency-groups]` and `vllm`-extra comments to name the new range — a stale
+comment claiming the old range is a review failure in this repo.
 
 Also update the version range wherever it is stated as prose: `README.md`,
 `tutorials/PREREQUISITES.md`, `docs/`. `grep -rn "0\.<old-ceiling>"` to find them.
@@ -239,11 +286,34 @@ gh pr create --draft --title "..." --body-file <generated>
 Loop, with a budget of **5 fix attempts per leg**. Exceeding it means stop and
 report rather than thrash.
 
+Dispatch is **per line × per suite**, because each line is a different commit (see
+Phase 5). Collect the shas first, then fan out — concurrency is sha-keyed, so these
+do not cancel one another and the whole grid runs in parallel:
+
 ```bash
-# one dispatch per suite; the widened matrix runs every version leg in parallel
-.claude/skills/upgrade-vllm/scripts/gpu_dispatch.sh --ref <branch> --suite full --wait
-.claude/skills/upgrade-vllm/scripts/gpu_dispatch.sh --ref <branch> --suite eval --wait
+# the sha of each per-line commit, in the order Phase 5 created them
+SHA_031=<sha of the --add commit>        # legs: floor + 0.31
+SHA_032=<sha of the --point-latest 0.32 commit>   # legs: floor + 0.32
+
+BRANCH=feature/vllm-<floor>-to-<new-ceiling>
+for SHA in "$SHA_031" "$SHA_032"; do
+  for SUITE in full audio eval; do
+    .claude/skills/upgrade-vllm/scripts/gpu_dispatch.sh \
+        --ref "$BRANCH" --sha "$SHA" --suite "$SUITE" --wait &
+  done
+done
+wait
 ```
+
+**Both flags, and they mean different things.** `--ref` picks which *workflow file*
+runs and is required; `--sha` picks which *commit* the cluster checks out and
+defaults to `origin/<ref>`'s head. Letting it default is the trap: every dispatch
+would then test the branch tip, so each intermediate line would silently report the
+ceiling's result — a table full of ✅ that proves the top line N times and the
+others never.
+
+The leg label in each result is the receipt that this went right. Two runs reporting
+the same label (`vllm32` twice) means the shas were wrong, not that the lines agree.
 
 The script dispatches with `no_cache=true`, polls, and on failure downloads the
 `gpu-tests-log-<leg>-<sha>` artifact and prints the failing tests.
