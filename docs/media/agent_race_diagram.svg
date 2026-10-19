@@ -1,7 +1,7 @@
 <svg viewBox="-16 -16 1056 415" width="1056" height="415" role="img" aria-labelledby="dTitle-grid dDesc-grid" xmlns="http://www.w3.org/2000/svg">
 <title id="dTitle-grid">The simulated agent, and what each lane does at an adapter switch</title>
 <desc id="dDesc-grid">Each agent prefills its own prompt, then generates in 32-token steps, switching adapter at each, with a tool call after every 256 tokens. At each switch, stock vLLM ends the request, waits an adapter switching round trip (2&#8211;10 ms) and prefills the context again; granite-switch SR keeps one request running until a tool call.</desc>
-<defs><marker id="dArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#777"/></marker></defs>
+<defs><marker id="dArrow-grid" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#777"/></marker></defs>
 <style>
   text { font-family: 'IBM Plex Mono', Consolas, 'Cascadia Code', Monaco, monospace; }
   .d-h    { fill: #9a9a9a; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
@@ -12,12 +12,22 @@
   .d-sub  { fill: #8a8a8a; font-size: 10.5px; }
   .d-note { fill: #8a8a8a; font-size: 11px; }
   .d-arrow, .d-rule { stroke: #666; stroke-width: 1; fill: none; }
+  .d-node     { fill: #e0e0e0; font-size: 12px; font-weight: 600; }
+  .d-node-sub { fill: #8fb8cc; font-size: 10.5px; }
+  .d-node-tool     { fill: #1e1e1e; font-size: 12px; font-weight: 600; }
+  .d-node-tool-sub { fill: #3a3a1e; font-size: 10.5px; }
+  .d-node-tag { fill: #6f6f6f; font-size: 9.5px; letter-spacing: 0.04em; }
+  .d-term     { fill: #2a2a2a; stroke: #9e9e9e; stroke-width: 1.5; }
+  .d-term-lab { fill: #bdbdbd; font-size: 9.5px; font-weight: 700; }
+  .d-edge     { stroke: #8a8a8a; stroke-width: 1.3; fill: none; }
+  .d-edge-end { stroke-dasharray: 4 3; stroke: #66bb6a; }
+  .d-edge-lab { fill: #9a9a9a; font-size: 10px; }
 </style>
 <rect x="-16" y="-16" width="1056" height="415" fill="#1e1e1e"/>
 <text x="0" y="11" class="d-h">EACH AGENT · THE SAME IN BOTH LANES</text>
 <g><title>The agent's own prompt, 256 to 16,384 tokens, shared with no other agent. Its first request prefills it, in both lanes.</title><rect x="0" y="34" width="100" height="30" rx="2" fill="none" stroke="#ef5350" stroke-width="1.5"/><text x="50" y="53" class="d-lab" text-anchor="middle">prompt</text></g>
 <text x="50" y="88" class="d-sub" text-anchor="middle">256&#8211;16,384 tok</text>
-<path d="M102,49 H118" class="d-arrow" marker-end="url(#dArrow)"/>
+<path d="M102,49 H118" class="d-arrow" marker-end="url(#dArrow-grid)"/>
 <text x="120" y="29" class="d-step">generation</text>
 <g><title>generation: 32 tokens on adapter ad25</title><rect x="120" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="140" y="53" class="d-chip" text-anchor="middle">ad25</text></g>
 <g><title>generation: 32 tokens on adapter ad57</title><rect x="163" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="183" y="53" class="d-chip" text-anchor="middle">ad57</text></g>
@@ -29,11 +39,11 @@
 <g><title>generation: 32 tokens on adapter ad40</title><rect x="421" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="441" y="53" class="d-chip" text-anchor="middle">ad40</text></g>
 <path d="M120,70 v4 H461 v-4" class="d-rule"/>
 <text x="290.5" y="88" class="d-sub" text-anchor="middle">256 tokens · switching adapter every 32</text>
-<path d="M463,49 H479" class="d-arrow" marker-end="url(#dArrow)"/>
+<path d="M463,49 H479" class="d-arrow" marker-end="url(#dArrow-grid)"/>
 <text x="481" y="29" class="d-step">act</text>
 <g><title>act: the tool call. Calculator (1&#8211;10 ms), SQL lookup (5&#8211;50 ms) or RAG retrieval (20&#8211;80 ms), slept for real. Both lanes make the same calls.</title><rect x="481" y="34" width="92" height="30" rx="2" fill="#fff176"/><text x="527" y="53" class="d-chip" text-anchor="middle">tool call</text></g>
 <text x="527" y="88" class="d-sub" text-anchor="middle">1&#8211;80 ms</text>
-<path d="M575,49 H591" class="d-arrow" marker-end="url(#dArrow)"/>
+<path d="M575,49 H591" class="d-arrow" marker-end="url(#dArrow-grid)"/>
 <text x="593" y="29" class="d-step">generation</text>
 <g><title>generation: 32 tokens on adapter ad41</title><rect x="593" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="613" y="53" class="d-chip" text-anchor="middle">ad41</text></g>
 <g><title>generation: 32 tokens on adapter ad10</title><rect x="636" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="656" y="53" class="d-chip" text-anchor="middle">ad10</text></g>
@@ -45,7 +55,7 @@
 <g><title>generation: 32 tokens on adapter ad56</title><rect x="894" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="914" y="53" class="d-chip" text-anchor="middle">ad56</text></g>
 <path d="M593,70 v4 H934 v-4" class="d-rule"/>
 <text x="763.5" y="88" class="d-sub" text-anchor="middle">another 256 tokens</text>
-<path d="M936,49 H952" class="d-arrow" marker-end="url(#dArrow)"/>
+<path d="M936,49 H952" class="d-arrow" marker-end="url(#dArrow-grid)"/>
 <g><title>Done: the agent's last token. Its slot goes to the next agent.</title><rect x="954" y="34" width="64" height="30" rx="2" fill="none" stroke="#66bb6a" stroke-width="1.5"/><text x="986" y="53" class="d-lab" text-anchor="middle">done</text></g>
 <text x="986" y="88" class="d-sub" text-anchor="middle">512 tok</text>
 <text x="0" y="112" class="d-note">These agents are simplified: every step is a 32-token generation on a new adapter. At 1,024 tokens: 3 tool calls; at 128 or 256: none.</text>

@@ -1,0 +1,67 @@
+<svg viewBox="-16 -16 1056 496" width="1056" height="496" role="img" aria-labelledby="dTitle-machine dDesc-machine" xmlns="http://www.w3.org/2000/svg">
+<title id="dTitle-machine">The ReAct agent as a state machine</title>
+<desc id="dDesc-machine">The ReAct agent as a state machine: from its prompt it thinks, prepares a tool call (perhaps several), acts (calls the tool), observes the result and either acts again or reflects, then starts its next cycle; it ends when its tokens run out.</desc>
+<defs><marker id="dArrow-machine" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#777"/></marker></defs>
+<style>
+  text { font-family: 'IBM Plex Mono', Consolas, 'Cascadia Code', Monaco, monospace; }
+  .d-h    { fill: #9a9a9a; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+  .d-step { fill: #bdbdbd; font-size: 11px; font-weight: 600; }
+  .d-lane { fill: #9cdcfe; font-size: 12px; font-weight: 600; }
+  .d-chip { fill: #1e1e1e; font-size: 10px; }
+  .d-lab  { fill: #cccccc; font-size: 11px; }
+  .d-sub  { fill: #8a8a8a; font-size: 10.5px; }
+  .d-note { fill: #8a8a8a; font-size: 11px; }
+  .d-arrow, .d-rule { stroke: #666; stroke-width: 1; fill: none; }
+  .d-node     { fill: #e0e0e0; font-size: 12px; font-weight: 600; }
+  .d-node-sub { fill: #8fb8cc; font-size: 10.5px; }
+  .d-node-tool     { fill: #1e1e1e; font-size: 12px; font-weight: 600; }
+  .d-node-tool-sub { fill: #3a3a1e; font-size: 10.5px; }
+  .d-node-tag { fill: #6f6f6f; font-size: 9.5px; letter-spacing: 0.04em; }
+  .d-term     { fill: #2a2a2a; stroke: #9e9e9e; stroke-width: 1.5; }
+  .d-term-lab { fill: #bdbdbd; font-size: 9.5px; font-weight: 700; }
+  .d-edge     { stroke: #8a8a8a; stroke-width: 1.3; fill: none; }
+  .d-edge-end { stroke-dasharray: 4 3; stroke: #66bb6a; }
+  .d-edge-lab { fill: #9a9a9a; font-size: 10px; }
+</style>
+<rect x="-16" y="-16" width="1056" height="496" fill="#1e1e1e"/>
+<text x="0" y="11" class="d-h">THE AGENT · A REACT STATE MACHINE, THE SAME IN BOTH LANES</text>
+<path d="M44,108 H88" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<path d="M222,108 H314" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<path d="M448,108 H558" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="504" y="100" class="d-edge-lab" text-anchor="middle">call the tool</text>
+<path d="M692,108 H798" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="746" y="100" class="d-edge-lab" text-anchor="middle">result</text>
+<path d="M364,85 C352,51 412,51 400,83" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="342" y="59" class="d-edge-lab" text-anchor="end">another call</text>
+<path d="M866,85 V33 H428 V83" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="654" y="28" class="d-edge-lab" text-anchor="middle">act again</text>
+<path d="M866,131 V271 H574" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="759" y="264" class="d-edge-lab" text-anchor="middle">reflect on it</text>
+<path d="M596,131 V171 H526 V246" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<path d="M412,131 V171 H486 V246" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<path d="M440,271 H156 V149" class="d-edge" marker-end="url(#dArrow-machine)"/>
+<text x="298" y="264" class="d-edge-lab" text-anchor="middle">next cycle</text>
+<path d="M572,284 H602 V320 H938" class="d-edge d-edge-end" marker-end="url(#dArrow-machine)"/>
+<text x="932" y="313" class="d-edge-lab" text-anchor="end">after 128&#8211;1,024 tokens, from any step</text>
+<g><title>The agent's prompt: 256 to 16,384 tokens, its own. Its first request prefills it.</title><circle cx="24" cy="108" r="20" class="d-term"/><text x="24" y="112" class="d-term-lab" text-anchor="middle">START</text></g>
+<g><title>think (generation): reasons about the task. Median 120 tokens; switches adapter as it starts 35% of the time, and again inside it: 1 + Poisson(2) segments.</title><rect x="90" y="85" width="132" height="46" rx="8" fill="#1e2a33" stroke="#4fc3f7" stroke-width="1.5"/><text x="156" y="103" class="d-node" text-anchor="middle">think</text><text x="156" y="119" class="d-node-sub" text-anchor="middle">~120 tok · 35%</text></g>
+<text x="156" y="144" class="d-node-tag" text-anchor="middle">LLM · generation</text>
+<g><title>prepare_call (generation): writes the tool call. Median 10 tokens; its own adapter 95% of the time; too short to split.</title><rect x="316" y="85" width="132" height="46" rx="8" fill="#1e2a33" stroke="#4fc3f7" stroke-width="1.5"/><text x="382" y="103" class="d-node" text-anchor="middle">prepare_call</text><text x="382" y="119" class="d-node-sub" text-anchor="middle">~10 tok · 95%</text></g>
+<text x="382" y="144" class="d-node-tag" text-anchor="middle">LLM · generation</text>
+<g><title>act: the tool call. Calculator (1&#8211;10 ms), SQL lookup (5&#8211;50 ms) or RAG retrieval (20&#8211;80 ms), slept for real. Both lanes make the same calls.</title><rect x="560" y="85" width="132" height="46" rx="8" fill="#fff176" stroke="#fff176" stroke-width="1.5"/><text x="626" y="103" class="d-node-tool" text-anchor="middle">act</text><text x="626" y="119" class="d-node-tool-sub" text-anchor="middle">tool call · 1&#8211;80 ms</text></g>
+<text x="626" y="144" class="d-node-tag" text-anchor="middle">tool</text>
+<g><title>observe (generation): reads the tool's result. Median 35 tokens; switches 80% of the time; 1 + Poisson(0.5) segments.</title><rect x="800" y="85" width="132" height="46" rx="8" fill="#1e2a33" stroke="#4fc3f7" stroke-width="1.5"/><text x="866" y="103" class="d-node" text-anchor="middle">observe</text><text x="866" y="119" class="d-node-sub" text-anchor="middle">~35 tok · 80%</text></g>
+<text x="866" y="144" class="d-node-tag" text-anchor="middle">LLM · generation</text>
+<g><title>reflect (generation): weighs the result. Median 90 tokens; switches 70% of the time; 1 + Poisson(1.5) segments.</title><rect x="440" y="248" width="132" height="46" rx="8" fill="#1e2a33" stroke="#4fc3f7" stroke-width="1.5"/><text x="506" y="266" class="d-node" text-anchor="middle">reflect</text><text x="506" y="282" class="d-node-sub" text-anchor="middle">~90 tok · 70%</text></g>
+<text x="506" y="307" class="d-node-tag" text-anchor="middle">LLM · generation</text>
+<g><title>The agent's last token (128 to 1,024 tokens), wherever its cycle stands. Its slot goes to the next agent.</title><circle cx="960" cy="320" r="20" class="d-term"/><text x="960" y="324" class="d-term-lab" text-anchor="middle">END</text></g>
+<text x="0" y="370" class="d-h">THE CYCLES (one each agent, drawn at random)</text>
+<text x="0" y="388" class="d-step">classic5</text>
+<text x="110" y="388" class="d-note">think → prepare_call → act → observe → reflect</text>
+<text x="0" y="403" class="d-step">toolheavy10</text>
+<text x="110" y="403" class="d-note">think → (prepare_call → act → observe) &#215;3 → reflect</text>
+<text x="0" y="418" class="d-step">shortadapters</text>
+<text x="110" y="418" class="d-note">think → prepare_call &#215;3 → act → observe → prepare_call &#215;2 → reflect</text>
+<text x="0" y="442" class="d-note">Each LLM node: its median tokens, and how often it switches adapter as it starts; think, observe and reflect also switch inside.</text>
+<text x="0" y="456" class="d-note">The state passed between nodes is the agent's context.</text>
+</svg>

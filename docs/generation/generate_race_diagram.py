@@ -2,18 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Generate the agent race page's diagrams (docs/agent_race.html).
 
-Two diagrams, one per kind of agent, each drawn from a recorded agent:
+Three diagrams:
 
+* ``machine``: the paper's ReAct agent as a state machine, LangGraph-style: its
+  steps as nodes (think, prepare_call, act, observe, reflect), the transitions
+  its three cycles take, from START to END;
 * ``grid``: the switching workload's agent, generating 32-token segments on a
   new adapter each, with a tool call after every 256 tokens;
-* ``react``: the paper's ReAct agent, its steps (think, prepare_call, act,
-  observe, reflect) at their own lengths, each segment on its adapter.
+* ``react``: a recorded ReAct agent's first cycle, its steps at their own
+  lengths, each segment on its adapter.
 
-Below each, what each lane does at an adapter switch, and the round trip. The
-colors are the page's phase colors, so a diagram matches the race's bars.
+Below ``grid`` and ``react``, what each lane does at an adapter switch, and the
+round trip. The colors are the page's phase colors, so a diagram matches the
+race's bars.
 
 Usage:
-    python docs/generation/generate_race_diagram.py grid      # inline, for the page
+    python docs/generation/generate_race_diagram.py machine   # inline, for the page
+    python docs/generation/generate_race_diagram.py grid
     python docs/generation/generate_race_diagram.py react
     python docs/generation/generate_race_diagram.py --standalone grid \\
         > docs/media/agent_race_diagram.svg                   # an image of its own
@@ -73,9 +78,13 @@ def block(x, y, w, h, title, fill=None, stroke=None, label=None, cls="d-chip"):
     out.append(f"<g><title>{title}</title>{inner}</g>")
 
 
+# The arrowhead's id: each diagram's own, as the page holds several (set in main).
+MARKER = "dArrow"
+
+
 def arrow(x1, x2, y):
     out.append(
-        f'<path d="M{x1:g},{y:g} H{x2:g}" class="d-arrow" marker-end="url(#dArrow)"/>'
+        f'<path d="M{x1:g},{y:g} H{x2:g}" class="d-arrow" marker-end="url(#{MARKER})"/>'
     )
 
 
@@ -288,6 +297,198 @@ def rtt_note(y):
     return y + 86
 
 
+# ── The state machine (kind "machine"): the agent's graph, LangGraph-style ─────
+# Nodes are the ReAct steps; edges are the transitions the generator's cycles
+# (CYCLES in benchmarks/gen_agent_configs.py) take. LLM nodes generate tokens on
+# an adapter; the act node calls a tool.
+NODE_W, NODE_H = 132, 46
+MACHINE_NODES = {
+    # name: (x, y, kind, the second line)
+    "__start__": (24, 108, "terminal", ""),
+    "think": (90, 85, "llm", "~120 tok · 35%"),
+    "prepare_call": (316, 85, "llm", "~10 tok · 95%"),
+    "act": (560, 85, "tool", "tool call · 1&#8211;80 ms"),
+    "observe": (800, 85, "llm", "~35 tok · 80%"),
+    "reflect": (440, 248, "llm", "~90 tok · 70%"),
+    "__end__": (960, 320, "terminal", ""),
+}
+# (from, to, label, how to draw: "h" straight, "loop" self-loop, or a path)
+MACHINE_EDGES = [
+    ("__start__", "think", "", "h"),
+    ("think", "prepare_call", "", "h"),
+    ("prepare_call", "act", "call the tool", "h"),
+    ("prepare_call", "prepare_call", "another call", "loop"),
+    ("act", "observe", "result", "h"),
+    ("observe", "prepare_call", "act again", "back"),
+    ("observe", "reflect", "", "down_left"),
+    ("act", "reflect", "", "down_mid"),
+    ("prepare_call", "reflect", "", "down_right"),
+    ("reflect", "think", "next cycle", "up_left"),
+]
+MACHINE_HELP = {
+    "think": STEP_HELP["think"],
+    "prepare_call": STEP_HELP["prepare_call"],
+    "act": STEP_HELP["act"],
+    "observe": STEP_HELP["observe"],
+    "reflect": STEP_HELP["reflect"],
+    "__start__": "The agent's prompt: 256 to 16,384 tokens, its own. Its first "
+    "request prefills it.",
+    "__end__": "The agent's last token (128 to 1,024 tokens), wherever its "
+    "cycle stands. Its slot goes to the next agent.",
+}
+
+
+def _center(name):
+    x, y, kind, _ = MACHINE_NODES[name]
+    if kind == "terminal":
+        return x, y
+    return x + NODE_W / 2, y + NODE_H / 2
+
+
+def _edge(path, label=None, lx=0.0, ly=0.0, anchor="middle"):
+    out.append(f'<path d="{path}" class="d-edge" marker-end="url(#{MARKER})"/>')
+    if label:
+        text(lx, ly, label, "d-edge-lab", anchor)
+
+
+def machine_node(name):
+    x, y, kind, sub = MACHINE_NODES[name]
+    tip = MACHINE_HELP[name]
+    if kind == "terminal":
+        label = "START" if name == "__start__" else "END"
+        out.append(
+            f'<g><title>{tip}</title><circle cx="{x:g}" cy="{y:g}" r="20" '
+            f'class="d-term"/><text x="{x:g}" y="{y + 4:g}" class="d-term-lab" '
+            f'text-anchor="middle">{label}</text></g>'
+        )
+        return
+    fill, stroke = (TOOL, TOOL) if kind == "tool" else ("#1e2a33", DEC)
+    name_cls = "d-node-tool" if kind == "tool" else "d-node"
+    tag = "tool" if kind == "tool" else "LLM · generation"
+    out.append(
+        f"<g><title>{tip}</title>"
+        f'<rect x="{x:g}" y="{y:g}" width="{NODE_W}" height="{NODE_H}" rx="8" '
+        f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>'
+        f'<text x="{x + NODE_W / 2:g}" y="{y + 18:g}" class="{name_cls}" '
+        f'text-anchor="middle">{name}</text>'
+        f'<text x="{x + NODE_W / 2:g}" y="{y + 34:g}" class="{name_cls}-sub" '
+        f'text-anchor="middle">{sub}</text>'
+        f"</g>"
+    )
+    text(x + NODE_W / 2, y + NODE_H + 13, tag, "d-node-tag", "middle")
+
+
+def machine(y0=0):
+    """The agent as a graph: its steps and the transitions between them."""
+    text(0, 11, "THE AGENT · A REACT STATE MACHINE, THE SAME IN BOTH LANES", "d-h")
+    n = MACHINE_NODES
+    top = n["think"][1]
+    mid = top + NODE_H / 2
+
+    def right(name):
+        return n[name][0] + NODE_W
+
+    def left(name):
+        return n[name][0]
+
+    # START -> think, and the cycle's straight edges.
+    _edge(f"M{n['__start__'][0] + 20:g},{mid:g} H{left('think') - 2:g}")
+    _edge(f"M{right('think'):g},{mid:g} H{left('prepare_call') - 2:g}")
+    _edge(
+        f"M{right('prepare_call'):g},{mid:g} H{left('act') - 2:g}",
+        "call the tool",
+        (right("prepare_call") + left("act")) / 2,
+        mid - 8,
+    )
+    _edge(
+        f"M{right('act'):g},{mid:g} H{left('observe') - 2:g}",
+        "result",
+        (right("act") + left("observe")) / 2,
+        mid - 8,
+    )
+    # prepare_call -> prepare_call: another call before acting (shortadapters).
+    px = n["prepare_call"][0] + NODE_W / 2
+    _edge(
+        f"M{px - 18:g},{top:g} C{px - 30:g},{top - 34:g} {px + 30:g},{top - 34:g} "
+        f"{px + 18:g},{top - 2:g}",
+        "another call",
+        px - 40,
+        top - 26,
+        "end",
+    )
+    # observe -> prepare_call: act again (toolheavy10), over the top.
+    ox = n["observe"][0] + NODE_W / 2
+    _edge(
+        f"M{ox:g},{top:g} V{top - 52:g} H{px + 46:g} V{top - 2:g}",
+        "act again",
+        (ox + px) / 2 + 30,
+        top - 57,
+    )
+    # Down to reflect: from observe, act and prepare_call.
+    rx, ry = n["reflect"][0], n["reflect"][1]
+    rc = rx + NODE_W / 2
+    bottom = top + NODE_H
+    # The tags below the top row's nodes sit in their first 16 pixels.
+    drop = bottom + 18
+    _edge(
+        f"M{ox:g},{bottom:g} V{ry + NODE_H / 2:g} H{rx + NODE_W + 2:g}",
+        "reflect on it",
+        (ox + rx + NODE_W) / 2 + 40,
+        ry + NODE_H / 2 - 7,
+    )
+    ax = n["act"][0] + NODE_W / 2
+    _edge(f"M{ax - 30:g},{bottom:g} V{drop + 22:g} H{rc + 20:g} V{ry - 2:g}")
+    _edge(f"M{px + 30:g},{bottom:g} V{drop + 22:g} H{rc - 20:g} V{ry - 2:g}")
+    # reflect -> think: the next cycle.
+    tx = n["think"][0] + NODE_W / 2
+    _edge(
+        f"M{rx:g},{ry + NODE_H / 2:g} H{tx:g} V{bottom + 18:g}",
+        "next cycle",
+        (rx + tx) / 2,
+        ry + NODE_H / 2 - 7,
+    )
+    # Any step -> END, when the agent's tokens run out.
+    ex, ey = n["__end__"][0], n["__end__"][1]
+    out.append(
+        f'<path d="M{rx + NODE_W:g},{ry + NODE_H - 10:g} H{rx + NODE_W + 30:g} '
+        f'V{ey:g} H{ex - 22:g}" '
+        f'class="d-edge d-edge-end" marker-end="url(#{MARKER})"/>'
+    )
+    text(
+        ex - 28,
+        ey - 7,
+        "after 128&#8211;1,024 tokens, from any step",
+        "d-edge-lab",
+        "end",
+    )
+
+    for name in MACHINE_NODES:
+        machine_node(name)
+
+    # The three cycles, as the paths through the graph.
+    y = 370
+    text(0, y, "THE CYCLES (one each agent, drawn at random)", "d-h")
+    cycles = [
+        ("classic5", "think → prepare_call → act → observe → reflect"),
+        ("toolheavy10", "think → (prepare_call → act → observe) &#215;3 → reflect"),
+        (
+            "shortadapters",
+            "think → prepare_call &#215;3 → act → observe → prepare_call &#215;2 → reflect",
+        ),
+    ]
+    for i, (name, path) in enumerate(cycles):
+        text(0, y + 18 + i * 15, name, "d-step")
+        text(110, y + 18 + i * 15, path, "d-note")
+    text(
+        0, y + 72,
+        "Each LLM node: its median tokens, and how often it switches adapter as it "
+        "starts; think, observe and reflect also switch inside.",
+        "d-note",
+    )  # fmt: skip
+    text(0, y + 86, "The state passed between nodes is the agent's context.", "d-note")
+    return y + 94
+
+
 def diagram(kind) -> int:
     """Draws the diagram; returns its height."""
     text(0, 11, "EACH AGENT · THE SAME IN BOTH LANES", "d-h")
@@ -313,6 +514,16 @@ STANDALONE = """<style>
   .d-sub  { fill: #8a8a8a; font-size: 10.5px; }
   .d-note { fill: #8a8a8a; font-size: 11px; }
   .d-arrow, .d-rule { stroke: #666; stroke-width: 1; fill: none; }
+  .d-node     { fill: #e0e0e0; font-size: 12px; font-weight: 600; }
+  .d-node-sub { fill: #8fb8cc; font-size: 10.5px; }
+  .d-node-tool     { fill: #1e1e1e; font-size: 12px; font-weight: 600; }
+  .d-node-tool-sub { fill: #3a3a1e; font-size: 10.5px; }
+  .d-node-tag { fill: #6f6f6f; font-size: 9.5px; letter-spacing: 0.04em; }
+  .d-term     { fill: #2a2a2a; stroke: #9e9e9e; stroke-width: 1.5; }
+  .d-term-lab { fill: #bdbdbd; font-size: 9.5px; font-weight: 700; }
+  .d-edge     { stroke: #8a8a8a; stroke-width: 1.3; fill: none; }
+  .d-edge-end { stroke-dasharray: 4 3; stroke: #66bb6a; }
+  .d-edge-lab { fill: #9a9a9a; font-size: 10px; }
 </style>
 <rect x="-16" y="-16" width="WIDTH" height="HEIGHT" fill="#1e1e1e"/>"""
 
@@ -321,13 +532,20 @@ def main(argv):
     standalone = "--standalone" in argv
     kinds = [a for a in argv if not a.startswith("--")] or ["grid"]
     kind = kinds[0]
-    if kind not in ("grid", "react"):
-        raise SystemExit(f"unknown diagram {kind!r}: grid or react")
-    h = diagram(kind)
+    if kind not in ("grid", "react", "machine"):
+        raise SystemExit(f"unknown diagram {kind!r}: grid, react or machine")
+    global MARKER
+    MARKER = f"dArrow-{kind}"
+    h = machine() if kind == "machine" else diagram(kind)
     view = f"-16 -16 {W + 32} {h + 32}" if standalone else f"0 0 {W} {h}"
     size = f' width="{W + 32}" height="{h + 32}"' if standalone else ""
     who = (
-        "Each ReAct agent prefills its own prompt, then walks its steps: think, "
+        "The ReAct agent as a state machine: from its prompt it thinks, prepares "
+        "a tool call (perhaps several), acts (calls the tool), observes the result "
+        "and either acts again or reflects, then starts its next cycle; it ends when "
+        "its tokens run out."
+        if kind == "machine"
+        else "Each ReAct agent prefills its own prompt, then walks its steps: think, "
         "prepare_call, act (a tool call), observe and reflect, each at its own length, "
         "switching adapter between and inside steps."
         if kind == "react"
@@ -340,13 +558,27 @@ def main(argv):
                 f'<svg viewBox="{view}"{size} role="img" '
                 f'aria-labelledby="dTitle-{kind} dDesc-{kind}" '
                 'xmlns="http://www.w3.org/2000/svg">',
-                f'<title id="dTitle-{kind}">The simulated agent, and what each lane '
-                "does at an adapter switch</title>",
-                f'<desc id="dDesc-{kind}">{who} At each switch, stock vLLM ends the '
-                "request, waits an adapter switching round trip (2&#8211;10 ms) and prefills "
-                "the context again; granite-switch SR keeps one request running until a "
-                "tool call.</desc>",
-                '<defs><marker id="dArrow" viewBox="0 0 10 10" refX="9" refY="5" '
+                f'<title id="dTitle-{kind}">'
+                + (
+                    "The ReAct agent as a state machine"
+                    if kind == "machine"
+                    else "The simulated agent, and what each lane does at an "
+                    "adapter switch"
+                )
+                + "</title>",
+                f'<desc id="dDesc-{kind}">{who}'
+                + (
+                    ""
+                    if kind == "machine"
+                    else " At each switch, stock vLLM ends the request, waits an "
+                    "adapter switching round trip (2&#8211;10 ms) and prefills the "
+                    "context again; granite-switch SR keeps one request running "
+                    "until a tool call."
+                )
+                + "</desc>",
+                '<defs><marker id="'
+                + MARKER
+                + '" viewBox="0 0 10 10" refX="9" refY="5" '
                 'markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 '
                 'L0,10 z" fill="#777"/></marker></defs>',
                 *(

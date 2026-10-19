@@ -84,9 +84,11 @@ replays them side by side, each from its own start.
 
 - **The experiment**, in a few lines, and a diagram of the race's agents: the
   switching block's (its prompt, 32-token generations switching adapter at each, a
-  tool call between) or, for the ReAct race, a ReAct agent's steps at their own
-  lengths; then what each lane does at a switch, and what an adapter switching
-  (rtt) takes. Hovering a step or a metric's label explains it.
+  tool call between) or, for the ReAct race, the agent as a state machine
+  (LangGraph-style: its steps as nodes, the transitions its cycles take) above a
+  ReAct agent's steps at their own lengths; then what each lane does at a switch,
+  and what an adapter switching (rtt) takes. Hovering a step or a metric's label
+  explains it.
 - **A race per configuration**, chosen above the controls, each a recorded run.
   The link keeps the choice (e.g. `#64-16-mix`).
 - **A bar per agent**, filled by the tokens it has generated, colored by what it
@@ -177,5 +179,5 @@ run's storage, no host name.
 | `benchmarks/gen_agent_configs.py` | that generator, copied unchanged |
 | `benchmarks/adapter_eval/race/build_page.py` | the race into the page |
 | `docs/agent_race.html` | the page |
-| `docs/generation/generate_race_diagram.py` | the page's diagrams, and `docs/media/agent_race_diagram*.svg` |
+| `docs/generation/generate_race_diagram.py` | the page's diagrams (the state machine, the agents, the lanes at a switch), and `docs/media/agent_race_*.svg` |
 | `tests/unit/test_agent_race.py` | the race end to end on CPU, with a fake engine |
