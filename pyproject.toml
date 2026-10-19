@@ -55,6 +55,7 @@ markers = [
     "deep: expensive code-theory tests (m=8 / 256-dim); run with: pytest -m deep",
     "requires_model: needs a real model checkpoint",
     "audio: exercises the audio/ASR path; run with: pytest -m audio",
+    "eval: adapter-output eval against a committed baseline; run with: pytest -m eval",
 ]
 
 [dependency-groups]
