@@ -114,10 +114,27 @@ pre-release versions are excluded by the script.
 
 ### Phase 2 — branch
 
+**Branch from main without ever checking main out.** `git checkout main` would
+delete this skill from the working tree on any clone where the skill is not yet
+committed to main — and a deleted skill has no Phase 3 onward left to read, so
+the run ends mid-flight with the branch already created. Create the branch at
+`origin/main` directly, which never puts main itself in the tree:
+
 ```bash
-git checkout main && git pull --ff-only
-git checkout -b feature/vllm-<floor>-to-<new-ceiling>
+git fetch origin main
+git checkout -b feature/vllm-<floor>-to-<new-ceiling> origin/main
 ```
+
+Then confirm the skill survived, because the same hazard applies to the new
+branch if it is a faithful copy of a main that lacks the skill:
+
+```bash
+test -f .claude/skills/upgrade-vllm/SKILL.md || echo "SKILL GONE"
+```
+
+If it is gone, the skill is not on `origin/main` yet. Stop and report that
+rather than improvising — an unattended run cannot proceed on instructions it
+can no longer read.
 
 `<floor>` is the existing lower bound (unchanged unless Phase 4 forces a drop).
 
