@@ -111,16 +111,53 @@ fi
 echo "== gpu suite plumbing =="
 
 # A dispatch naming a suite with no case arm fails at "Resolve test scope" with
-# `unknown suite`. Cheap to verify, and the eval suite is new enough to be missing
-# on an older checkout.
+# `unknown suite`.
+#
+# CHECK THE DEFAULT BRANCH'S COPY, NOT THE LOCAL ONE. `workflow_dispatch` always
+# executes the workflow file as it exists on the DEFAULT BRANCH, regardless of
+# which ref or sha is being tested -- the same property pyproject's `vllm27`
+# comment records. Grepping the local file therefore reports a suite as
+# available when a dispatch of it would be rejected, which is exactly the
+# false green this check exists to prevent: the `eval` suite is on the feature
+# branch and not yet on main.
 WF=.github/workflows/gpu-tests.yaml
-for suite in full eval; do
-    if grep -q "options:.*\b$suite\b" "$WF" 2>/dev/null; then
-        ok "suite '$suite' is in the workflow's options list"
+DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
+if [ -z "$DEFAULT_BRANCH" ]; then
+    bad "cannot determine the default branch -- cannot verify suite availability"
+else
+    WF_REMOTE=$(git fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null &&
+        git show "origin/$DEFAULT_BRANCH:$WF" 2>/dev/null)
+    if [ -z "$WF_REMOTE" ]; then
+        bad "$WF is missing on origin/$DEFAULT_BRANCH -- no GPU workflow to dispatch"
     else
-        bad "suite '$suite' is not an option in $WF -- dispatch would be rejected"
+        for suite in full eval; do
+            if printf '%s' "$WF_REMOTE" | grep -q "options:.*\b$suite\b"; then
+                ok "suite '$suite' is dispatchable (present on origin/$DEFAULT_BRANCH)"
+            else
+                bad "suite '$suite' is not in $WF on origin/$DEFAULT_BRANCH -- a dispatch would be rejected with 'unknown suite'"
+                note "workflow_dispatch runs the DEFAULT BRANCH's workflow file; merge the suite to $DEFAULT_BRANCH first"
+            fi
+        done
     fi
-done
+fi
+
+# A dispatchable eval suite is still useless without recorded baselines. Tier-1
+# compares this commit's adapter output against committed numbers; with nothing
+# to compare to, every eval leg fails (or worse, vacuously passes) and the PR
+# body's drift column has no source. README.md is the directory's own
+# documentation, not a baseline, so it does not count.
+BASELINES=tests/eval/baselines
+if [ ! -d "$BASELINES" ]; then
+    bad "$BASELINES does not exist -- the eval suite has nothing to compare against"
+else
+    n=$(find "$BASELINES" -type f ! -name 'README.md' | wc -l | tr -d ' ')
+    if [ "$n" -gt 0 ]; then
+        ok "$n tier-1 baseline file(s) recorded"
+    else
+        bad "no tier-1 baselines in $BASELINES (only README.md) -- eval legs cannot be green"
+        note "record them once on a GPU pod with adapter checkpoints staged, and commit them"
+    fi
+fi
 
 echo
 if [ "$FAIL" -ne 0 ]; then
