@@ -1203,6 +1203,29 @@ def _adapters_line(fingerprints: dict, spec: Spec) -> str:
     return " · ".join(parts)
 
 
+def _classifiers_line(row: dict) -> str:
+    """Whether the row's composed checkpoints held classifier slots (a
+    classifier head in an adapter slot), over every run that composed for it:
+    its own and its ``--only`` updates (a re-score composes nothing).
+
+    A run from before they were recorded composed from the same manifests,
+    which never ask for one.
+    """
+    runs = [row["run"], *(u for u in row.get("updates", []) if u.get("only"))]
+    most: dict[str, int] = {}
+    for run in runs:
+        for name, n in run.get("classifier_slots", {}).items():
+            most[name] = max(n, most.get(name, 0))
+    held = [f"{n} in {name}" for name, n in sorted(most.items()) if n]
+    if held:
+        return f"Classifier slots: {', '.join(held)}."
+    unrecorded = sum("classifier_slots" not in run for run in runs)
+    if not unrecorded:
+        return "Classifier slots: none; every composed checkpoint holds adapters only."
+    runs_text = "the run predates" if unrecorded == len(runs) else "some runs predate"
+    return f"Classifier slots: none requested; {runs_text} recording them."
+
+
 def _throughput_settings(run: dict) -> str:
     t = run.get("throughput")
     if not t:
@@ -1276,6 +1299,7 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
             ]
         ),
     ]
+    out.append("<h4>Adapters</h4>")
     fingerprints = _adapter_fingerprints(row, reference)
     if fingerprints:
         head = "".join(f"<th>{_esc(t.label)}</th>" for t in spec.technologies)
@@ -1295,13 +1319,13 @@ def _details(row: dict, reference: dict | None, gap: str | None, spec: Spec) -> 
             {f["staged_at"][:10] for f in fingerprints.values() if f.get("staged_at")}
         )
         out += [
-            "<h4>Adapters</h4>",
             f"<table><tr><th></th>{head}</tr>{''.join(body)}</table>",
             "<p>Each checkpoint's rank and the first 8 characters of its weights'"
             " SHA-256 checksum, which change if the checkpoint is replaced"
             + (f". Staged {_esc(', '.join(staged))}." if staged else ".")
             + "</p>",
         ]
+    out.append(f"<p>{_esc(_classifiers_line(row))}</p>")
     out.append(f"<h4>{_esc(REFERENCE_LABEL)} and {_esc(BASE_LABEL)}</h4>")
     if gap:
         out.append(f"<p>{_esc(gap)}</p>")

@@ -1068,6 +1068,37 @@ def test_render_run_details():
     assert 'title="vllm 0.19.1, torch 2.10.0, transformers 5.8.1; NVIDIA' in page
 
 
+def test_run_details_say_whether_the_checkpoints_held_classifier_slots():
+    def details(row: dict) -> str:
+        page = publish.render(page_data(row, reference=reference_for()), SPEC)
+        return page.split('<div class="details" hidden>')[1].split("</div>")[0]
+
+    # A run from before the record: the harness asks for none.
+    assert "Classifier slots: none requested; the run predates" in details(
+        results_for()
+    )
+    clean = {"single_stream": 0, "dual_stream": 0, "throughput_lora": 0}
+    row = results_for(classifier_slots=clean)
+    # A re-score composes nothing.
+    row["updates"] = [{"rescored": ["answerability/lora"], "finished": "x"}]
+    assert "Classifier slots: none; every composed checkpoint holds adapters" in (
+        details(row)
+    )
+    # A later --only run of an old row: its other cells' composes are unknown.
+    old = results_for()
+    old["updates"] = [{"only": ["answerability"], "classifier_slots": clean}]
+    assert "Classifier slots: none requested; some runs predate" in details(old)
+    # One the composer made unasked is named, with its checkpoint, even when a
+    # later --only run of the row composed one of the same name without.
+    row = results_for(classifier_slots={**clean, "single_stream": 2})
+    row["updates"] = [{"only": ["answerability"], "classifier_slots": clean}]
+    assert "Classifier slots: 2 in single_stream." in details(row)
+    row["updates"][0]["classifier_slots"] = {"throughput_alora": 1}
+    assert "Classifier slots: 2 in single_stream, 1 in throughput_alora." in (
+        details(row)
+    )
+
+
 def test_throughput_block_and_speedup():
     row = results_for()
     row["throughput"]["lora"]["native"] = {"error": "refused: adapter 0 not loaded"}
@@ -2318,6 +2349,32 @@ def test_run_times_each_technology_against_stock_vllm(tmp_path, monkeypatch):
     assert (
         run["driver"] == switch_bench.DRIVER and run["cudagraph_capture_size"] == 1024
     )
+
+
+def test_run_records_each_checkpoints_classifier_slots(tmp_path, monkeypatch):
+    composes, _, _ = bench_with_lora_and_alora(tmp_path, monkeypatch)
+    fake = run_benchmark.compose
+
+    def compose_with_config(python, repo_dir, manifest, path, base, out, flags):
+        out.mkdir(parents=True, exist_ok=True)
+        # The aLoRA one with a classifier slot; a composer from before them
+        # writes no adapter_kinds.
+        kinds = ["lora", "classifier"] if "alora" in out.name else None
+        (out / "config.json").write_text(
+            json.dumps({"adapter_kinds": kinds} if kinds else {})
+        )
+        return fake(python, repo_dir, manifest, path, base, out, flags)
+
+    monkeypatch.setattr(run_benchmark, "compose", compose_with_config)
+    assert run_benchmark.main(bench_argv(tmp_path)) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    # Every checkpoint it composed, and only those.
+    assert results["run"]["classifier_slots"] == {
+        "single_stream": 0,
+        "throughput_alora": 1,
+        "throughput_lora": 0,
+    }
+    assert {c[0] for c in composes} == set(results["run"]["classifier_slots"])
 
 
 def test_only_throughput_runs_no_accuracy(tmp_path, monkeypatch):

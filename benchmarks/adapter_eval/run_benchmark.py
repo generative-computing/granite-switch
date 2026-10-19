@@ -26,8 +26,9 @@ Steps:
 3. Generate greedily for every cell, one subprocess per composed checkpoint.
 4. Score every cell and print the results block (``common.py``) that
    ``publish.py`` reads from the pod log. It also records the library
-   versions and each staged checkpoint's fingerprint
-   (``staged.fingerprint``), for the page's details box.
+   versions, each staged checkpoint's fingerprint (``staged.fingerprint``)
+   and each composed checkpoint's classifier slots, for the page's details
+   box.
 
 Everything the run produced (manifests, predictions, full score reports) is
 kept under ``--work-dir``.
@@ -181,6 +182,22 @@ def compose_manifest(
         }
         for c in cells
     }
+
+
+def classifier_slots(model_root: Path) -> dict[str, int]:
+    """Per composed checkpoint under ``model_root`` (a pod's is new each run),
+    its classifier slots, for the page's details box: adapter slots that hold
+    a classifier head instead of an adapter (``adapter_kinds`` in its config;
+    a composer without them writes none). The run's manifests never ask for
+    one."""
+    found = {}
+    for config in sorted(model_root.glob("*/config.json")):
+        try:
+            kinds = json.loads(config.read_text()).get("adapter_kinds") or []
+        except (OSError, ValueError):
+            continue
+        found[config.parent.name] = kinds.count("classifier")
+    return found
 
 
 def generation_prompt_anchor(
@@ -1061,6 +1078,7 @@ def main(argv: list[str] | None = None) -> int:
             (args.switching_cache or work / "synthetic").resolve(), sr_anchor,
         )  # fmt: skip
 
+    run_meta["classifier_slots"] = classifier_slots(model_root)
     results = {
         "model": spec.model_id,
         "bench_version": spec.bench_version,

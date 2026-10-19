@@ -85,8 +85,13 @@ HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
   Quality is hidden, and the page keeps at least one column on show.
 - **The `i` next to a commit** opens its run details: the commit, the library
   versions (vLLM, torch, transformers), the GPU, each adapter checkpoint (ranks
-  and the start of its weights checksum, never its storage path), and the
-  reference run.
+  and the start of its weights checksum, never its storage path), whether the
+  composed checkpoints held classifier slots, and the reference run.
+  - A classifier slot holds a classifier head instead of an adapter. The
+    benchmark's manifests never ask for one, so the box says "none", or names
+    each checkpoint the composer gave one anyway.
+  - The run reads this from each composed checkpoint's config
+    (`adapter_kinds`). A row from before that says "none requested".
 - A diagram at the top shows the pipeline: pick adapters, compose, evaluate,
   next to the reference path.
 
