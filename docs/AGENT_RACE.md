@@ -31,7 +31,7 @@ The page holds five races:
 | the switching block's | 64 | 8 | 512 | (the defaults) |
 | the switching block's | 64 | 16 | 1,024 | `--concurrency 16 --decode 1024` |
 | the switching block's | 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--concurrency 16 --decode-mix 128,256,512,1024` |
-| the paper's ReAct agents | 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--agents-kind react --concurrency 16 --decode-mix 128,256,512,1024` |
+| the paper's ReAct agents, classic5 | 64 | 16 | 128, 256, 512 or 1,024, 16 agents each | `--agents-kind react --cycles classic5 --concurrency 16 --decode-mix 128,256,512,1024` |
 
 A mixed workload runs the generator once per length, for an equal share of the
 agents with a seed of its own, then shuffles the agents together with a fixed
@@ -50,14 +50,17 @@ steps, at the generator's lengths and switch rates:
 | observe | 35 | 80% | 1 + Poisson(0.5) segments |
 | reflect | 90 | 70% | 1 + Poisson(1.5) segments |
 
-over its three cycles (classic5, toolheavy10, shortadapters), choosing adapters
-novelty-first over the 64. Three settings are the race's, so its agents are
-comparable with the other races': 128 to 1,024 tokens (the paper's agents
-generate 10,000), the switching workload's prompts (256 to 16,384 tokens), and a
-round trip within one datacenter (the paper draws a mix of distances). The
-generator closes every tenth of an agent's tokens on a step boundary, for the
-paper's stopwatch; here an agent is one chunk, closed by its last step, and
-every other step keeps its drawn length. They switch about every 35 tokens.
+round its classic5 cycle (think, prepare_call, act, observe, reflect, and
+around again), choosing adapters novelty-first over the 64. The generator has
+two more cycles (toolheavy10, shortadapters), which `--cycles` can add; the page's
+race runs classic5 alone, for one clear loop. Three settings are the race's, so
+its agents are comparable with the other races': 128 to 1,024 tokens (the
+paper's agents generate 10,000), the switching workload's prompts (256 to 16,384
+tokens), and a round trip within one datacenter (the paper draws a mix of
+distances). The generator closes every tenth of an agent's tokens on a step
+boundary, for the paper's stopwatch; here an agent is one chunk, closed by its
+last step, and every other step keeps its drawn length. They switch about every
+41 tokens.
 
 **The lanes:**
 
@@ -82,13 +85,23 @@ replays them side by side, each from its own start.
 
 ## What the page shows
 
-- **The experiment**, in a few lines, and a diagram of the race's agents: the
-  switching block's (its prompt, 32-token generations switching adapter at each, a
-  tool call between) or, for the ReAct race, the agent as a state machine
-  (LangGraph-style: its steps as nodes, the transitions its cycles take) above a
-  ReAct agent's steps at their own lengths; then what each lane does at a switch,
-  and what an adapter switching (rtt) takes. Hovering a step or a metric's label
-  explains it.
+- **At the top, only the demo:** a sentence on what races, the outcome (e.g.
+  "granite-switch SR finished 3.1× sooner"), and the race, which opens on the
+  ReAct race. The rest is behind buttons:
+  - **How it works:** the experiment in a few lines, and a diagram of the race's
+    agents: the switching block's (its prompt, 32-token generations switching
+    adapter at each, a tool call between) or, for the ReAct race, the agent as a
+    state machine (LangGraph-style: its steps as nodes, its cycle as the edges)
+    above a ReAct agent's steps at their own lengths; then what each lane does at
+    a switch, and what an adapter switching (rtt) takes.
+  - **The models:** each lane's setup: the base model (Granite 4.1 3B, 40
+    layers), the 64 adapters, their rank (32, alpha 64) and the modules they
+    adapt (SR: q, o, gate, up and down, with a cross-stream shunt per layer and no
+    k or v; stock vLLM: q, k, v, o, gate, up and down).
+  - **Metrics:** the panels described below.
+  - **More races:** the switching block's four races.
+
+  Hovering a step or a metric's label explains it.
 - **A race per configuration**, chosen above the controls, each a recorded run.
   The link keeps the choice (e.g. `#64-16-mix`).
 - **A bar per agent**, filled by the tokens it has generated, colored by what it
@@ -114,7 +127,7 @@ replays them side by side, each from its own start.
   - **Context hit**: the share of the context sent again that the prefix cache
     already held. On the recorded races, 99.8% or more for SR (only the end of
     each context, short of a full 16-token cache block, is recomputed) and
-    between 3.6% and 16.2% for stock vLLM LoRA, whose cache is keyed on the
+    between 3.6% and 16.6% for stock vLLM LoRA, whose cache is keyed on the
     adapter (highest for the ReAct agents, whose steps more often stay on the
     adapter or the base model they ran before).
 - **The result**, once both lanes are done: each lane's time and the ratio.
