@@ -64,3 +64,6 @@ docs/KV_CACHE_OVERHEAD_REMOVAL.md
 docs/KV_CACHE_OVERHEAD_REMOVAL.html
 docs/KV_CACHE_OVERHEAD_REMOVAL*.html
 docs/UNIFIED_SWITCH_FUSED_CANONICAL.md
+# Skip audit: a point-in-time snapshot of which tests were skipped and why. It
+# goes stale the moment a gate changes, so it stays a local working note.
+docs/SKIPPED_TESTS.html
