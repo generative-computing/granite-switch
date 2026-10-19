@@ -30,10 +30,10 @@ for `<reason it is not worth it>`. The `[vllm]` extra's lower bound is raised to
 `>=0.NN.0` to match.
 
 **Action for maintainers:** anything pinning granite-switch against vLLM 0.XX must
-move. The `vllmXX` dependency *group* is intentionally kept (a group named by
-main's GPU matrix cannot be deleted without killing that leg before pytest starts),
-so `uv sync --group vllmXX` still works — it is simply no longer a supported
-configuration.
+move. The `vllmXX` dependency *group* is intentionally kept — a group `dev-latest`
+could be pointed at is a GPU leg, and deleting one kills that leg before pytest
+starts — so `uv sync --group vllmXX` still works. It is simply no longer a
+supported configuration.
 
 ## Dependency ceilings touched
 
@@ -86,18 +86,31 @@ to prevent.
 covers every column. They are shown per column so the table has no silent holes,
 not because they ran four times.
 
-Run links: <one per ✅, or a single link per matrix run with the leg names>.
+Run links: <one per ✅ — give the sha and leg label with each, since the per-line
+runs are different commits>.
 
 GPU legs were dispatched with `no_cache=true` — the test pod pins
 `vllm/vllm-openai:latest`, so a cached pass would answer "what did this commit do"
 rather than "is this still true today".
 
-**Matrix note.** This PR's GPU matrix carried a leg per added line so each column
-above has its own evidence. The final commit narrows the committed matrix back to
-the two ends of the new range (floor + new ceiling), which is where breakage
-actually lands: an API deleted upstream fails at the ceiling, and an API that does
-not exist yet fails at the floor. A middle line is bracketed by two tested lines.
-The middle lines' evidence is the run linked above, not a future CI run.
+**How each column got its own evidence.** The GPU legs are not written in
+`gpu-tests.yaml`: `/opt/gsw/derive_legs.py` (runner image) reads the *tested
+commit's* `pyproject.toml` and emits at most two — one from `dev` (the floor) and
+one from `dev-latest`. So rather than widening a matrix, which this repo cannot do,
+the PR walks `dev-latest` up one line per commit and dispatches at each sha:
+
+| commit | `dev-latest` | legs produced |
+|---|---|---|
+| `<sha of the plumbing commit>` | 0.ZZ-1 | floor + 0.ZZ-1 |
+| `<sha of the --point-latest commit>` | 0.ZZ | floor + 0.ZZ |
+
+Workflow concurrency is keyed on the sha, so those runs are parallel rather than
+sequential, and the floor is re-tested by every one of them. The final commit
+leaves `dev-latest` on the new ceiling, which is the right steady state: breakage
+lands at the ends of the range — an API deleted upstream fails at the ceiling, one
+that does not exist yet fails at the floor — and a middle line is bracketed by two
+tested lines. CI re-checks the ends on every future run; the table above is what
+proves the middle.
 
 ## Scored accuracy evals
 
