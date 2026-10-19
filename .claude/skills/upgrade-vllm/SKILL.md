@@ -9,6 +9,29 @@ Runs end to end without supervision. The human's only job is reviewing and mergi
 the PR. Read `REFERENCE.md` (next to this file) before touching anything — it holds
 the exact version surface and the traps that have already cost this repo a red CI.
 
+## What invoking this skill must deliver
+
+This is the contract. Nothing here is optional, and **none of it asks the user for
+permission** — invoking the skill is the authorization. Decide, act, and report at
+the end. The four exceptions are enumerated in operating rule 9.
+
+1. **Compare and decide.** Read the newest released vLLM lines and this repo's
+   supported ceiling. If released > supported, every line in the gap is a target.
+   If the gap is empty, say so and stop — no empty PR.
+2. **One PR covering all new lines.** Not one PR per line. The repo's claim is a
+   contiguous range, so the range moves in one reviewable change.
+3. **Port the code** so every new line works, capability-gated (rule 1).
+4. **Verify every added line independently** — CPU, GPU and the regression/eval
+   tiers — rather than testing the newest and inferring the rest. "0.31 and 0.32
+   were added" means 0.31 and 0.32 each have their own green evidence.
+5. **A PR body with per-version proof tables.** One column per added line, a ✅
+   per gate that actually ran and passed on that line, and a separate table giving
+   the regression/eval numbers **against the existing baseline** for each added
+   line. A gate that did not run is `—`, never ✅.
+
+The point of 4 and 5 together: a reviewer must be able to see, per version, that
+each gate ran — not take "the suite is green" on faith.
+
 ## Operating rules
 
 These are not suggestions. Each one is a failure this repo has actually hit.
@@ -35,6 +58,20 @@ These are not suggestions. Each one is a failure this repo has actually hit.
    this commit do" when the question is "is this still true today".
 8. **Open the PR as a draft** and only mark it ready when every gate is green.
    A human seeing a ready PR assumes the gates passed.
+9. **Do not ask the user to approve the routine steps.** Branching, editing
+   `src/`, relocking, widening the matrix, committing, pushing, dispatching GPU
+   runs, submitting the eval jobs, opening the PR and marking it ready are all
+   pre-authorized by invoking this skill. Narrate what you are doing; do not stop
+   for a yes. There are exactly four reasons to stop and ask:
+   - **preflight fails** (Phase 0) — the run cannot complete unattended anyway;
+   - **a gate is still red after 5 fix attempts** (Phase 8) — report the failure
+     with the log, do not thrash;
+   - **a scored eval returns DRIFT** — accepting a quality change is the user's
+     decision, and re-recording a baseline to make it pass destroys the gate;
+   - **the floor must rise** (Phase 4), i.e. the upgrade would *drop* a supported
+     line. Widening the range is routine; narrowing it is not.
+
+   And one thing never to do: **merge.** The hand-off is a ready PR.
 
 ## Procedure
 
@@ -84,7 +121,7 @@ git checkout -b feature/vllm-<floor>-to-<new-ceiling>
 For each new line, diff upstream over only the API surface this repo touches:
 
 ```bash
-.claude/skills/upgrade-vllm/scripts/upstream_api_diff.sh v<old-ceiling>.0 v<new>.0
+.claude/skills/upgrade-vllm/scripts/upstream_api_diff.py v<old-ceiling>.0 v<new>.0
 ```
 
 It clones/updates a cached vLLM checkout and reports, per symbol that
@@ -118,8 +155,14 @@ Apply the fixes with capability gating. Two things to decide explicitly and reco
 ### Phase 5 — plumbing
 
 ```bash
-uv run .claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --add 0.31 0.32 --ceiling 0.32
+# every line in the gap, in one invocation; add --floor 0.NN only if Phase 4
+# concluded the floor must rise
+.claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --add 0.31 0.32
+.claude/skills/upgrade-vllm/scripts/plumb_pyproject.py --check   # must print "complete"
 ```
+
+The ceiling is **derived** from the highest `--add`, so there is no `--ceiling`
+flag. The only other flag is `--floor`, which *drops* support below it.
 
 This edits `pyproject.toml` to add each new line's `vllmNN` group, its `dev-vllmNN`
 group, widen the `vllm` extra's upper bound, and **regenerate the entire
@@ -139,11 +182,30 @@ which the `uv-lock` pre-commit hook then rewrites and fails on. Take the version
 from `.pre-commit-config.yaml`'s `uv-pre-commit` rev rather than this line, so a
 hook bump cannot leave the skill relocking with the wrong one.
 
-Edit `.github/workflows/gpu-tests.yaml`'s matrix so the two legs are the **ends of
-the new supported range** (floor + new ceiling), matching the rationale already
-written in `pyproject.toml`'s `[dependency-groups]` comment. Keep the old ceiling's
-group declared even when it stops being a leg (rule 2). Update that comment and the
-`vllm` extra's comment to name the new range — a stale comment claiming the old
+Then the GPU matrix in `.github/workflows/gpu-tests.yaml`. **Two distinct matrices
+are involved and conflating them is how a version ships untested:**
+
+- **The in-PR matrix — one leg per added line, plus the floor.** Every line this
+  PR adds needs its own green evidence (contract item 4), and a leg is the only
+  thing that produces it. Adding 0.31 and 0.32 means four legs this run: `vllm26`
+  (floor, `dep_group: dev`), `vllm30` (old ceiling), `vllm31`, `vllm32`. They
+  cannot share a venv — `[tool.uv] conflicts` forbids it — so each is its own pod,
+  and `fail-fast: false` keeps one red leg from hiding the others.
+- **The matrix left behind on merge — back to the two ends** (floor + new
+  ceiling), matching the rationale already written in `pyproject.toml`'s
+  `[dependency-groups]` comment. Per-run cost is why: a middle line is bracketed
+  by two tested lines, so it adds install time without adding a failure mode the
+  ends would miss.
+
+So the sequence is: widen the matrix to cover every added line, dispatch, collect
+the per-line results that become the PR tables, then narrow it back to the two ends
+in a **final commit** whose message records which lines were verified out of band
+and in which run. That last commit is what makes the existing `[dependency-groups]`
+comment true again — it already claims the middle lines were "verified together out
+of band", and this is the step that earns the claim.
+
+Do **not** delete a group when its leg goes away (rule 2). Update that comment and
+the `vllm` extra's comment to name the new range — a stale comment claiming the old
 range is a review failure in this repo.
 
 Also update the version range wherever it is stated as prose: `README.md`,
@@ -178,13 +240,21 @@ Loop, with a budget of **5 fix attempts per leg**. Exceeding it means stop and
 report rather than thrash.
 
 ```bash
-# one dispatch per suite; run the version legs in parallel (the matrix does that)
+# one dispatch per suite; the widened matrix runs every version leg in parallel
 .claude/skills/upgrade-vllm/scripts/gpu_dispatch.sh --ref <branch> --suite full --wait
 .claude/skills/upgrade-vllm/scripts/gpu_dispatch.sh --ref <branch> --suite eval --wait
 ```
 
 The script dispatches with `no_cache=true`, polls, and on failure downloads the
 `gpu-tests-log-<leg>-<sha>` artifact and prints the failing tests.
+
+**Record the per-leg conclusion and run URL for every leg as they land** — that is
+the raw material for the PR's per-version table (contract item 5), and it is not
+reconstructible later once a run ages out. Write them into the state file as you
+go. `full` covers the five GPU suites including `tests/vllm/`, `tests/hf/`,
+`tests/composer/` and `tests/integration/` — this repo's regression coverage lives
+in those, not in a `tests/regression/` directory (it does not exist; see
+REFERENCE.md §5's stale-things list).
 
 Two result-reading rules:
 
@@ -203,14 +273,30 @@ with a comment naming the version and the error — is the fix.
 
 After each fix: amend nothing, add a **new** commit, push, re-dispatch.
 
-Once the two version legs and the drift eval are green, launch the **scored**
-evals (tier 2 — see below) against the PR head sha. They take hours, so start them
-as soon as the cheap gates pass rather than at the end:
+Once a line's leg and drift eval are green, launch the **scored** evals (tier 2 —
+see below) for that line against the PR head sha. They take hours, so start them as
+soon as the cheap gates pass rather than at the end.
+
+**Once per added line, not once per PR.** Each line gets its own four jobs, which
+is what fills that line's column in the regression table:
 
 ```bash
-.claude/skills/upgrade-vllm/scripts/render_eval_jobs.py --vllm <new-ceiling> --sha $(git rev-parse HEAD)
-kubectl apply -f scratch/eval-jobs/
+SHA="$(git rev-parse HEAD)"
+for LINE in 0.31 0.32; do
+  # --out PER LINE. Without it every line renders into the same directory and
+  # `kubectl apply -f <dir>` re-submits the previous line's jobs as well.
+  OUT="scratch/eval-jobs/v${LINE//./}"
+  .claude/skills/upgrade-vllm/scripts/render_eval_jobs.py \
+      --vllm "$LINE" --sha "$SHA" --out "$OUT"
+  kubectl apply -f "$OUT/"
+done
+kubectl -n security get appwrappers | grep itzikv-eval
 ```
+
+Job names and result paths both carry the line (`itzikv-eval-v031-…`,
+`…-v032-…`), so the two sets coexist in the namespace and neither overwrites the
+other's results under `paths.results`. Collect each job's printed accuracy, delta
+and verdict — four numbers per line, and that is the regression table.
 
 ### Phase 9 — PR body and hand-off
 
@@ -225,14 +311,22 @@ Generate the body from `pr_body_template.md` in this directory. It must contain:
 - One paragraph per Phase 3 finding: the upstream change, how it manifested here,
   and how it is gated.
 - Any dependency ceiling raised (`transformers`, `torch`).
-- The gate results table: CPU 3.11/3.12, each GPU leg, each of the four drift
-  evals, with run links.
-- The scored-accuracy table: for each of the four `evals.yaml` configs, the bar,
-  the measured accuracy, the delta and the verdict.
+- **The per-version coverage table — one column per added line.** Rows: pre-commit,
+  CPU 3.11, CPU 3.12, each GPU suite, each of the four drift evals. A `✅` only
+  where that gate actually ran and passed **on that line**; `—` where it does not
+  apply (CPU rows do not vary by vLLM line — say so in a footnote rather than
+  ticking them per column). Never ✅ a cell by inference from a neighbouring
+  column: that is the exact failure this table exists to prevent.
+- **The regression table — measured vs. existing baseline, per added line.** For
+  each of the four `evals.yaml` configs: the bar, then that line's accuracy, delta
+  and verdict. Four configs × N added lines. This is what answers "did the model
+  get worse on 0.32 specifically".
+- Run links for every ✅, so a reviewer can open the evidence.
 - A note that the change was prepared with AI assistance (required by the
   contribution guidance; must **not** be a commit trailer).
 
-Then `gh pr ready <n>` and report the PR URL. **Do not merge.**
+Then `gh pr ready <n>` and report the PR URL. **Do not merge.** Marking it ready is
+the hand-off; the human reviews and merges.
 
 ## Evaluation: two tiers, both required
 

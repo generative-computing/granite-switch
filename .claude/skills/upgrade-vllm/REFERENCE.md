@@ -42,7 +42,7 @@ and uv derives that transitively.
 
 ## 3. The upstream API surface this repo actually touches
 
-Where breakage has landed before, and therefore what `upstream_api_diff.sh`
+Where breakage has landed before, and therefore what `upstream_api_diff.py`
 watches most closely:
 
 - **Multimodal processor hooks** (`src/granite_switch/vllm/audio/processor.py`).
@@ -121,6 +121,30 @@ nothing else. `#` is the one forbidden character in `TEST_PATHS` (it is the `sed
 delimiter in the job template). A bare `-m <marker>` **replaces** `pyproject.toml`'s
 `addopts = ["-m", "not deep"]` rather than adding to it — always write
 `and not deep`.
+
+### Adding a version leg
+
+`matrix.include` entries are `{label, dep_group}`. The label is the line
+(`vllm31`); `dep_group` is its **dev** flavour, because the bare `vllmNN` groups
+omit pytest. The floor's dev flavour is plain `dev`, not `dev-vllm26` — that
+asymmetry is real, and `plumb_pyproject.py` encodes it:
+
+```yaml
+        include:
+          - label: vllm26
+            dep_group: dev            # the FLOOR's dev flavour is bare `dev`
+          - label: vllm31
+            dep_group: dev-vllm31
+```
+
+A leg's group must exist in `pyproject.toml` **on the dispatched ref**, or
+`uv sync --group` fails before pytest starts and the log comes back under 1.1 KB.
+Legs cannot share a venv (the `conflicts` table forbids it), so each gets its own
+pod; `fail-fast: false` is what stops one red line from hiding the others.
+
+During an upgrade the matrix carries **one leg per line being added**, so every
+added version has its own evidence rather than inheriting the newest line's result.
+It returns to the two ends of the range afterwards — see SKILL.md Phase 5.
 
 ### Known-stale things not to trust
 

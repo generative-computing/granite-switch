@@ -147,11 +147,15 @@ echo "HEAD: $(git log --oneline -1)"
 # site-packages is read-only for this non-root container.
 # -------------------------------------------------------- #
 echo ""
-echo "=== STEP 2: install .[${{DEP_EXTRA}}] ==="
+echo "=== STEP 2: install .[${{DEP_EXTRA}}] with vllm pinned to ${{VLLM_EXPECT}} ==="
 python3 -m venv .venv --system-site-packages
 . .venv/bin/activate
 pip install --upgrade pip
-pip install -e ".[${{DEP_EXTRA}}]" pandas numpy scikit-learn > ${{LOG_DIR}}/02-install.log 2>&1
+# The `vllm` extra is a RANGE (it claims the whole supported span), so installing
+# the extra alone gets the newest line in that range -- not the line this job is
+# named for. Naming `vllm==${{VLLM_EXPECT}}.*` in the SAME pip invocation makes the
+# resolver satisfy both at once; the line gate below then only has to confirm it.
+pip install -e ".[${{DEP_EXTRA}}]" "vllm==${{VLLM_EXPECT}}.*" pandas numpy scikit-learn > ${{LOG_DIR}}/02-install.log 2>&1
 RC=$?
 tail -5 ${{LOG_DIR}}/02-install.log
 if [ ${{RC}} -ne 0 ]; then echo "INSTALL FAILED"; sleep 600; exit 1; fi

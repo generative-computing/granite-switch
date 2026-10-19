@@ -58,28 +58,46 @@ comparison, so it states the actual requirement and survives the next rename.
 **Test:** <which test covers it>. <If the failure mode was silent, say that the
 test asserts the effect rather than the call.>
 
-## Gate results
+## Per-version coverage
 
-| gate | result | run |
-|---|---|---|
-| Pre-commit | | |
-| CPU tests (3.11) | | |
-| CPU tests (3.12) | | |
-| GPU `vllmXX` (floor) | | |
-| GPU `vllmZZ` (new ceiling) | | |
-| drift eval `granite42_vllm` | | |
-| drift eval `granite5_vllm` | | |
-| drift eval `sr_vllm` | | |
-| drift eval `granite42_hf` | | |
+One column per vLLM line this PR adds, plus the floor and previous ceiling as
+controls. **✅ means that gate ran and passed on that line**; `—` means it does not
+apply. No cell is ticked by inference from its neighbours.
+
+<!--
+Add or remove version columns to match --add. Fill ONLY from an actual run; an
+unticked cell is honest and a wrongly ticked one is the failure this table exists
+to prevent.
+-->
+
+| gate | 0.XX (floor) | 0.YY (prev ceiling) | **0.ZZ-1 (new)** | **0.ZZ (new)** |
+|---|---|---|---|---|
+| Pre-commit | ✅¹ | ✅¹ | ✅¹ | ✅¹ |
+| CPU tests (3.11) | ✅¹ | ✅¹ | ✅¹ | ✅¹ |
+| CPU tests (3.12) | ✅¹ | ✅¹ | ✅¹ | ✅¹ |
+| GPU `full` (unit, composer, hf, vllm, integration) | | | | |
+| GPU `audio` | | | | |
+| Drift eval `granite42_vllm` | | | | |
+| Drift eval `granite5_vllm` | | | | |
+| Drift eval `sr_vllm` | | | | |
+| Drift eval `granite42_hf` | | | | |
+
+¹ The CPU jobs install the `dev` group and do not vary by vLLM line — one run
+covers every column. They are shown per column so the table has no silent holes,
+not because they ran four times.
+
+Run links: <one per ✅, or a single link per matrix run with the leg names>.
 
 GPU legs were dispatched with `no_cache=true` — the test pod pins
 `vllm/vllm-openai:latest`, so a cached pass would answer "what did this commit do"
 rather than "is this still true today".
 
-Lines in the middle of the range (0.XX+1 … 0.ZZ-1) are not per-run CI legs. They
-were verified out of band for this PR: <result>. The two legs are the ends of the
-range, where breakage actually lands — a deleted API shows up at the ceiling and an
-API that does not exist yet shows up at the floor.
+**Matrix note.** This PR's GPU matrix carried a leg per added line so each column
+above has its own evidence. The final commit narrows the committed matrix back to
+the two ends of the new range (floor + new ceiling), which is where breakage
+actually lands: an API deleted upstream fails at the ceiling, and an API that does
+not exist yet fails at the floor. A middle line is bracketed by two tested lines.
+The middle lines' evidence is the run linked above, not a future CI run.
 
 ## Scored accuracy evals
 
@@ -88,12 +106,15 @@ API that does not exist yet shows up at the floor.
 above cannot: *did the model get worse.* A model that answers confidently and
 wrongly has a perfectly normal top-k distribution.
 
-| config | backend | bar | accuracy | delta | verdict |
-|---|---|---|---|---|---|
-| `granite42_dense` | vLLM | 0.9052 | | | |
-| `granite5_lora` | vLLM | 0.9196 | | | |
-| `granite5_sr` | vLLM | 0.8948 | | | |
-| `granite5_sr_hf` | HF | 0.8948 | | | |
+Reported **per added line**, against the same unchanged bars — so a reviewer can
+see that 0.ZZ specifically did not regress, rather than that "the evals passed".
+
+| config | backend | bar | 0.ZZ-1 accuracy | Δ | 0.ZZ accuracy | Δ | verdict |
+|---|---|---|---|---|---|---|---|
+| `granite42_dense` | vLLM | 0.9052 | | | | | |
+| `granite5_lora` | vLLM | 0.9196 | | | | | |
+| `granite5_sr` | vLLM | 0.8948 | | | | | |
+| `granite5_sr_hf` | HF | 0.8948 | | | | | |
 
 Tolerance is ±0.006 for the vLLM configs, which absorbs the HF→vLLM gap for bars
 measured on the HF path, and ±0.002 for `granite5_sr_hf`, whose bar *is* the HF
