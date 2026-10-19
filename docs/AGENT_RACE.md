@@ -110,9 +110,11 @@ replays them side by side, each from its own start.
     hold; it is the same in both lanes (about 67k tokens for 16 agents, 267k
     for 64) and is left out.
   - **Context hit**: the share of the context sent again that the prefix cache
-    already held. On the recorded races, 99.9% for SR (only the end of each
-    context, short of a full 16-token cache block, is recomputed) and between
-    3.6% and 10.2% for stock vLLM LoRA, whose cache is keyed on the adapter.
+    already held. On the recorded races, 99.8% or more for SR (only the end of
+    each context, short of a full 16-token cache block, is recomputed) and
+    between 3.6% and 16.2% for stock vLLM LoRA, whose cache is keyed on the
+    adapter (highest for the ReAct agents, whose steps more often stay on the
+    adapter or the base model they ran before).
 - **The result**, once both lanes are done: each lane's time and the ratio.
 
 ## Running it
