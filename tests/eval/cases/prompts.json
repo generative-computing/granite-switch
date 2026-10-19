@@ -1,0 +1,20 @@
+{
+  "_comment": [
+    "Committed and FIXED. The baseline records a distribution per prompt per",
+    "position, so changing this file invalidates every baseline -- the eval",
+    "detects that and fails rather than comparing misaligned positions.",
+    "",
+    "Chosen to be adapter-agnostic: the same four prompts are used for every",
+    "config, including SR and the HF backend, so one config's result is",
+    "comparable to another's. They are short because cost is positions x",
+    "prompts x configs, and deliberately plain -- the gate measures whether the",
+    "adapter still behaves as it did on the signed-off vLLM line, not whether",
+    "any particular task is answered well."
+  ],
+  "prompts": [
+    "Summarize the following in one sentence: The committee met on Tuesday and voted to postpone the budget review until the next quarter.",
+    "Is the following statement answerable from the given context? Context: The store opens at 9am on weekdays. Question: What time does the store close?",
+    "Rewrite this query to be more specific: tell me about the policy",
+    "List three risks of deploying a language model without output filtering."
+  ]
+}

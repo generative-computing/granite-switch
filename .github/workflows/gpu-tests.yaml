@@ -60,11 +60,11 @@ on:
       # family is added HERE and nowhere else -- this entry plus its arm in the
       # Resolve test scope step below.
       suite:
-        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs)."
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), eval (the four adapter evals vs committed baselines)."
         required: false
         default: full
         type: choice
-        options: [full, short, dev, audio, multi]
+        options: [full, short, dev, audio, multi, eval]
       # RESULT CACHE OPT-OUT. Default off, i.e. cache on: the expensive thing here is
       # a GPU run, and re-running one for a commit+scope that was already tested buys
       # nothing in the common case (a reviewer re-reading a PR, a second maintainer
@@ -256,6 +256,21 @@ jobs:
               SUFFIX="multi"
               LEG="$LABEL-multi"
               GPU_COUNT="2"
+              ;;
+            # The adapter evals: tier-1 drift checks that compare this commit's
+            # adapter output against the committed baselines in
+            # tests/eval/baselines/. Selected by MARKER and restricted to
+            # tests/eval/ -- every other scope excludes them, because `eval` is
+            # not in pyproject's default `-m "not deep"` selection and the files
+            # need adapter checkpoints staged on the pod.
+            #
+            # "and not deep" for the same reason as `audio`: -m on the command
+            # line REPLACES addopts' `-m "not deep"` instead of intersecting with
+            # it, so a bare `-m eval` would also pull in the deep eval cases.
+            eval)
+              PATHS='-m "eval and not deep" tests/eval/'
+              SUFFIX="eval"
+              LEG="$LABEL-eval"
               ;;
             # Fail rather than defaulting to full: silently running the wrong scope
             # is worse than not running, and `type: choice` already rejects unknown
