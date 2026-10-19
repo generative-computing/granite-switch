@@ -161,6 +161,7 @@ def race_record(spec, settings: dict, commit: dict, lanes: list[dict]) -> dict:
                 k: settings.get(k)
                 for k in (
                     "agents",
+                    "cycles",
                     "decode_tokens",
                     "decode_mix",
                     "span",
@@ -244,6 +245,13 @@ def main(argv: list[str] | None = None) -> int:
         "switches; react takes --decode-mix for its lengths",
     )
     p.add_argument(
+        "--cycles",
+        default=None,
+        metavar="NAME,...",
+        help="the ReAct cycles its agents walk (gen_agent_configs.py's names, e.g. "
+        "classic5); default all of them",
+    )
+    p.add_argument(
         "--switching-cache",
         default=None,
         help="the synthetic adapters' cache (default: the benchmark's, per model)",
@@ -254,12 +262,17 @@ def main(argv: list[str] | None = None) -> int:
     lengths = [int(n) for n in args.decode_mix.split(",")] if args.decode_mix else None
     if args.agents_kind == "react" and not lengths:
         p.error("--agents-kind react needs --decode-mix")
+    cycles = tuple(args.cycles.split(",")) if args.cycles else None
+    if cycles and args.agents_kind != "react":
+        p.error("--cycles is for --agents-kind react")
     settings = race_settings(spec, args.agents, args.concurrency, args.decode)
     if lengths:
         settings.update(decode_tokens=None, decode_mix=lengths)
     if args.agents_kind == "react":
         # The steps set each switch, so there is no span.
-        settings.update(agents="react", span=None)
+        settings.update(
+            agents="react", span=None, cycles=list(cycles) if cycles else None
+        )
     python, root = sys.executable, harness_root()
     work = Path(args.work_dir).resolve() / "race"
     work.mkdir(parents=True, exist_ok=True)
@@ -281,7 +294,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.agents_kind == "react":
         grid_file = react.write(
             react.build(
-                root, settings["min_agents"], tuple(lengths), settings["adapters"]
+                root,
+                settings["min_agents"],
+                tuple(lengths),
+                settings["adapters"],
+                cycles=cycles,
             ),
             work / f"react_c{settings['concurrency']}.jsonl",
         )

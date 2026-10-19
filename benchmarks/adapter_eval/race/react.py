@@ -64,13 +64,19 @@ def build(
     lengths: tuple[int, ...] = LENGTHS,
     adapters: int = 64,
     seed: int = SEED,
+    cycles: tuple[str, ...] | None = None,
 ) -> list[dict]:
     """``agents`` ReAct agents, an equal share at each of ``lengths``, shuffled so
     the lengths interleave. Both lanes read the one list, so an agent's steps,
-    prompt and schedule are the same in both."""
+    prompt and schedule are the same in both. Each agent walks one of ``cycles``
+    (the generator's names; all of its cycles when not given), drawn at random."""
     gen, grid = _load(root, GENERATOR), _load(root, GRID)
     if agents % len(lengths):
         raise SystemExit(f"FATAL: {agents} agents do not split evenly over {lengths}")
+    cycles = tuple(cycles or gen.CYCLES)
+    unknown = sorted(set(cycles) - set(gen.CYCLES))
+    if unknown:
+        raise SystemExit(f"FATAL: no ReAct cycle {unknown}; have {sorted(gen.CYCLES)}")
     if adapters > 64:
         raise SystemExit(
             f"FATAL: --adapters {adapters} exceeds the 64 the SWITCH kernel holds"
@@ -82,15 +88,17 @@ def build(
     order = [n for n in lengths for _ in range(agents // len(lengths))]
     random.Random(seed).shuffle(order)
     return [
-        _agent(gen, rng, i, decode, prompts[i], adapters)
+        _agent(gen, rng, i, decode, prompts[i], adapters, cycles)
         for i, decode in enumerate(order)
     ]
 
 
-def _agent(gen, rng, agent_id: int, decode: int, prompt: int, adapters: int) -> dict:
+def _agent(
+    gen, rng, agent_id: int, decode: int, prompt: int, adapters: int, cycles
+) -> dict:
     """One agent, as the generator's ``main`` builds one, with the race's length,
     prompt and network distance. The adapter choice is the generator's loop."""
-    cycle_name = rng.choice(list(gen.CYCLES))
+    cycle_name = rng.choice(list(cycles))
     nodes = gen.build_spans(rng, decode, gen.CYCLES[cycle_name], deciles=1)
     toolbox = [
         dict(name=f"t{t:02d}", category=rng.choice(sorted(gen.TOOLS)))

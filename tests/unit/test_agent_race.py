@@ -594,3 +594,36 @@ def test_a_react_race_has_its_own_key():
         "64-16-mix",
         "64-16-mix-react",
     ]
+
+
+def test_react_agents_walk_only_the_cycles_asked_for():
+    gen = react._load(REPO_ROOT, react.GENERATOR)
+    classic = react.build(REPO_ROOT, cycles=("classic5",))
+    assert {a["cycle"] for a in classic} == {"classic5"}
+    steps = [n["type"] for a in classic for n in a["nodes"]]
+    assert set(steps) == set(gen.NODE_TYPES)
+    for agent in classic:  # the cycle's steps in its order, round and round
+        cycle = gen.CYCLES["classic5"]
+        for i, node in enumerate(agent["nodes"]):
+            assert node["type"] == cycle[i % len(cycle)]
+    # The same lengths and prompts as with every cycle: only the steps differ.
+    every = react.build(REPO_ROOT)
+    assert [(a["decode_tokens"], a["prompt_tokens"]) for a in classic] == [
+        (a["decode_tokens"], a["prompt_tokens"]) for a in every
+    ]
+    assert react.build(REPO_ROOT, cycles=("classic5",)) == classic
+    with pytest.raises(SystemExit, match="no ReAct cycle"):
+        react.build(REPO_ROOT, cycles=("classic6",))
+
+
+def test_a_react_race_records_its_cycles():
+    spec = types.SimpleNamespace(model_id="m", base_model="b")
+    settings = {**WORKLOAD, "decode_tokens": None, "decode_mix": [128, 256],
+                "agents": "react", "span": None, "cycles": ["classic5"]}  # fmt: skip
+    lanes = [
+        {"lane": "gs-sr-vllm", "wall_s": 1.0, "agents": 64, "events": [], "rows": []}
+    ]
+    meta = run_race.race_record(spec, settings, {"sha": "0" * 40}, lanes)["metadata"]
+    assert meta["workload"]["cycles"] == ["classic5"]
+    # It replaces the page's ReAct race: the same configuration.
+    assert build_page.config_key({"metadata": meta}) == "64-8-mix-react"

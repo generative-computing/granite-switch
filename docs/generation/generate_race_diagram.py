@@ -34,14 +34,14 @@ GRID_ADAPTERS = [
     "ad25", "ad57", "ad34", "ad14", "ad24", "ad4", "ad2", "ad40",
     "ad41", "ad10", "ad7", "ad47", "ad45", "ad26", "ad54", "ad56",
 ]  # fmt: skip
-# The ReAct race's agent 4 (512 tokens, the classic5 cycle): its first cycle,
+# The ReAct race's agent 37 (512 tokens, the classic5 cycle): its first cycle,
 # each step's segments as (adapter, tokens).
 REACT_STEPS = [
-    ("think", [("base", 35), ("ad26", 18), ("ad40", 65), ("ad19", 50)]),
-    ("prepare_call", [("ad9", 17)]),
+    ("think", [("base", 23), ("ad9", 71)]),
+    ("prepare_call", [("ad12", 16)]),
     ("act", []),
-    ("observe", [("ad18", 4), ("ad54", 11), ("ad20", 13)]),
-    ("reflect", [("ad29", 103), ("ad36", 56)]),
+    ("observe", [("ad45", 135)]),
+    ("reflect", [("ad22", 33), ("ad39", 41), ("ad43", 8)]),
 ]
 STEP_HELP = {
     "think": "think (generation): reasons about the task. Median 120 tokens; "
@@ -189,8 +189,7 @@ def react_agent(y):
     done_block(W - 76, y, "128&#8211;1,024 tok")
     text(
         0, y + 78,
-        "Agent 4's first cycle (classic5), at scale. The other cycles: toolheavy10 "
-        "(3 tool calls a cycle) and shortadapters (5 prepare_calls).",
+        "Agent 37's first cycle, at scale: each segment on its adapter, base in gray.",
         "d-note",
     )  # fmt: skip
 
@@ -298,33 +297,21 @@ def rtt_note(y):
 
 
 # ── The state machine (kind "machine"): the agent's graph, LangGraph-style ─────
-# Nodes are the ReAct steps; edges are the transitions the generator's cycles
-# (CYCLES in benchmarks/gen_agent_configs.py) take. LLM nodes generate tokens on
-# an adapter; the act node calls a tool.
-NODE_W, NODE_H = 132, 46
+# Nodes are the ReAct steps of the race's agents, which walk the generator's
+# classic5 cycle (CYCLES in benchmarks/gen_agent_configs.py): think,
+# prepare_call, act, observe, reflect, and around again. LLM nodes generate
+# tokens on an adapter; the act node calls a tool.
+NODE_W, NODE_H = 140, 50
 MACHINE_NODES = {
     # name: (x, y, kind, the second line)
-    "__start__": (24, 108, "terminal", ""),
-    "think": (90, 85, "llm", "~120 tok · 35%"),
-    "prepare_call": (316, 85, "llm", "~10 tok · 95%"),
-    "act": (560, 85, "tool", "tool call · 1&#8211;80 ms"),
-    "observe": (800, 85, "llm", "~35 tok · 80%"),
-    "reflect": (440, 248, "llm", "~90 tok · 70%"),
-    "__end__": (960, 320, "terminal", ""),
+    "__start__": (26, 104, "terminal", ""),
+    "think": (96, 79, "llm", "~120 tok · switch 35%"),
+    "prepare_call": (296, 79, "llm", "~10 tok · switch 95%"),
+    "act": (496, 79, "tool", "tool call · 1&#8211;80 ms"),
+    "observe": (696, 79, "llm", "~35 tok · switch 80%"),
+    "reflect": (396, 205, "llm", "~90 tok · switch 70%"),
+    "__end__": (960, 230, "terminal", ""),
 }
-# (from, to, label, how to draw: "h" straight, "loop" self-loop, or a path)
-MACHINE_EDGES = [
-    ("__start__", "think", "", "h"),
-    ("think", "prepare_call", "", "h"),
-    ("prepare_call", "act", "call the tool", "h"),
-    ("prepare_call", "prepare_call", "another call", "loop"),
-    ("act", "observe", "result", "h"),
-    ("observe", "prepare_call", "act again", "back"),
-    ("observe", "reflect", "", "down_left"),
-    ("act", "reflect", "", "down_mid"),
-    ("prepare_call", "reflect", "", "down_right"),
-    ("reflect", "think", "next cycle", "up_left"),
-]
 MACHINE_HELP = {
     "think": STEP_HELP["think"],
     "prepare_call": STEP_HELP["prepare_call"],
@@ -338,15 +325,8 @@ MACHINE_HELP = {
 }
 
 
-def _center(name):
-    x, y, kind, _ = MACHINE_NODES[name]
-    if kind == "terminal":
-        return x, y
-    return x + NODE_W / 2, y + NODE_H / 2
-
-
-def _edge(path, label=None, lx=0.0, ly=0.0, anchor="middle"):
-    out.append(f'<path d="{path}" class="d-edge" marker-end="url(#{MARKER})"/>')
+def _edge(path, label=None, lx=0.0, ly=0.0, anchor="middle", cls="d-edge"):
+    out.append(f'<path d="{path}" class="{cls}" marker-end="url(#{MARKER})"/>')
     if label:
         text(lx, ly, label, "d-edge-lab", anchor)
 
@@ -369,18 +349,18 @@ def machine_node(name):
         f"<g><title>{tip}</title>"
         f'<rect x="{x:g}" y="{y:g}" width="{NODE_W}" height="{NODE_H}" rx="8" '
         f'fill="{fill}" stroke="{stroke}" stroke-width="1.5"/>'
-        f'<text x="{x + NODE_W / 2:g}" y="{y + 18:g}" class="{name_cls}" '
+        f'<text x="{x + NODE_W / 2:g}" y="{y + 20:g}" class="{name_cls}" '
         f'text-anchor="middle">{name}</text>'
-        f'<text x="{x + NODE_W / 2:g}" y="{y + 34:g}" class="{name_cls}-sub" '
+        f'<text x="{x + NODE_W / 2:g}" y="{y + 37:g}" class="{name_cls}-sub" '
         f'text-anchor="middle">{sub}</text>'
         f"</g>"
     )
-    text(x + NODE_W / 2, y + NODE_H + 13, tag, "d-node-tag", "middle")
+    text(x + NODE_W / 2, y - 7, tag, "d-node-tag", "middle")
 
 
-def machine(y0=0):
-    """The agent as a graph: its steps and the transitions between them."""
-    text(0, 11, "THE AGENT · A REACT STATE MACHINE, THE SAME IN BOTH LANES", "d-h")
+def machine():
+    """The agent as a graph: its steps, and the cycle through them."""
+    text(0, 11, "THE AGENT · A REACT LOOP, THE SAME IN BOTH LANES", "d-h")
     n = MACHINE_NODES
     top = n["think"][1]
     mid = top + NODE_H / 2
@@ -391,102 +371,52 @@ def machine(y0=0):
     def left(name):
         return n[name][0]
 
-    # START -> think, and the cycle's straight edges.
     _edge(f"M{n['__start__'][0] + 20:g},{mid:g} H{left('think') - 2:g}")
-    _edge(f"M{right('think'):g},{mid:g} H{left('prepare_call') - 2:g}")
-    _edge(
-        f"M{right('prepare_call'):g},{mid:g} H{left('act') - 2:g}",
-        "call the tool",
-        (right("prepare_call") + left("act")) / 2,
-        mid - 8,
-    )
-    _edge(
-        f"M{right('act'):g},{mid:g} H{left('observe') - 2:g}",
-        "result",
-        (right("act") + left("observe")) / 2,
-        mid - 8,
-    )
-    # prepare_call -> prepare_call: another call before acting (shortadapters).
-    px = n["prepare_call"][0] + NODE_W / 2
-    _edge(
-        f"M{px - 18:g},{top:g} C{px - 30:g},{top - 34:g} {px + 30:g},{top - 34:g} "
-        f"{px + 18:g},{top - 2:g}",
-        "another call",
-        px - 40,
-        top - 26,
-        "end",
-    )
-    # observe -> prepare_call: act again (toolheavy10), over the top.
+    for a, b, label in (
+        ("think", "prepare_call", "decide"),
+        ("prepare_call", "act", "call"),
+        ("act", "observe", "result"),
+    ):
+        _edge(
+            f"M{right(a):g},{mid:g} H{left(b) - 2:g}", label,
+            (right(a) + left(b)) / 2, mid - 8,
+        )  # fmt: skip
+    # observe -> reflect, and reflect -> think: around again.
     ox = n["observe"][0] + NODE_W / 2
-    _edge(
-        f"M{ox:g},{top:g} V{top - 52:g} H{px + 46:g} V{top - 2:g}",
-        "act again",
-        (ox + px) / 2 + 30,
-        top - 57,
-    )
-    # Down to reflect: from observe, act and prepare_call.
     rx, ry = n["reflect"][0], n["reflect"][1]
-    rc = rx + NODE_W / 2
-    bottom = top + NODE_H
-    # The tags below the top row's nodes sit in their first 16 pixels.
-    drop = bottom + 18
+    rmid = ry + NODE_H / 2
     _edge(
-        f"M{ox:g},{bottom:g} V{ry + NODE_H / 2:g} H{rx + NODE_W + 2:g}",
-        "reflect on it",
-        (ox + rx + NODE_W) / 2 + 40,
-        ry + NODE_H / 2 - 7,
-    )
-    ax = n["act"][0] + NODE_W / 2
-    _edge(f"M{ax - 30:g},{bottom:g} V{drop + 22:g} H{rc + 20:g} V{ry - 2:g}")
-    _edge(f"M{px + 30:g},{bottom:g} V{drop + 22:g} H{rc - 20:g} V{ry - 2:g}")
-    # reflect -> think: the next cycle.
+        f"M{ox:g},{top + NODE_H:g} V{rmid:g} H{rx + NODE_W + 2:g}",
+        "reflect", (ox + rx + NODE_W) / 2, rmid - 8,
+    )  # fmt: skip
     tx = n["think"][0] + NODE_W / 2
     _edge(
-        f"M{rx:g},{ry + NODE_H / 2:g} H{tx:g} V{bottom + 18:g}",
-        "next cycle",
-        (rx + tx) / 2,
-        ry + NODE_H / 2 - 7,
-    )
+        f"M{rx:g},{rmid:g} H{tx:g} V{top + NODE_H + 2:g}",
+        "next cycle", (rx + tx) / 2, rmid - 8,
+    )  # fmt: skip
     # Any step -> END, when the agent's tokens run out.
     ex, ey = n["__end__"][0], n["__end__"][1]
-    out.append(
-        f'<path d="M{rx + NODE_W:g},{ry + NODE_H - 10:g} H{rx + NODE_W + 30:g} '
-        f'V{ey:g} H{ex - 22:g}" '
-        f'class="d-edge d-edge-end" marker-end="url(#{MARKER})"/>'
+    _edge(
+        f"M{right('observe'):g},{mid + 10:g} H{ex:g} V{ey - 22:g}",
+        cls="d-edge d-edge-end",
     )
-    text(
-        ex - 28,
-        ey - 7,
-        "after 128&#8211;1,024 tokens, from any step",
-        "d-edge-lab",
-        "end",
-    )
+    text(ex - 26, ey + 4, "tokens done", "d-edge-lab", "end")
 
     for name in MACHINE_NODES:
         machine_node(name)
-
-    # The three cycles, as the paths through the graph.
-    y = 370
-    text(0, y, "THE CYCLES (one each agent, drawn at random)", "d-h")
-    cycles = [
-        ("classic5", "think → prepare_call → act → observe → reflect"),
-        ("toolheavy10", "think → (prepare_call → act → observe) &#215;3 → reflect"),
-        (
-            "shortadapters",
-            "think → prepare_call &#215;3 → act → observe → prepare_call &#215;2 → reflect",
-        ),
-    ]
-    for i, (name, path) in enumerate(cycles):
-        text(0, y + 18 + i * 15, name, "d-step")
-        text(110, y + 18 + i * 15, path, "d-note")
     text(
-        0, y + 72,
-        "Each LLM node: its median tokens, and how often it switches adapter as it "
-        "starts; think, observe and reflect also switch inside.",
+        0, 286,
+        "Each LLM node shows its median tokens and how often it switches adapter as "
+        "it starts; think, observe and reflect also switch inside.",
         "d-note",
     )  # fmt: skip
-    text(0, y + 86, "The state passed between nodes is the agent's context.", "d-note")
-    return y + 94
+    text(
+        0, 300,
+        "The state passed between nodes is the agent's context; an agent stops when "
+        "its 128&#8211;1,024 tokens are done, at any node.",
+        "d-note",
+    )  # fmt: skip
+    return 308
 
 
 def diagram(kind) -> int:
