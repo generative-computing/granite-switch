@@ -240,8 +240,16 @@ def main() -> int:
     print()
     print("NEXT, and none of it is optional:")
     print("  1. relock:   uvx uv@0.8.4 lock")
-    print("  2. move the GPU matrix legs in .github/workflows/gpu-tests.yaml to the")
-    print("     ENDS of the new range, keeping every group main's matrix still names")
+    if new:
+        legs = " ".join(f"vllm{line_key(ln)}" for ln in new)
+        print("  2. WIDEN the GPU matrix in .github/workflows/gpu-tests.yaml to add a")
+        print(f"     leg per added line ({legs}) so each one gets its own green")
+        print("     evidence, dispatch, and collect the per-leg results for the PR")
+        print("     table. Narrow it back to the two ENDS of the range in a final")
+        print("     commit once those results are recorded.")
+    else:
+        print("  2. set the GPU matrix legs to the ENDS of the new range, keeping")
+        print("     every group main's matrix still names")
     print("  3. update the [dependency-groups] and [vllm]-extra comments to name the")
     print("     new range -- a stale comment is a review failure here")
     print(f"  4. grep -rn '0\\.{top - 1}' README.md tutorials/ docs/   # prose ranges")
