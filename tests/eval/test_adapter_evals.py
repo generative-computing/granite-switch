@@ -64,7 +64,10 @@ def test_adapter_eval(config_name):
         f"--config {cfg.name}"
     )
 
-    current = core.capture(cfg, model_dir)
+    # The baseline's continuations, not freshly generated ones: the measurement is
+    # teacher-forced so every compared position has a byte-identical prefix. See
+    # _eval_core's module docstring for the greedy-rollout failure that forced this.
+    current = core.capture(cfg, model_dir, continuations=baseline.get("continuations"))
     failures, report = core.compare(baseline, current)
 
     print(f"\n[{cfg.name}] {cfg.description}")

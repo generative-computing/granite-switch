@@ -9,9 +9,33 @@ would pass forever.
 
 What is measured, per eval config:
 
-  adapter_dists  top-k logprobs at each greedily generated position, with the
-                 adapter's control token prepended to the prompt
+  continuations  the greedy token ids the baseline run produced, per prompt
+  adapter_dists  top-k logprobs at each of those positions, with the adapter's
+                 control token prepended to the prompt
   base_dists     the same prompts with NO control token
+
+MEASUREMENT IS TEACHER-FORCED, which is load-bearing. Both the baseline and the
+check feed the BASELINE's `continuations` through the model and read the
+distribution at each position, so position i is always conditioned on a byte-
+identical prefix. Only recording generates; the check never lets the model
+condition on its own output.
+
+Why: the first version of this gate compared position-aligned distributions
+across a self-conditioning greedy rollout, and `granite42_vllm` failed its own
+recording line (vLLM 0.30) with mean JSD 0.95 on prompt 3. The cause was ONE
+near-tie argmax flip at position 1 -- `527` vs `16` -- after which the two runs
+were generating different sentences and the metric was comparing unrelated
+contexts. The numbers gave it away: mean JSD 0.953644 and mean(1-Jaccard)
+0.9583 are both exactly 23/24, the fraction of positions at or after the flip,
+and they were byte-identical on 0.26 and 0.30. Positions before the flip agreed
+to JSD < 0.01.
+
+A rollout gate therefore cannot distinguish "this vLLM line computes different
+logits" from "this vLLM line broke a tie the other way" -- and tolerating that
+tie is the whole reason this is a distribution metric and not a token-exact one
+(see below). Teacher forcing removes the cascade without weakening anything: a
+real logit or weight regression still moves the distribution at the very first
+position it touches.
 
 `adapter_dists` vs the baseline's `adapter_dists` is the regression gate: it answers
 "does this vLLM line still produce the output we signed off on". `adapter_dists` vs
@@ -302,8 +326,33 @@ def versions() -> dict[str, str]:
 # ── capture ───────────────────────────────────────────────────────────────────
 
 
-def _dists_vllm(model_dir: Path, token_seqs: list[list[int]]) -> list[list[dict]]:
-    """Greedy top-k logprobs per generated position, one list per sequence."""
+def _topk(d: dict[int, float]) -> dict[str, float]:
+    """The TOP_K highest-logprob entries, string-keyed for JSON.
+
+    vLLM's `prompt_logprobs` returns the k alternatives PLUS the actual token when
+    that token is outside the top k, so a raw dict is sometimes k+1 entries wide.
+    Truncating here keeps every captured position exactly k wide, which the
+    metric's own k-sweep assumes.
+    """
+    return {
+        str(t): float(v)
+        for t, v in sorted(d.items(), key=lambda kv: kv[1], reverse=True)[:TOP_K]
+    }
+
+
+def _run_vllm(
+    model_dir: Path,
+    adapter_seqs: list[list[int]],
+    base_seqs: list[list[int]],
+    continuations: list[list[int]] | None,
+) -> tuple[list[list[int]], list[list[dict]], list[list[dict]]]:
+    """Teacher-forced top-k logprobs for both passes; generates if asked to.
+
+    `continuations is None` means "recording": greedily generate from the adapter
+    pass first and return what it produced. Either way the DISTRIBUTIONS come from
+    the same teacher-forced `prompt_logprobs` path, so a baseline is measured by
+    exactly the code that later checks it.
+    """
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -318,25 +367,61 @@ def _dists_vllm(model_dir: Path, token_seqs: list[list[int]]) -> list[list[dict]
 
     llm = LLM(**kwargs)
     try:
-        outs = llm.generate(
-            [TokensPrompt(prompt_token_ids=s) for s in token_seqs],
-            SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0, logprobs=TOP_K),
-        )
-        return [
-            [
-                {str(tid): float(lp.logprob) for tid, lp in step.items()}
-                for step in (o.outputs[0].logprobs or [])
-            ]
-            for o in outs
-        ]
+        if continuations is None:
+            outs = llm.generate(
+                [TokensPrompt(prompt_token_ids=s) for s in adapter_seqs],
+                SamplingParams(max_tokens=MAX_TOKENS, temperature=0.0),
+            )
+            continuations = [list(o.outputs[0].token_ids) for o in outs]
+
+        groups: list[list[list[dict]]] = []
+        for seqs in (adapter_seqs, base_seqs):
+            outs = llm.generate(
+                [
+                    TokensPrompt(prompt_token_ids=[*s, *c])
+                    for s, c in zip(seqs, continuations, strict=True)
+                ],
+                # max_tokens=1 because prompt_logprobs is the measurement and vLLM
+                # requires at least one generated token; the generated one is unused.
+                SamplingParams(max_tokens=1, temperature=0.0, prompt_logprobs=TOP_K),
+            )
+            group: list[list[dict]] = []
+            for o, s, c in zip(outs, seqs, continuations, strict=True):
+                pl = o.prompt_logprobs
+                # Not a skip: a capture missing positions would otherwise be
+                # compared as a shorter run and the metric would average over
+                # whatever survived.
+                if pl is None or len(pl) < len(s) + len(c):
+                    raise RuntimeError(
+                        "vLLM returned no usable prompt_logprobs "
+                        f"(got {0 if pl is None else len(pl)}, need "
+                        f"{len(s) + len(c)}). The eval measures distributions via "
+                        "prompt_logprobs; without them there is nothing to compare."
+                    )
+                group.append(
+                    [
+                        # prompt_logprobs[j] is the distribution over prompt token j
+                        # given tokens[:j], so continuation step i -- token index
+                        # len(s)+i -- reads at len(s)+i.
+                        _topk({t: lp.logprob for t, lp in pl[len(s) + i].items()})
+                        for i in range(len(c))
+                    ]
+                )
+            groups.append(group)
+        return continuations, groups[0], groups[1]
     finally:
         # Release the device before the next config's engine starts; otherwise the
         # free-memory guard above trips on our own leftovers.
         shutdown_llm(llm)
 
 
-def _dists_hf(model_dir: Path, token_seqs: list[list[int]]) -> list[list[dict]]:
-    """The same measurement through the HF backend."""
+def _run_hf(
+    model_dir: Path,
+    adapter_seqs: list[list[int]],
+    base_seqs: list[list[int]],
+    continuations: list[list[int]] | None,
+) -> tuple[list[list[int]], list[list[dict]], list[list[dict]]]:
+    """The same measurement through the HF backend: one forward per forced sequence."""
     import torch
 
     from granite_switch.hf import GraniteSwitchForCausalLM
@@ -348,29 +433,41 @@ def _dists_hf(model_dir: Path, token_seqs: list[list[int]]) -> list[list[dict]]:
     )
     model.eval()
 
-    out: list[list[dict]] = []
-    for seq in token_seqs:
-        ids = torch.tensor([seq], device=model.device)
-        gen = model.generate(
-            ids,
-            max_new_tokens=MAX_TOKENS,
-            do_sample=False,
-            output_scores=True,
-            return_dict_in_generate=True,
-        )
-        steps = []
-        for scores in gen.scores:
-            lp = torch.log_softmax(scores[0].float(), dim=-1)
-            vals, idx = torch.topk(lp, TOP_K)
-            steps.append(
-                {str(int(i)): float(v) for i, v in zip(idx, vals, strict=True)}
-            )
-        out.append(steps)
-    return out
+    if continuations is None:
+        continuations = []
+        for seq in adapter_seqs:
+            ids = torch.tensor([seq], device=model.device)
+            gen = model.generate(ids, max_new_tokens=MAX_TOKENS, do_sample=False)
+            continuations.append([int(t) for t in gen[0][len(seq) :]])
+
+    groups: list[list[list[dict]]] = []
+    for seqs in (adapter_seqs, base_seqs):
+        group: list[list[dict]] = []
+        for seq, cont in zip(seqs, continuations, strict=True):
+            ids = torch.tensor([[*seq, *cont]], device=model.device)
+            with torch.no_grad():
+                logits = model(ids).logits[0].float()
+            steps = []
+            for i in range(len(cont)):
+                # logits[j] predicts token j+1, so step i -- token index len(seq)+i
+                # -- is read at len(seq)+i-1.
+                lp = torch.log_softmax(logits[len(seq) + i - 1], dim=-1)
+                vals, idx = torch.topk(lp, TOP_K)
+                steps.append({int(t): float(v) for t, v in zip(idx, vals, strict=True)})
+            group.append([_topk(s) for s in steps])
+        groups.append(group)
+    return continuations, groups[0], groups[1]
 
 
-def capture(cfg: EvalConfig, model_dir: Path) -> dict:
-    """Run both the adapter-on and base passes and package the result."""
+def capture(
+    cfg: EvalConfig, model_dir: Path, continuations: list[list[int]] | None = None
+) -> dict:
+    """Run both the adapter-on and base passes and package the result.
+
+    `continuations` is the baseline's recorded token ids. The CHECK always passes
+    them, so it measures the model at exactly the contexts the baseline measured;
+    only recording leaves it None and generates.
+    """
     from transformers import AutoTokenizer
 
     name, ctrl = adapter_of(model_dir)
@@ -382,11 +479,13 @@ def capture(cfg: EvalConfig, model_dir: Path) -> dict:
     # adapter_token_ids activates adapter i+1; 0 is base.
     adapter_seqs = [[ctrl, *s] for s in base_seqs]
 
-    run = _dists_vllm if cfg.backend == "vllm" else _dists_hf
-    # One engine, both passes: starting two engines doubles the slowest part of the
-    # eval and the base pass is the cheap half of the same comparison.
-    both = run(model_dir, adapter_seqs + base_seqs)
-    n = len(texts)
+    run = _run_vllm if cfg.backend == "vllm" else _run_hf
+    # Both passes forced with the SAME continuation, so the liveness comparison
+    # (adapter vs base) is position-aligned by construction too: it asks what the
+    # un-adapted model would have predicted at the adapter's own contexts.
+    continuations, adapter_dists, base_dists = run(
+        model_dir, adapter_seqs, base_seqs, continuations
+    )
 
     return {
         "config": cfg.name,
@@ -398,9 +497,10 @@ def capture(cfg: EvalConfig, model_dir: Path) -> dict:
         "max_tokens": MAX_TOKENS,
         "top_k": TOP_K,
         "prompts": texts,
+        "continuations": continuations,
         "thresholds": dict(DEFAULT_THRESHOLDS),
-        "adapter_dists": both[:n],
-        "base_dists": both[n:],
+        "adapter_dists": adapter_dists,
+        "base_dists": base_dists,
     }
 
 
@@ -460,6 +560,25 @@ def compare(baseline: dict, current: dict) -> tuple[list[str], list[str]]:
             f"baseline evaluates adapter {baseline['adapter']['name']!r} but the "
             f"checkpoint now offers {current['adapter']['name']!r} first -- the "
             "checkpoint was re-composed with a different adapter order"
+        )
+        return fails, report
+    if "continuations" not in baseline:
+        fails.append(
+            "baseline predates teacher forcing (no 'continuations' key). It was "
+            "recorded from a self-conditioning greedy rollout, where one flipped "
+            "near-tie desynchronizes every later position and the metric compares "
+            "unrelated contexts. Re-record it on a KNOWN-GOOD line; it cannot be "
+            "compared against a forced capture."
+        )
+        return fails, report
+    if baseline["continuations"] != current["continuations"]:
+        # Unreachable via test_adapter_evals, which forces the baseline's own
+        # continuations. Guards a caller that forgets to pass them -- which would
+        # silently reintroduce the rollout bug this measurement exists to avoid.
+        fails.append(
+            "current capture used different continuations from the baseline, so "
+            "the comparison is not position-aligned. capture() must be called "
+            "with baseline['continuations']."
         )
         return fails, report
     if baseline["checkpoint_fingerprint"] != current["checkpoint_fingerprint"]:
