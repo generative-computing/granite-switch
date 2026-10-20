@@ -111,35 +111,29 @@ fi
 echo "== gpu suite plumbing =="
 
 # A dispatch naming a suite with no case arm fails at "Resolve test scope" with
-# `unknown suite`.
+# `unknown suite`. The LOCAL file is the right one to check, because the skill
+# dispatches with `--ref <this branch>`.
 #
-# CHECK THE DEFAULT BRANCH'S COPY, NOT THE LOCAL ONE. `workflow_dispatch` always
-# executes the workflow file as it exists on the DEFAULT BRANCH, regardless of
-# which ref or sha is being tested -- the same property pyproject's `vllm27`
-# comment records. Grepping the local file therefore reports a suite as
-# available when a dispatch of it would be rejected, which is exactly the
-# false green this check exists to prevent: the `eval` suite is on the feature
-# branch and not yet on main.
+# DO NOT "FIX" THIS TO READ THE DEFAULT BRANCH. That was tried and it was wrong.
+# The claim was that workflow_dispatch always runs main's copy of the workflow,
+# so a branch-only suite would be rejected. Verified false on 2026-10-19: run
+# 39299824463 dispatched `suite=eval` -- an option present only on
+# feature/vllm-upgrade-skill -- with `--ref` on that branch, and it was accepted,
+# derived its legs, and resolved `TEST_PATHS: -m "eval and not deep" tests/eval/`.
+# GitHub validates the choice list against the DISPATCHED REF.
+#
+# What is true about main is narrower: `gpu_test_command.sh` chooses to dispatch
+# with `--ref <default branch>`, so /gpu-test COMMENTS use main's file. That is
+# the comment path's deliberate security property, not a platform limit, and the
+# skill does not use the comment path.
 WF=.github/workflows/gpu-tests.yaml
-DEFAULT_BRANCH=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null)
-if [ -z "$DEFAULT_BRANCH" ]; then
-    bad "cannot determine the default branch -- cannot verify suite availability"
-else
-    WF_REMOTE=$(git fetch -q origin "$DEFAULT_BRANCH" 2>/dev/null &&
-        git show "origin/$DEFAULT_BRANCH:$WF" 2>/dev/null)
-    if [ -z "$WF_REMOTE" ]; then
-        bad "$WF is missing on origin/$DEFAULT_BRANCH -- no GPU workflow to dispatch"
+for suite in full eval; do
+    if grep -q "options:.*\b$suite\b" "$WF" 2>/dev/null; then
+        ok "suite '$suite' is in the workflow's options list"
     else
-        for suite in full eval; do
-            if printf '%s' "$WF_REMOTE" | grep -q "options:.*\b$suite\b"; then
-                ok "suite '$suite' is dispatchable (present on origin/$DEFAULT_BRANCH)"
-            else
-                bad "suite '$suite' is not in $WF on origin/$DEFAULT_BRANCH -- a dispatch would be rejected with 'unknown suite'"
-                note "workflow_dispatch runs the DEFAULT BRANCH's workflow file; merge the suite to $DEFAULT_BRANCH first"
-            fi
-        done
+        bad "suite '$suite' is not an option in $WF -- dispatch would be rejected"
     fi
-fi
+done
 
 # A dispatchable eval suite is still useless without recorded baselines. Tier-1
 # compares this commit's adapter output against committed numbers; with nothing
