@@ -50,6 +50,10 @@ LOCAL_ONLY = {
     "benchmarks/adapter_eval/vela/render_job.py",
     "benchmarks/adapter_eval/vela/submit.sh",
 }
+# The agent race (race/, docs/AGENT_RACE.md): shipped only with a script job that
+# runs it, and in the switch benchmark's payload, which has room for it, so the
+# harness payload stays within MAX_PAYLOAD for every job.
+RACE_DIR = "benchmarks/adapter_eval/race"
 # The SR model package inside a shadow-residual checkout.
 SR_CODE_DIR = "src/shadow_residual/shadow_residual"
 # One environment string must stay below Linux's 128 KiB MAX_ARG_STRLEN.
@@ -94,10 +98,10 @@ def tarball(files: dict[str, Path], what: str) -> str:
     return payload
 
 
-def harness_payload(extra: dict[str, Path]) -> str:
-    """This benchmark's code (benchmarks/adapter_eval) and the job's extra files."""
+def _files(root: Path) -> dict[str, Path]:
+    """The files under ``root`` a job ships: no caches, no local-only tools."""
     files = {}
-    for path in sorted((REPO / "benchmarks" / "adapter_eval").rglob("*")):
+    for path in sorted(root.rglob("*")):
         rel = path.relative_to(REPO)
         if (
             path.is_file()
@@ -105,19 +109,33 @@ def harness_payload(extra: dict[str, Path]) -> str:
             and str(rel) not in LOCAL_ONLY
         ):
             files[str(rel)] = path
+    return files
+
+
+def harness_payload(extra: dict[str, Path]) -> str:
+    """This benchmark's code (benchmarks/adapter_eval) but the agent race's
+    (``RACE_DIR``), and the job's extra files."""
+    files = {
+        rel: path
+        for rel, path in _files(REPO / "benchmarks" / "adapter_eval").items()
+        if not Path(rel).is_relative_to(RACE_DIR)
+    }
     files.update({f"extra/{name}": path for name, path in extra.items()})
     return tarball(files, "harness")
 
 
-def switch_payload() -> str:
+def switch_payload(race: bool = False) -> str:
     """The switch benchmark's copied scripts (benchmarks/*.py) and the test helpers
     its fleet builder imports, in a payload of their own: with this benchmark's
-    code they would not fit in one environment string."""
+    code they would not fit in one environment string. With ``race``, the agent
+    race's code too (``RACE_DIR``), which runs on them."""
     files = {
         str(path.relative_to(REPO)): path
         for path in sorted((REPO / "benchmarks").glob("*.py"))
     }
     files.update({rel: REPO / rel for rel in SWITCH_HELPERS})
+    if race:
+        files.update(_files(REPO / RACE_DIR))
     return tarball(files, "switch benchmark")
 
 
@@ -154,6 +172,13 @@ def harness_version() -> tuple[str, bool]:
 
 def env_var(name: str, value) -> dict:
     return {"name": name, "value": str(value)}
+
+
+def runs_race(args) -> bool:
+    """Whether the job runs the agent race: a script job of a file in ``RACE_DIR``."""
+    if args.mode != "script" or not args.script:
+        return False
+    return Path(args.script).resolve().is_relative_to(REPO / RACE_DIR)
 
 
 def build(args) -> dict:
@@ -260,7 +285,7 @@ def build(args) -> dict:
         if mode == "stage":  # the model's eval sets, copied into the release's folder
             env.append(env_var("ADAPTER_BENCH_EVAL_FROM", need("EVAL_FROM")))
     env.append(env_var("ADAPTER_BENCH_HARNESS_TGZ", harness_payload(extra)))
-    env.append(env_var("ADAPTER_BENCH_SWITCH_TGZ", switch_payload()))
+    env.append(env_var("ADAPTER_BENCH_SWITCH_TGZ", switch_payload(runs_race(args))))
 
     return {
         "namespace": need("NAMESPACE"),
