@@ -34,6 +34,14 @@ the end. The four exceptions are enumerated in operating rule 9.
 The point of 4 and 5 together: a reviewer must be able to see, per version, that
 each gate ran — not take "the suite is green" on faith.
 
+**A green run is not proof a gate ran.** pytest exits 0 when every test skips, the
+pod then prints `ALL GPU TESTS PASSED`, and the workflow posts success. Measured,
+not hypothesised: run `39299824463` collected 4 eval tests, skipped all 4 because
+no checkpoint was staged, and reported PASSED in 0.03s. A ✅ written from that run
+would be a false claim of coverage. `gpu_dispatch.sh` now fails on a green run
+whose log has no `N passed`, so the only ✅ you can write is one a real test
+earned. If a leg comes back vacuous, the cell is `—` plus a note saying why.
+
 ## Operating rules
 
 These are not suggestions. Each one is a failure this repo has actually hit.

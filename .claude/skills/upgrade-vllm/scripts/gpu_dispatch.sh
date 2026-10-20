@@ -128,18 +128,56 @@ echo "=== run $RUN_ID: $CONCLUSION ==="
 gh run view "$RUN_ID" --json jobs \
     -q '.jobs[] | "  \(.conclusion // .status)\t\(.name)"'
 
-if [ "$CONCLUSION" = "success" ]; then
-    echo
-    echo "all legs green for suite '$SUITE'."
-    exit 0
-fi
-
-# Failure: the published log artifact is the readable one (clean_log.sh has already
-# stripped the noise). Pull every leg's artifact and triage.
+# A GREEN CONCLUSION IS NOT EVIDENCE THAT ANYTHING RAN. pytest exits 0 when every
+# test skips, the pod prints "ALL GPU TESTS PASSED", and the workflow posts
+# success. Observed on run 39299824463: the eval suite collected 4 items, skipped
+# all 4 for want of staged checkpoints, and reported PASSED. An upgrade that
+# stamps a per-version checkmark from that is claiming coverage it does not have,
+# which is the exact failure this skill exists to avoid.
+#
+# So on success, read the log anyway and require a non-zero passed count.
 TMP="$(mktemp -d)"
 echo
 echo "downloading log artifacts to $TMP"
 gh run download "$RUN_ID" -D "$TMP" 2>/dev/null || echo "  (no artifacts -- the job may have died before the upload step)"
+
+if [ "$CONCLUSION" = "success" ]; then
+    shopt -s nullglob
+    VACUOUS=0
+    SEEN=0
+    for log in "$TMP"/*/*.log; do
+        SEEN=$((SEEN + 1))
+        LEG_NAME=$(basename "$(dirname "$log")")
+        # pytest's summary line, e.g. "4 skipped in 0.03s" or "12 passed, 1 skipped".
+        if grep -qE "^=+ .*[0-9]+ passed" "$log"; then
+            echo "  ok   $LEG_NAME -- tests actually ran"
+        else
+            SUMMARY=$(grep -oE "[0-9]+ (passed|failed|skipped|error)[^=]*" "$log" | tail -1)
+            echo "  !!   $LEG_NAME -- GREEN BUT NOTHING PASSED: ${SUMMARY:-no pytest summary found}"
+            VACUOUS=1
+        fi
+    done
+    if [ "$SEEN" -eq 0 ]; then
+        echo
+        echo "run was green but published no log artifact -- cannot confirm tests ran."
+        echo "Treat this leg as UNPROVEN, not as a pass."
+        exit 1
+    fi
+    if [ "$VACUOUS" -ne 0 ]; then
+        echo
+        echo "VACUOUS PASS for suite '$SUITE': the run is green because tests were"
+        echo "skipped, not because they succeeded. Do NOT record a checkmark for this."
+        echo "For the eval suite this means the checkpoints are not staged on the pod:"
+        echo "  GSW_EVAL_*_DIR must point at a staged checkpoint (see tests/eval/_eval_core.py)."
+        exit 1
+    fi
+    echo
+    echo "all legs green for suite '$SUITE', and every leg ran real tests."
+    exit 0
+fi
+
+# Failure: the published log artifact is the readable one (clean_log.sh has already
+# stripped the noise). Triage every leg's artifact.
 
 shopt -s nullglob
 for log in "$TMP"/*/*.log; do
