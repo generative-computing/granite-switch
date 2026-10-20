@@ -38,6 +38,8 @@ import hashlib
 import json
 import math
 import os
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -111,8 +113,47 @@ EVAL_CONFIGS: dict[str, EvalConfig] = {
 }
 
 
+#: Compose recipes, consulted only when no checkpoint is staged. Public
+#: `ibm-granite` repos, and the same base+adapters the e2e suites already
+#: download, so this adds no new artifact to fetch. `sr_vllm` deliberately has
+#: NO recipe: a dual-stream checkpoint needs SR adapters, which are not public,
+#: so that config keeps skipping rather than quietly evaluating a non-SR model
+#: and reporting it as SR coverage.
+COMPOSE_RECIPES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "granite42_vllm": (
+        "ibm-granite/granite-4.1-3b",
+        ("ibm-granite/granitelib-guardian-r1.0", "ibm-granite/granitelib-core-r1.0"),
+    ),
+    "granite5_vllm": (
+        "ibm-granite/granite-4.0-micro",
+        ("ibm-granite/granitelib-rag-r1.0",),
+    ),
+}
+#: The HF-backend eval evaluates the same checkpoint as granite42_vllm, on the
+#: other backend -- mirroring its `fallback_env`.
+COMPOSE_RECIPES["granite42_hf"] = COMPOSE_RECIPES["granite42_vllm"]
+
+#: Shared with tests/hf/test_multi_switch_e2e.py ON PURPOSE -- the same cache
+#: root, so a checkpoint composed by either side is warm-reused by the other
+#: instead of being built twice in one GPU leg.
+_E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e2e"))
+
+
 def checkpoint_dir(cfg: EvalConfig) -> Path | None:
-    """The staged checkpoint for `cfg`, or None if this runner does not have it."""
+    """The checkpoint for `cfg`, composing one when no path is staged.
+
+    An explicit ``GSW_EVAL_*_DIR`` always wins, so a pod with a real checkpoint
+    staged -- a 30B, or a variant with no public recipe -- is unaffected.
+
+    WHY THERE IS A FALLBACK AT ALL. Requiring the env var meant the eval suite
+    could only ever skip: nothing sets ``GSW_EVAL_*_DIR`` on the GPU pod, and
+    pytest exits 0 on an all-skipped suite, so the leg went green having
+    evaluated nothing (run 39299824463: 4 collected, 4 skipped, "ALL GPU TESTS
+    PASSED", 0.03s). An eval gate that cannot run is worse than no gate, because
+    it reads as coverage. The repo already solved this for the e2e suites --
+    compose from public HF repos into a warm-reused cache -- so this reuses that
+    mechanism rather than inventing a second one.
+    """
     for var in (cfg.env, cfg.fallback_env):
         if var and (val := os.environ.get(var)):
             p = Path(val)
@@ -123,7 +164,68 @@ def checkpoint_dir(cfg: EvalConfig) -> Path | None:
                     "would otherwise read as 'not staged' and pass vacuously."
                 )
             return p
-    return None
+    return compose_for(cfg)
+
+
+def compose_for(cfg: EvalConfig) -> Path | None:
+    """Compose (or warm-reuse) a checkpoint for `cfg`; None if not possible here.
+
+    Returns None -- so the caller SKIPS -- when the config has no recipe, or when
+    ``GSW_EVAL_NO_COMPOSE`` is set to force the old staged-only behaviour. A
+    compose FAILURE is not a skip: it raises, because a recipe that has stopped
+    working is a real break and must not be reported as "this runner does not
+    have the checkpoint".
+    """
+    recipe = COMPOSE_RECIPES.get(cfg.name)
+    if recipe is None:
+        return None
+    # NO `GRANITE_SWITCH_E2E_MODELS=1` GATE HERE, DELIBERATELY. The e2e suites
+    # need that opt-in because they are reachable from a plain `pytest tests/`
+    # and composing pulls several GB from HF. These evals are not: they are
+    # excluded from the default selection by pyproject's `-m "not deep"` plus
+    # the `eval` marker, so the only ways in are `-m eval` and /gpu-test-eval.
+    # ASKING FOR THE EVAL SUITE IS THE OPT-IN.
+    #
+    # This is also the only workable place for it. Requiring a second env var
+    # would mean forwarding it to the GPU pod, and the pod is launched by
+    # /opt/gsw/submit_and_poll.sh, which is baked into the runner image and
+    # cannot be given a new flag from this repo. A gate nothing can satisfy is
+    # how the suite ended up permanently skipping in the first place.
+    if os.environ.get("GSW_EVAL_NO_COMPOSE"):
+        return None
+
+    base, adapters = recipe
+    out_dir = _E2E_ROOT / f"eval-{cfg.name}"
+    if (out_dir / "config.json").exists():
+        return out_dir
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "granite_switch.composer.compose_granite_switch",
+            "--base-model",
+            base,
+            "--adapters",
+            *adapters,
+            "--technology-filter",
+            "lora",
+            "--output",
+            str(out_dir),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"compose failed for eval config {cfg.name}:\n"
+            f"--- stdout ---\n{result.stdout[-3000:]}\n"
+            f"--- stderr ---\n{result.stderr[-3000:]}"
+        )
+    if not (out_dir / "config.json").exists():
+        raise RuntimeError(f"compose produced no config.json in {out_dir}")
+    return out_dir
 
 
 def prompts() -> list[str]:
