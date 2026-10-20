@@ -49,6 +49,18 @@ HERE = Path(__file__).parent
 CASES = HERE / "cases"
 BASELINES = HERE / "baselines"
 
+# Same defaults tests/conftest.py applies, set HERE because this module is also
+# imported by the skill's record_eval_baseline.py, which runs standalone and so
+# never loads conftest. Without it, recording a baseline booted vLLM with the
+# FlashInfer sampler, which JIT-compiles through ninja and failed outright on the
+# GPU pod (`ninja ... returned non-zero exit status 1`, engine core never
+# started) -- while the eval CHECK, running under pytest, had the sampler off.
+# Recording and checking must not differ in engine configuration, which is the
+# whole reason both sides share this module.
+#
+# setdefault, so an image with a working toolchain can opt back in.
+os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
 #: Generated positions per prompt. Long enough that the adapter's behaviour shows,
 #: short enough that four configs fit in a GPU leg alongside everything else.
 MAX_TOKENS = int(os.environ.get("GSW_EVAL_MAX_TOKENS", "24"))
