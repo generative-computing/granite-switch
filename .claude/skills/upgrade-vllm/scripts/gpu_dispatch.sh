@@ -24,11 +24,15 @@ POLL=60
 
 usage() {
     cat <<'EOF'
-usage: gpu_dispatch.sh --ref BRANCH [--suite full|short|dev|audio|multi|eval]
+usage: gpu_dispatch.sh --ref BRANCH
+                       [--suite full|short|dev|audio|multi|eval|eval-record]
                        [--sha SHA] [--pr N] [--wait] [--poll SECONDS]
 
   --ref    branch whose workflow file AND commit to use (required)
-  --suite  test scope (default: full)
+  --suite  test scope (default: full). `eval-record` does not CHECK the eval
+           baselines, it RECORDS them: it prints each JSON into the run log
+           between `--8<--`/`-->8--` markers for a human to extract and commit.
+           It never writes into the repo, and it bypasses the result cache.
   --sha    commit to check out on the cluster (default: origin/<ref> head)
   --pr     PR number to comment on (default: derived by the workflow)
   --wait   block until the run finishes, then report per-leg results

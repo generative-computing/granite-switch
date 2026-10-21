@@ -1,9 +1,21 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""Record (or refresh) the committed eval baselines.
+"""Record (or refresh) the committed eval baselines ON A DEV BOX.
 
-Run this from a KNOWN-GOOD vLLM line, with the checkpoints staged, BEFORE porting
-to a new line:
+NOT THE SANCTIONED PATH. Record on the GPU runner instead, with
+
+    gh workflow run gpu-tests.yaml --ref <branch> -f suite=eval-record -f sha=<sha>
+
+(see `tests/eval/test_record_baselines.py`), because a baseline is only a
+reference if the environment that checks it can reproduce it. A baseline recorded
+on a Vela pod was off by a systematic ~0.004 mean JSD on the CI runner --
+identically on the 0.26 and 0.30 legs, so neither version drift nor torch. The
+difference in the vLLM capture path between those machines was never isolated;
+recording where the check runs makes it moot.
+
+This script survives for the case where that is not available: a dev box with the
+checkpoints staged, comparing two locally-installed vLLM lines against each other.
+Run it from a KNOWN-GOOD line, BEFORE porting:
 
     uv run --group dev-vllm30 \
       .claude/skills/upgrade-vllm/scripts/record_eval_baseline.py --config all
@@ -12,8 +24,9 @@ A baseline captured on the version under test proves nothing, which is why this
 prints the version it recorded against and refuses to overwrite an existing
 baseline without --force.
 
-Uses tests/eval/_eval_core.py -- the same code the check runs -- so the baseline
-cannot describe something different from what is later measured.
+Uses tests/eval/_eval_core.py -- the same code the check and the runner recorder
+both run -- so the baseline cannot describe something different from what is later
+measured, and a file written here is byte-comparable with one printed there.
 """
 
 from __future__ import annotations

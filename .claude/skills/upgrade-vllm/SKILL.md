@@ -444,17 +444,50 @@ baseline** in `tests/eval/baselines/`, which records top-k logprob distributions
 for a fixed prompt set plus the vLLM version they were captured on. A config whose
 env var is unset skips with a reason; it does not silently pass.
 
+**The measurement is teacher-forced.** Both the baseline and the check push the
+BASELINE's recorded `continuations` through the model and read the distribution at
+each position, so position *i* always sits on a byte-identical prefix. Only
+recording generates. Do not "simplify" this into a greedy rollout: one flipped
+near-tie argmax desynchronizes the prefix and every later position then compares
+unrelated contexts. If `mean_jsd` and `mean_jaccard_dist` both land on exactly
+`(N − p)/N` for some integer p, that is trajectory desynchronization at position
+p, not a logit regression — see `tests/eval/_eval_core.py`'s docstring.
+
 The baseline is the gate, so capture it on a **known-good** version — the current
-ceiling, *before* porting:
+ceiling, *before* porting — and capture it **on the GPU runner**, the same
+environment that checks it:
 
 ```bash
-uv run --group dev-vllm<old-ceiling> \
-  .claude/skills/upgrade-vllm/scripts/record_eval_baseline.py --config all
+gh workflow run gpu-tests.yaml --ref <branch> -f suite=eval-record -f sha=<sha>
 ```
+
+Then lift each JSON out of the run's `gpu-tests.log` artifact between its
+`--8<-- <path>` and `-->8--` markers, write it to that path, and commit. The job
+writes nothing into the repo on purpose: a job that could rewrite a baseline in
+place is one bad dispatch away from erasing the thing being gated.
+
+Recording elsewhere has been tried and does not hold. A Vela-recorded baseline was
+off by a systematic ~0.004 mean JSD on the CI runner, identically on the 0.26 and
+0.30 legs — so not version drift, and not torch either (the HF config reproduced
+across torch 2.11 vs 2.13 at exactly 0.000000). Recording where the check runs
+makes the baseline reproducible by construction, so later movement is attributable
+to the one thing that changed: the vLLM line. `scripts/record_eval_baseline.py`
+still exists for a dev box with checkpoints staged, but it is not the sanctioned
+path.
 
 Only re-record when the user explicitly accepts a quality change. Re-recording to
 make a failing eval pass destroys the gate: a failure here is the signal the whole
-upgrade was looking for. Report it and stop.
+upgrade was looking for. Report it and stop. Likewise never widen a threshold. If
+a failure reproduces identically across vLLM lines — *including the line the
+baseline was recorded on* — it is a defect in the measurement, not stale data.
+
+Two further invariants the gate depends on:
+
+- **The adapter is pinned by NAME** (`_eval_core.EVAL_ADAPTERS`), never by index.
+  The composer walks `rglob` in filesystem order without sorting, so "adapter 0"
+  of a composed checkpoint is not the same adapter on two machines.
+- **Prefix caching is off** in the capture path, for reproducibility rather than
+  speed. Leave it off.
 
 ### Tier 2 — scored accuracy (`evals.yaml`)
 
