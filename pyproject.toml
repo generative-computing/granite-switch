@@ -82,15 +82,31 @@ vllm27     = ["vllm>=0.27.0,<0.28.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
-dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
-dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
-dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
+#
+# `quant` carries the two quantization backends tests/hf/test_quantization.py drives.
+# They are in every dev group because that module no longer opts in through an env
+# flag -- it runs wherever it can, and without these it would skip on importorskip
+# instead, which is the same silent nothing the flag used to produce.
+#
+# PINNED, unlike most of this file. These are JIT-compiling CUDA extensions, so a
+# new release can change whether a kernel builds at all on a given image -- the
+# Quanto float8 `quanto_cuda`/ptxas break is exactly that failure mode, and it is
+# inside one of these two. Floating them would mean a red suite traceable to a
+# background upgrade rather than to a commit. Both versions below are measured green
+# on the Vela A100 image. Raise them deliberately, with a GPU run.
+quant      = ["bitsandbytes==0.50.2", "optimum-quanto==0.2.7"]
+dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, { include-group = "quant" }, "granite-switch[hf,compose,audio]"]
+dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, { include-group = "quant" }, "granite-switch[hf,compose,audio]"]
+dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, { include-group = "quant" }, "granite-switch[hf,compose,audio]"]
 # The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
 # CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
 # the ceiling is repointing this one line instead of chasing the version through
 # every caller. Currently the 0.30 line.
 dev-latest = [{ include-group = "dev-vllm30" }]
-test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
+# The two quantization backends come in through `dev` -> `quant` now, PINNED. They
+# used to be listed here bare (unversioned), which would have silently overridden
+# the pin with "whatever is newest".
+test       = ["pytest", "pytest-cov", { include-group = "dev" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
