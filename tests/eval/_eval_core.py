@@ -358,7 +358,20 @@ def _run_vllm(
 
     from tests.shared.vllm_gpu_mem import gpu_mem_util, shutdown_llm
 
-    kwargs: dict = {"model": str(model_dir), "enforce_eager": True}
+    kwargs: dict = {
+        "model": str(model_dir),
+        "enforce_eager": True,
+        # OFF for reproducibility, not speed. The adapter and base passes send
+        # near-identical token sequences -- they differ only by the leading
+        # control token -- so with prefix caching on, whether a position is
+        # recomputed or served from a cached block depends on what ran earlier in
+        # the same engine. That made the capture depend on pass order: prompt 0,
+        # the longest, was the only one whose numbers moved between two runs of
+        # the same vLLM line (granite42_vllm 0.000000 -> 0.001857, granite5_vllm
+        # 0.001914 -> 0.003221 across the 0.26 and 0.30 legs of run
+        # 39556314476), while the shorter prompts reproduced byte-identically.
+        "enable_prefix_caching": False,
+    }
     # vLLM measures gpu_memory_utilization against TOTAL memory and refuses to
     # start if that exceeds what is free. These evals start engines back to back,
     # so a fixed value only works on an idle card.
