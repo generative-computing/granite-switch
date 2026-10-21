@@ -1302,7 +1302,6 @@ def build():
                 per_slot_label_token_ids.append(
                     resolve_label_token_ids(tokenizer, label_names)
                 )
-
                 per_slot_read_layer.append(classifier_meta[name].get("layer"))
 
             optional_kwargs["adapter_kinds"] = adapter_kinds

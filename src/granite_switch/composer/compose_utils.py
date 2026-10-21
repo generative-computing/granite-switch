@@ -174,9 +174,7 @@ class GraniteSwitchComposer:
 
         # adapter_ranks/adapter_alphas stay full external width (one entry per
         # slot, classifiers included) so config.adapter_ranks is length
-        # num_adapters. A classifier slot itself has no LoRA weights. A
-        # separately selected LoRA slot can remain active through a classifier
-        # marker because classifier selection does not overwrite adapter state.
+        # num_adapters. A classifier slot itself has no LoRA weights.
         if lora_adapter_paths:
             lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths
@@ -307,9 +305,7 @@ class GraniteSwitchComposer:
             base_model_name_or_path, model, switch_config, arch
         )
 
-        adapter_mapping = {}
         classifier_mapping = {}
-
         if lora_adapter_paths:
             # --- Step 7: Transfer LoRA adapter weights ---
             # LoRAs are the contiguous leading slots, so the leading k entries of
@@ -330,11 +326,7 @@ class GraniteSwitchComposer:
                 model,
                 arch,
                 adapter_paths=lora_adapter_paths,
-                adapter_names=(
-                    [adapter_names[i] for i in lora_slots]
-                    if adapter_names is not None
-                    else None
-                ),
+                adapter_names=lora_adapter_names,
                 target_module_sets=target_module_sets,
             )
             if dual_stream:

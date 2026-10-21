@@ -192,7 +192,6 @@ class LoRAContext:
 
     __slots__ = (
         "adapter_indices",
-        "classifier_indices",
         "num_tokens",
         "per_module_bitmasks",
         "remapped_indices",
@@ -203,18 +202,12 @@ class LoRAContext:
         self.remapped_indices: torch.Tensor | None = None
         self.per_module_bitmasks: torch.Tensor | None = None
         self.num_tokens: int = 0
-        # Classifier stream (parallel to the LoRA stream): 0 = no classifier,
-        # 1+ = classifier slot. Set by the model's forward when a classifier
-        # head is present; read by the verdict exit on the last rank. Not part
-        # of the fused-LoRA bitmask path — the LoRA kernel never sees it.
-        self.classifier_indices: torch.Tensor | None = None
 
     def reset(self):
         self.adapter_indices = None
         self.remapped_indices = None
         self.per_module_bitmasks = None
         self.num_tokens = 0
-        self.classifier_indices = None
 
 
 class FusedLoRAKernelMeta(nn.Module):
