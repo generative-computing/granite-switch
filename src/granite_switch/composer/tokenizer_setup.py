@@ -907,10 +907,7 @@ def configure_chat_template(
 
     Modifies the tokenizer's chat template so that callers can pass
     ``adapter_name="..."`` to ``apply_chat_template()`` and have the
-    correct control token inserted automatically. An independent
-    ``classifier_name="..."`` appends a classifier marker as the final token,
-    preserving the selected adapter. ``adapter_name`` alone still accepts a
-    classifier slot for compatibility.
+    correct control token inserted automatically:
 
     * **LoRA** adapters: token at the **beginning** of the sequence.
     * **ALoRA** adapters: token immediately before ``alora_invocation_tokens``
@@ -918,10 +915,6 @@ def configure_chat_template(
       requirement-checker), or right before the generation prompt for adapters
       whose invocation sequence is the assistant role token sequence and
       therefore does not appear in any user message.
-    * **SR** adapters: replace the generation prompt's activation anchor.
-      Classification preserves this prompt, as it does an ALoRA fallback
-      invocation. LoRA and user-invoked ALoRA classification omit the generation
-      prompt, matching classifier-only placement after the last turn's close.
 
     ALoRA placement uses a two-pass Jinja2 approach embedded in the template:
 
@@ -1053,7 +1046,7 @@ def configure_chat_template(
 {%- set adapter_type = '' %}
 {%- set adapter_invocation_text = '' %}
 {%- set adapter_invocation_drop_chars = 1 %}
-{%- if adapter_name is defined and adapter_name is string and adapter_name in adapter_map %}
+{%- if adapter_name is defined and adapter_name in adapter_map %}
 {%- set adapter_token = adapter_map[adapter_name]['token'] %}
 {%- set adapter_type = adapter_map[adapter_name]['type'] %}
 {%- if adapter_map[adapter_name]['type'] == 'alora' %}
@@ -1061,26 +1054,11 @@ def configure_chat_template(
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
-{#- Classifier selection is independent of persistent adapter selection.
-    adapter_name still accepts a classifier for existing callers. -#}
-{%- set classifier_token = adapter_token if adapter_type == 'classifier' else '' %}
-{%- if classifier_name is defined and classifier_name is not none %}
-{%- if classifier_name is not string or classifier_name not in adapter_map or adapter_map[classifier_name]['type'] != 'classifier' %}
-{{- raise_exception('classifier_name must name a composed classifier slot') }}
-{%- endif %}
-{%- if classifier_token and classifier_token != adapter_map[classifier_name]['token'] %}
-{{- raise_exception('adapter_name and classifier_name select different classifiers') }}
-{%- endif %}
-{%- set classifier_token = adapter_map[classifier_name]['token'] %}
-{%- endif %}
-{%- set classifier_mode = classifier_token != '' %}
+{#- A classifier reads its verdict at the marker, so nothing may follow it:
+    drop the generation prompt even when the caller asks for one. -#}
+{%- set classifier_mode = adapter_type == 'classifier' %}
 {%- if classifier_mode %}
-{%- if adapter_name is defined and adapter_name is not none and not adapter_type %}
-{{- raise_exception('adapter_name must name a composed adapter or classifier slot') }}
-{%- endif %}
-{#- SR needs its generation-prompt anchor before the classifier marker.
-    The ALoRA fallback below similarly restores its full invocation. -#}
-{%- set add_generation_prompt = adapter_type == 'sr' %}
+{%- set add_generation_prompt = false %}
 {%- endif %}
 
 """
@@ -1207,7 +1185,6 @@ def configure_chat_template(
      (alora_target_idx == -1), meaning the adapter activates at the assistant
      role token boundary rather than inside a user message. -#}
 {%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 %}
-{%- if classifier_mode %}{%- set add_generation_prompt = true %}{%- endif %}
 {{- ns.adapter_token }}
 {%- set ns.skip_next_role_marker = true %}
 {%- endif %}
@@ -1354,6 +1331,13 @@ def configure_chat_template(
                 + modified_chat_template[insertion_point:]
             )
 
+    # Classifier placement: the marker is the very last token, after the last
+    # turn's close.
+    if any(i["type"] == ANCHOR_MODE_CLASSIFIER for i in adapter_mapping.values()):
+        modified_chat_template += (
+            "\n{%- if classifier_mode %}{{- adapter_token }}{%- endif %}"
+        )
+
     # Insert alora fallback before generation prompt
     gen_prompt_pattern = r"(\{%- if add_generation_prompt %\})"
     match = re.search(gen_prompt_pattern, modified_chat_template)
@@ -1453,13 +1437,6 @@ def configure_chat_template(
         _split_merged,
         modified_chat_template,
     )
-
-    # Append only after all activation insertions, including the fallback used
-    # by templates without a generation-prompt block. Nothing follows the probe.
-    if any(i["type"] == ANCHOR_MODE_CLASSIFIER for i in adapter_mapping.values()):
-        modified_chat_template += (
-            "\n{%- if classifier_mode %}{{- classifier_token }}{%- endif %}"
-        )
 
     tokenizer.chat_template = modified_chat_template
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")

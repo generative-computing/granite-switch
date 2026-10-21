@@ -295,9 +295,9 @@ two labels for a 2-label slot, three for a 3-label slot.
 
 ### Firing via the chat template (optional)
 
-Instead of placing `<|safety|>` by hand, pass `classifier_name` to the composed model's chat
-template. It appends the control token as the final token. Existing calls that select a classifier
-through `adapter_name` still work:
+Instead of placing `<|safety|>` by hand, you can let the composed model's chat template place it for
+you by passing `adapter_name` — a classifier slot is activated exactly like any other adapter. The
+template appends the control token after the last turn:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -306,30 +306,9 @@ curl http://localhost:8000/v1/chat/completions \
     "model": "./granite-switch-detect",
     "messages": [{"role": "user", "content": "Is this text safe? The weather is nice today."}],
     "max_tokens": 1,
-    "chat_template_kwargs": {"classifier_name": "safety"}
+    "chat_template_kwargs": {"adapter_name": "safety"}
   }'
 ```
-
-To apply an adapter and classify its resulting activation in the same request, select both:
-
-```json
-"chat_template_kwargs": {"adapter_name": "rag", "classifier_name": "safety"}
-```
-
-The adapter stays active at the classifier marker. LoRA and user-invoked aLoRA classification omit
-the assistant generation prompt. SR and assistant-boundary aLoRA preserve the generation prompt
-needed to activate the adapter, then append the classifier marker. This placement is enforced even
-when the caller supplies the opposite `add_generation_prompt` value; ChatML thinking branches keep
-their usual suffix before the marker. Return the verdict with `max_tokens: 1`.
-
-Unknown classifier names, non-classifier slots supplied as `classifier_name`, unknown adapters
-paired with classification, and conflicting classifier selections raise template errors.
-Omitting `classifier_name` or setting it to `null` preserves ordinary adapter-only rendering.
-
-These arguments are embedded in newly composed tokenizers. Existing checkpoints need their chat
-template regenerated (or re-composition) to use the new interface. No model-weight change is needed.
-The request-level arguments select one adapter and one classifier; per-message adapter switching
-is not exposed by this interface.
 
 ### Reading logprobs (optional)
 
