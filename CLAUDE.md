@@ -406,14 +406,29 @@ backend architecture. Upstream HuggingFace `GraniteMoeHybridForCausalLM` uses se
 Fused projections change the floating-point reduction order, so bit-exact skinning equivalence
 with the upstream HF model is not achievable. The HF skinning test in
 `tests/composer/test_skinning_equivalence.py` used to be skipped outright for this reason; it
-now runs and compares the way every other equivalence check here does — exact agreement on
-argmax and the top-100 token set, plus a magnitude bound derived from the dtype's epsilon
-(`ULP_SLACK` in `_skinning_equivalence_worker.py`) rather than a fixed atol, since one ULP of a
-logit is ~5e-06 in fp32 but ~0.34 in bf16. Ranking is the load-bearing part: adding a constant
-to every logit leaves the distribution unchanged (`log_softmax` is shift-invariant), so a
-magnitude check alone can neither convict nor acquit. Worth keeping rather than deleting because
-both vLLM skinning tests need a GPU, making this the only CPU-runnable check that the composer's
-weight transfer reproduces the original model.
+now runs and gates **distribution** equivalence instead, with the same metric and thresholds
+`tests/vllm/_generation_equivalence_worker.py` already calibrated: top-k JSD + Jaccard swept
+over k, plus an exact argmax check and a least-squares slope fit. Four checks because the first
+three live after `log_softmax` and the fourth covers what normalizing hides:
+
+- **argmax, exact** — what greedy decoding emits; measured to be a strict maximum at every
+  position, so no tolerance is needed even in bf16.
+- **mean + max top-k JSD** — mean catches "wrong everywhere a little", max catches one
+  catastrophically wrong position that a mean would dilute.
+- **mean top-k Jaccard distance**, deliberately loose. An exact top-K *set* match is
+  unreachable in bf16 and was the first attempt: bf16 resolution is ~0.11 at these logits, so
+  the rank-100 boundary is a pile of exact ties (measured 4, 7 and 7 tokens sharing one bf16
+  value at the cut) and which tie-mate lands inside the cut is arbitrary. Jaccard measures how
+  much the top-k overlaps rather than demanding it match.
+- **slope of skinned-vs-reference logits** (`SLOPE_TOL`) — the only non-scale-invariant check,
+  which is its whole job. A uniform logit *scaling* preserves ranking and barely dents the
+  normalized shape (a 5% error measures inside the benign JSD floor), yet it is the signature of
+  a mistransferred `logits_scaling` / `attention_multiplier`. A scale error is systematic where
+  reduction-order noise is random, so the fit separates them by ~300x. Intercept left free, so a
+  benign uniform shift still reads as slope 1.
+
+Worth keeping rather than deleting because both vLLM skinning tests need a GPU, making this the
+only CPU-runnable check that the composer's weight transfer reproduces the original model.
 
 The vLLM check (`tests/vllm/test_generation_equivalence.py`) is the authoritative equivalence
 test, but it is **not** token-exact either. The skinned model runs its projections through the

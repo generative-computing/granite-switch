@@ -3,8 +3,8 @@
 
 Neither backend checks bit-exactness: the skin's fused projections sum in a
 different order than the unfused reference, so both workers compare within a
-noise bound (an ULP multiple for HF logits, LOGPROB_ATOL for vLLM logprobs) and
-pair it with an exact top-token check. See CLAUDE.md Gotcha #9.
+measured noise bound and pair it with an exact top-token check. See CLAUDE.md
+Gotcha #9.
 
 Each model runs in its own subprocess so CUDA context is fully torn down between
 tests (avoids OOM and stale-state issues that plague in-process model reloading).
@@ -184,9 +184,11 @@ def _run_vllm_test(model_name, timeout, fast=False):
 # changes the order of a floating-point sum. This test therefore used to carry an
 # unconditional @pytest.mark.skip, on the correct observation that bit-exact
 # equivalence is unreachable -- but the conclusion drawn from it was too strong.
-# Its worker now compares within a dtype-derived ULP bound plus an exact argmax
-# check (see _skinning_equivalence_worker._compare_logits), which is the same move
-# the vLLM worker already made with LOGPROB_ATOL, so the test can run instead.
+# Its worker now gates DISTRIBUTION equivalence (top-k JSD + Jaccard swept over k,
+# plus an exact argmax check and a slope fit; see
+# _skinning_equivalence_worker._compare_logits), reusing the metric and thresholds
+# tests/vllm/_generation_equivalence_worker.py already calibrated, so the test can
+# run instead.
 #
 # Worth having rather than deleting: both vLLM skinning tests below need a GPU, so
 # this is the only end-to-end check that the composer's weight transfer produces a
