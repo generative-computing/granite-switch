@@ -251,10 +251,12 @@ jobs:
             #                                       env flag; 4 of them now gate on a
             #                                       real Quanto float8 probe that only
             #                                       means anything on a GPU.
-            #   tests/composer/test_skinning_...py   was @pytest.mark.skip outright;
-            #                                       now compares within a dtype-derived
-            #                                       ULP bound whose real noise floor is
-            #                                       unmeasured until it runs.
+            #   tests/composer/test_skinning_...py   was @pytest.mark.skip outright; now
+            #                                       gates top-k JSD/Jaccard + argmax +
+            #                                       a slope fit. This scope is what
+            #                                       measured the bf16 noise floor those
+            #                                       are calibrated against -- a CPU box
+            #                                       runs it in fp32 and sees none of it.
             #   tests/unit/test_bitmask_computation  34 tests, no longer 2 skips. Cheap,
             #                                       and it cannot even be COLLECTED off
             #                                       GPU: it imports lora_kernel_meta,
