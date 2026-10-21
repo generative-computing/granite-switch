@@ -156,19 +156,22 @@ def test_multi_audio_checkpoint_loads_without_size_overrides(audio_multi):
 
 
 # --------------------------------------------------------------------------- #
-# Classifier slot + audio: every vocabulary-sized routing table must be rebuilt
-# after the audio marker grows the vocabulary, and the classifier must still
-# route to its head after a strict reload. Text-only compose is the control.
+# A LoRA + classifier checkpoint composed with and without --enable-audio must
+# load strictly (no ignore_mismatched_sizes) and still route the classifier
+# marker to its head. The audio marker grows the vocabulary past the control
+# ids, so this also checks the saved control LUT matches the shipped config.
 # --------------------------------------------------------------------------- #
 _CLASSIFIER_BASE = "ibm-granite/granite-4.1-3b"
 _CLASSIFIER_LABELS = ["safe", "unsafe"]
 
 
 def _write_classifier_manifest(root):
-    """A synthetic bias-only head (label 1 always wins) under the library layout."""
+    """A real LoRA plus a synthetic bias-only head (label 1 always wins)."""
     import torch
     from safetensors.torch import save_file
     from transformers import AutoConfig
+
+    from .test_classifier_compose import _find_rag_lora_dir
 
     hidden = AutoConfig.from_pretrained(_CLASSIFIER_BASE).hidden_size
     head_dir = root / "safety" / "safety" / "granite-4.1-3b" / "lora"
@@ -181,6 +184,9 @@ def _write_classifier_manifest(root):
     (head_dir / "io.yaml").write_text("name: safety\nmodel: ~\n")
     manifest = root / "adapters.yaml"
     manifest.write_text(
+        "rag:\n"
+        f"  path: {_find_rag_lora_dir()}\n"
+        "  type: lora\n"
         "safety:\n"
         f"  path: {head_dir}\n"
         "  type: lora\n"
@@ -242,7 +248,7 @@ def test_classifier_checkpoint_loads_strictly_and_routes(classifier_checkpoint):
     ).eval()
     switch = model.model.switch
     assert switch.control_to_substitute_lut.numel() == model.config.vocab_size
-    assert switch.adapter_kind_lut.tolist() == [False, True]
+    assert switch.adapter_kind_lut.tolist() == [False, False, True]
 
     tokenizer = AutoTokenizer.from_pretrained(str(output_dir))
     input_ids = tokenizer.apply_chat_template(
@@ -256,9 +262,9 @@ def test_classifier_checkpoint_loads_strictly_and_routes(classifier_checkpoint):
     assert input_ids[0, -1].item() == marker
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=False)
-    assert model.model._last_classifier_indices[0, -1].item() == 1
+    assert model.model._last_classifier_indices[0, -1].item() == 2
     assert not model.model._last_lora_indices.any()
-    label_ids = model.config.classifier_label_token_ids[0]
+    label_ids = model.config.classifier_label_token_ids[1]
     assert int(out.logits[0, -1].argmax()) == label_ids[1]
 
 
