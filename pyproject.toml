@@ -56,6 +56,10 @@ markers = [
     "requires_model: needs a real model checkpoint",
     "audio: exercises the audio/ASR path; run with: pytest -m audio",
     "eval: adapter-output eval against a committed baseline; run with: pytest -m eval",
+    # Also marked `deep`, so the default `-m "not deep"` hides it: this one RECORDS
+    # the baselines the `eval` marker checks against, and must only ever run when
+    # asked for by name.
+    "eval_record: records eval baselines on the GPU runner; run with: pytest -m eval_record",
 ]
 
 [dependency-groups]

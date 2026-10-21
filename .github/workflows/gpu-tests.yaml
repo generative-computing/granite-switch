@@ -60,11 +60,11 @@ on:
       # family is added HERE and nowhere else -- this entry plus its arm in the
       # Resolve test scope step below.
       suite:
-        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), eval (the four adapter evals vs committed baselines)."
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), eval (the four adapter evals vs committed baselines), eval-record (re-record those baselines; prints them, commits nothing)."
         required: false
         default: full
         type: choice
-        options: [full, short, dev, audio, multi, eval]
+        options: [full, short, dev, audio, multi, eval, eval-record]
       # RESULT CACHE OPT-OUT. Default off, i.e. cache on: the expensive thing here is
       # a GPU run, and re-running one for a commit+scope that was already tested buys
       # nothing in the common case (a reviewer re-reading a PR, a second maintainer
@@ -272,6 +272,26 @@ jobs:
               SUFFIX="eval"
               LEG="$LABEL-eval"
               ;;
+            # RECORDS the baselines the `eval` scope checks against, printing each
+            # into the log for a human to extract and commit. Writes nothing to the
+            # repo -- see tests/eval/test_record_baselines.py.
+            #
+            # Recording happens HERE, on the runner that does the checking, because
+            # a baseline recorded elsewhere was not reproducible here: a Vela-
+            # recorded one missed by a systematic ~0.004 mean JSD on both vLLM
+            # configs, identically on the 0.26 and 0.30 legs. Same-environment
+            # recording makes the baseline reproducible by construction, so later
+            # movement is attributable to the vLLM line and nothing else.
+            #
+            # `-m eval_record` with NO "and not deep" -- the opposite of every arm
+            # above, on purpose. These cases are marked `deep` precisely so the
+            # default selection cannot reach them, so intersecting with "not deep"
+            # would select nothing and the leg would pass vacuously.
+            eval-record)
+              PATHS='-m eval_record tests/eval/'
+              SUFFIX="eval-record"
+              LEG="$LABEL-eval-record"
+              ;;
             # Fail rather than defaulting to full: silently running the wrong scope
             # is worse than not running, and `type: choice` already rejects unknown
             # values, so reaching this means the options list above gained an entry
@@ -325,6 +345,9 @@ jobs:
           # the opposite of what it reads like.
           NO_CACHE: ${{ inputs.no_cache }}
           DEP_GROUP: ${{ matrix.dep_group }}
+          # Needed for the eval-record bypass below. SUITE in the mapping step is
+          # that step's own env and does not carry across steps.
+          SUITE: ${{ inputs.suite || 'full' }}
         # No `set -e`: every failure path here is a cache miss, not a broken run.
         run: |
           set -uo pipefail
@@ -346,7 +369,14 @@ jobs:
             awk -v k="$1" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' <<<"$LOOKUP"
           }
 
-          if [[ "$NO_CACHE" == "true" ]]; then
+          # eval-record is never cacheable. Its whole output is the baseline JSON
+          # printed into the pod log, and a cache hit skips the pod entirely — so a
+          # second recording dispatch on the same commit would report success with
+          # nothing to extract, and the obvious reading of that is "the recording
+          # produced no baselines".
+          if [[ "$SUITE" == "eval-record" ]]; then
+            echo "eval-record always runs: the log IS the artifact, so a cached result is useless."
+          elif [[ "$NO_CACHE" == "true" ]]; then
             echo "--no-cache was requested — running the tests fresh."
           else
             # stderr goes to a file, never to this console: on a failure the script
