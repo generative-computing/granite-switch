@@ -10,8 +10,18 @@ Quantization methods tested:
 - BitsAndBytes: NF4 (INT4), FP4
 - Quanto: INT4, FP8
 
-No hardware gating — all methods dequantize to BF16 at compute time on HF backend.
-Requires: CUDA GPU, bitsandbytes, optimum-quanto.
+GATING. This module runs wherever it *can* run — there is no opt-in env flag. It
+used to sit behind ``GRANITE_SWITCH_E2E_MODELS=1`` like the e2e suites, which meant
+all 16 tests skipped on every CI run and the quantization path was never exercised
+at all. What actually constrains them is capability, not cost policy, so each
+requirement is now checked where it applies and reported honestly:
+
+- CUDA: module-level skip (every backend here needs a GPU).
+- ``bitsandbytes`` / ``optimum-quanto``: ``importorskip`` in the owning fixture, so
+  a missing backend skips only its own tests.
+- Quanto **float8**: a real probe (``_probe_quanto_float8``) — see
+  ``require_quanto_float8`` for why a capability check is needed and what it
+  catches. These four used to ERROR in fixture setup on an A100.
 
 Model: a real MultiSwitch checkpoint composed on demand from granitelib-rag, which
 carries both an aLoRA intrinsic (``answerability``) and a LoRA one
@@ -33,8 +43,8 @@ pytestmark = [
     pytest.mark.requires_model,
     pytest.mark.gpu,
     pytest.mark.skipif(
-        os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
-        reason="composes a real ~3B mixed checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",
+        not torch.cuda.is_available(),
+        reason="every quantization backend here needs a CUDA GPU",
     ),
 ]
 
@@ -51,7 +61,13 @@ _E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e
 
 @pytest.fixture(scope="module")
 def model_path():
-    """Compose (or warm-reuse) a rag MultiSwitch checkpoint; return its dir."""
+    """Compose (or warm-reuse) a rag MultiSwitch checkpoint; return its dir.
+
+    The compose is the one genuinely expensive thing in this module (a ~3B base
+    model plus adapters). It is NOT behind an opt-in flag: `make test-e2e` is the
+    way this module is meant to be run, and the warm-reuse below makes a second run
+    free. ``GRANITE_SWITCH_E2E_DIR`` relocates the cache.
+    """
     out_dir = _E2E_ROOT / "quant-rag"
     if (out_dir / "config.json").exists():
         print(f"warm-reuse {out_dir}", file=sys.stderr)
@@ -326,8 +342,76 @@ class TestQuantoBaseQuantized:
 # ===========================================================================
 
 
+# The probe body. Deliberately contains NO granite-switch code: it quantizes a bare
+# nn.Linear, so a failure can only come from optimum-quanto/CUDA, never from us.
+# ``freeze()`` is the operative call — that is what materializes the quantized
+# weight and what JIT-builds the ``quanto_cuda`` extension.
+_FLOAT8_PROBE = """
+import torch
+from optimum.quanto import freeze, qfloat8, quantize
+
+m = torch.nn.Linear(64, 64).cuda()
+quantize(m, weights=qfloat8)
+freeze(m)
+m(torch.randn(2, 64, device="cuda"))
+print("FLOAT8_OK")
+"""
+
+
+def _probe_quanto_float8():
+    """Ask a subprocess whether Quanto can actually quantize to float8 here.
+
+    A subprocess for two reasons: the extension build and a CUDA context must not
+    be inherited into the test session, and a hard abort (``ptxas`` has been seen
+    to abort rather than raise) would otherwise take the whole run down.
+
+    Returns ``(ok, reason)``.
+    """
+    res = subprocess.run(
+        [sys.executable, "-c", _FLOAT8_PROBE],
+        capture_output=True,
+        text=True,
+        timeout=900,
+    )
+    if "FLOAT8_OK" in res.stdout:
+        return True, ""
+    tail = (res.stderr or res.stdout or "").strip().splitlines()
+    return False, " | ".join(tail[-3:])[:400] or f"exit {res.returncode}"
+
+
 @pytest.fixture(scope="module")
-def fp8_model(model_path):
+def require_quanto_float8():
+    """Skip the FP8 tests unless Quanto float8 works on this machine.
+
+    These four tests used to ERROR rather than skip. The visible exception was a
+    transformers ``RuntimeError: issues during automatic conversion of the weights``
+    naming ``base_layer.weight``, which reads like a granite-switch LoRA fault and is
+    not one: the real failure is inside ``quanto.convert → freeze() →
+    quantize_weight``, where optimum-quanto JIT-builds its ``quanto_cuda`` extension
+    and ``ptxas`` aborts with ``Feature 'cp.async' requires .target sm_80 or higher``
+    while compiling ``compute_75.ptx``. Reproduced on an A100 (sm_80) with a bare
+    ``nn.Linear`` and no granite-switch code at all.
+
+    Note the failing object is ``marlin_cuda.o`` — an INT4 kernel — because
+    ``quanto_cuda`` bundles marlin+awq+unpack and builds all-or-nothing, so float8's
+    ``freeze()`` pays for compiling a kernel it never uses. That is why INT4 can be
+    green while float8 is not.
+
+    The probe does not care which of those is the root cause: it asks the only
+    question that matters to these tests — can this machine freeze a float8 linear —
+    and skips with the real error when it cannot. A green result here therefore means
+    "float8 verified", and a skip means "float8 unavailable", never a misattributed
+    LoRA failure.
+    """
+    pytest.importorskip("optimum.quanto")
+    ok, reason = _probe_quanto_float8()
+    print(f"\nQuanto float8 skip-guard: ok={ok} reason={reason!r}")
+    if not ok:
+        pytest.skip(f"Quanto cannot quantize to float8 on this machine: {reason}")
+
+
+@pytest.fixture(scope="module")
+def fp8_model(model_path, require_quanto_float8):
     """Load granite-switch from HF with Quanto FP8 quantization."""
     pytest.importorskip("optimum.quanto")
     from transformers import AutoModelForCausalLM, AutoTokenizer, QuantoConfig
