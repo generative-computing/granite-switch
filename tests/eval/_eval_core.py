@@ -287,12 +287,29 @@ def fingerprint(model_dir: Path) -> str:
     return h.hexdigest()[:16]
 
 
-def adapter_of(model_dir: Path) -> tuple[str, int]:
+#: The adapter each config evaluates, BY NAME. Not an index, because compose
+#: orders adapters in `rglob` filesystem order -- `discover_adapters` builds its
+#: dict from `root_path.rglob(...)` and returns `list(...values())` without
+#: sorting (unlike its sibling `list_available_adapters`, which does sort). So
+#: "adapter 0" of the same recipe is not the same adapter on two machines: run
+#: 39569446055 composed granite42 with `factuality-correction` first on one GPU
+#: leg and `factuality-detection` first on the other, and the index-0 default
+#: made the eval compare two different adapters and report it as a regression.
+#: Pinning the name makes the eval independent of that ordering.
+EVAL_ADAPTERS: dict[str, str] = {
+    "granite42_vllm": "factuality-correction",
+    "granite42_hf": "factuality-correction",
+    "granite5_vllm": "answerability",
+}
+
+
+def adapter_of(model_dir: Path, config_name: str | None = None) -> tuple[str, int]:
     """(name, control-token id) of the adapter this config evaluates.
 
-    Index 0 by default, overridable by name with GSW_EVAL_ADAPTER. The NAME is
-    recorded in the baseline, so re-composing a checkpoint with its adapters in a
-    different order is caught rather than quietly evaluating a different adapter.
+    Selected BY NAME -- from `EVAL_ADAPTERS`, overridable with GSW_EVAL_ADAPTER --
+    so the compose-order instability described above cannot silently swap which
+    adapter is measured. Falls back to index 0 only for a config with no entry
+    (a staged checkpoint with no recipe, e.g. sr_vllm).
     """
     cfg = json.loads((model_dir / "config.json").read_text())
     names = cfg.get("adapter_names") or []
@@ -303,10 +320,15 @@ def adapter_of(model_dir: Path) -> tuple[str, int]:
             "are empty) -- it is a skinned checkpoint, not an eval target."
         )
 
-    want = os.environ.get("GSW_EVAL_ADAPTER")
-    idx = names.index(want) if want else 0
+    want = os.environ.get("GSW_EVAL_ADAPTER") or EVAL_ADAPTERS.get(config_name or "")
     if want and want not in names:
-        raise RuntimeError(f"GSW_EVAL_ADAPTER={want!r} not in {names}")
+        raise RuntimeError(
+            f"the eval for {config_name} measures adapter {want!r}, which this "
+            f"checkpoint does not contain. It offers {names}. Compose dropped it, "
+            "or the recipe changed -- either way the gate must not fall back to a "
+            "different adapter and report the difference as a regression."
+        )
+    idx = names.index(want) if want else 0
     return names[idx], ids[idx]
 
 
@@ -483,7 +505,7 @@ def capture(
     """
     from transformers import AutoTokenizer
 
-    name, ctrl = adapter_of(model_dir)
+    name, ctrl = adapter_of(model_dir, cfg.name)
     tok = AutoTokenizer.from_pretrained(model_dir)
     texts = prompts()
     base_seqs = [tok(p, add_special_tokens=False)["input_ids"] for p in texts]
