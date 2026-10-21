@@ -144,8 +144,15 @@ confined to the HF path could otherwise hide behind three green vLLM legs.
 ## Drift eval baselines
 
 Baselines in `tests/eval/baselines/` were recorded on vLLM 0.YY (the previously
-supported ceiling) and are **unchanged** by this PR. <If any baseline was
+supported ceiling), **on the GPU runner itself** so the environment that checks
+them can reproduce them, and are **unchanged** by this PR. <If any baseline was
 re-recorded, name it, say why, and name the human who accepted the quality change.>
+
+The measurement is teacher-forced on the baseline's recorded continuation and
+sweeps top-k agreement only at k < TOP_K, so a reported mean JSD is distribution
+movement at fixed contexts — not a greedy trajectory that desynchronized, and not
+churn at the edge of the capture window. Both of those produced false positives
+before the gate was corrected; see `tests/eval/_eval_core.py`.
 
 ---
 
