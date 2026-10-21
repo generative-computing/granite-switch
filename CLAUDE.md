@@ -404,8 +404,16 @@ architectures (4.0, 4.1) use `attention_bias=False` and `mlp_bias=False`.
 The GraniteSwitch HF backend uses fused QKV and gate-up projections, symmetric with the vLLM
 backend architecture. Upstream HuggingFace `GraniteMoeHybridForCausalLM` uses separate projections.
 Fused projections change the floating-point reduction order, so bit-exact skinning equivalence
-with the upstream HF model is not achievable. The HF skinning tests in
-`tests/composer/test_skinning_equivalence.py` are skipped for this reason.
+with the upstream HF model is not achievable. The HF skinning test in
+`tests/composer/test_skinning_equivalence.py` used to be skipped outright for this reason; it
+now runs and compares the way every other equivalence check here does — exact agreement on
+argmax and the top-100 token set, plus a magnitude bound derived from the dtype's epsilon
+(`ULP_SLACK` in `_skinning_equivalence_worker.py`) rather than a fixed atol, since one ULP of a
+logit is ~5e-06 in fp32 but ~0.34 in bf16. Ranking is the load-bearing part: adding a constant
+to every logit leaves the distribution unchanged (`log_softmax` is shift-invariant), so a
+magnitude check alone can neither convict nor acquit. Worth keeping rather than deleting because
+both vLLM skinning tests need a GPU, making this the only CPU-runnable check that the composer's
+weight transfer reproduces the original model.
 
 The vLLM check (`tests/vllm/test_generation_equivalence.py`) is the authoritative equivalence
 test, but it is **not** token-exact either. The skinned model runs its projections through the
