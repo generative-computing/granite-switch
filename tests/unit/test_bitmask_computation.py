@@ -11,11 +11,41 @@ import torch
 import granite_switch.vllm.core.lora_kernel_meta as meta_mod
 from granite_switch.vllm.core.lora_kernel_meta import _compute_bitmasks_reference
 
+# Production BLOCK_M is 32 (kernels/switch_lora_kernel.py); the others are synthetic
+# probes of the tile arithmetic, so these tests keep holding if the kernel retiles.
+_BLOCK_M_VALUES = [1, 8, 16, 32, 64]
 
-@pytest.fixture(params=[1, 8, 16, 32, 64])
+
+def _use_block_m(monkeypatch, value):
+    monkeypatch.setattr(meta_mod, "BLOCK_M", value)
+    return value
+
+
+@pytest.fixture(params=_BLOCK_M_VALUES)
 def block_m(request, monkeypatch):
-    monkeypatch.setattr(meta_mod, "BLOCK_M", request.param)
-    return request.param
+    return _use_block_m(monkeypatch, request.param)
+
+
+@pytest.fixture(params=[b for b in _BLOCK_M_VALUES if b > 1])
+def block_m_multi_token(request, monkeypatch):
+    """The same sweep minus BLOCK_M=1: tiles that hold more than one token.
+
+    Two tests need a tile wide enough to hold two *different* things at once, and
+    at BLOCK_M=1 that is arithmetically impossible rather than merely untested:
+
+    - Splitting a tile between two adapters needs >= 2 tokens. ``M // 2`` is 0 at
+      M=1, so the "split" collapses to a single adapter and the expected bitmask
+      is unreachable.
+    - A partially-filled tile needs ``M % BLOCK_M != 0``, and every M is divisible
+      by 1, so there is no padding for the test to find spurious bits in.
+
+    Narrowing the sweep rather than skipping inside the test body, because the two
+    read differently in a report: a skip says "might work, nobody checked", when
+    the truth is "this configuration does not exist". Asserting the degenerate
+    outcome instead would be worse than either -- a green cell pinning arithmetic
+    no caller relies on, for a tiling production never uses.
+    """
+    return _use_block_m(monkeypatch, request.param)
 
 
 def _make_remap_tables_t(remap_tables):
@@ -43,12 +73,9 @@ class TestSingleAdapterFullTile:
 
 
 class TestMultipleAdaptersOneTile:
-    def test_two_adapters_split(self, block_m):
-        if block_m < 2:
-            pytest.skip("need at least 2 tokens to split between adapters")
-
+    def test_two_adapters_split(self, block_m_multi_token):
         # One tile: first half adapter 1, second half adapter 2
-        M = block_m
+        M = block_m_multi_token
         half = M // 2
         adapter_indices = torch.cat(
             [
@@ -160,16 +187,13 @@ class TestBitmaskOverflow:
 
 
 class TestPaddingNoSpuriousBits:
-    def test_partial_tile_padding(self, block_m):
-        if block_m == 1:
-            pytest.skip("no padding when block_m=1")
-
+    def test_partial_tile_padding(self, block_m_multi_token):
         # M = block_m + 1 → two tiles, second tile has 1 real token + padding
         # All tokens use adapter 1 except the single token in tile 2
         # which uses base (0). Padding should not introduce bits.
         adapter_indices = torch.cat(
             [
-                torch.ones(block_m, dtype=torch.long),  # tile 0: adapter 1
+                torch.ones(block_m_multi_token, dtype=torch.long),  # tile 0: adapter 1
                 torch.zeros(1, dtype=torch.long),  # tile 1: base only
             ]
         )
