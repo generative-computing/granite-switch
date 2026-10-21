@@ -849,6 +849,13 @@ class TestConfigureChatTemplateChatML:
         assert after.startswith("assistant\n<think>")
 
 
+# NOTE: the ChatML content-format flattening (OpenAI-style parts list must not
+# render as a Python list-repr) is covered end-to-end with the real 4.1/4.2
+# tokenizers in ``test_chat_template_real_tokenizer.py``
+# (``TestContentShapeRealTokenizer`` + ``TestContentFormatDetection``), which
+# supersede an earlier mock-tokenizer version of these checks.
+
+
 # ════════════════════════════════════════════════════════════════════
 # Audio: <|audio|> marker preservation, and coexistence with adapters
 # ════════════════════════════════════════════════════════════════════
