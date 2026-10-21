@@ -578,6 +578,7 @@ class TestManifestClassifierMetadata:
             "hallucination": {
                 "kind": "classifier",
                 "labels": ["faithful", "hallucinated"],
+                "layer": None,
             }
         }
 
