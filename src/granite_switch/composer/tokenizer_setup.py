@@ -725,53 +725,166 @@ def _inject_audio_granite_format(template: str, marker: str) -> str:
     return template.replace(_GRANITE_TEXT_PART_BRANCH, new, 1)
 
 
-def _inject_audio_chatml(template: str, marker: str) -> str:
-    """Rebuild ChatML's stringified content from its parts, emitting the marker.
+# Marker that identifies the ChatML content-flatten block (so the audio pass can
+# find and upgrade a text-only block rather than inject a competing second one).
+_CHATML_FLATTEN_SENTINEL = "{#- gs:chatml-content-flatten -#}"
 
-    ChatML has no content-part loop at all: its user/system branch does
-    ``{%- set content = message.content | string %}``, so a multimodal parts
-    *list* renders as that list's Python repr — base64 audio payload included —
-    and the marker never appears.
 
-    The flattening block is appended immediately *after* that assignment rather
-    than replacing it, which keeps the statement intact as
-    :func:`configure_chat_template`'s ALoRA Pass 2 anchor. Since Pass 2 is
-    inserted directly after the same anchor, calling this after
-    ``configure_chat_template`` lands the flattening ahead of Pass 2 — required,
-    because Pass 2 calls ``rsplit`` on ``content`` and so needs a string.
+def _chatml_content_flatten_block(marker: str | None) -> str:
+    """The Jinja block that rebuilds ChatML ``content`` from a parts list.
 
-    Part joining mirrors the granite_format loop: a text part is newline-
-    separated from whatever precedes it, and the marker is appended directly.
-    Part *order* is preserved, so the transcript the ASR processor splices in
-    lands where the clip sat relative to the text.
+    ChatML's user/system branch does ``{%- set content = message.content |
+    string %}``, so when vLLM feeds OpenAI-style structured content (a parts
+    *list*) that statement renders the list's Python repr — ``[{'type': 'text',
+    ...}]`` — instead of the text. This block flattens the parts back into a
+    string: text parts are newline-joined in order; everything else is dropped.
+
+    When *marker* is given (audio enabled) an extra branch emits it for audio
+    parts, interleaved in part order so the ASR transcript lands where the clip
+    sat. When *marker* is ``None`` the block is text-only.
+
+    The sentinel comment lets :func:`configure_audio_chat_template` recognize a
+    text-only block already injected by :func:`configure_chat_template` and
+    upgrade it in place, rather than stack a second competing block.
+    """
+    audio_branch = (
+        (
+            "                {%- if entry.type is defined and 'audio' in entry.type %}\n"
+            "                    {%- set _c.val = _c.val + '" + marker + "' %}\n"
+            "                {%- elif entry.type is defined and entry.type == 'text' %}\n"
+        )
+        if marker is not None
+        else "                {%- if entry.type is defined and entry.type == 'text' %}\n"
+    )
+    return (
+        "\n"
+        "        " + _CHATML_FLATTEN_SENTINEL + "\n"
+        "        {#- ChatML stringifies message.content, so rebuild it from the\n"
+        "         parts when it is a list — otherwise a multimodal / OpenAI-format\n"
+        "         turn renders as a Python repr. -#}\n"
+        "        {%- if message.content is not string and message.content is iterable %}\n"
+        "            {%- set _c = namespace(val='') %}\n"
+        "            {%- for entry in message.content %}\n"
+        + audio_branch
+        + "                    {%- if _c.val != '' %}\n"
+        "                        {%- set _c.val = _c.val + '\\n' %}\n"
+        "                    {%- endif %}\n"
+        "                    {%- set _c.val = _c.val + entry.text %}\n"
+        "                {%- endif %}\n"
+        "            {%- endfor %}\n"
+        "            {%- set content = _c.val %}\n"
+        "        {%- endif %}"
+    )
+
+
+# The ChatML preamble pulls the leading system message's content into a scalar
+# `system_message` that is later concatenated with a string. A parts list there
+# crashes the render ("can only concatenate str (not list)") before the main
+# loop runs, so it needs the same flatten as the per-message user/system branch.
+_CHATML_SYSTEM_MESSAGE_SET = '{%- set system_message = messages[0]["content"] %}'
+
+
+def _inject_chatml_system_message_flatten(template: str) -> str:
+    """Flatten a parts-list leading system message in the ChatML preamble.
+
+    Appends a block after ``{%- set system_message = messages[0]["content"] %}``
+    that, when that content is a non-string iterable, rebuilds it as the newline-
+    joined text parts. Text-only: an audio part in the *leading system* message
+    is still dropped (matching the per-message audio scope and the fact that no
+    caller places a clip in the system turn). No-op if the anchor is absent.
+    """
+    if _CHATML_SYSTEM_MESSAGE_SET not in template:
+        return template
+    block = (
+        "\n"
+        "{%- if system_message is not string and system_message is iterable %}\n"
+        "    {%- set _sys = namespace(val='') %}\n"
+        "    {%- for entry in system_message %}\n"
+        "        {%- if entry.type is defined and entry.type == 'text' %}\n"
+        "            {%- if _sys.val != '' %}\n"
+        "                {%- set _sys.val = _sys.val + '\\n' %}\n"
+        "            {%- endif %}\n"
+        "            {%- set _sys.val = _sys.val + entry.text %}\n"
+        "        {%- endif %}\n"
+        "    {%- endfor %}\n"
+        "    {%- set system_message = _sys.val %}\n"
+        "{%- endif %}"
+    )
+    return template.replace(
+        _CHATML_SYSTEM_MESSAGE_SET, _CHATML_SYSTEM_MESSAGE_SET + block, 1
+    )
+
+
+# The ChatML tool branch emits message.content directly inside a
+# <tool_response> wrapper. Tool content is external-data-in (like user content),
+# so vLLM wraps it into a parts list in 'openai' mode too; without a flatten the
+# tool response renders as the Python list-repr. Anchored on the emission in its
+# tool-response context so only the tool branch is rewritten.
+_CHATML_TOOL_RESPONSE_EMIT = (
+    "        {{- '<tool_response>\\n' }}\n        {{- message.content }}\n"
+)
+
+
+def _inject_chatml_tool_content_flatten(template: str) -> str:
+    """Flatten a parts-list ``tool``-role message in the ChatML tool branch.
+
+    Replaces the direct ``{{- message.content }}`` emission (inside the
+    ``<tool_response>`` wrapper) with a flatten-then-emit: a non-string iterable
+    is rebuilt as its newline-joined text parts, a string passes through. Text
+    parts only — a tool response carrying audio is not a shape any caller sends.
+    No-op if the anchor is absent (template shape changed).
+    """
+    if _CHATML_TOOL_RESPONSE_EMIT not in template:
+        return template
+    replacement = (
+        "        {{- '<tool_response>\\n' }}\n"
+        "        {%- if message.content is not string and message.content is iterable %}\n"
+        "            {%- set _tool = namespace(val='') %}\n"
+        "            {%- for entry in message.content %}\n"
+        "                {%- if entry.type is defined and entry.type == 'text' %}\n"
+        "                    {%- if _tool.val != '' %}\n"
+        "                        {%- set _tool.val = _tool.val + '\\n' %}\n"
+        "                    {%- endif %}\n"
+        "                    {%- set _tool.val = _tool.val + entry.text %}\n"
+        "                {%- endif %}\n"
+        "            {%- endfor %}\n"
+        "            {{- _tool.val }}\n"
+        "        {%- else %}\n"
+        "            {{- message.content }}\n"
+        "        {%- endif %}\n"
+    )
+    return template.replace(_CHATML_TOOL_RESPONSE_EMIT, replacement, 1)
+
+
+def _inject_chatml_content_flatten(template: str, marker: str | None) -> str:
+    """Insert (or upgrade) the ChatML content-flatten block.
+
+    Appended immediately *after* ``{%- set content = message.content | string
+    %}`` rather than replacing it, so that statement stays intact as
+    :func:`configure_chat_template`'s ALoRA Pass 2 anchor.
+
+    If a text-only flatten block (marked by :data:`_CHATML_FLATTEN_SENTINEL`) is
+    already present — injected by :func:`configure_chat_template` — and *marker*
+    is given, the existing block is swapped for the audio-aware variant instead
+    of stacking a second block that would re-assign ``content``.
     """
     if _CHATML_CONTENT_SET not in template:
         raise ValueError(
             "Could not find the ChatML per-message content assignment "
-            f"({_CHATML_CONTENT_SET!r}) to inject audio handling; the base chat "
-            "template may have changed."
+            f"({_CHATML_CONTENT_SET!r}) to inject content flattening; the base "
+            "chat template may have changed."
         )
-    block = (
-        "\n"
-        "        {#- Audio: ChatML stringifies message.content, so rebuild it from\n"
-        "         the parts when it is a list — otherwise a multimodal turn renders\n"
-        "         as a Python repr and the audio marker never appears. -#}\n"
-        "        {%- if message.content is not string and message.content is iterable %}\n"
-        "            {%- set _audio = namespace(val='') %}\n"
-        "            {%- for entry in message.content %}\n"
-        "                {%- if entry.type is defined and 'audio' in entry.type %}\n"
-        "                    {%- set _audio.val = _audio.val + '" + marker + "' %}\n"
-        "                {%- elif entry.type is defined and entry.type == 'text' %}\n"
-        "                    {%- if _audio.val != '' %}\n"
-        "                        {%- set _audio.val = _audio.val + '\\n' %}\n"
-        "                    {%- endif %}\n"
-        "                    {%- set _audio.val = _audio.val + entry.text %}\n"
-        "                {%- endif %}\n"
-        "            {%- endfor %}\n"
-        "            {%- set content = _audio.val %}\n"
-        "        {%- endif %}"
-    )
-    return template.replace(_CHATML_CONTENT_SET, _CHATML_CONTENT_SET + block, 1)
+    desired = _chatml_content_flatten_block(marker)
+    if _CHATML_FLATTEN_SENTINEL in template:
+        # A block is already installed; replace it wholesale (upgrade text-only
+        # -> audio, or re-inject identically). Bound the slice by the block's
+        # own structure: from the sentinel's leading newanchor to its {%- endif %}.
+        existing = _chatml_content_flatten_block(None)
+        if existing in template:
+            return template.replace(existing, desired, 1)
+        # Already the audio variant (or an unexpected shape): leave as-is.
+        return template
+    return template.replace(_CHATML_CONTENT_SET, _CHATML_CONTENT_SET + desired, 1)
 
 
 def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
@@ -788,7 +901,10 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
     * **granite_format** (3.x / 4.0 / 4.1) — one ``elif`` added to the existing
       content-part loop. See :func:`_inject_audio_granite_format`.
     * **chatml** (Granite 4.2) — no content-part loop exists, so a flattening
-      block rebuilds ``content`` from the parts. See :func:`_inject_audio_chatml`.
+      block rebuilds ``content`` from the parts. A text-only flatten is already
+      installed by :func:`configure_chat_template`; this upgrades it in place to
+      also emit the marker for audio parts. See
+      :func:`_inject_chatml_content_flatten`.
 
     Matching on ``'audio' in entry.type`` covers ``audio`` / ``input_audio`` /
     ``audio_url`` in both.
@@ -819,7 +935,7 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
         )
 
     if fmt.name == "chatml":
-        tokenizer.chat_template = _inject_audio_chatml(template, marker)
+        tokenizer.chat_template = _inject_chatml_content_flatten(template, marker)
     else:
         tokenizer.chat_template = _inject_audio_granite_format(template, marker)
     print(
@@ -1272,6 +1388,29 @@ def configure_chat_template(
                 + alora_pass2
                 + modified_chat_template[insertion_point:]
             )
+        # Flatten an OpenAI-style content parts list into a string. vLLM's
+        # content-format auto-detector resolves to 'openai' whenever a template
+        # iterates message.content (which the ALoRA Pass 1 scan above does), and
+        # then feeds content as a parts list. ChatML's base template stringifies
+        # content directly, so without this the list renders as its Python repr.
+        # Inserted AFTER Pass 2 so that at render time it runs BEFORE Pass 2 —
+        # both anchor on the content assignment, and Pass 2 rsplits `content`
+        # and so needs a string. Text-only here; the audio pass upgrades it.
+        modified_chat_template = _inject_chatml_content_flatten(
+            modified_chat_template, marker=None
+        )
+        # The leading system message is read into a scalar in the preamble before
+        # the loop; flatten a parts list there too or the render crashes on a
+        # str+list concat before the per-message block runs.
+        modified_chat_template = _inject_chatml_system_message_flatten(
+            modified_chat_template
+        )
+        # The tool branch emits message.content directly; flatten a parts-list
+        # tool response the same way (tool content is external-data-in, like user
+        # content, so vLLM wraps it under 'openai' too).
+        modified_chat_template = _inject_chatml_tool_content_flatten(
+            modified_chat_template
+        )
     else:
         match = re.search(fmt.user_role_anchor_re, modified_chat_template)
         if match:
