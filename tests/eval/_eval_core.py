@@ -54,6 +54,15 @@ kernel's float-reduction order differs from vLLM's native linear, and that sub-U
 difference can flip a near-tie greedy argmax between vLLM lines. A token-exact gate
 would flag that as a regression; a distribution gate does not, while still catching
 a real logit or weight break.
+
+THE COMPARISON SWEEPS ONLY k < TOP_K (`COMPARE_KS`), which is the second
+load-bearing detail and was the second false positive. At k == TOP_K the compared
+support IS the capture window, and the window's edge churns between runs: a token
+ranked just inside one capture's top-20 and just outside the other's is present on
+one side and absent on the other, and since `jsd_bits` renormalizes over the union
+it contributes roughly its whole mass in bits regardless of how small the logit
+difference actually was. See `COMPARE_KS` for the measurement that pinned this
+(~43x inflation on one prompt, zero of it distribution movement).
 """
 
 from __future__ import annotations
@@ -90,6 +99,8 @@ os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 MAX_TOKENS = int(os.environ.get("GSW_EVAL_MAX_TOKENS", "24"))
 #: Top-k captured per position. 20 keeps the baseline files well under the
 #: 500 KB pre-commit ceiling while leaving room to sweep k when comparing.
+#: Must stay strictly above min(COMPARE_KS) or the comparison has no k to sweep
+#: and would pass vacuously -- asserted below, where COMPARE_KS is defined.
 TOP_K = int(os.environ.get("GSW_EVAL_TOP_K", "20"))
 
 #: Defaults, overridable per config in the baseline file. Starting values are the
@@ -542,7 +553,39 @@ def capture(
 # ── compare ───────────────────────────────────────────────────────────────────
 
 
-def _pairwise(a: list[dict], b: list[dict], ks=(1, 5, 10, 20)) -> dict:
+#: The k values the comparison sweeps. ALL STRICTLY BELOW TOP_K, which is
+#: load-bearing: at k == TOP_K the compared support is the capture WINDOW, and the
+#: window's own edge churns. A token ranked just inside one capture's top-20 and
+#: just outside the other's enters the union present on one side and absent on the
+#: other, and `jsd_bits` renormalizes over the union, so that token contributes
+#: roughly its entire mass in bits however small the underlying logit difference
+#: was. Measured on the two `eval-record` recordings of run 39578693370
+#: (granite5_vllm prompt 0): ~3 such tokens per position holding 0.0157 mass gave
+#: mean JSD 0.016248 at k=20, versus 0.000378 at k<=10 over the same positions --
+#: a 43x artifact that is pure truncation, not distribution movement. That is what
+#: made granite5_vllm fail at 0.003472 > 0.003 on the 0.26 leg of run 39587132597
+#: while granite42_vllm read exactly 0.000000 on the same leg: the ordering was
+#: backwards for a version regression, because it was never about the version.
+#: Keeping k < TOP_K means every compared token was ranked well inside both
+#: captures, so presence is not itself a measurement. Sensitivity is retained: a
+#: 30% logit scaling still reads mean JSD 0.011 and a one-position top-2 swap reads
+#: max JSD 0.72, against thresholds of 0.003 and 0.05.
+#: Do not add TOP_K back to this tuple. Raise TOP_K instead if you want a wider
+#: sweep -- the invariant is k < TOP_K, not the specific numbers.
+COMPARE_KS = (1, 5, 10)
+
+# GSW_EVAL_TOP_K is an env knob, so a caller can set it below the whole sweep. The
+# k >= TOP_K skip would then drop every k and `_pairwise` would return all-zeros --
+# an eval that passes because it measured nothing. Fail at import instead.
+if TOP_K <= min(COMPARE_KS):
+    raise RuntimeError(
+        f"GSW_EVAL_TOP_K={TOP_K} leaves no k below it to compare over "
+        f"(COMPARE_KS={COMPARE_KS}); the eval would pass without measuring. "
+        f"Use GSW_EVAL_TOP_K > {min(COMPARE_KS)}."
+    )
+
+
+def _pairwise(a: list[dict], b: list[dict], ks=COMPARE_KS) -> dict:
     """mean/max JSD and mean Jaccard distance over aligned positions, swept over k."""
     worst = {
         "mean_jsd": 0.0,
@@ -552,7 +595,7 @@ def _pairwise(a: list[dict], b: list[dict], ks=(1, 5, 10, 20)) -> dict:
     }
     n = min(len(a), len(b))
     for k in ks:
-        if k > TOP_K:
+        if k >= TOP_K:
             continue
         jsds, jaccs = [], []
         for i in range(n):
