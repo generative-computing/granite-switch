@@ -842,8 +842,7 @@ def transfer_classifier_weights(
     model,
     num_labels_per_slot: list[int],
     hidden_size: int,
-    return_mapping: bool = True,
-) -> dict | None:
+) -> None:
     """Load trained classifier heads and transfer them into the switch model.
 
     A classifier slot is the classifier-head analog of a LoRA adapter: it shares
@@ -863,10 +862,6 @@ def transfer_classifier_weights(
             (``config.classifier_num_labels_per_slot``, indexed by
             ``adapter_index - 1``).
         hidden_size: Expected hidden size (``config.hidden_size``).
-        return_mapping: If True, return detailed mapping information.
-
-    Returns:
-        Mapping record dict, or None if *return_mapping* is False.
     """
     from safetensors.torch import load_file
 
@@ -880,9 +875,20 @@ def transfer_classifier_weights(
             "the head is constructed before loading trained weights."
         )
 
-    _validate_classifier_transfer(model, slot_indices)
-
-    mapping_record = {"source_params": [], "target_params": [], "mappings": []}
+    # Two directories on one bank row, or a row outside the bank, would
+    # silently corrupt another slot's head.
+    if len(slot_indices) != len(set(slot_indices)):
+        raise ValueError(
+            f"Duplicate classifier slot indices {slot_indices}; each classifier "
+            "must map to a distinct bank row."
+        )
+    num_rows = head.weight.shape[0]
+    for slot in slot_indices:
+        if not (0 <= slot < num_rows):
+            raise ValueError(
+                f"Classifier slot {slot} is out of range for a classifier bank "
+                f"of {num_rows} rows (num_adapters)."
+            )
 
     print(f"Loading {len(classifier_paths)} trained classifier head(s)...")
     with torch.no_grad():
@@ -931,44 +937,5 @@ def transfer_classifier_weights(
             )
 
             print(f"  Classifier: {path} -> classifier_head[{slot}, :{n_labels}]")
-            mapping_record["source_params"].append(f"{path}::weight")
-            mapping_record["source_params"].append(f"{path}::bias")
-            mapping_record["mappings"].append(
-                {
-                    "source": [f"{path}::weight", f"{path}::bias"],
-                    "target": f"model.classifier_head[{slot}]",
-                    "type": "classifier",
-                }
-            )
-
-    mapping_record["target_params"] = [
-        f"model.classifier_head.weight[{s}]" for s in slot_indices
-    ] + [f"model.classifier_head.bias[{s}]" for s in slot_indices]
 
     print(f"Loaded {len(classifier_paths)} classifier head(s)")
-    return mapping_record if return_mapping else None
-
-
-def _validate_classifier_transfer(model, slot_indices: list[int]):
-    """Sanity-check the classifier slots before transfer.
-
-    Guards against two silent-corruption modes: two directories claiming the
-    same bank row, and a slot index outside the head's ``[num_adapters, ...]``
-    bank.
-    """
-    if len(slot_indices) != len(set(slot_indices)):
-        raise ValueError(
-            f"Duplicate classifier slot indices {slot_indices}; each classifier "
-            "must map to a distinct bank row."
-        )
-    num_rows = model.model.classifier_head.weight.shape[0]
-    for slot in slot_indices:
-        if not (0 <= slot < num_rows):
-            raise ValueError(
-                f"Classifier slot {slot} is out of range for a classifier bank "
-                f"of {num_rows} rows (num_adapters)."
-            )
-    print(
-        f"Classifier transfer: {len(slot_indices)} slot(s) "
-        f"{sorted(slot_indices)} into a {num_rows}-row bank"
-    )

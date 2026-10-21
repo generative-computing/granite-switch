@@ -6,15 +6,11 @@ serve it so the model emits a label *word* (`safe`, `unsafe`, …) for a detecti
 
 ## Overview
 
-A Granite Switch adapter slot is normally a LoRA adapter. A **classifier slot** is an alternative
-occupant of that same slot: instead of a LoRA, it holds a small linear classification head. It is
-triggered by the *same* control-token machinery — one `<|name|>` token, one adapter index — but
-the classifier reads the configured layer's activation and produces per-label logits.
-
-Activation probes are supported as classifier slots in the standard composition workflow. Probes and
-generation adapters can coexist in one checkpoint and be selected individually: a request selects
-one slot, either a generation adapter or a classifier. The calling stack manages compatible
-execution state and cache reuse.
+A **classifier slot** holds a small linear classification head instead of a LoRA. It uses the same
+control-token machinery (one `<|name|>` token, one adapter index) and reads the configured layer's
+activation to produce per-label logits. Classifier and generation-adapter slots can coexist in one
+checkpoint; a request selects one slot. The calling stack manages compatible execution state and
+cache reuse.
 
 At inference the verdict does not come back as a raw score vector. Each label word is resolved to a
 single token id at compose time, and the model rewrites the request's final logit row so that the
@@ -334,25 +330,16 @@ channel.
 
 ## How it works (brief)
 
-- **Same trigger, separate path.** One `<|name|>` control token selects a classifier slot, exactly
-  like an adapter. Classifier positions are routed out of the LoRA stream, and the head reads the
-  activation at that token.
-- **Padded head bank.** All classifier heads live in one stacked tensor padded to
-  `max_classifier_labels`; a slot with fewer labels leaves its extra rows zero. This keeps the vLLM
-  head a single fused, compile-safe operation regardless of how many labels each slot has — the same
-  way the LoRA bank pads every adapter to `max_lora_rank`.
-- **Scored at the read layer.** A slot reading an intermediate layer is scored as soon as that
-  layer runs; final-layer slots are scored after the final norm. The per-label scores and slot id
-  travel with the hidden states, so vLLM's own row selection delivers them to the logits step,
-  which also works under CUDA-graph capture.
-- **Pipeline transport.** The first stage identifies marker tokens. Each stage scores its own
-  configured layers and passes those scores and marker indices to the next stage; intermediate
-  hidden states do not need to be saved for classification on the last stage.
-- **Label-word verdict exit.** At each classifier request's final token the model blanks the
-  vocabulary and scatters the head's per-label logits onto that slot's own label token ids (sliced
-  to the slot's real label count, so padded columns are never emitted). The sampler then emits the
-  label word.
-
+- **Routing.** A classifier control token selects its slot like any adapter; its position is routed
+  out of the LoRA stream and the head reads the activation there.
+- **Padded head bank.** All heads share one tensor padded to `max_classifier_labels` (like the LoRA
+  bank pads to `max_lora_rank`), keeping the vLLM head one compile-safe operation.
+- **Scoring.** Intermediate-layer slots are scored as that layer runs, final-layer slots after the
+  final norm. Scores and slot id travel with the hidden states to the logits step, so this also
+  works under CUDA-graph capture. Under pipeline parallelism the first stage finds the markers and
+  each stage passes scores and marker indices on.
+- **Verdict exit.** The marker's logit row is blanked and the head's scores are written onto that
+  slot's label token ids, so the sampler emits the label word.
 
 ## Related
 

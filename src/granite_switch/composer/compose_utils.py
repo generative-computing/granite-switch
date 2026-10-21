@@ -305,7 +305,6 @@ class GraniteSwitchComposer:
             base_model_name_or_path, model, switch_config, arch
         )
 
-        classifier_mapping = {}
         if lora_adapter_paths:
             # --- Step 7: Transfer LoRA adapter weights ---
             # LoRAs are the contiguous leading slots, so the leading k entries of
@@ -338,7 +337,7 @@ class GraniteSwitchComposer:
             # --- Step 7b: Transfer trained classifier-head weights ---
             # Each slot's head is validated against its own label count and
             # copied into the top rows of the padded bank.
-            classifier_mapping = transfer_classifier_weights(
+            transfer_classifier_weights(
                 classifier_adapter_paths,
                 classifier_slots,
                 model,
@@ -359,7 +358,6 @@ class GraniteSwitchComposer:
         model._build_mappings = {
             "base": base_mapping,
             "adapter": adapter_mapping,
-            "classifier": classifier_mapping,
             "source_analysis": source_analysis,
             # Per-external-adapter alpha, parallel to adapter_paths. When no
             # external adapters are provided, detect_lora_config isn't called

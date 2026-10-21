@@ -41,47 +41,18 @@ def compose(base, outdir, control_offset=5, num_labels=6, scale=0.5):
     ``num_labels`` single-token labels are taken from ``_LABEL_CANDIDATES`` and
     ``scale`` is the std of the random head weight.
     """
-    import torch
-    from safetensors.torch import save_file
     from transformers import AutoConfig, AutoTokenizer
 
     from granite_switch.composer.compose_utils import GraniteSwitchComposer
-    from granite_switch.composer.weight_transfer import CLASSIFIER_HEAD_FILE
 
     tok = AutoTokenizer.from_pretrained(base)
-    hidden = AutoConfig.from_pretrained(base).hidden_size
-
-    labels, ids = [], []
-    for c in _LABEL_CANDIDATES:
-        e = tok.encode(c, add_special_tokens=False)
-        if len(e) == 1 and e[0] not in ids:
-            labels.append(c)
-            ids.append(e[0])
-        if len(labels) == num_labels:
-            break
-    if len(labels) < num_labels:
-        raise RuntimeError(
-            f"only {len(labels)} single-token labels available from "
-            f"{_LABEL_CANDIDATES}, need {num_labels}"
-        )
-    nl = len(labels)
-
-    g = torch.Generator().manual_seed(0)
+    labels, ids = _pick_labels(tok, num_labels)
     # Weight-based (not bias-only) head so the verdict depends on the hidden state.
-    weight = torch.randn((nl, hidden), generator=g, dtype=torch.float32) * scale
-    bias = torch.zeros((nl,), dtype=torch.float32)
-
+    weight, bias = _fixed_head(
+        0, len(ids), AutoConfig.from_pretrained(base).hidden_size, scale
+    )
     slot = os.path.join(outdir, "detect")
-    os.makedirs(slot, exist_ok=True)
-    save_file(
-        {"weight": weight.contiguous(), "bias": bias.contiguous()},
-        os.path.join(slot, CLASSIFIER_HEAD_FILE),
-    )
-    json.dump(
-        {"kind": "classifier", "labels": labels},
-        open(os.path.join(slot, "adapter_config.json"), "w"),
-    )
-    open(os.path.join(slot, "io.yaml"), "w").write("name: detect\nmodel: ~\n")
+    _write_head(slot, weight, bias, labels)
 
     control_id = tok.vocab_size - control_offset
     model = GraniteSwitchComposer.from_base_and_adapters(
@@ -168,13 +139,13 @@ def _pick_labels(tok, num_labels):
     raise RuntimeError(f"only {len(labels)} single-token labels, need {num_labels}")
 
 
-def _fixed_head(seed, num_labels, hidden_size):
-    """Fixed seed-``seed`` weight (std 0.5) and zero bias. Do not search seeds."""
+def _fixed_head(seed, num_labels, hidden_size, scale=0.5):
+    """Fixed seed-``seed`` weight (std ``scale``) and zero bias. Do not search seeds."""
     import torch
 
     g = torch.Generator().manual_seed(seed)
     weight = torch.randn((num_labels, hidden_size), generator=g, dtype=torch.float32)
-    return weight * 0.5, torch.zeros(num_labels, dtype=torch.float32)
+    return weight * scale, torch.zeros(num_labels, dtype=torch.float32)
 
 
 def _write_head(slot_dir, weight, bias, labels):

@@ -479,6 +479,59 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             for layer in self.layers:
                 nn.init.zeros_(layer.cross_stream.base_layer.weight)
 
+    def _locate_classifier_markers(self, input_ids, classifier_indices, attention_mask):
+        """``(rows, pos, slots, markers_by_layer)`` for this forward's markers.
+
+        ``markers_by_layer`` maps each read layer (None = final) to the marker
+        indices that read it. ``None`` when there is no classifier marker. Each
+        marker must be its row's last real token, since the verdict replaces
+        that position's logits.
+        """
+        if self.classifier_head is None:
+            return None
+        if input_ids is None:
+            if bool((classifier_indices > 0).any()):
+                raise RuntimeError(
+                    "Classifier requests need input_ids, not inputs_embeds."
+                )
+            return None
+        marker_ids = torch.tensor(
+            self.config.classifier_control_token_ids,
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
+        rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
+        if rows.numel() == 0:
+            return None
+
+        batch_size, seq_length = input_ids.shape
+        if attention_mask is not None and attention_mask.dim() == 2:
+            real = attention_mask[:, -seq_length:].long()
+            cols = torch.arange(seq_length, device=real.device)
+            last = (real * cols).max(dim=1).values
+        else:
+            last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
+        misplaced = pos != last[rows]
+        if bool(misplaced.any()):
+            bad = sorted(set(rows[misplaced].tolist()))
+            raise RuntimeError(
+                f"Classifier request(s) {bad}: control token is not their last token."
+            )
+
+        slots = classifier_indices[rows, pos]
+        read_layers = self.config.classifier_read_layers or [None] * len(
+            self.config.adapter_kinds
+        )
+        by_layer: dict[int | None, list[int]] = {}
+        for marker_idx, slot in enumerate(slots.tolist()):
+            layer = read_layers[slot - 1] if slot > 0 else None
+            by_layer.setdefault(layer, []).append(marker_idx)
+        markers_by_layer = {
+            layer: torch.tensor(indices, device=input_ids.device)
+            for layer, indices in by_layer.items()
+        }
+        return rows, pos, slots, markers_by_layer
+
     def forward(
         self,
         input_ids: torch.LongTensor | None = None,
@@ -649,77 +702,29 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        # Resolve classifier read positions before the decoder runs. This lets
-        # intermediate heads consume only their marker rows as each layer
-        # produces them, without retaining full sequence activations per layer.
+        # Resolve classifier read positions before the decoder runs, so each read
+        # layer scores only its marker rows as it produces them.
+        markers = self._locate_classifier_markers(
+            input_ids, classifier_indices, attention_mask
+        )
         self._last_classifier_verdict = None
-        classifier_rows = classifier_pos = classifier_slots = None
-        classifier_verdict = None
-        classifier_markers_by_layer = {}
-        classifier_final_markers = None
-        if self.classifier_head is not None:
-            if input_ids is None:
-                if bool((classifier_indices > 0).any()):
-                    raise RuntimeError(
-                        "Classifier requests need input_ids, not inputs_embeds."
-                    )
-            else:
-                marker_ids = torch.tensor(
-                    self.config.classifier_control_token_ids,
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
-                )
-                is_marker = torch.isin(input_ids, marker_ids)
-                if bool(is_marker.any()):
-                    classifier_rows, classifier_pos = is_marker.nonzero(as_tuple=True)
-                    classifier_slots = classifier_indices[
-                        classifier_rows, classifier_pos
-                    ]
+        if markers is not None:
+            classifier_rows, classifier_pos, classifier_slots, markers_by_layer = (
+                markers
+            )
+            classifier_verdict = inputs_embeds.new_zeros(
+                (classifier_rows.numel(), self.config.max_classifier_labels)
+            )
 
-                    # Each marker must be the last real token of its request,
-                    # since the verdict replaces that position's logits.
-                    if attention_mask is not None and attention_mask.dim() == 2:
-                        real = attention_mask[:, -seq_length:].long()
-                        cols = torch.arange(seq_length, device=real.device)
-                        last = (real * cols).max(dim=1).values
-                    else:
-                        last = torch.full(
-                            (batch_size,), seq_length - 1, device=input_ids.device
-                        )
-                    misplaced = classifier_pos != last[classifier_rows]
-                    if bool(misplaced.any()):
-                        bad = sorted(set(classifier_rows[misplaced].tolist()))
-                        raise RuntimeError(
-                            f"Classifier request(s) {bad}: control token is not "
-                            "their last token."
-                        )
-
-                    read_layers = self.config.classifier_read_layers
-                    if read_layers is None:
-                        read_layers = [None] * self.config.num_adapters
-                    layer_to_marker_indices = {}
-                    final_marker_indices = []
-                    for marker_idx, slot in enumerate(classifier_slots.tolist()):
-                        layer = read_layers[slot - 1] if slot > 0 else None
-                        if layer is None:
-                            final_marker_indices.append(marker_idx)
-                        else:
-                            layer_to_marker_indices.setdefault(layer, []).append(
-                                marker_idx
-                            )
-                    classifier_markers_by_layer = {
-                        layer: torch.tensor(indices, device=input_ids.device)
-                        for layer, indices in layer_to_marker_indices.items()
-                    }
-                    classifier_final_markers = torch.tensor(
-                        final_marker_indices, device=input_ids.device
-                    )
-                    classifier_verdict = inputs_embeds.new_zeros(
-                        (
-                            classifier_rows.numel(),
-                            self.config.max_classifier_labels,
-                        )
-                    )
+        def score_markers(layer, hidden):
+            """Score the markers that read ``layer`` (None = final) from ``hidden``."""
+            if markers is None or layer not in markers_by_layer:
+                return
+            idx = markers_by_layer[layer]
+            classifier_verdict[idx] = self.classifier_head(
+                hidden[classifier_rows[idx], classifier_pos[idx]],
+                classifier_slots[idx],
+            )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
@@ -743,14 +748,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             else:
                 hidden_states = layer_outputs[0]
 
-            marker_indices = classifier_markers_by_layer.get(layer_idx)
-            if marker_indices is not None:
-                marker_hidden = hidden_states[
-                    classifier_rows[marker_indices], classifier_pos[marker_indices]
-                ]
-                classifier_verdict[marker_indices] = self.classifier_head(
-                    marker_hidden, classifier_slots[marker_indices]
-                )
+            score_markers(layer_idx, hidden_states)
 
             if output_attentions:
                 if layer_outputs[1] is not None:
@@ -761,15 +759,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
 
-        if classifier_rows is not None:
-            if classifier_final_markers.numel() > 0:
-                final_hidden = hidden_states[
-                    classifier_rows[classifier_final_markers],
-                    classifier_pos[classifier_final_markers],
-                ]
-                classifier_verdict[classifier_final_markers] = self.classifier_head(
-                    final_hidden, classifier_slots[classifier_final_markers]
-                )
+        if markers is not None:
+            score_markers(None, hidden_states)
             self._last_classifier_verdict = (
                 classifier_rows,
                 classifier_pos,
