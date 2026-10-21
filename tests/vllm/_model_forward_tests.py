@@ -474,23 +474,21 @@ class TestAdapterIndicesWiring(_VLLMModelTestBase):
         )
 
 
-class TestClassifierLoRAProbe(_VLLMModelTestBase):
+class TestClassifierSlotRouting(_VLLMModelTestBase):
     def _make_config(self):
         return _tiny_vllm_config(
             adapter_kinds=["lora", "classifier"],
             classifier_label_token_ids=[None, [100, 101]],
         )
 
-    def test_marker_scores_with_active_lora_and_emits_label(self, monkeypatch):
+    def test_marker_routes_out_of_lora_and_emits_label(self, monkeypatch):
         self.model.eval()
         seen = {}
         switch = self.model.model.switch
         original_split = switch.split_indices
 
-        def record_split(adapter_indices, classifier_probe_indices=None):
-            lora_indices, classifier_indices = original_split(
-                adapter_indices, classifier_probe_indices
-            )
+        def record_split(adapter_indices):
+            lora_indices, classifier_indices = original_split(adapter_indices)
             seen["lora"] = lora_indices.detach().cpu()
             seen["classifier"] = classifier_indices.detach().cpu()
             return lora_indices, classifier_indices
@@ -498,10 +496,10 @@ class TestClassifierLoRAProbe(_VLLMModelTestBase):
         monkeypatch.setattr(switch, "split_indices", record_split)
 
         with torch.no_grad():
-            logits = self._run_forward_and_logits([10, 250, 20, 30, 251])
+            logits = self._run_forward_and_logits([10, 20, 30, 251])
 
-        assert seen["lora"].tolist() == [0, 1, 1, 1, 1]
-        assert seen["classifier"].tolist() == [0, 0, 0, 0, 2]
+        assert seen["lora"].tolist() == [0, 0, 0, 0]
+        assert seen["classifier"].tolist() == [0, 0, 0, 2]
         final_logits = logits[-1]
         assert torch.isfinite(final_logits[[100, 101]]).all()
         non_label_ids = [

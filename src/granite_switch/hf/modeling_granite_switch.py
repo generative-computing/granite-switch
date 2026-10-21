@@ -419,10 +419,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             self.switch = None
             self.adapter_token_ids = None
 
-        # Classifier heads share the adapter control-token machinery. The marker
-        # selects a classifier head independently; the active adapter selection
-        # remains in effect through that token. Intermediate read layers are
-        # scored as the decoder runs, retaining only marker-row verdicts.
+        # Classifier heads: optional alternative for LoRA adapters. A classifier
+        # slot shares the adapter index/token machinery, but its index is tagged
+        # as "classifier" (via the switch's adapter_kind_lut). The switch's
+        # split_indices() routes those positions out of the LoRA stream (so LoRA
+        # no-ops there) and into a classifier stream. The head reads its
+        # configured layer (the final post-norm state by default), scoring
+        # intermediate layers as the decoder runs and keeping only marker rows.
         if "classifier" in getattr(config, "adapter_kinds", []):
             self.classifier_head = SwitchedClassifierHead(
                 hidden_size=config.hidden_size,
@@ -602,17 +605,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 device=device,
             )
 
-        # Keep persistent adapter routing separate from the classifier probe:
-        # classifier markers select a head from their token id and do not
-        # replace the currently active adapter.
+        # Split the single adapter_indices stream into a LoRA stream and
+        # a classifier stream. Classifier positions are zeroed in lora_indices
+        # (so the LoRA path no-ops there).
         if self.switch is not None:
-            classifier_probe_indices = (
-                self.switch.classifier_indices_from_tokens(input_ids)
-                if input_ids is not None
-                else None
-            )
             lora_indices, classifier_indices = self.switch.split_indices(
-                adapter_indices, classifier_probe_indices
+                adapter_indices
             )
         else:
             lora_indices = adapter_indices
@@ -625,8 +623,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             inputs_embeds = self.embed_tokens(modified_input_ids)
         inputs_embeds = inputs_embeds * self.embedding_multiplier
 
-        # Expose routing for tests/debugging: adapter selection is persistent,
-        # while classifier indices come independently from marker token ids.
+        # Expose adapter_indices for tests and debugging. _last_adapter_indices is
+        # the full stream (LoRA + classifier); _last_lora_indices is what the
+        # decoder routes on; _last_classifier_indices is the classifier-only
+        # stream the verdict reads.
         self._last_adapter_indices = adapter_indices
         self._last_lora_indices = lora_indices
         self._last_classifier_indices = classifier_indices

@@ -31,9 +31,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             classifier). Default: 0. Index 0 always means "base / no adapter".
         adapter_token_ids (List[int]): Token IDs for adapter control.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
-            token). Must be unique. A LoRA control token selects that adapter;
-            a classifier control token selects its head without changing the
-            active adapter. Output 0 = base.
+            token). Must be unique. adapter_token_ids[i] activates slot i+1
+            (1-indexed output), a LoRA adapter or a classifier head.
+            Output 0 = base.
         adapter_substitute_token_ids (List[int]): Token IDs whose embeddings
             replace the control-token embeddings before the decoder runs.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
@@ -387,9 +387,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.adapter_ranks = adapter_ranks
 
         # Each adapter slot is either a LoRA adapter ("lora", the default) or
-        # a classifier head ("classifier"). Classifier markers are orthogonal
-        # probes: they select a head without replacing the currently active
-        # adapter selection. The probe slot is looked up from the marker token.
+        # a classifier head ("classifier"). A classifier slot still uses a
+        # control token and adapter index; the switch's adapter_kind_lut routes
+        # its positions out of the LoRA stream and into the classifier head.
         _VALID_KINDS = ("lora", "classifier")
         if adapter_kinds is None:
             adapter_kinds = ["lora"] * num_adapters

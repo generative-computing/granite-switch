@@ -399,7 +399,11 @@ def run_at_layer(ckpt, prompt_ids, label_token_ids, out_path, full_cudagraph=Fal
 
 
 def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
-    """Exercise SR probes at each configured layer, sequentially and in a mixed batch."""
+    """Serve each SR-checkpoint probe and an SR request, sequentially and mixed.
+
+    Each slot is selected on its own: a probe request carries only its marker,
+    and the SR request carries only the SR control token.
+    """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     if pp_size > 1:
         # Only trusted, importable test callbacks cross the local RPC boundary.
@@ -437,7 +441,7 @@ def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
     llm = LLM(**kw)
     _record_classifier_rows(llm)
     sampling = SamplingParams(max_tokens=1, temperature=0.0, logprobs=HIDDEN + 1)
-    plain = [10, CONTROL_TOKEN_ID, 20, 30]
+    sr_request = [10, CONTROL_TOKEN_ID, 20, 30]
 
     def serve(prompts):
         outputs = llm.generate(
@@ -463,20 +467,15 @@ def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
             ],
         }
 
+    # Each probe twice: the second run is the replay of the first's shape.
     result = {
         "sequential": [
-            serve([p])
-            for marker in markers
-            for p in (
-                [10, CONTROL_TOKEN_ID, 20, marker],
-                [10, 21, 20, marker],
-                [10, CONTROL_TOKEN_ID, 20, marker],
-            )
+            serve([[10, 21, 20, marker]]) for marker in markers for _ in range(2)
         ]
     }
-    mixed = [[10, CONTROL_TOKEN_ID, 20, markers[0]], plain, [10, 21, 20, markers[-1]]]
+    mixed = [[10, 21, 20, markers[0]], sr_request, [11, 21, 20, markers[-1]]]
     if len(markers) > 1:
-        mixed.append([10, CONTROL_TOKEN_ID, 20, markers[1]])
+        mixed.append([12, 21, 20, markers[1]])
     result["mixed"] = serve(mixed)
     with open(out_path, "w") as f:
         json.dump(result, f)

@@ -168,9 +168,12 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
-        # Classifier markers share the control-token machinery but select the
-        # classifier head independently, preserving the active adapter. The head
-        # scores each slot at its read layer (the final post-norm state by default).
+        # Classifier heads: optional alternative for LoRA adapters. A classifier
+        # slot shares the adapter index/token machinery, but its index is tagged
+        # as "classifier" (via the switch's adapter_kind_lut). The switch's
+        # split_indices() routes those positions out of the LoRA stream (so LoRA
+        # no-ops there) and into a classifier stream. The head scores each slot
+        # at its read layer (the final post-norm state by default).
         if "classifier" in getattr(config, "adapter_kinds", []):
             from .core import SwitchedClassifierHead
 
@@ -187,6 +190,13 @@ class GraniteSwitchModel(nn.Module):
                 )
             if vllm_config.parallel_config.use_ubatching:
                 raise ValueError("Classifier slots do not support microbatching.")
+
+            # Built once: copying a list to CUDA inside forward breaks capture.
+            self.register_buffer(
+                "classifier_control_token_ids_t",
+                torch.tensor(config.classifier_control_token_ids, dtype=torch.long),
+                persistent=False,
+            )
 
             is_classifier = [kind == "classifier" for kind in config.adapter_kinds]
             # Index 0 is a sentinel so a 1-based slot id indexes it directly.
@@ -379,35 +389,35 @@ class GraniteSwitchModel(nn.Module):
                 )
                 modified_input_ids = input_ids
 
-            # Marker-only probe indices are independent of persistent adapter
-            # routing. They travel across PP stages along with their scores.
-            if self.switch is not None:
-                classifier_probe_indices = (
-                    self.switch.classifier_indices_from_tokens(input_ids)
-                    if input_ids is not None
-                    else None
-                )
-                lora_indices, classifier_indices = self.switch.split_indices(
-                    adapter_indices, classifier_probe_indices
-                )
-            else:
-                lora_indices = adapter_indices
-                classifier_indices = torch.zeros_like(adapter_indices)
-
         else:
             assert intermediate_tensors is not None
             adapter_indices = intermediate_tensors["adapter_indices"]
-            # Later stages need no input ids: rank zero already identified the
-            # markers, without turning them into persistent adapter selection.
-            classifier_indices = (
-                intermediate_tensors["classifier_indices"]
-                if self.classifier_head is not None
-                else torch.zeros_like(adapter_indices)
+
+        # Split the single adapter_indices stream into a LoRA stream and a
+        # classifier stream. Classifier positions are zeroed in lora_indices (so
+        # the LoRA path no-ops there).
+        if self.switch is not None:
+            lora_indices, classifier_indices = self.switch.split_indices(
+                adapter_indices
             )
+        else:
             lora_indices = adapter_indices
+            classifier_indices = torch.zeros_like(adapter_indices)
+
+        # The verdict is read only at the marker itself, not at tokens that
+        # inherit its slot afterwards. Later PP ranks have no input ids, so they
+        # receive the marker-only indices from the first rank.
+        if self.classifier_head is not None:
+            if not get_pp_group().is_first_rank:
+                classifier_indices = intermediate_tensors["classifier_indices"]
+            elif input_ids is not None:
+                is_marker = torch.isin(input_ids, self.classifier_control_token_ids_t)
+                classifier_indices = torch.where(
+                    is_marker, classifier_indices, torch.zeros_like(classifier_indices)
+                )
 
         # Rebuild this rank's fixed-size kernel metadata from token-leading
-        # adapter ids; classifier markers preserve the active adapter.
+        # adapter ids. The fused kernel routes on the LoRA stream.
         if self.lora_meta is not None and self.lora_ctx is not None:
             self.decoder_interface.prepare_kernel_meta(
                 self.lora_meta, lora_indices, self.lora_ctx
@@ -458,7 +468,7 @@ class GraniteSwitchModel(nn.Module):
             if group is not None:
                 classifier_scores = self._score_group(
                     group,
-                    self.decoder_interface.layer_output(state, adapter_indices),
+                    self.decoder_interface.layer_output(state, lora_indices),
                     classifier_indices,
                     classifier_scores,
                 )
@@ -470,7 +480,7 @@ class GraniteSwitchModel(nn.Module):
             # [M, H] tensor is the final post-norm hidden state (what the LM head
             # consumes).
             hidden_states = self.decoder_interface.exit_decoder_stack(
-                state, adapter_indices, self.norm, self.config
+                state, lora_indices, self.norm, self.config
             )
 
             # Pack scores and slot ids onto the hidden states so vLLM's own
@@ -520,7 +530,7 @@ class GraniteSwitchModel(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add final-layer scores and return per-token (scores, slot ids).
 
-        ``classifier_indices`` identifies only this forward's marker tokens,
+        ``classifier_indices`` is nonzero only at this forward's marker tokens,
         computed on the first PP rank and passed unchanged between stages.
         Callers must place one classifier marker last in each request;
         misplaced or duplicate markers are not rejected (request-boundary

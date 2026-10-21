@@ -131,18 +131,17 @@ def composed_sr_probes(tmp_path_factory):
 
 
 @pytest.mark.parametrize("mode", ["eager", "full"])
-def test_sr_and_final_classifier_coactivate(composed_sr, mode):
-    """The identity head scores the selected SR output; transport stays exact."""
+def test_sr_checkpoint_serves_final_classifier_slot(composed_sr, mode):
+    """The identity head scores the served hidden state; transport stays exact."""
     served = _run_worker(
         composed_sr["outdir"],
         [f"run-sr-{mode}"],
         {"CLS_CKPT": composed_sr["ckpt"]},
     )
     sequential = served["sequential"]
-    assert [len(case["records"]) for case in sequential] == [1, 1, 1]
-    active, inactive, replay = [case["records"][0] for case in sequential]
-    assert active["served_hidden"] != inactive["served_hidden"]
-    assert replay["packed_scores"] == active["packed_scores"]
+    assert [len(case["records"]) for case in sequential] == [1, 1]
+    probe, replay = [case["records"][0] for case in sequential]
+    assert replay["packed_scores"] == probe["packed_scores"]
     for case in [*sequential, served["mixed"]]:
         for record in case["records"]:
             assert record["slot"] == 2
@@ -175,23 +174,18 @@ def sr_probe_reference(composed_sr_probes, request):
 
 
 def _check_sr_layer_probes(result, mode, pp):
-    """Distinct identity-head rows expose wrong sources, masks and stale replay."""
+    """Distinct identity-head rows expose wrong layers, masks and stale replay."""
     failures = []
-    assert len(result["sequential"]) == 9
-    active_scores = []
+    assert len(result["sequential"]) == 6
+    slot_scores = []
     for slot in (2, 3, 4):
-        active, inactive, replay = result["sequential"][3 * (slot - 2) : 3 * (slot - 1)]
-        assert [r["slot"] for r in active["records"]] == [slot]
-        assert [r["slot"] for r in inactive["records"]] == [slot]
-        scores = active["records"][0]["packed_scores"]
-        active_scores.append(scores)
-        assert scores != inactive["records"][0]["packed_scores"]
+        probe, replay = result["sequential"][2 * (slot - 2) : 2 * (slot - 1)]
+        assert [r["slot"] for r in probe["records"]] == [slot]
+        assert [r["slot"] for r in replay["records"]] == [slot]
+        scores = probe["records"][0]["packed_scores"]
+        slot_scores.append(scores)
         assert scores == replay["records"][0]["packed_scores"]
-        for name, case in (
-            ("active", active),
-            ("inactive", inactive),
-            ("replay", replay),
-        ):
+        for name, case in (("probe", probe), ("replay", replay)):
             record, output = case["records"][0], case["outputs"][0]
             failures.extend(
                 _check_transport(
@@ -204,9 +198,7 @@ def _check_sr_layer_probes(result, mode, pp):
                 max(record["packed_scores"])
             )
             assert not output["has_non_label_support"]
-    assert all(
-        active_scores[a] != active_scores[b] for a, b in ((0, 1), (0, 2), (1, 2))
-    )
+    assert all(slot_scores[a] != slot_scores[b] for a, b in ((0, 1), (0, 2), (1, 2)))
     assert sorted(r["slot"] for r in result["mixed"]["records"]) == [2, 3, 4]
     assert [o["has_non_label_support"] for o in result["mixed"]["outputs"]] == [
         False,
@@ -218,7 +210,7 @@ def _check_sr_layer_probes(result, mode, pp):
 
 
 def test_sr_classifier_reads_each_layer_under_replay(sr_probe_reference):
-    """One GPU: probes at layer 0, layer 1 and final norm with SR active/inactive."""
+    """One GPU: probes at layer 0, layer 1 and final norm beside an SR slot."""
     mode, served = sr_probe_reference
     _check_sr_layer_probes(served, mode, 1)
 

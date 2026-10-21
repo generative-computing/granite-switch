@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Classifier-substitute path tests for GraniteSwitchForCausalLM (HF backend).
 
-A classifier slot is selected independently from the active adapter. A LoRA
-selected earlier in the prompt remains active at the classifier marker, while
-the classifier head reads its slot's read layer (the final hidden state by
-default) to emit ONE verdict per request. The verdict marker must be the
-request's last token.
+A classifier slot is an alternative to a LoRA adapter: it shares the adapter
+index/control-token machinery, the switch splits classifier positions out of
+the LoRA stream, and the classifier head reads its slot's read layer (the final
+hidden state by default) to emit ONE verdict per request. The verdict is read at
+the control token, which must be the request's last token.
 
 The verdict exits as a GENERATED LABEL WORD, matching the vLLM backend: the LM
 head rewrites the marker's logit row so the vocab is -inf except at
@@ -97,19 +97,25 @@ def test_classifier_rewrites_last_logit_row_to_label_word():
     assert int(last_row.argmax()) in label_ids
 
 
-def test_classifier_marker_preserves_active_lora():
+def test_lora_and_classifier_slots_select_separately():
     config = _classifier_config(["lora", "classifier"])
     model = GraniteSwitchForCausalLM(config).eval()
     _set_adapter_token_ids(model, config.adapter_token_ids)
 
-    # Select LoRA slot 1, then place the classifier marker last. The marker
-    # probes slot 2 while LoRA slot 1 remains active through the final token.
-    input_ids = torch.tensor([[10, 250, 20, 30, 251]])
+    # The LoRA control token selects slot 1 for the following tokens.
+    with torch.no_grad():
+        model(input_ids=torch.tensor([[10, 250, 20, 30]]))
+    assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
+    assert not model.model._last_classifier_indices.any()
+    assert model.model._last_classifier_verdict is None
+
+    # The classifier marker selects slot 2 and routes out of the LoRA stream.
+    input_ids = torch.tensor([[10, 20, 30, 251]])
     with torch.no_grad():
         output = model(input_ids=input_ids)
 
-    assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1, 1]]
-    assert model.model._last_classifier_indices.tolist() == [[0, 0, 0, 0, 2]]
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
+    assert model.model._last_classifier_indices.tolist() == [[0, 0, 0, 2]]
     label_ids = config.classifier_label_token_ids[1]
     last_logits = output.logits[0, -1]
     assert torch.isfinite(last_logits[torch.tensor(label_ids)]).all()
@@ -325,13 +331,11 @@ def test_intermediate_layer_classifier_scores_that_layers_output():
     _randomize_classifier_head(model)
     with torch.no_grad():
         out = model(
-            input_ids=torch.tensor([[10, 250, 30, 40, 50, 60, 70, 251]]),
+            input_ids=torch.tensor([[10, 20, 30, 40, 50, 60, 70, 251]]),
             output_hidden_states=True,
         )
 
-    # The classifier marker selects its head independently; the active LoRA
-    # remains routed through the layer whose residual representation is read.
-    assert model.model._last_lora_indices[0, -1].item() == 1
+    assert model.model._last_lora_indices[0, -1].item() == 0
     assert model.model._last_classifier_indices[0, -1].item() == 2
     rows, pos, verdict, slots, _ = model.model._last_classifier_verdict
     expected = model.model.classifier_head(out.hidden_states[1][rows, pos], slots)

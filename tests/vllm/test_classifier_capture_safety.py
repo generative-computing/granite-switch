@@ -205,21 +205,29 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
     A layer-0 probe crosses the boundary; another probe and final norm are scored
     on the last rank. With three stages, the middle rank only relays scores.
     Distinct values expose resets, wrong layers, stream selection and reliance
-    on input_ids. The token slice matches vLLM's PP buffer contract.
+    on input_ids. The switch keeps the latest slot, like MultiSwitch, so only
+    the markers themselves may carry a classifier index. Markers route out of
+    the LoRA stream; the trailing LoRA token reads the adapted SR stream. The
+    token slice matches vLLM's PP buffer contract.
     """
     from granite_switch.vllm import granite_switch_model as model_module
 
     class Switch:
         def __call__(self, input_ids, **kwargs):
-            return (input_ids != 5).long(), input_ids
+            control_slot = {89: 1, 90: 2, 91: 3, 92: 4}
+            active, indices = 0, []
+            for token in input_ids.tolist():
+                active = control_slot.get(token, active)
+                indices.append(active)
+            return torch.tensor(indices), input_ids
 
-        def classifier_indices_from_tokens(self, input_ids):
-            lut = torch.zeros(100, dtype=torch.long)
-            lut[90:93] = torch.tensor([2, 3, 4])
-            return lut[input_ids]
-
-        def split_indices(self, indices, probes):
-            return indices, probes
+        def split_indices(self, indices):
+            is_classifier = indices >= 2
+            zeros = torch.zeros_like(indices)
+            return (
+                torch.where(is_classifier, zeros, indices),
+                torch.where(is_classifier, indices, zeros),
+            )
 
     class Layer(torch.nn.Module):
         def forward(self, positions, hidden_states, residual=None):
@@ -240,6 +248,7 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
     model.config.fused_add_norm = False
     model.switch = Switch()
     model.adapter_token_ids = torch.tensor([89, 90, 91, 92])
+    model.classifier_control_token_ids_t = torch.tensor([90, 91, 92])
     model.lora_meta = model.lora_ctx = None
     model.decoder_interface = SRDecoderInterface() if sr else LoRADecoderInterface()
     model.layers = torch.nn.ModuleList([Layer() for _ in range(stages)])
@@ -255,13 +264,13 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
     )
     wire = GraniteSwitchModel.forward(
         model,
-        torch.tensor([5, 90, 91, 92, 5]),
+        torch.tensor([5, 90, 91, 92, 89]),
         torch.arange(5),
         inputs_embeds=torch.ones(5, 4, dtype=dtype),
     )[1:]
     assert isinstance(wire, IntermediateTensors)
     assert wire["classifier_indices"].tolist() == [2, 3, 4, 0]
-    assert wire["classifier_scores"][:, 0].tolist() == [22 if sr else 4, 0, 0, 0]
+    assert wire["classifier_scores"][:, 0].tolist() == [4, 0, 0, 0]
     buffers = GraniteSwitchModel.make_empty_intermediate_tensors(
         model, 4, dtype, torch.device("cpu")
     )
@@ -283,10 +292,10 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
             for key, tensor in packed.items():
                 buffers[key].copy_(tensor)
     assert packed[:, -1].tolist() == [2, 3, 4, 0]
-    source = 1 + (10 if sr else 1) * stages
-    expected = [22 if sr else 4, 3 * source, 4 * source, 0]
-    assert packed[:, 4].tolist() == expected
-    assert packed[-1, 0] == stages + 1  # inactive SR token reads the base stream
+    # Markers read the base stream; the LoRA token reads the adapted SR stream.
+    source = 1 + stages
+    assert packed[:, 4].tolist() == [4, 3 * source, 4 * source, 0]
+    assert packed[-1, 0] == 1 + (10 if sr else 1) * stages
 
 
 def test_sr_pipeline_stack_partitions_post_attention_metadata():

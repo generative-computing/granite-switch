@@ -9,8 +9,12 @@ serve it so the model emits a label *word* (`safe`, `unsafe`, …) for a detecti
 A Granite Switch adapter slot is normally a LoRA adapter. A **classifier slot** is an alternative
 occupant of that same slot: instead of a LoRA, it holds a small linear classification head. It is
 triggered by the *same* control-token machinery — one `<|name|>` token, one adapter index — but
-the classifier reads the configured layer's activation and produces per-label logits. An active
-LoRA or SR adapter stays active while the classifier reads its resulting hidden state.
+the classifier reads the configured layer's activation and produces per-label logits.
+
+Activation probes are supported as classifier slots in the standard composition workflow. Probes and
+generation adapters can coexist in one checkpoint and be selected individually: a request selects
+one slot, either a generation adapter or a classifier. The calling stack manages compatible
+execution state and cache reuse.
 
 At inference the verdict does not come back as a raw score vector. Each label word is resolved to a
 single token id at compose time, and the model rewrites the request's final logit row so that the
@@ -145,10 +149,9 @@ safety_mid:
   layer: 20                  # 0..num_decoder_layers - 1; omit for final
 ```
 
-This also works with Shadow Residual (SR) adapters: an active adapter's tokens read the adapted
-stream after that layer's cross-stream shunt; inactive tokens read the base stream. Decoder layer
-numbers exclude the switch's KV-cache slots. Pipeline parallelism preserves the same numbering
-across stages.
+Classifier slots can also be composed alongside Shadow Residual (SR) adapters; a classifier
+request reads that layer's base stream. Decoder layer numbers exclude the switch's KV-cache slots.
+Pipeline parallelism preserves the same numbering across stages.
 
 You can mix LoRA and classifier entries in one manifest, and give each classifier its own `labels`
 list of any length:
@@ -331,8 +334,9 @@ channel.
 
 ## How it works (brief)
 
-- **Independent probe trigger.** One `<|name|>` control token selects a classifier head while
-  preserving the active LoRA or SR adapter. The head reads the resulting activation at that token.
+- **Same trigger, separate path.** One `<|name|>` control token selects a classifier slot, exactly
+  like an adapter. Classifier positions are routed out of the LoRA stream, and the head reads the
+  activation at that token.
 - **Padded head bank.** All classifier heads live in one stacked tensor padded to
   `max_classifier_labels`; a slot with fewer labels leaves its extra rows zero. This keeps the vLLM
   head a single fused, compile-safe operation regardless of how many labels each slot has — the same
