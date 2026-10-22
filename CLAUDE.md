@@ -408,8 +408,7 @@ with the upstream HF model is not achievable. The HF skinning test in
 `tests/composer/test_skinning_equivalence.py` used to be skipped outright for this reason; it
 now runs and gates **distribution** equivalence instead, with the same metric and thresholds
 `tests/vllm/_generation_equivalence_worker.py` already calibrated: top-k JSD + Jaccard swept
-over k, plus an exact argmax check and a least-squares slope fit. Four checks because the first
-three live after `log_softmax` and the fourth covers what normalizing hides:
+over k, plus an exact argmax check. Three logit checks, all after `log_softmax`:
 
 - **argmax, exact** — what greedy decoding emits; measured to be a strict maximum at every
   position, so no tolerance is needed even in bf16.
@@ -420,16 +419,27 @@ three live after `log_softmax` and the fourth covers what normalizing hides:
   the rank-100 boundary is a pile of exact ties (measured 4, 7 and 7 tokens sharing one bf16
   value at the cut) and which tie-mate lands inside the cut is arbitrary. Jaccard measures how
   much the top-k overlaps rather than demanding it match.
-- **relative logit scale** (`SLOPE_TOL`) — the only non-scale-invariant check, which is its
-  whole job. A uniform logit *scaling* preserves ranking and barely dents the normalized shape
-  (a 5% error measures inside the benign JSD floor), yet it is the signature of a mistransferred
-  `logits_scaling` / `attention_multiplier`. Measured as `std(sw)/std(ref)`, **not** an OLS
-  slope: OLS is `cov(x,y)/var(x)`, and since the reference is itself bf16 the predictor carries
-  noise, so OLS converges to `1 - var(e_x)/var(t)` — biased down by the *square* of the
-  reduction residual. That made it platform-dependent (3.2e-05 on arm64, 4.0e-03 on CI's x86,
-  failing a 1e-3 gate on a correct skin). The ratio is symmetric in the two noises so they
-  cancel, and it still convicts: 2.8e-04 for the real skin against 1.03e-02 for a 1% scaling.
-  Mean-centred, so a benign uniform shift still reads exactly 1.
+Being post-`log_softmax`, those three are blind to a uniform logit *scaling* — the signature of
+a mistransferred Granite multiplier. That is gated separately, and **on the config rather than
+the logits**: `_compare_multipliers` asserts all four of `logits_scaling`,
+`attention_multiplier`, `residual_multiplier` and `embedding_multiplier` match the base config
+exactly. The bug is reachable — `compose_utils.py:189` propagates them with
+`getattr(base_config, field, default)` where the default is `1.0`, so a field upstream renames
+or drops silently becomes 1.0 (verified for all four; absent `logits_scaling`, which is 10 on
+granite-4.0-micro, would compose as 1.0). `test_save_load_compose.py` only checks these survive
+a save/load round-trip (`loaded == built`), never that `built` matches the *base*, so this is
+the only coverage of that gap.
+
+A numeric logit-scale gate was tried first and **could not be made platform-independent**. As an
+OLS slope it read 3.2e-05 on arm64 and 4.0e-03 on CI's x86; switching to `std(sw)/std(ref)` on a
+regression-dilution theory did not help (3.7e-03 on x86 vs 2.8e-04 on arm64). The data refutes
+the noise explanation: both platforms report the same reduction residual (2.318e-02 vs
+2.213e-02, within 5%), and since independent per-side noise bounds `|a-1|` by `residual²/2`,
+arm64 sits at 1.1x that ceiling (pure noise) while x86 sits at **14x** it. x86 genuinely
+contracts the logits ~0.37% on a skin that is otherwise clean. No estimator fixes a real
+platform difference, and a gate loose enough for x86 (~4e-3) would sit only 2.7x below what a 1%
+scaling reads. The scale and residual are still *printed* (ungated) because they make a future
+platform difference diagnosable in one run.
 
 Worth keeping rather than deleting because both vLLM skinning tests need a GPU, making this the
 only CPU-runnable check that the composer's weight transfer reproduces the original model.

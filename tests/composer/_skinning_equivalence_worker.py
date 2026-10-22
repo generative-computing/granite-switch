@@ -24,9 +24,16 @@ not a defect, and the test could only ever fail.  It sat behind an unconditional
 weight-transfer check that runs without a GPU.
 
 What replaced it is the same gate the vLLM generation-equivalence worker uses
-(top-k JSD + Jaccard over a swept k), plus an exact argmax check and a scale check.
-See the constants below for the measured noise floor those are calibrated against,
-and ``_compare_logits`` for why each of the four is there.
+(top-k JSD + Jaccard over a swept k) plus an exact argmax check -- see the constants
+below for the measured noise floor those are calibrated against, and
+``_compare_logits`` for why each of the three is there.
+
+Those three all live after ``log_softmax`` and are therefore blind to a uniform
+logit SCALING, the signature of a mistransferred Granite multiplier. That bug is
+caught on the config instead, by exact comparison against the base
+(``_compare_multipliers``), rather than inferred from the logits -- a numeric
+estimate of the scale turned out to differ 13x between arm64 and x86 on the same
+correct skin. See ``_MULTIPLIERS``.
 
 Runs in its own process so CUDA context is fully torn down on exit.
 """
@@ -93,50 +100,47 @@ JACC_THRESH = 0.20
 # flipped near-tie only shows up at small k, and a reordered tail only at large k.
 K_SWEEP = (1, 5, 10, 20, 50, 100)
 
-# Max allowed |a-1| where `a` is the ratio of skinned to reference logit spread.
+# The four Granite scalar multipliers, checked for EXACT equality between the base
+# config and the skin's.
 #
-# This check exists because the three gates above are all computed AFTER
-# log_softmax, which makes them blind to one real bug: a uniform SCALING of every
-# logit. Scaling preserves ranking (so argmax and Jaccard see nothing) and barely
-# dents the normalized shape at small factors -- a 5% error measured mean JSD
-# 7.2e-04, inside the benign floor. That is not a hypothetical: it is the signature
-# of a wrong ``logits_scaling`` or ``attention_multiplier``, the two Granite config
-# multipliers a skin could plausibly mistransfer, and `logits_scaling` is typically
-# 8.0 so a one-step error is a ~12% scale change.
+# WHY A CONFIG CHECK AND NOT A NUMERIC ONE. The three distribution gates above are
+# all computed after ``log_softmax``, which makes them blind to one real bug: a
+# uniform SCALING of every logit. Scaling preserves ranking (argmax and Jaccard see
+# nothing) and barely dents the normalized shape -- a 5% error measures mean JSD
+# 7.2e-04, inside the benign floor. That is not hypothetical: it is the signature of
+# a mistransferred multiplier, and the transfer really can drop one silently.
+# ``compose_utils.py`` propagates these with ``getattr(base_config, field, default)``
+# where the default is ``1.0``, so a field that upstream renames or removes does not
+# raise -- it quietly becomes 1.0. Verified for all four: absent ``logits_scaling``
+# (10 on granite-4.0-micro) would compose as 1.0.
 #
-# A scale estimate separates that from reduction noise because a scale error is
-# SYSTEMATIC across all 1.2M elements while reduction-order noise is random.
+# So the bug is reachable, but it is a CONFIG bug, and comparing the configs catches
+# it exactly, on every platform, for all four multipliers rather than just the two
+# that happen to move the logit scale. ``test_save_load_compose.py`` only checks
+# these survive a save/load round-trip (``loaded == built``), never that ``built``
+# matches the BASE, so this is the only place that gap is covered.
 #
-# NOT AN ORDINARY LEAST-SQUARES SLOPE, and the reason is a CI failure worth
-# recording. This started as OLS -- cov(x,y)/var(x) -- which measured 3.2e-05 on
-# the dev box but 4.0e-03 on CI's x86 leg, failing a 1e-3 gate on a skin that was
-# otherwise clean (argmax 0/12, JSD at the benign floor). OLS is the wrong
-# estimator here, not the platform the wrong answer: with x = t + e_x and
-# y = t + e_y (t the exact logit, e each backend's reduction error),
-# cov(x,y) = var(t) but var(x) = var(t) + var(e_x), so OLS converges to
-# 1 - var(e_x)/var(t). It is biased DOWN by noise in the PREDICTOR -- classic
-# regression dilution -- and the reference is itself bf16, so there is always some.
-# Worse, the bias goes as the SQUARE of the residual, so a platform with 2x the
-# reduction noise reads 4x the error for an equally correct skin.
+# WHAT THIS REPLACED. A gated numeric estimate of the logit scale, which could not be
+# made platform-independent. It began as an OLS slope (1e-3 gate), read 3.2e-05 on
+# arm64 and 4.0e-03 on CI's x86 leg, and was changed to ``std(sw)/std(ref)`` on the
+# theory that OLS was diluted by noise in the predictor. THE DATA REFUTED THAT: the
+# ratio still read 3.74e-03 on x86 against 2.77e-04 on arm64. The two platforms
+# report the SAME reduction residual (2.318e-02 vs 2.213e-02, within 5%), so noise is
+# not the difference. Independent per-side noise bounds |a-1| at r^2/2, and arm64 sits
+# at 1.13x that ceiling -- pure noise -- while x86 sits at 13.9x it. x86 genuinely
+# contracts the logits ~0.37%, systematically, on a skin that is otherwise clean
+# (argmax 0/12, JSD at the benign floor). No choice of estimator fixes a real
+# platform difference, and a gate loose enough to pass x86 (~4e-3) would sit only
+# 2.7x under what a 1% scaling reads (1.03e-02) -- too thin to trust either way.
 #
-# std(y)/std(x) is used instead: symmetric in the two noises, so they cancel
-# rather than bias it, while still reading exactly `a` under a true uniform
-# scaling. CONFIRMED by injecting extra noise into both sides of the measured
-# logit pair -- OLS crosses the old 1e-3 gate on a correct skin while the ratio
-# does not move at all:
-#
-#     extra noise   residual    OLS |a-1|   scale |a-1|
-#            none   2.21e-02     3.2e-05       2.8e-04
-#              1x   3.13e-02     2.7e-04       2.2e-04
-#              2x   4.94e-02     9.0e-04       3.2e-04
-#              4x   9.11e-02     3.9e-03       2.6e-04   <- the CI reading
-#              6x   1.34e-01     8.7e-03       3.2e-04
-#
-# Still convicts, which is the only reason the swap is worth making: 1.03e-02 for
-# a 1% scaling and 1.21e-02 for logits_scaling 8.0->8.1, against 2.8e-04 for the
-# real skin -- a ~40x gap, and one that does not move when the platform's
-# arithmetic does.
-SLOPE_TOL = 3e-3
+# ``_scale`` is still computed and printed, just not gated: it is the quantity that
+# makes a future platform difference diagnosable in one run.
+_MULTIPLIERS = (
+    "logits_scaling",
+    "attention_multiplier",
+    "residual_multiplier",
+    "embedding_multiplier",
+)
 
 
 def _native_dtype(config):
@@ -159,12 +163,11 @@ def _scale(ref, sw):
     """Ratio of ``sw``'s logit spread to ``ref``'s: 1.0 iff unscaled.
 
     Mean-centred via ``std``, so a uniform additive shift -- invisible after
-    softmax -- does not register here either. Returns exactly 1.0 for a shifted
-    copy and exactly ``a`` for an ``a``-scaled one.
+    softmax -- does not register here either.
 
-    Symmetric in the two sides on purpose: this replaced an OLS slope that was
-    biased by noise in the reference and so read differently per platform. See
-    ``SLOPE_TOL``.
+    PRINTED, NOT GATED: it is platform-dependent (2.8e-04 on arm64, 3.7e-03 on
+    x86 for the same correct skin) because x86 really does contract these logits.
+    The bug it was meant to catch is gated exactly via ``_MULTIPLIERS`` instead.
     """
     return float(sw.reshape(-1).std() / ref.reshape(-1).std())
 
@@ -172,21 +175,36 @@ def _scale(ref, sw):
 def _residual(ref, sw):
     """``std(sw - ref) / std(ref)`` -- the reduction-noise floor, printed only.
 
-    Not gated: it is a raw magnitude ratio, so a legitimately different float
-    reduction order moves it, which is what made the original magnitude bound
-    near-vacuous. Reported because it is the quantity that *explains* a scale
-    reading, which makes a future platform difference diagnosable in one run.
-    ARM measures 2.2e-02.
+    Reported next to ``_scale`` because it bounds it: with independent per-side
+    noise, ``|scale - 1| <= residual^2 / 2``. A scale reading above that ceiling
+    is systematic rather than noise, which is how the x86/arm64 gap was diagnosed
+    (both report residual ~2.2e-02; arm64 lands at 1.1x the ceiling, x86 at 14x).
     """
     return float((sw - ref).reshape(-1).std() / ref.reshape(-1).std())
+
+
+def _compare_multipliers(base_config, switch_config):
+    """Check the Granite scalar multipliers transferred exactly. Returns a failure list.
+
+    Exact equality, no tolerance: these are config floats copied verbatim, not
+    computed, so any difference is a transfer defect. See ``_MULTIPLIERS``.
+    """
+    failures = []
+    for name in _MULTIPLIERS:
+        want = getattr(base_config, name, None)
+        got = getattr(switch_config, name, None)
+        status = "OK" if want == got else "MISMATCH"
+        print(f"  {name:24} base={want!r:12} switch={got!r:12} {status}")
+        if want != got:
+            failures.append(f"{name}: base={want!r} but skin={got!r}")
+    return failures
 
 
 def _compare_logits(reference, switch, label, dtype):
     """Check skinned logits against the original's. Returns 0 on agreement, 1 on diff.
 
-    Four checks. The first three are computed on ``log_softmax`` output -- the
-    distribution a caller actually observes -- and the fourth covers the one real
-    bug that normalizing hides. They fail for different reasons, and reporting them
+    Three gated checks, all computed on ``log_softmax`` output -- the distribution a
+    caller actually observes. They fail for different reasons, and reporting them
     separately is what makes a failure diagnosable rather than just "the numbers
     moved":
 
@@ -201,12 +219,13 @@ def _compare_logits(reference, switch, label, dtype):
     3. **mean top-k Jaccard distance.** A loose set-overlap guard, same role as in
        the vLLM worker. Deliberately loose: at these bf16 logits several tokens tie
        exactly at the k-th rank, so a few percent of churn is arithmetic.
-    4. **relative logit scale.** The only check here that is NOT scale-invariant,
-       which is precisely its job -- see ``SLOPE_TOL``.
 
-    All four are printed either way, so a run drifting toward a bound is visible
-    before it crosses it, along with the ungated reduction residual that explains
-    where the scale estimate's own noise comes from.
+    All three are printed either way, so a run drifting toward a bound is visible
+    before it crosses it. The scale and reduction residual are printed alongside but
+    NOT gated -- being post-``log_softmax``, the three above are blind to a uniform
+    logit scaling, but that bug is caught exactly on the config instead
+    (``_compare_multipliers``) rather than inferred from platform-dependent
+    arithmetic. See ``_MULTIPLIERS`` for the full reasoning.
     """
     # Compare in fp32: a bf16 subtraction would itself round the difference being
     # measured, and the two tensors are already materialized at native precision.
@@ -222,8 +241,12 @@ def _compare_logits(reference, switch, label, dtype):
 
     print(f"  dtype = {dtype}   positions = {num_pos}   vocab = {ref.shape[-1]}")
     print(f"  argmax mismatches: {argmax_mismatches} / {num_pos}")
-    print(f"  scale |a-1| = {abs(scale - 1):.3e}   tolerance = {SLOPE_TOL:.3e}")
-    print(f"  reduction residual = {_residual(ref, sw):.3e}   (informational)")
+    resid = _residual(ref, sw)
+    print(
+        f"  scale |a-1| = {abs(scale - 1):.3e}   noise ceiling = {resid**2 / 2:.3e}"
+        f"   (informational, not gated)"
+    )
+    print(f"  reduction residual = {resid:.3e}   (informational)")
     print(f"  {'k':>5}{'mean(1-Jacc)':>15}{'mean JSD':>12}{'max JSD':>12}{'@pos':>7}")
 
     failures = []
@@ -264,13 +287,6 @@ def _compare_logits(reference, switch, label, dtype):
             f"top token; the skin is not equivalent (dtype={dtype})"
         )
         return 1
-    if abs(scale - 1) > SLOPE_TOL:
-        print(
-            f"\nFAIL: {label} — skinned logits are scaled by {scale:.6f} relative to "
-            f"the original (|a-1| = {abs(scale - 1):.3e} > {SLOPE_TOL:.3e}); suspect a "
-            f"mistransferred logits_scaling / attention_multiplier (dtype={dtype})"
-        )
-        return 1
     if failures:
         print(f"\nFAIL: {label} — distributions disagree beyond the noise floor:")
         for line in failures:
@@ -278,8 +294,7 @@ def _compare_logits(reference, switch, label, dtype):
         return 1
     print(
         f"\nPASS: {label} — distribution-equivalent (mean JSD <= {MEAN_JSD_THRESH}, "
-        f"max JSD <= {MAX_JSD_THRESH}, mean 1-Jaccard <= {JACC_THRESH}, "
-        f"scale within {SLOPE_TOL:.0e}, dtype={dtype})"
+        f"max JSD <= {MAX_JSD_THRESH}, mean 1-Jaccard <= {JACC_THRESH}, dtype={dtype})"
     )
     return 0
 
@@ -331,8 +346,18 @@ def main():
     print(f"  switch_logits shape: {switch_logits.shape}")
 
     # ── Phase 3: compare ──────────────────────────────────────────
-    print("\nPhase 3: comparing logits...")
-    return _compare_logits(reference_logits, switch_logits, model_name, dtype)
+    print("\nPhase 3: comparing Granite scalar multipliers...")
+    mult_failures = _compare_multipliers(base_config, switch_model.config)
+
+    print("\nPhase 4: comparing logits...")
+    rc = _compare_logits(reference_logits, switch_logits, model_name, dtype)
+
+    if mult_failures:
+        print(f"\nFAIL: {model_name} — Granite multipliers did not transfer:")
+        for line in mult_failures:
+            print(f"  {line}")
+        return 1
+    return rc
 
 
 if __name__ == "__main__":

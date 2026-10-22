@@ -252,11 +252,15 @@ jobs:
             #                                       real Quanto float8 probe that only
             #                                       means anything on a GPU.
             #   tests/composer/test_skinning_...py   was @pytest.mark.skip outright; now
-            #                                       gates top-k JSD/Jaccard + argmax +
-            #                                       a slope fit. This scope is what
-            #                                       measured the bf16 noise floor those
-            #                                       are calibrated against -- a CPU box
-            #                                       runs it in fp32 and sees none of it.
+            #                                       gates top-k JSD/Jaccard + argmax,
+            #                                       plus exact config multipliers. This
+            #                                       scope is what measured the bf16 noise
+            #                                       floor the thresholds are calibrated
+            #                                       against -- a CPU box runs it in fp32
+            #                                       and sees none of it. It is also what
+            #                                       caught x86 contracting the logits
+            #                                       0.37%, which retired a numeric
+            #                                       logit-scale gate as unportable.
             #   tests/unit/test_bitmask_computation  34 tests, no longer 2 skips. Cheap,
             #                                       and it cannot even be COLLECTED off
             #                                       GPU: it imports lora_kernel_meta,

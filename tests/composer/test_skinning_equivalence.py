@@ -185,10 +185,12 @@ def _run_vllm_test(model_name, timeout, fast=False):
 # unconditional @pytest.mark.skip, on the correct observation that bit-exact
 # equivalence is unreachable -- but the conclusion drawn from it was too strong.
 # Its worker now gates DISTRIBUTION equivalence (top-k JSD + Jaccard swept over k,
-# plus an exact argmax check and a slope fit; see
-# _skinning_equivalence_worker._compare_logits), reusing the metric and thresholds
-# tests/vllm/_generation_equivalence_worker.py already calibrated, so the test can
-# run instead.
+# plus an exact argmax check; see _skinning_equivalence_worker._compare_logits),
+# reusing the metric and thresholds tests/vllm/_generation_equivalence_worker.py
+# already calibrated, so the test can run instead. Those three checks live after
+# log_softmax and so cannot see a uniform logit scaling; that bug is gated exactly
+# on the config instead (_compare_multipliers), because a numeric estimate of the
+# scale differs 13x between arm64 and x86 on the same correct skin.
 #
 # Worth having rather than deleting: both vLLM skinning tests below need a GPU, so
 # this is the only end-to-end check that the composer's weight transfer produces a
