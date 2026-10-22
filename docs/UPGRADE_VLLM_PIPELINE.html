@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>upgrade-vllm — how the pipeline works</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    background: #f4f4f4;
+    color: #161616;
+    line-height: 1.55;
+  }
+
+  .container { max-width: 820px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+
+  header { margin-bottom: 2rem; }
+  header h1 { font-size: 1.75rem; font-weight: 600; margin-bottom: .4rem; }
+  header p.sub { color: #525252; font-size: .95rem; }
+
+  h2 {
+    font-size: 1.15rem; font-weight: 600; margin: 2.5rem 0 .9rem;
+    padding-bottom: .4rem; border-bottom: 1px solid #e0e0e0;
+  }
+
+  p { margin-bottom: .9rem; }
+  .panel { background: #fff; border: 1px solid #e0e0e0; padding: 1.25rem 1.4rem; margin-bottom: 1rem; }
+
+  code {
+    font-family: 'IBM Plex Mono', ui-monospace, Menlo, monospace;
+    font-size: .85em; background: #f4f4f4; padding: .1rem .3rem;
+    border: 1px solid #e0e0e0;
+  }
+  .panel code { background: #f4f4f4; }
+
+  /* phase list */
+  ol.phases { list-style: none; counter-reset: ph -1; }
+  ol.phases > li {
+    counter-increment: ph; position: relative;
+    background: #fff; border: 1px solid #e0e0e0; border-left: 3px solid #0f62fe;
+    padding: .85rem 1.1rem .85rem 3.4rem; margin-bottom: .5rem;
+  }
+  ol.phases > li::before {
+    content: counter(ph);
+    position: absolute; left: 1.1rem; top: .85rem;
+    font-family: 'IBM Plex Mono', monospace; font-size: .8rem; font-weight: 600;
+    color: #0f62fe; background: #edf5ff;
+    width: 1.5rem; height: 1.5rem; line-height: 1.5rem; text-align: center;
+  }
+  ol.phases strong { font-weight: 600; }
+  ol.phases .note { display: block; color: #525252; font-size: .88rem; margin-top: .15rem; }
+
+  /* gate group accent */
+  li.gate { border-left-color: #198038; }
+  li.gate::before { color: #198038; background: #defbe6; }
+  li.handoff { border-left-color: #8a3ffc; }
+  li.handoff::before { color: #8a3ffc; background: #f6f2ff; }
+
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: .88rem; }
+  th, td { text-align: left; padding: .55rem .7rem; border: 1px solid #e0e0e0; vertical-align: top; }
+  th { background: #f4f4f4; font-weight: 600; }
+
+  .callout {
+    background: #fff; border: 1px solid #e0e0e0; border-left: 3px solid #f1c21b;
+    padding: 1rem 1.2rem; margin-bottom: 1rem;
+  }
+  .callout h3 { font-size: .95rem; font-weight: 600; margin-bottom: .4rem; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  .walk { font-family: 'IBM Plex Mono', monospace; font-size: .82rem; }
+  .walk td:first-child { white-space: nowrap; }
+
+  ul.plain { margin: 0 0 .9rem 1.2rem; }
+  ul.plain li { margin-bottom: .35rem; }
+
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid #e0e0e0; color: #525252; font-size: .85rem; }
+</style>
+</head>
+<body>
+<div class="container">
+
+<header>
+  <h1>upgrade-vllm</h1>
+  <p class="sub">An autonomous pipeline that moves granite-switch onto newly released vLLM lines and hands back a reviewable PR.</p>
+</header>
+
+<p>vLLM releases faster than this repo tracks it. The <code>vllm</code> extra in
+<code>pyproject.toml</code> claims a <em>contiguous range</em> of supported lines, so every
+release widens a gap between what is claimed and what has actually been tested.
+This skill closes that gap without supervision.</p>
+
+<p>The only human step is reviewing and merging the PR. Invoking the skill <em>is</em>
+the authorization for everything else — branching, editing code, relocking,
+dispatching GPU runs, opening the PR.</p>
+
+<h2>What it guarantees</h2>
+
+<div class="panel">
+  <ul class="plain">
+    <li><strong>One PR for all new lines.</strong> The range claim moves in one reviewable change, not one PR per version.</li>
+    <li><strong>Every added line is verified independently</strong> — CPU, GPU and both eval tiers. Testing the newest and inferring the rest is explicitly not allowed.</li>
+    <li><strong>Capability gating, never version numbers.</strong> Detection is <code>hasattr</code> / <code>try: import</code>. There is currently zero version branching in <code>src/</code>.</li>
+    <li><strong>Proof tables in the PR body</strong> — one column per added line, a check only where a gate actually ran on <em>that</em> line.</li>
+  </ul>
+</div>
+
+<div class="callout">
+  <h3>A green run is not proof a gate ran</h3>
+  <p>pytest exits 0 when every test skips, the pod then prints <code>ALL GPU TESTS PASSED</code>, and the
+  workflow posts success. Measured, not hypothesised: one run collected 4 eval tests, skipped all 4
+  because no checkpoint was staged, and reported PASSED in 0.03 s. The dispatcher now fails a green
+  run whose log contains no <code>N passed</code>, so the only check mark you can write is one a real
+  test earned.</p>
+</div>
+
+<h2>The ten phases</h2>
+
+<ol class="phases">
+  <li><strong>Preflight.</strong> <code>gh</code> authenticated, Maintain/Admin on the repo, <code>uv 0.8.4</code>, SSH push, clean tree.
+    <span class="note">Abort on any failure — an unattended run cannot recover from a missing tool.</span></li>
+
+  <li><strong>Detect the gap.</strong> Compare the supported ceiling against released lines on PyPI.
+    <span class="note">Empty gap means stop. No empty PR.</span></li>
+
+  <li><strong>Branch</strong> from <code>origin/main</code> directly, without ever checking main out.
+    <span class="note">Checking main out would delete the skill from the working tree on any clone where it is not yet on main — and a deleted skill has no later phases left to read.</span></li>
+
+  <li><strong>Research what actually broke.</strong> Diff upstream over only the API surface this repo touches, and read the commits responsible.
+    <span class="note">The worst case is a deleted hook whose override is silently never called again. That shows up as a feature quietly not working, never as a failure — so the fix gets a test asserting the <em>effect</em>, not the call.</span></li>
+
+  <li><strong>Port <code>src/</code> and <code>tests/</code>.</strong> Apply fixes with capability gating, and decide explicitly whether the new line forces the floor or a dependency ceiling up.</li>
+
+  <li><strong>Plumbing.</strong> Add each line's dependency groups, widen the extra, regenerate the uv <code>conflicts</code> table, relock with the pinned uv.
+    <span class="note">This is also where per-line GPU evidence is bought — see below.</span></li>
+
+  <li class="gate"><strong>CPU gate, locally, before pushing.</strong> Pre-commit over all files, plus the unit suite.
+    <span class="note">Burning a CI run on something reproducible locally wastes everyone's time.</span></li>
+
+  <li class="gate"><strong>Commit, push, open a draft PR.</strong> One commit per concern, DCO-signed.</li>
+
+  <li class="gate"><strong>Drive the gates to green.</strong> Dispatch per line × per suite, in parallel; collect each leg's conclusion and URL as it lands.
+    <span class="note">Budget of 5 fix attempts per leg — exceeding it means stop and report rather than thrash.</span></li>
+
+  <li class="handoff"><strong>PR body and hand-off.</strong> Generate the proof tables, then mark the PR ready.
+    <span class="note">Never merge. The hand-off is a ready PR.</span></li>
+</ol>
+
+<h2>The one mechanical trick: one commit per line</h2>
+
+<p>The GPU workflow <em>does not contain its own test legs</em>. A script baked into the
+runner image reads the <strong>tested commit's own</strong> <code>pyproject.toml</code> and emits
+<strong>at most two legs</strong>: one from the <code>dev</code> group (the floor) and one from the
+<code>dev-latest</code> alias (the ceiling). No edit a PR can make will add a third.</p>
+
+<p>So per-line coverage is bought differently: make each added line <em>be</em>
+<code>dev-latest</code> at some commit, and dispatch at that commit's sha. Workflow
+concurrency is keyed on the sha, so these runs go in parallel instead of
+cancelling each other.</p>
+
+<table class="walk">
+  <thead><tr><th>commit</th><th><code>dev-latest</code></th><th>legs produced</th></tr></thead>
+  <tbody>
+    <tr><td>declare all lines</td><td>0.31</td><td>floor + 0.31</td></tr>
+    <tr><td>walk the alias up</td><td>0.32</td><td>floor + 0.32</td></tr>
+  </tbody>
+</table>
+
+<p style="margin-top:.9rem">The floor is re-tested on every dispatch, every gap line gets its own leg, and the
+final commit leaves the alias on the true ceiling — which is also the only state
+allowed to merge. A merge check fails while the alias is parked mid-range, because
+that would leave the top supported line permanently untested by CI.</p>
+
+<div class="callout">
+  <h3>Both <code>--ref</code> and <code>--sha</code>, and they mean different things</h3>
+  <p><code>--ref</code> picks which <em>workflow file</em> runs; <code>--sha</code> picks which <em>commit</em>
+  gets checked out. Letting the sha default is the trap: every dispatch would test the branch tip, so
+  each intermediate line would silently report the ceiling's result — a table full of check marks that
+  proves the top line N times and the others never. The leg label in each result is the receipt that
+  this went right.</p>
+</div>
+
+<h2>Two eval tiers, both required</h2>
+
+<p>Neither substitutes for the other: a <em>dead</em> adapter and a <em>degraded</em> adapter
+are different failures, and tier 1 cannot see the second one. A model that answers
+confidently and wrongly has a perfectly normal top-k distribution.</p>
+
+<table>
+  <thead><tr><th></th><th>what it catches</th><th>cost</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Tier 1</strong><br>distribution drift</td><td>the adapter stopped firing, or the logits moved</td><td>minutes, inside the GPU leg</td></tr>
+    <tr><td><strong>Tier 2</strong><br>scored accuracy</td><td>the model got <em>worse</em></td><td>hours, on the GPU cluster</td></tr>
+  </tbody>
+</table>
+
+<p style="margin-top:.9rem">Tier 1 compares top-k output distributions against a committed baseline. Two
+properties of that measurement are load-bearing, and each one was a false positive
+before it was fixed:</p>
+
+<div class="panel">
+  <ul class="plain">
+    <li><strong>It is teacher-forced.</strong> Both the baseline and the check push the baseline's
+      recorded continuation through the model, so every compared position sits on a byte-identical
+      prefix. A self-conditioning greedy rollout cannot work here: one flipped near-tie
+      desynchronizes the prefix and every later position then compares unrelated sentences.</li>
+    <li><strong>It compares only below the capture width.</strong> At the very edge of the captured
+      top-k, a token ranked just inside one run and just outside the other contributes nearly its
+      whole mass to the metric — an artifact of truncation, not a distribution difference.</li>
+  </ul>
+</div>
+
+<div class="callout">
+  <h3>Never re-record a baseline, never widen a threshold</h3>
+  <p>A failure here is the signal the whole upgrade was looking for; adjusting the reference to make
+  it pass destroys the gate. The cheap diagnostic that separates a real regression from a broken
+  measurement: <strong>if a failure reproduces identically across vLLM lines — including the line the
+  baseline was recorded on — it is a defect in the metric, not stale data.</strong> A property of one
+  version cannot be identical on two.</p>
+</div>
+
+<h2>When it stops and asks</h2>
+
+<p>Routine steps are pre-authorized and run without prompting. There are exactly
+four reasons to stop:</p>
+
+<div class="panel">
+  <ul class="plain">
+    <li><strong>Preflight fails</strong> — the run cannot complete unattended anyway.</li>
+    <li><strong>A gate is still red after 5 fix attempts</strong> — report with the log instead of thrashing.</li>
+    <li><strong>A scored eval drifts</strong> — accepting a quality change is the user's decision.</li>
+    <li><strong>The floor must rise</strong> — widening the supported range is routine; <em>narrowing</em> it is not.</li>
+  </ul>
+</div>
+
+<footer>
+  Source of record: <code>.claude/skills/upgrade-vllm/SKILL.md</code> (procedure and rules),
+  <code>REFERENCE.md</code> (version surface and known traps),
+  <code>tests/eval/_eval_core.py</code> (the drift metric).
+  This page is a summary — where it disagrees with those, they win.
+</footer>
+
+</div>
+</body>
+</html>
