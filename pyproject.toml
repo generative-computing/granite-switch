@@ -103,12 +103,13 @@ dev-vllm32 = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-swi
 # The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
 # CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
 # the ceiling is repointing this one line instead of chasing the version through
-# every caller. Currently the 0.31 line -- an INTERMEDIATE parking spot while the
-# per-line walk collects 0.31's GPU evidence at this commit's sha. It must land
-# back on the true ceiling (0.32) before merge; `plumb_pyproject.py --check
-# --final` fails while it is parked here, because merging in this state would
-# leave the top supported line untested by CI.
-dev-latest = [{ include-group = "dev-vllm31" }]
+# every caller. Now on 0.32, the true ceiling of the `vllm` extra's range -- which
+# is also the only state that may merge, since CI's upper leg comes from this
+# alias and anything lower would leave the top supported line untested
+# (`plumb_pyproject.py --check --final` enforces exactly that). The preceding
+# commit parked it on 0.31 to collect that line's own GPU evidence at its own
+# sha; see .claude/skills/upgrade-vllm/ Phase 5 for the walk.
+dev-latest = [{ include-group = "dev-vllm32" }]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
@@ -139,15 +140,15 @@ conflicts = [
     # 0.26 vs 0.31
     [{ group = "vllm26" },     { group = "vllm31" }],
     [{ group = "vllm26" },     { group = "dev-vllm31" }],
-    [{ group = "vllm26" },     { group = "dev-latest" }],
     [{ group = "dev" },        { group = "vllm31" }],
     [{ group = "dev" },        { group = "dev-vllm31" }],
-    [{ group = "dev" },        { group = "dev-latest" }],
     # 0.26 vs 0.32
     [{ group = "vllm26" },     { group = "vllm32" }],
     [{ group = "vllm26" },     { group = "dev-vllm32" }],
+    [{ group = "vllm26" },     { group = "dev-latest" }],
     [{ group = "dev" },        { group = "vllm32" }],
     [{ group = "dev" },        { group = "dev-vllm32" }],
+    [{ group = "dev" },        { group = "dev-latest" }],
     # 0.27 vs 0.30
     [{ group = "vllm27" },     { group = "vllm30" }],
     [{ group = "vllm27" },     { group = "dev-vllm30" }],
@@ -156,34 +157,34 @@ conflicts = [
     # 0.27 vs 0.31
     [{ group = "vllm27" },     { group = "vllm31" }],
     [{ group = "vllm27" },     { group = "dev-vllm31" }],
-    [{ group = "vllm27" },     { group = "dev-latest" }],
     [{ group = "dev-vllm27" }, { group = "vllm31" }],
     [{ group = "dev-vllm27" }, { group = "dev-vllm31" }],
-    [{ group = "dev-vllm27" }, { group = "dev-latest" }],
     # 0.27 vs 0.32
     [{ group = "vllm27" },     { group = "vllm32" }],
     [{ group = "vllm27" },     { group = "dev-vllm32" }],
+    [{ group = "vllm27" },     { group = "dev-latest" }],
     [{ group = "dev-vllm27" }, { group = "vllm32" }],
     [{ group = "dev-vllm27" }, { group = "dev-vllm32" }],
+    [{ group = "dev-vllm27" }, { group = "dev-latest" }],
     # 0.30 vs 0.31
     [{ group = "vllm30" },     { group = "vllm31" }],
     [{ group = "vllm30" },     { group = "dev-vllm31" }],
-    [{ group = "vllm30" },     { group = "dev-latest" }],
     [{ group = "dev-vllm30" }, { group = "vllm31" }],
     [{ group = "dev-vllm30" }, { group = "dev-vllm31" }],
-    [{ group = "dev-vllm30" }, { group = "dev-latest" }],
     # 0.30 vs 0.32
     [{ group = "vllm30" },     { group = "vllm32" }],
     [{ group = "vllm30" },     { group = "dev-vllm32" }],
+    [{ group = "vllm30" },     { group = "dev-latest" }],
     [{ group = "dev-vllm30" }, { group = "vllm32" }],
     [{ group = "dev-vllm30" }, { group = "dev-vllm32" }],
+    [{ group = "dev-vllm30" }, { group = "dev-latest" }],
     # 0.31 vs 0.32
     [{ group = "vllm31" },     { group = "vllm32" }],
     [{ group = "vllm31" },     { group = "dev-vllm32" }],
+    [{ group = "vllm31" },     { group = "dev-latest" }],
     [{ group = "dev-vllm31" }, { group = "vllm32" }],
     [{ group = "dev-vllm31" }, { group = "dev-vllm32" }],
-    [{ group = "dev-latest" }, { group = "vllm32" }],
-    [{ group = "dev-latest" }, { group = "dev-vllm32" }],
+    [{ group = "dev-vllm31" }, { group = "dev-latest" }],
 ]
 
 [tool.coverage.run]
