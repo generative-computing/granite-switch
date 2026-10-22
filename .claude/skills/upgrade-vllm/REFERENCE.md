@@ -13,9 +13,9 @@ absorbed by `hasattr` capability checks at the call site.
 
 | File | What | Role |
 |---|---|---|
-| `pyproject.toml` `[project.optional-dependencies]` | `vllm = ["vllm>=0.26.0,<0.31.0"]` | **the supported-range claim** |
-| `pyproject.toml` `[dependency-groups]` | `vllm26`, `vllm27`, `vllm30` | per-line pins |
-| `pyproject.toml` `[dependency-groups]` | `dev`, `dev-vllm27`, `dev-vllm30` | what a leg's `dep_group` names |
+| `pyproject.toml` `[project.optional-dependencies]` | `vllm = ["vllm>=0.26.0,<0.33.0"]` | **the supported-range claim** |
+| `pyproject.toml` `[dependency-groups]` | `vllm26`, `vllm27`, `vllm30`, `vllm31`, `vllm32` | per-line pins |
+| `pyproject.toml` `[dependency-groups]` | `dev`, `dev-vllm27`, `dev-vllm30`, `dev-vllm31`, `dev-vllm32` | what a leg's `dep_group` names |
 | `pyproject.toml` `[dependency-groups]` | `dev-latest` | **the upper GPU leg's identity** — repoint per line |
 | `pyproject.toml` `[tool.uv] default-groups` | `["vllm26"]` | the implicit version for `uv sync`/CPU CI |
 | `pyproject.toml` `[tool.uv] conflicts` | 16 entries at 3 lines | **regenerate, never hand-edit** |
