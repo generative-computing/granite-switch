@@ -27,11 +27,12 @@ checkpoint at any `--asr-model` your installed transformers supports (for exampl
 
 ```bash
 # Serving an audio-enabled checkpoint
-uv sync --extra vllm --extra audio     # any vLLM 0.26.x - 0.30.x
+uv sync --extra vllm --extra audio     # any vLLM 0.26.x - 0.32.x
 
 # Development / running the test suite (the dev groups include audio already)
 uv sync --group dev                    # vLLM 0.26.x
 uv sync --group dev-vllm27             # vLLM 0.27.x
+uv sync --group dev-vllm32             # vLLM 0.32.x
 ```
 
 ## Building an audio-enabled checkpoint
