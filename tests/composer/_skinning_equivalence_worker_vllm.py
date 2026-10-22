@@ -136,7 +136,12 @@ def cmd_run(args):
     dtype_s = _dtype_str(dtype)
     print(f"  native_dtype={dtype}")
 
-    # Create vLLM instance
+    # Create vLLM instance. Both the original and the skin go through this path, so
+    # they share these memory settings and the comparison stays like-for-like.
+    # gpu_memory_utilization: vLLM's default (0.92 in newer releases) is a fraction of
+    # TOTAL memory and exceeds what is free once earlier in-process HF tests in the
+    # parent pytest hold ~9 GiB. max_model_len: the longest input is 256 tokens, so
+    # don't let vLLM size the KV cache for the model's full 131k context.
     print(f"Creating vLLM LLM for {model_path}...")
     llm_kwargs = dict(
         model=model_path,
@@ -145,6 +150,8 @@ def cmd_run(args):
         enforce_eager=True,
         enable_prefix_caching=False,
         skip_tokenizer_init=True,
+        gpu_memory_utilization=0.8,
+        max_model_len=2048,
     )
 
     llm = LLM(**llm_kwargs)
