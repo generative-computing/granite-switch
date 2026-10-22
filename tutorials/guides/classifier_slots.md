@@ -9,8 +9,7 @@ serve it so the model emits a label *word* (`safe`, `unsafe`, …) for a detecti
 A **classifier slot** holds a small linear classification head instead of a LoRA. It uses the same
 control-token machinery (one `<|name|>` token, one adapter index) and reads the configured layer's
 activation to produce per-label logits. Classifier and generation-adapter slots can coexist in one
-checkpoint; a request selects one slot. The calling stack manages compatible execution state and
-cache reuse.
+checkpoint; a request selects one slot.
 
 At inference the verdict does not come back as a raw score vector. Each label word is resolved to a
 single token id at compose time, and the model rewrites the request's final logit row so that the
