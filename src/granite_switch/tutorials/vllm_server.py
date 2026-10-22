@@ -6,6 +6,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import sys
 import time
 from collections.abc import Sequence
 
@@ -24,8 +25,16 @@ def launch_vllm(
     extra_args: Sequence[str] = (),
     max_model_len: int = DEFAULT_MAX_MODEL_LEN,
 ) -> subprocess.Popen:
+    # sys.executable, not "python": the server has to run in the SAME environment
+    # as the caller, and the bare name resolves through PATH to whatever comes
+    # first. On a container with a system Python plus a project venv those are
+    # different interpreters, and the one on PATH need not have vLLM installed --
+    # five tests/integration serving modules failed exactly that way under
+    # `make test-e2e PYTHON=.../.venv/bin/python`, where the venv ran the tests
+    # but the child got /usr/local/bin/python and died on
+    # "No module named 'vllm'" before binding its port.
     cmd = [
-        "python",
+        sys.executable,
         "-m",
         "vllm.entrypoints.openai.api_server",
         "--model",
