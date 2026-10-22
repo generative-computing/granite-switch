@@ -420,12 +420,16 @@ three live after `log_softmax` and the fourth covers what normalizing hides:
   the rank-100 boundary is a pile of exact ties (measured 4, 7 and 7 tokens sharing one bf16
   value at the cut) and which tie-mate lands inside the cut is arbitrary. Jaccard measures how
   much the top-k overlaps rather than demanding it match.
-- **slope of skinned-vs-reference logits** (`SLOPE_TOL`) — the only non-scale-invariant check,
-  which is its whole job. A uniform logit *scaling* preserves ranking and barely dents the
-  normalized shape (a 5% error measures inside the benign JSD floor), yet it is the signature of
-  a mistransferred `logits_scaling` / `attention_multiplier`. A scale error is systematic where
-  reduction-order noise is random, so the fit separates them by ~300x. Intercept left free, so a
-  benign uniform shift still reads as slope 1.
+- **relative logit scale** (`SLOPE_TOL`) — the only non-scale-invariant check, which is its
+  whole job. A uniform logit *scaling* preserves ranking and barely dents the normalized shape
+  (a 5% error measures inside the benign JSD floor), yet it is the signature of a mistransferred
+  `logits_scaling` / `attention_multiplier`. Measured as `std(sw)/std(ref)`, **not** an OLS
+  slope: OLS is `cov(x,y)/var(x)`, and since the reference is itself bf16 the predictor carries
+  noise, so OLS converges to `1 - var(e_x)/var(t)` — biased down by the *square* of the
+  reduction residual. That made it platform-dependent (3.2e-05 on arm64, 4.0e-03 on CI's x86,
+  failing a 1e-3 gate on a correct skin). The ratio is symmetric in the two noises so they
+  cancel, and it still convicts: 2.8e-04 for the real skin against 1.03e-02 for a 1% scaling.
+  Mean-centred, so a benign uniform shift still reads exactly 1.
 
 Worth keeping rather than deleting because both vLLM skinning tests need a GPU, making this the
 only CPU-runnable check that the composer's weight transfer reproduces the original model.

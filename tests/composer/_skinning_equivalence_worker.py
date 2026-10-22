@@ -24,7 +24,7 @@ not a defect, and the test could only ever fail.  It sat behind an unconditional
 weight-transfer check that runs without a GPU.
 
 What replaced it is the same gate the vLLM generation-equivalence worker uses
-(top-k JSD + Jaccard over a swept k), plus an exact argmax check and a slope fit.
+(top-k JSD + Jaccard over a swept k), plus an exact argmax check and a scale check.
 See the constants below for the measured noise floor those are calibrated against,
 and ``_compare_logits`` for why each of the four is there.
 
@@ -93,8 +93,7 @@ JACC_THRESH = 0.20
 # flipped near-tie only shows up at small k, and a reordered tail only at large k.
 K_SWEEP = (1, 5, 10, 20, 50, 100)
 
-# Max allowed |a-1| where `a` is the least-squares slope of skinned-vs-reference
-# logits.
+# Max allowed |a-1| where `a` is the ratio of skinned to reference logit spread.
 #
 # This check exists because the three gates above are all computed AFTER
 # log_softmax, which makes them blind to one real bug: a uniform SCALING of every
@@ -105,11 +104,39 @@ K_SWEEP = (1, 5, 10, 20, 50, 100)
 # multipliers a skin could plausibly mistransfer, and `logits_scaling` is typically
 # 8.0 so a one-step error is a ~12% scale change.
 #
-# A slope fit separates it cleanly because a scale error is SYSTEMATIC across all
-# 1.2M elements while reduction-order noise is random: measured |a-1| = 3.2e-05 for
-# the real skin versus 1.0e-02 for a 1% scaling -- a 300x gap. The intercept is left
-# free, so a benign uniform shift still reads as slope 1 exactly.
-SLOPE_TOL = 1e-3
+# A scale estimate separates that from reduction noise because a scale error is
+# SYSTEMATIC across all 1.2M elements while reduction-order noise is random.
+#
+# NOT AN ORDINARY LEAST-SQUARES SLOPE, and the reason is a CI failure worth
+# recording. This started as OLS -- cov(x,y)/var(x) -- which measured 3.2e-05 on
+# the dev box but 4.0e-03 on CI's x86 leg, failing a 1e-3 gate on a skin that was
+# otherwise clean (argmax 0/12, JSD at the benign floor). OLS is the wrong
+# estimator here, not the platform the wrong answer: with x = t + e_x and
+# y = t + e_y (t the exact logit, e each backend's reduction error),
+# cov(x,y) = var(t) but var(x) = var(t) + var(e_x), so OLS converges to
+# 1 - var(e_x)/var(t). It is biased DOWN by noise in the PREDICTOR -- classic
+# regression dilution -- and the reference is itself bf16, so there is always some.
+# Worse, the bias goes as the SQUARE of the residual, so a platform with 2x the
+# reduction noise reads 4x the error for an equally correct skin.
+#
+# std(y)/std(x) is used instead: symmetric in the two noises, so they cancel
+# rather than bias it, while still reading exactly `a` under a true uniform
+# scaling. CONFIRMED by injecting extra noise into both sides of the measured
+# logit pair -- OLS crosses the old 1e-3 gate on a correct skin while the ratio
+# does not move at all:
+#
+#     extra noise   residual    OLS |a-1|   scale |a-1|
+#            none   2.21e-02     3.2e-05       2.8e-04
+#              1x   3.13e-02     2.7e-04       2.2e-04
+#              2x   4.94e-02     9.0e-04       3.2e-04
+#              4x   9.11e-02     3.9e-03       2.6e-04   <- the CI reading
+#              6x   1.34e-01     8.7e-03       3.2e-04
+#
+# Still convicts, which is the only reason the swap is worth making: 1.03e-02 for
+# a 1% scaling and 1.21e-02 for logits_scaling 8.0->8.1, against 2.8e-04 for the
+# real skin -- a ~40x gap, and one that does not move when the platform's
+# arithmetic does.
+SLOPE_TOL = 3e-3
 
 
 def _native_dtype(config):
@@ -128,16 +155,30 @@ def _native_dtype(config):
     return torch.float32
 
 
-def _slope(ref, sw):
-    """Least-squares slope of ``sw`` against ``ref``, intercept free.
+def _scale(ref, sw):
+    """Ratio of ``sw``'s logit spread to ``ref``'s: 1.0 iff unscaled.
 
-    Intercept free on purpose: a uniform additive shift is invisible after softmax,
-    so it must not register here either. Returns 1.0 exactly for a shifted copy.
+    Mean-centred via ``std``, so a uniform additive shift -- invisible after
+    softmax -- does not register here either. Returns exactly 1.0 for a shifted
+    copy and exactly ``a`` for an ``a``-scaled one.
+
+    Symmetric in the two sides on purpose: this replaced an OLS slope that was
+    biased by noise in the reference and so read differently per platform. See
+    ``SLOPE_TOL``.
     """
-    x = ref.reshape(-1)
-    y = sw.reshape(-1)
-    xc = x - x.mean()
-    return float((xc * (y - y.mean())).sum() / (xc * xc).sum())
+    return float(sw.reshape(-1).std() / ref.reshape(-1).std())
+
+
+def _residual(ref, sw):
+    """``std(sw - ref) / std(ref)`` -- the reduction-noise floor, printed only.
+
+    Not gated: it is a raw magnitude ratio, so a legitimately different float
+    reduction order moves it, which is what made the original magnitude bound
+    near-vacuous. Reported because it is the quantity that *explains* a scale
+    reading, which makes a future platform difference diagnosable in one run.
+    ARM measures 2.2e-02.
+    """
+    return float((sw - ref).reshape(-1).std() / ref.reshape(-1).std())
 
 
 def _compare_logits(reference, switch, label, dtype):
@@ -160,11 +201,12 @@ def _compare_logits(reference, switch, label, dtype):
     3. **mean top-k Jaccard distance.** A loose set-overlap guard, same role as in
        the vLLM worker. Deliberately loose: at these bf16 logits several tokens tie
        exactly at the k-th rank, so a few percent of churn is arithmetic.
-    4. **slope of skinned-vs-reference logits.** The only check here that is NOT
-       scale-invariant, which is precisely its job -- see ``SLOPE_TOL``.
+    4. **relative logit scale.** The only check here that is NOT scale-invariant,
+       which is precisely its job -- see ``SLOPE_TOL``.
 
     All four are printed either way, so a run drifting toward a bound is visible
-    before it crosses it.
+    before it crosses it, along with the ungated reduction residual that explains
+    where the scale estimate's own noise comes from.
     """
     # Compare in fp32: a bf16 subtraction would itself round the difference being
     # measured, and the two tensors are already materialized at native precision.
@@ -175,12 +217,13 @@ def _compare_logits(reference, switch, label, dtype):
     sw_lp = torch.log_softmax(sw, dim=-1)
 
     argmax_mismatches = int((ref.argmax(dim=-1) != sw.argmax(dim=-1)).sum().item())
-    slope = _slope(ref, sw)
+    scale = _scale(ref, sw)
     num_pos = ref.shape[0]
 
     print(f"  dtype = {dtype}   positions = {num_pos}   vocab = {ref.shape[-1]}")
     print(f"  argmax mismatches: {argmax_mismatches} / {num_pos}")
-    print(f"  slope |a-1| = {abs(slope - 1):.3e}   tolerance = {SLOPE_TOL:.3e}")
+    print(f"  scale |a-1| = {abs(scale - 1):.3e}   tolerance = {SLOPE_TOL:.3e}")
+    print(f"  reduction residual = {_residual(ref, sw):.3e}   (informational)")
     print(f"  {'k':>5}{'mean(1-Jacc)':>15}{'mean JSD':>12}{'max JSD':>12}{'@pos':>7}")
 
     failures = []
@@ -221,10 +264,10 @@ def _compare_logits(reference, switch, label, dtype):
             f"top token; the skin is not equivalent (dtype={dtype})"
         )
         return 1
-    if abs(slope - 1) > SLOPE_TOL:
+    if abs(scale - 1) > SLOPE_TOL:
         print(
-            f"\nFAIL: {label} — skinned logits are scaled by {slope:.6f} relative to "
-            f"the original (|a-1| = {abs(slope - 1):.3e} > {SLOPE_TOL:.3e}); suspect a "
+            f"\nFAIL: {label} — skinned logits are scaled by {scale:.6f} relative to "
+            f"the original (|a-1| = {abs(scale - 1):.3e} > {SLOPE_TOL:.3e}); suspect a "
             f"mistransferred logits_scaling / attention_multiplier (dtype={dtype})"
         )
         return 1
@@ -236,7 +279,7 @@ def _compare_logits(reference, switch, label, dtype):
     print(
         f"\nPASS: {label} — distribution-equivalent (mean JSD <= {MEAN_JSD_THRESH}, "
         f"max JSD <= {MAX_JSD_THRESH}, mean 1-Jaccard <= {JACC_THRESH}, "
-        f"slope within {SLOPE_TOL:.0e}, dtype={dtype})"
+        f"scale within {SLOPE_TOL:.0e}, dtype={dtype})"
     )
     return 0
 
