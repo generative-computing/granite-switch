@@ -1,11 +1,31 @@
 # SPDX-License-Identifier: Apache-2.0
 """vLLM multimodal processor for the audio cascade.
 
-ASR runs in the HF-processor hook (``_call_hf_processor`` on vLLM 0.26 - 0.28,
-``_apply_hf_processor_main`` on 0.29+, which deleted the former) and tokenizes the
-transcript; ``_get_prompt_updates`` then replaces the ``<|audio|>`` marker with the
-real transcript token ids via ``PromptReplacement``, so the scheduler sizes KV for
-the runtime-determined length rather than a fixed audio window.
+ASR runs in the HF-processor hook and tokenizes the transcript;
+``_get_prompt_updates`` then replaces the ``<|audio|>`` marker with the real
+transcript token ids via ``PromptReplacement``, so the scheduler sizes KV for the
+runtime-determined length rather than a fixed audio window.
+
+Upstream has reshaped that hook surface three times, and the eras are NOT ordered
+by whether a given name exists -- 0.31 brought ``_call_hf_processor`` back with a
+different signature after 0.29 deleted it:
+
+===  =========  ==========================================================
+era  vLLM       base-class shape
+===  =========  ==========================================================
+A    0.26-0.28  ``_call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)``
+                owns tokenization AND mm data; ``_get_hf_mm_data(mm_items)``
+B    0.29-0.30  ``_call_hf_processor`` DELETED; text split out of mm, so
+                ``_apply_hf_processor_main(mm_items, hf_processor_mm_kwargs)``
+                returns mm tensors only; ``_get_hf_mm_data(mm_items)``
+C    0.31-0.32  ``_call_hf_processor(hf_data, hf_kwargs)`` is BACK, but it is
+                now called *by* ``_apply_hf_processor_main(mm_items,
+                hf_kwargs)`` -- note the renamed kwarg. ``_get_hf_mm_data`` is
+                gone, replaced by ``_get_hf_mm_inputs``/``_finalize_hf_mm_data``
+===  =========  ==========================================================
+
+So the gate here keys on the *shape* of the base hook, never on a version number
+and never on bare ``hasattr``. See ``_base_hook_era``.
 
 Modeled on vLLM 0.19.1's ``ultravox.py``. Audio is answered by the base model —
 no adapter control tokens are placed, so the switch is not involved.
@@ -13,6 +33,7 @@ no adapter control tokens are placed, so the switch is not involved.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Mapping, Sequence
 
 import torch
@@ -44,6 +65,11 @@ from .asr import (
 
 AUDIO_MARKER = "<|audio|>"
 _TARGET_SR = 16_000
+# Hook-surface eras; see the module docstring. Ordered only for readability --
+# nothing compares them, because they are not a version ordering.
+_ERA_CALL_HF = "call_hf"  # A: 0.26-0.28
+_ERA_MAIN_ONLY = "main_only"  # B: 0.29-0.30
+_ERA_CALL_HF_MM = "call_hf_mm"  # C: 0.31+
 # Stands in for a transcript with no speech in it. Must tokenize to at least one
 # token: vLLM discards a zero-length placeholder and then reports the item as
 # missing, so every audio item has to contribute something to the prompt.
@@ -51,6 +77,36 @@ _EMPTY_TRANSCRIPT_TEXT = " "
 # Keeps the transcript budget finite if max_model_len cannot be read.
 _FALLBACK_CONTEXT_LEN = 8192
 _DUMMY_AUDIO_SECONDS = 5
+
+
+def _base_hook_era(base: type) -> str:
+    """Which HF-processor contract ``base`` implements, decided by SHAPE.
+
+    ``hasattr(base, "_call_hf_processor")`` cannot answer this. That name is
+    present in era A, absent in B, and present again in C with an incompatible
+    signature, so an existence check maps A and C onto the same branch and feeds
+    era C's call the era-A code path -- which is how ASR breaks silently: the
+    transcript is simply never produced and every test stays green.
+
+    The discriminator is the FIRST PARAMETER of ``_call_hf_processor``: era A
+    takes ``prompt`` (it owns tokenization), era C takes ``hf_data`` (it is handed
+    already-extracted mm data by ``_apply_hf_processor_main``). Era B has no such
+    method at all.
+    """
+    hook = getattr(base, "_call_hf_processor", None)
+    if hook is None:
+        return _ERA_MAIN_ONLY
+
+    try:
+        params = list(inspect.signature(hook).parameters)
+    except (TypeError, ValueError):
+        # Unsignaturable (C extension, exotic descriptor). Fall back to the other
+        # era-C marker: the helper pair that replaced _get_hf_mm_data.
+        return _ERA_CALL_HF_MM if hasattr(base, "_get_hf_mm_inputs") else _ERA_CALL_HF
+
+    if "self" in params:
+        params.remove("self")
+    return _ERA_CALL_HF if params and params[0] == "prompt" else _ERA_CALL_HF_MM
 
 
 class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
@@ -375,19 +431,32 @@ class GraniteSwitchASRMultiModalProcessor(
             audio_num_tokens=torch.tensor(sizes, dtype=torch.long),
         )
 
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        """vLLM 0.26 - 0.28 only; the base class dropped this hook at 0.29.
+    def _call_hf_processor(self, *args, **kwargs) -> BatchFeature:
+        """Transcribe, on the two eras that call this hook (A and C).
 
-        Here the processor owns both halves of the job, so it returns the
-        tokenized prompt alongside the audio tensors. See
-        ``_apply_hf_processor_main`` for the 0.29+ split.
+        The signature is positional-agnostic because the two eras disagree on it:
+
+        * era A (0.26-0.28) ``(prompt, mm_data, mm_kwargs, tok_kwargs)`` -- this
+          hook owns tokenization too, so it must return ``input_ids`` alongside
+          the audio tensors;
+        * era C (0.31+) ``(hf_data, hf_kwargs)`` -- the base class already pulled
+          the mm data out and tokenizes the prompt itself, so returning
+          ``input_ids`` here would fight it. Audio tensors ONLY.
+
+        Era B never calls this; see ``_apply_hf_processor_main``.
         """
+        era = _base_hook_era(super())
+
+        if era == _ERA_CALL_HF_MM:  # 0.31+
+            hf_data = args[0] if args else kwargs["hf_data"]
+            hf_kwargs = args[1] if len(args) > 1 else kwargs.get("hf_kwargs", {})
+            features = self._audio_features(hf_data.get("audios", []) or [], hf_kwargs)
+            return BatchFeature(dict(**features), tensor_type="pt")
+
+        # era A: we own the prompt as well.
+        prompt = args[0] if args else kwargs["prompt"]
+        mm_data = args[1] if len(args) > 1 else kwargs["mm_data"]
+        mm_kwargs = args[2] if len(args) > 2 else kwargs.get("mm_kwargs", {})
         tokenizer = self.info.get_tokenizer()
         input_ids = tokenizer.encode(prompt, add_special_tokens=False)
         features = self._audio_features(mm_data.get("audios", []) or [], mm_kwargs)
@@ -399,22 +468,29 @@ class GraniteSwitchASRMultiModalProcessor(
     def _apply_hf_processor_main(self, **kwargs):
         """Produce the audio tensors on whichever hook this vLLM actually calls.
 
-        vLLM 0.29 deleted ``BaseMultiModalProcessor._call_hf_processor`` (and
-        ``_apply_hf_processor_text_mm``, which was its only caller). Text and
-        multi-modal data are now processed independently: ``apply()`` tokenizes the
-        prompt itself via ``_postprocess_prompt`` and ``_apply_hf_processor_main``
-        was narrowed to ``(mm_items, hf_processor_mm_kwargs) -> BatchFeature``,
-        returning the MM tensors ONLY. Left alone, our ``_call_hf_processor`` above
-        is simply never called on 0.29+ and no transcript is ever produced.
+        Three different contracts hide behind this one name (module docstring):
 
-        The two signatures are mutually exclusive, so this dispatches on whether the
-        base class still has ``_call_hf_processor``: that is the hook whose removal
-        is the actual problem, and it was removed in the same commit that narrowed
-        this signature. Both vLLM call sites pass keywords only (0.28 adds
-        ``prompt`` / ``tokenization_kwargs`` / ``enable_hf_prompt_update``), hence
-        ``**kwargs`` rather than a signature that could only match one line.
+        * era A (0.26-0.28) -- the base implementation routes through
+          ``_call_hf_processor``, so just delegate and let our override above run.
+        * era B (0.29-0.30) -- ``_call_hf_processor`` was deleted and this method
+          narrowed to ``(mm_items, hf_processor_mm_kwargs) -> BatchFeature``
+          returning mm tensors only, with the prompt handled by ``apply()`` via
+          ``_postprocess_prompt``. Nothing calls our transcriber unless we do it
+          here, so this branch extracts the audio itself.
+        * era C (0.31+) -- ``_call_hf_processor`` is back and the base
+          implementation calls it again, so delegate as in era A. The kwarg was
+          renamed ``hf_processor_mm_kwargs`` -> ``hf_kwargs``, which is why
+          delegation forwards ``**kwargs`` untouched rather than naming it.
+
+        Dispatching on ``hasattr(super(), "_call_hf_processor")`` -- as this did
+        until 0.31 -- collapses A and C onto one branch, which happens to be
+        right, but for era C it was reached for the wrong reason and the era-B
+        branch's ``kwargs["hf_processor_mm_kwargs"]`` would ``KeyError`` the
+        moment the era were misread. Gate on shape.
         """
-        if hasattr(super(), "_call_hf_processor"):  # 0.26 - 0.28
+        era = _base_hook_era(super())
+
+        if era != _ERA_MAIN_ONLY:  # eras A and C both re-enter _call_hf_processor
             return super()._apply_hf_processor_main(**kwargs)
 
         mm_items = kwargs["mm_items"]
