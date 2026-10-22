@@ -120,14 +120,23 @@ def our_surface(root: Path) -> tuple[set[str], dict[str, set[str]]]:
 
 
 def defs_at(cache: Path, tag: str, name: str) -> list[tuple[str, str]]:
-    """[(file, def-line)] for every definition of `name` in vllm/ at `tag`."""
+    """[(file, def-line)] for every definition of `name` in vllm/ at `tag`.
+
+    NOTE: these patterns go to `git grep -E`, which is POSIX ERE and does NOT
+    understand the `\\s` / `\\w` Perl shorthands -- it silently matches nothing
+    rather than erroring. Using `\\s` here made EVERY symbol report zero
+    definitions at every tag, so each one compared 0-to-0 and the whole report
+    came back "nothing on our surface moved" no matter what upstream did. It hid
+    the real 0.28->0.29 deletion of `get_kv_cache_shape` (30 defs -> 1) that
+    REFERENCE.md documents. Keep these as POSIX classes.
+    """
     out = sh(
         [
             "git",
             "grep",
             "-n",
             "-E",
-            rf"^\s*(async\s+)?def\s+{re.escape(name)}\s*\(",
+            rf"^[[:space:]]*(async[[:space:]]+)?def[[:space:]]+{re.escape(name)}[[:space:]]*\(",
             tag,
             "--",
             "vllm/",
@@ -151,7 +160,8 @@ def symbol_exists(cache: Path, tag: str, name: str) -> bool:
             "grep",
             "-l",
             "-E",
-            rf"^\s*(class|def|{re.escape(name)}\s*=)\s*{re.escape(name)}\b|^\s*{re.escape(name)}\s*[:=]",
+            rf"^[[:space:]]*(class|def|{re.escape(name)}[[:space:]]*=)[[:space:]]*"
+            rf"{re.escape(name)}\b|^[[:space:]]*{re.escape(name)}[[:space:]]*[:=]",
             tag,
             "--",
             "vllm/",
