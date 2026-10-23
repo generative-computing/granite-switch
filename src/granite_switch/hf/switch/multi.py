@@ -66,6 +66,7 @@ import torch.nn as nn
 from transformers.cache_utils import Cache
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
+from ...probe_routing import build_adapter_kind_lut, split_adapter_indices
 from ...token_exchange import apply_token_exchange, build_control_to_substitute_lut
 from .codes import KerdockDGCodeGenerator, recover_count_from_signal
 
@@ -275,6 +276,16 @@ class MultiSwitch(nn.Module):
         # non-persistent buffer is zeroed by ``from_pretrained``. This LUT uses
         # -1 as the "not a control token" sentinel, so an all-zero LUT would
         # rewrite EVERY token id to 0 in apply_token_exchange.
+        # adapter_kind_lut: marks which adapter indices are probe slots, so
+        # split_indices can route those positions out of the LoRA stream. None when
+        # no slot is a probe. persistent=True so it survives HF's
+        # meta-device loading, like the token-exchange LUT below.
+        kind_lut = build_adapter_kind_lut(config)
+        if kind_lut is not None:
+            self.register_buffer("adapter_kind_lut", kind_lut, persistent=True)
+        else:
+            self.adapter_kind_lut = None
+
         lut = build_control_to_substitute_lut(config)
         if lut is not None:
             self.register_buffer("control_to_substitute_lut", lut, persistent=True)
@@ -307,6 +318,15 @@ class MultiSwitch(nn.Module):
         ):
             self.codebook = self.codebook.to(torch.float32)
         return out
+
+    def split_indices(
+        self, adapter_indices: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split ``[batch, seq_len]`` or ``[num_tokens]`` into (lora, probe).
+
+        See :func:`granite_switch.probe_routing.split_adapter_indices`.
+        """
+        return split_adapter_indices(self.adapter_kind_lut, adapter_indices)
 
     @property
     def num_cache_layers(self) -> int:

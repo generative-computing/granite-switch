@@ -6,9 +6,11 @@ from .lora import (
     MergedSwitchedLoRALinear,
     SwitchedLoRALinear,
 )
+from .probe import SwitchedProbeHead
 
 __all__ = [
     "GraniteLoRAEmbeddedAttention",
     "MergedSwitchedLoRALinear",
     "SwitchedLoRALinear",
+    "SwitchedProbeHead",
 ]
