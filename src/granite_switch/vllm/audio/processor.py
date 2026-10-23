@@ -450,7 +450,22 @@ class GraniteSwitchASRMultiModalProcessor(
         if era == _ERA_CALL_HF_MM:  # 0.31+
             hf_data = args[0] if args else kwargs["hf_data"]
             hf_kwargs = args[1] if len(args) > 1 else kwargs.get("hf_kwargs", {})
-            features = self._audio_features(hf_data.get("audios", []) or [], hf_kwargs)
+            # KEY IS "audio", NOT "audios", on this era only. `_get_hf_mm_inputs`
+            # normalizes vLLM's plural modality key to the singular one HF
+            # processors take -- `hf_data["audio"] = hf_data.pop("audios")` -- and
+            # it runs BEFORE this hook, so by here the plural key is gone. Era A
+            # is handed the raw mm_data, where it is still "audios".
+            #
+            # Reading the wrong key does not raise: `.get` returns the default, so
+            # `_audio_features` sees no clips, returns {}, and this hook hands back
+            # an empty BatchFeature. The request then fails much further on, in
+            # `_get_prompt_updates`, as `IndexError: index 1 is out of bounds for
+            # dimension 0 with size 1` -- a cumsum over an empty `audio_num_tokens`
+            # indexed for an audio item that vLLM knows exists. Both keys are
+            # accepted below so the failure cannot come back as silence if upstream
+            # moves the normalization.
+            audios = hf_data.get("audio") or hf_data.get("audios") or []
+            features = self._audio_features(audios, hf_kwargs)
             return BatchFeature(dict(**features), tensor_type="pt")
 
         # era A: we own the prompt as well.
