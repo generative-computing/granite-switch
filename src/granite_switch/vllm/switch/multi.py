@@ -98,13 +98,13 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.attention.attention import Attention
 
-from granite_switch.classifier_routing import (
-    build_adapter_kind_lut,
-    split_adapter_indices,
-)
 from granite_switch.hf.switch.codes import (
     KerdockDGCodeGenerator,
     recover_count_from_signal,
+)
+from granite_switch.probe_routing import (
+    build_adapter_kind_lut,
+    split_adapter_indices,
 )
 from granite_switch.token_exchange import (
     apply_token_exchange,
@@ -316,9 +316,9 @@ class MultiSwitch(nn.Module):
         # non-persistent buffer is zeroed by checkpoint loading. This LUT uses -1
         # as the "not a control token" sentinel, so an all-zero LUT would rewrite
         # EVERY token id to 0 in apply_token_exchange.
-        # adapter_kind_lut: marks which adapter indices are classifier slots, so
+        # adapter_kind_lut: marks which adapter indices are probe slots, so
         # split_indices can route those positions out of the LoRA stream. None when
-        # no slot is a classifier.
+        # no slot is a probe.
         kind_lut = build_adapter_kind_lut(hf_config)
         if kind_lut is not None:
             self.register_buffer("adapter_kind_lut", kind_lut, persistent=False)
@@ -334,9 +334,9 @@ class MultiSwitch(nn.Module):
     def split_indices(
         self, adapter_indices: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Split ``[total_tokens]`` into (lora_indices, classifier_indices).
+        """Split ``[total_tokens]`` into (lora_indices, probe_indices).
 
-        See :func:`granite_switch.classifier_routing.split_adapter_indices`.
+        See :func:`granite_switch.probe_routing.split_adapter_indices`.
         """
         return split_adapter_indices(self.adapter_kind_lut, adapter_indices)
 

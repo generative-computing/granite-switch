@@ -344,19 +344,19 @@ class TestBuildSubstituteTokenIds:
 
         assert subs == [42]
 
-    def test_classifier_uses_its_own_substitute(self):
-        adapters = [("/b", "code", "lora", None), (None, "safety", "classifier", None)]
+    def test_probe_uses_its_own_substitute(self):
+        adapters = [("/b", "code", "lora", None), (None, "safety", "probe", None)]
 
         subs = build_substitute_token_ids(
-            adapters, lora_substitute_id=42, classifier_substitute_id=9
+            adapters, lora_substitute_id=42, probe_slot_substitute_id=9
         )
 
         assert subs == [42, 9]
 
-    def test_classifier_without_its_substitute_raises(self):
-        adapters = [(None, "safety", "classifier", None)]
+    def test_probe_without_its_substitute_raises(self):
+        adapters = [(None, "safety", "probe", None)]
 
-        with pytest.raises(ValueError, match="classifier_substitute_id"):
+        with pytest.raises(ValueError, match="probe_slot_substitute_id"):
             build_substitute_token_ids(adapters, lora_substitute_id=42)
 
 
@@ -641,7 +641,7 @@ class _LabelTokenizer:
 
 
 class TestResolveLabelTokenIds:
-    """Tests for resolve_label_token_ids (classifier label word -> token id)."""
+    """Tests for resolve_label_token_ids (probe label word -> token id)."""
 
     def test_single_token_labels_resolve_in_order(self):
         tok = _LabelTokenizer({"safe": 19193, "unsafe": 39257})

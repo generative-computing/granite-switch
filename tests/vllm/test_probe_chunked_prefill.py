@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""GPU coverage for the vLLM classifier verdict exit: FULL capture/replay,
+"""GPU coverage for the vLLM probe verdict exit: FULL capture/replay,
 chunked prefill, intermediate-layer reads, and two slots in one checkpoint.
 
 ``enable_chunked_prefill`` is on by default in serving. The prompt is laid out as
-the chat template renders it, with the classifier control token as the very last
+the chat template renders it, with the probe control token as the very last
 token, so it always lands in the final chunk. The same prompt served at
 ``max_num_batched_tokens`` in {unchunked, 256, 101, 48} must emit the same label
 token.
@@ -26,12 +26,10 @@ import pytest
 import torch
 
 pytestmark = pytest.mark.skipif(
-    not torch.cuda.is_available(), reason="vLLM classifier serving test requires a GPU"
+    not torch.cuda.is_available(), reason="vLLM probe serving test requires a GPU"
 )
 
-WORKER = os.path.join(
-    os.path.dirname(__file__), "_classifier_chunked_prefill_worker.py"
-)
+WORKER = os.path.join(os.path.dirname(__file__), "_probe_chunked_prefill_worker.py")
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(WORKER)))
 BASE_MODEL = os.environ.get("CLS_TEST_BASE", "ibm-granite/granite-4.1-3b")
 
@@ -50,7 +48,7 @@ def _env():
 
 
 def _compose(tmp_path_factory, argv, tag):
-    """Compose a classifier checkpoint in a CPU subprocess, before any CUDA init."""
+    """Compose a probe checkpoint in a CPU subprocess, before any CUDA init."""
     outdir = str(tmp_path_factory.mktemp(tag))
     proc = subprocess.run(
         [sys.executable, WORKER, *argv],
@@ -110,7 +108,7 @@ def _run_worker(outdir, argv, env, timeout=1800):
 
 @pytest.fixture(scope="module")
 def composed(tmp_path_factory):
-    """Multi-label classifier over a varied prompt."""
+    """Multi-label probe over a varied prompt."""
     result = _compose(tmp_path_factory, ["compose-multilabel"], "cls_ckpt")
     result["pids_path"] = _write_pids(result)
     return result
@@ -122,16 +120,16 @@ def _composed_env(composed, **extra):
 
 @pytest.fixture(scope="module")
 def composed_sr(tmp_path_factory):
-    return _compose(tmp_path_factory, ["compose-sr-classifier"], "sr_cls_ckpt")
+    return _compose(tmp_path_factory, ["compose-sr-probe"], "sr_cls_ckpt")
 
 
 @pytest.fixture(scope="module")
 def composed_sr_probes(tmp_path_factory):
-    return _compose(tmp_path_factory, ["compose-sr-classifiers"], "sr_probes_ckpt")
+    return _compose(tmp_path_factory, ["compose-sr-probes"], "sr_probes_ckpt")
 
 
 @pytest.mark.parametrize("mode", ["eager", "full"])
-def test_sr_checkpoint_serves_final_classifier_slot(composed_sr, mode):
+def test_sr_checkpoint_serves_final_probe_slot(composed_sr, mode):
     """The identity head scores the served hidden state; transport stays exact."""
     served = _run_worker(
         composed_sr["outdir"],
@@ -209,7 +207,7 @@ def _check_sr_layer_probes(result, mode, pp):
     assert not failures, "\n".join(failures)
 
 
-def test_sr_classifier_reads_each_layer_under_replay(sr_probe_reference):
+def test_sr_probe_reads_each_layer_under_replay(sr_probe_reference):
     """One GPU: probes at layer 0, layer 1 and final norm beside an SR slot."""
     mode, served = sr_probe_reference
     _check_sr_layer_probes(served, mode, 1)
@@ -258,7 +256,7 @@ def test_full_cudagraph_mode_does_not_crash_and_matches_eager(composed):
     for i, (f, e) in enumerate(zip(full["results"], eager["results"])):
         assert f["is_label"], (
             f"call {i}: FULL-cudagraph verdict {f['token_id']} ({f['text']!r}) "
-            f"is not a label token {label_ids}; the classifier exit did not "
+            f"is not a label token {label_ids}; the probe exit did not "
             f"fire under real CUDA-graph capture/replay"
         )
         assert f["token_id"] == e["token_id"], (
@@ -279,7 +277,7 @@ def test_full_cudagraph_mode_does_not_crash_and_matches_eager(composed):
             assert actual["is_label"]
 
 
-def test_classifier_token_stable_across_chunk_budgets(composed):
+def test_probe_token_stable_across_chunk_budgets(composed):
     """Emitted verdict token identical across chunk budgets."""
     label_ids = set(composed["label_token_ids"])
     assert len(composed["prompt_ids"]) > min(b for b in BUDGETS if b), (
@@ -299,7 +297,7 @@ def test_classifier_token_stable_across_chunk_budgets(composed):
     ref = results[None]
     assert ref["token_id"] in label_ids, (
         f"unchunked verdict {ref['token_id']} is not a label token {label_ids}; "
-        f"the classifier exit did not fire"
+        f"the probe exit did not fire"
     )
     for b, r in results.items():
         assert r["token_id"] == ref["token_id"], (
@@ -309,7 +307,7 @@ def test_classifier_token_stable_across_chunk_budgets(composed):
 
 
 # Score-gap tolerance against the fp32 HF reference; this comparison also
-# includes HF/vLLM backbone differences, not only classifier arithmetic.
+# includes HF/vLLM backbone differences, not only probe arithmetic.
 SCORE_DIFF_ATOL = 0.3
 
 
@@ -449,7 +447,7 @@ def _print_final_layer_activation(name, served, reference_hidden, reference_scor
     print(f"  activation contribution:           {vllm_gap - hf_gap:.4f}")
 
 
-def test_classifier_reads_an_intermediate_layer_correctly(tmp_path_factory):
+def test_probe_reads_an_intermediate_layer_correctly(tmp_path_factory):
     """A layer-20 slot under eager and FULL, against an fp32 HF layer-20 reference.
 
     The fixed seed-0 head's reference margin (about 0.07) is below the score
@@ -485,10 +483,10 @@ def test_classifier_reads_an_intermediate_layer_correctly(tmp_path_factory):
     assert not failures, "\n".join(failures)
 
 
-def test_two_classifier_slots_replay_correctly_in_one_captured_shape(tmp_path_factory):
+def test_two_probe_slots_replay_correctly_in_one_captured_shape(tmp_path_factory):
     """Serve a final-layer and a layer-15 slot under eager and FULL.
 
-    Classifier arithmetic and transport are checked against the head's
+    Probe arithmetic and transport are checked against the head's
     actual input, recorded in-process at ``compute_logits``:
 
     - slot 1 (final layer): packed scores equal the loaded bf16 head applied

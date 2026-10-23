@@ -20,7 +20,7 @@ from .validator import validate_all_parameters, validate_cross_stream_population
 from .weight_transfer import (
     transfer_adapter_weights,
     transfer_base_weights,
-    transfer_classifier_weights,
+    transfer_probe_weights,
 )
 
 
@@ -90,23 +90,21 @@ class GraniteSwitchComposer:
             ext_kinds = ["lora"] * num_external
         else:
             ext_kinds = list(ext_kinds)[:num_external]
-        lora_slots = [i for i in range(num_external) if ext_kinds[i] != "classifier"]
-        classifier_slots = [
-            i for i in range(num_external) if ext_kinds[i] == "classifier"
-        ]
+        lora_slots = [i for i in range(num_external) if ext_kinds[i] != "probe"]
+        probe_slots = [i for i in range(num_external) if ext_kinds[i] == "probe"]
 
-        # Compose orders LoRAs first, classifiers last, so classifier slots must
-        # form a contiguous suffix (LoRAs occupy 0..k-1, classifiers k..).
-        if classifier_slots and classifier_slots != list(
+        # Compose orders LoRAs first, probes last, so probe slots must
+        # form a contiguous suffix (LoRAs occupy 0..k-1, probes k..).
+        if probe_slots and probe_slots != list(
             range(lora_slots[-1] + 1 if lora_slots else 0, num_external)
         ):
             raise ValueError(
-                "Classifier slots must form a contiguous suffix (all LoRA slots "
-                f"first, then classifiers); got kinds {ext_kinds}. Order the "
+                "Probe slots must form a contiguous suffix (all LoRA slots "
+                f"first, then probes); got kinds {ext_kinds}. Order the "
                 "adapters LoRAs-first (compose does this automatically)."
             )
         lora_adapter_paths = [adapter_paths[i] for i in lora_slots]
-        classifier_adapter_paths = [adapter_paths[i] for i in classifier_slots]
+        probe_adapter_paths = [adapter_paths[i] for i in probe_slots]
         lora_adapter_names = (
             [adapter_names[i] for i in lora_slots]
             if adapter_names is not None
@@ -119,7 +117,7 @@ class GraniteSwitchComposer:
         base_config = load_base_config(base_model_name_or_path)
 
         # Classify adapting slots as single-stream (LoRA/aLoRA) or dual-stream
-        # (Shadow Residual). Classifier heads can read either decoder mode.
+        # (Shadow Residual). Probe heads can read either decoder mode.
         sr_adapters = []
         non_sr_adapters = []
         for ap in lora_adapter_paths:
@@ -173,8 +171,8 @@ class GraniteSwitchComposer:
             )
 
         # adapter_ranks/adapter_alphas stay full external width (one entry per
-        # slot, classifiers included) so config.adapter_ranks is length
-        # num_adapters. A classifier slot itself has no LoRA weights.
+        # slot, probes included) so config.adapter_ranks is length
+        # num_adapters. A probe slot itself has no LoRA weights.
         if lora_adapter_paths:
             lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths
@@ -185,13 +183,13 @@ class GraniteSwitchComposer:
                 adapter_names=lora_adapter_names,
             )
 
-            # LoRAs lead, classifiers follow, so the full lists are a concat:
-            # detected LoRA values, then a placeholder per classifier slot. The
+            # LoRAs lead, probes follow, so the full lists are a concat:
+            # detected LoRA values, then a placeholder per probe slot. The
             # placeholder is the detected max rank, keeping max(adapter_ranks) ==
             # max_lora_rank.
-            num_ext_classifier = num_external - len(lora_slots)
-            adapter_ranks = list(lora_ranks) + [lora_rank] * num_ext_classifier
-            adapter_alphas = list(lora_alphas) + [float(lora_rank)] * num_ext_classifier
+            num_ext_probe = num_external - len(lora_slots)
+            adapter_ranks = list(lora_ranks) + [lora_rank] * num_ext_probe
+            adapter_alphas = list(lora_alphas) + [float(lora_rank)] * num_ext_probe
 
             # Extend adapter_ranks with built-in entries
             if num_built_in > 0:
@@ -205,8 +203,8 @@ class GraniteSwitchComposer:
                     list(adapter_ranks) + [built_in_lora_rank] * num_built_in
                 )
                 lora_rank = max(lora_rank, built_in_lora_rank)
-        elif classifier_adapter_paths or num_built_in > 0:
-            # No LoRA slots but the model still has slots (classifier and/or
+        elif probe_adapter_paths or num_built_in > 0:
+            # No LoRA slots but the model still has slots (probe and/or
             # built-in). Give every slot a placeholder LoRA rank so the
             # (unused) LoRA bank is well-formed and config validation passes.
             lora_rank = built_in_lora_rank
@@ -333,15 +331,15 @@ class GraniteSwitchComposer:
         else:
             adapter_mapping = {}
 
-        if classifier_adapter_paths:
-            # --- Step 7b: Transfer trained classifier-head weights ---
+        if probe_adapter_paths:
+            # --- Step 7b: Transfer trained probe-head weights ---
             # Each slot's head is validated against its own label count and
             # copied into the top rows of the padded bank.
-            transfer_classifier_weights(
-                classifier_adapter_paths,
-                classifier_slots,
+            transfer_probe_weights(
+                probe_adapter_paths,
+                probe_slots,
                 model,
-                num_labels_per_slot=switch_config.classifier_num_labels_per_slot,
+                num_labels_per_slot=switch_config.probe_num_labels_per_slot,
                 hidden_size=switch_config.hidden_size,
             )
 

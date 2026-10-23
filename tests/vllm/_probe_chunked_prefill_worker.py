@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Subprocess worker for the vLLM classifier chunked-prefill test.
+"""Subprocess worker for the vLLM probe chunked-prefill test.
 
 Each sub-command is a separate process invocation so only one vLLM engine is ever
 resident (same discipline as ``_generation_equivalence_worker``)::
@@ -36,7 +36,7 @@ _LABEL_CANDIDATES = [
 
 
 def compose(base, outdir, control_offset=5, num_labels=6, scale=0.5):
-    """Compose a single-classifier-slot checkpoint.
+    """Compose a single-probe-slot checkpoint.
 
     ``num_labels`` single-token labels are taken from ``_LABEL_CANDIDATES`` and
     ``scale`` is the std of the random head weight.
@@ -61,8 +61,8 @@ def compose(base, outdir, control_offset=5, num_labels=6, scale=0.5):
         adapter_token_ids=[control_id],
         adapter_substitute_token_ids=[control_id],
         adapter_names=["detect"],
-        adapter_kinds=["classifier"],
-        classifier_label_token_ids=[ids],
+        adapter_kinds=["probe"],
+        probe_label_token_ids=[ids],
     )
     ckpt = os.path.join(outdir, "composed")
     model.save_pretrained(ckpt)
@@ -80,7 +80,7 @@ def compose(base, outdir, control_offset=5, num_labels=6, scale=0.5):
         "owed to the moon each evening without fail or apparent complaint "
         "although sailors insisted otherwise over cheap wine and louder songs"
     )
-    # The chat template's classifier layout: the user turn, its close, then the
+    # The chat template's probe layout: the user turn, its close, then the
     # marker as the very last token, which is itself the read point.
     body = tok.encode(
         f"<|start_of_role|>user<|end_of_role|>Is this text safe? {words}"
@@ -151,15 +151,15 @@ def _fixed_head(seed, num_labels, hidden_size, scale=0.5):
 def _write_head(slot_dir, weight, bias, labels):
     from safetensors.torch import save_file
 
-    from granite_switch.composer.weight_transfer import CLASSIFIER_HEAD_FILE
+    from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
 
     os.makedirs(slot_dir, exist_ok=True)
     save_file(
         {"weight": weight.contiguous(), "bias": bias.contiguous()},
-        os.path.join(slot_dir, CLASSIFIER_HEAD_FILE),
+        os.path.join(slot_dir, PROBE_HEAD_FILE),
     )
     json.dump(
-        {"kind": "classifier", "labels": labels},
+        {"kind": "probe", "labels": labels},
         open(os.path.join(slot_dir, "adapter_config.json"), "w"),
     )
     open(os.path.join(slot_dir, "io.yaml"), "w").write(
@@ -172,7 +172,7 @@ def _prompt(tok, control_id):
 
 
 def compose_at_layer(base, outdir, read_layer, control_offset=5, num_labels=2):
-    """Compose one classifier slot reading ``read_layer``, plus its fp32 HF reference."""
+    """Compose one probe slot reading ``read_layer``, plus its fp32 HF reference."""
     import torch
     from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
@@ -199,9 +199,9 @@ def compose_at_layer(base, outdir, read_layer, control_offset=5, num_labels=2):
         adapter_token_ids=[control_id],
         adapter_substitute_token_ids=[control_id],
         adapter_names=["detect"],
-        adapter_kinds=["classifier"],
-        classifier_label_token_ids=[ids],
-        classifier_read_layers=[read_layer],
+        adapter_kinds=["probe"],
+        probe_label_token_ids=[ids],
+        probe_read_layers=[read_layer],
     )
     ckpt = os.path.join(outdir, "composed")
     model.save_pretrained(ckpt)
@@ -245,9 +245,9 @@ def compose_two_slot(base, outdir, read_layer, control_offset=5, num_labels=2):
         adapter_token_ids=control_ids,
         adapter_substitute_token_ids=control_ids,
         adapter_names=["detect_final", "detect_mid"],
-        adapter_kinds=["classifier", "classifier"],
-        classifier_label_token_ids=[ids, ids],
-        classifier_read_layers=[None, read_layer],
+        adapter_kinds=["probe", "probe"],
+        probe_label_token_ids=[ids, ids],
+        probe_read_layers=[None, read_layer],
     )
     ckpt = os.path.join(outdir, "composed_two_slot")
     model.save_pretrained(ckpt)
@@ -269,25 +269,25 @@ def compose_two_slot(base, outdir, read_layer, control_offset=5, num_labels=2):
     return result
 
 
-def _record_classifier_rows(llm):
+def _record_probe_rows(llm):
     """Install after startup; PP callbacks must be importable for standard pickle."""
-    from tests.shared.classifier_recorder import install_classifier_recorder
+    from tests.shared.probe_recorder import install_probe_recorder
 
-    llm.apply_model(install_classifier_recorder)
+    llm.apply_model(install_probe_recorder)
 
 
-def _read_classifier_rows(llm):
-    from tests.shared.classifier_recorder import read_classifier_records
+def _read_probe_rows(llm):
+    from tests.shared.probe_recorder import read_probe_records
 
-    return [row for rows in llm.apply_model(read_classifier_records) for row in rows]
+    return [row for rows in llm.apply_model(read_probe_records) for row in rows]
 
 
 def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *, eager):
-    """Serve both classifier slots' prompts, one request each, eager or FULL.
+    """Serve both probe slots' prompts, one request each, eager or FULL.
 
     Under FULL both requests share one captured batch shape, exercising
     replay with two different slots/read layers. Reports per-label logprobs
-    and the recorded classifier row (packed scores, rewritten label logits,
+    and the recorded probe row (packed scores, rewritten label logits,
     and for the final-layer slot its actual activation and loaded head).
     """
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -305,7 +305,7 @@ def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *,
     if not eager:
         kw["compilation_config"] = {"cudagraph_mode": "FULL"}
     llm = LLM(**kw)
-    _record_classifier_rows(llm)
+    _record_probe_rows(llm)
     sp = SamplingParams(max_tokens=1, temperature=0.0, logprobs=len(label_token_ids))
 
     results = []
@@ -313,7 +313,7 @@ def run_two_slot(ckpt, prompt_ids_1, prompt_ids_2, label_token_ids, out_path, *,
         out = llm.generate([TokensPrompt(prompt_token_ids=prompt_ids)], sp)[0].outputs[
             0
         ]
-        records = _read_classifier_rows(llm)
+        records = _read_probe_rows(llm)
         recorded_slots = [r["slot"] for r in records]
         if recorded_slots != [expected_slot]:
             raise RuntimeError(
@@ -369,7 +369,7 @@ def run_at_layer(ckpt, prompt_ids, label_token_ids, out_path, full_cudagraph=Fal
     )
 
 
-def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
+def run_sr_probe(ckpt, out_path, *, eager, pp_size=1):
     """Serve each SR-checkpoint probe and an SR request, sequentially and mixed.
 
     Each slot is selected on its own: a probe request carries only its marker,
@@ -388,7 +388,7 @@ def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
 
     labels = list(range(100, 100 + HIDDEN))
     config = AutoConfig.from_pretrained(ckpt)
-    markers = config.classifier_control_token_ids
+    markers = config.probe_control_token_ids
     kw = dict(
         model=ckpt,
         skip_tokenizer_init=True,
@@ -410,7 +410,7 @@ def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
             "cudagraph_capture_sizes": [1, 2, 4, 16],
         }
     llm = LLM(**kw)
-    _record_classifier_rows(llm)
+    _record_probe_rows(llm)
     sampling = SamplingParams(max_tokens=1, temperature=0.0, logprobs=HIDDEN + 1)
     sr_request = [10, CONTROL_TOKEN_ID, 20, 30]
 
@@ -419,7 +419,7 @@ def run_sr_classifier(ckpt, out_path, *, eager, pp_size=1):
             [TokensPrompt(prompt_token_ids=p) for p in prompts], sampling
         )
         return {
-            "records": _read_classifier_rows(llm),
+            "records": _read_probe_rows(llm),
             "outputs": [
                 {
                     "token_id": int(o.outputs[0].token_ids[0]),
@@ -501,7 +501,7 @@ def run_full_cudagraph_replay(
         o = llm.generate([prompt], sp)[0].outputs[0]
         results.append(summarize(o))
 
-    # Same shape (base_len + 1 tokens), no classifier marker at all -- the
+    # Same shape (base_len + 1 tokens), no probe marker at all -- the
     # verdict from the PRECEDING call must not leak into this one. This is a
     # SEQUENTIAL check (separate generate() calls), not a same-batch mix.
     plain_body = [rng.randint(1000, 2000) for _ in range(base_len + 1)]
@@ -509,11 +509,11 @@ def run_full_cudagraph_replay(
     o = llm.generate([plain_prompt], sp)[0].outputs[0]
     plain_result = summarize(o)
 
-    # A GENUINE mixed batch: 3 requests in ONE generate() call -- classifier,
-    # plain, classifier -- so vLLM schedules and samples all three rows in the
+    # A GENUINE mixed batch: 3 requests in ONE generate() call -- probe,
+    # plain, probe -- so vLLM schedules and samples all three rows in the
     # same forward pass. Each must get its own correct result: the plain
-    # row's logits must not pick up either classifier row's verdict, and the
-    # two classifier rows (same slot here, since this checkpoint has one)
+    # row's logits must not pick up either probe row's verdict, and the
+    # two probe rows (same slot here, since this checkpoint has one)
     # must each still fire independently.
     mix_cls_body_1 = [rng.randint(1000, 2000) for _ in range(base_len)]
     mix_plain_body = [rng.randint(1000, 2000) for _ in range(base_len + 1)]
@@ -569,21 +569,19 @@ def run_budget(ckpt, prompt_ids, budget, out_path):
 
 def main():
     mode = sys.argv[1]
-    if mode in ("compose-sr-classifier", "compose-sr-classifiers"):
+    if mode in ("compose-sr-probe", "compose-sr-probes"):
         from pathlib import Path
 
-        from tests.composer.test_sr_compose_e2e import _compose_sr_classifier
+        from tests.composer.test_sr_compose_e2e import _compose_sr_probe
 
-        read_layers = [0, 1, None] if mode == "compose-sr-classifiers" else [None]
-        model = _compose_sr_classifier(
-            Path(os.environ["CLS_OUT"]), read_layers=read_layers
-        )
+        read_layers = [0, 1, None] if mode == "compose-sr-probes" else [None]
+        model = _compose_sr_probe(Path(os.environ["CLS_OUT"]), read_layers=read_layers)
         ckpt = os.path.join(os.environ["CLS_OUT"], "composed")
         model.save_pretrained(ckpt)
         print(json.dumps({"result": {"ckpt": ckpt}}))
         return
     if mode in ("run-sr-eager", "run-sr-full", "run-sr-pp-eager", "run-sr-pp-full"):
-        run_sr_classifier(
+        run_sr_probe(
             os.environ["CLS_CKPT"],
             sys.argv[3] if mode.startswith("run-sr-pp-") else sys.argv[2],
             eager=mode.endswith("eager"),

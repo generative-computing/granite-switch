@@ -184,55 +184,55 @@ def _create_sr_adapter(
     save_file(state_dict, str(path / "adapter_model.safetensors"))
 
 
-def _compose_sr_classifier(path: Path, read_layers=(None,)):
-    """Tiny SR + classifier checkpoint, also used by the vLLM test.
+def _compose_sr_probe(path: Path, read_layers=(None,)):
+    """Tiny SR + probe checkpoint, also used by the vLLM test.
 
     An identity head exposes every component of its input, so its scores pin
     the exact layer and normalization read without random margins.
     """
     from granite_switch.composer import GraniteSwitchComposer
-    from granite_switch.composer.weight_transfer import CLASSIFIER_HEAD_FILE
+    from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
 
-    base, sr, classifier = (path / name for name in ("base", "sr", "classifier"))
+    base, sr, probe = (path / name for name in ("base", "sr", "probe"))
     base.mkdir(parents=True)
-    classifier.mkdir()
+    probe.mkdir()
     _create_base_model(base)
     _create_sr_adapter(sr)
     save_file(
         {"weight": torch.eye(HIDDEN), "bias": torch.zeros(HIDDEN)},
-        str(classifier / CLASSIFIER_HEAD_FILE),
+        str(probe / PROBE_HEAD_FILE),
     )
     return GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=str(base),
-        adapter_paths=[str(sr), *[str(classifier)] * len(read_layers)],
+        adapter_paths=[str(sr), *[str(probe)] * len(read_layers)],
         adapter_token_ids=list(
             range(CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1 + len(read_layers))
         ),
         adapter_substitute_token_ids=[1, *[2] * len(read_layers)],
         adapter_names=["sr", *[f"detect{i}" for i in range(len(read_layers))]],
-        adapter_kinds=["lora", *["classifier"] * len(read_layers)],
-        classifier_label_token_ids=[
+        adapter_kinds=["lora", *["probe"] * len(read_layers)],
+        probe_label_token_ids=[
             None,
             *[list(range(100, 100 + HIDDEN))] * len(read_layers),
         ],
-        classifier_read_layers=[None, *read_layers],
+        probe_read_layers=[None, *read_layers],
         switch_head_dim=16,
     ).eval()
 
 
 @pytest.mark.parametrize("read_layer", [None, 0, NUM_LAYERS - 1])
-def test_sr_and_classifier_slots_select_separately(tmp_path, capsys, read_layer):
+def test_sr_and_probe_slots_select_separately(tmp_path, capsys, read_layer):
     """Identity scores prove layer and normalization before/after reload.
 
-    The classifier marker routes out of the SR stream, so the probe reads the
+    The probe marker routes out of the SR stream, so the probe reads the
     base stream at its layer; an SR request in the same checkpoint still adapts.
     """
     from granite_switch.hf import load_model
 
-    model = _compose_sr_classifier(tmp_path, read_layers=[read_layer])
+    model = _compose_sr_probe(tmp_path, read_layers=[read_layer])
     assert "cross_stream slots are all-zero" not in capsys.readouterr().out
     assert model.config.dual_stream
-    head = model.model.classifier_head
+    head = model.model.probe_head
     torch.testing.assert_close(head.weight[1], torch.eye(HIDDEN))
     assert torch.count_nonzero(head.weight[0]) == 0
     for layer in model.model.layers:
@@ -254,21 +254,21 @@ def test_sr_and_classifier_slots_select_separately(tmp_path, capsys, read_layer)
         )
         return output, base, adapted
 
-    labels = model.config.classifier_label_token_ids[1]
+    labels = model.config.probe_label_token_ids[1]
     non_labels = torch.ones(VOCAB_SIZE, dtype=torch.bool)
     non_labels[labels] = False
 
     probe_ids = torch.tensor([[10, 21, 20, CONTROL_TOKEN_ID + 1]])
     probe, base, _ = run(model, probe_ids)
     assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert model.model._last_classifier_indices.tolist() == [[0, 0, 0, 2]]
+    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
     torch.testing.assert_close(probe.logits[0, -1, labels], base)
     assert torch.isneginf(probe.logits[0, -1, non_labels]).all()
 
     sr_ids = torch.tensor([[10, CONTROL_TOKEN_ID, 20, 30]])
     sr, base, adapted = run(model, sr_ids)
     assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
-    assert not model.model._last_classifier_indices.any()
+    assert not model.model._last_probe_indices.any()
     assert not torch.allclose(adapted, base), "fixture must exercise SR adaptation"
     assert torch.isfinite(sr.logits[0, -1]).all()
 

@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""CPU method tests for token-aligned, score-at-layer classification.
+"""CPU method tests for token-aligned, score-at-layer probe verdicts.
 
 GPU capture/replay and packed-output transport are tested in
-``test_classifier_chunked_prefill.py``. Request-boundary validation is deferred.
+``test_probe_chunked_prefill.py``. Request-boundary validation is deferred.
 """
 
 from types import SimpleNamespace
@@ -24,11 +24,11 @@ from granite_switch.vllm.granite_switch_model import (
 )
 
 
-class _StubClassifierHead:
+class _StubProbeHead:
     """Score = slot id * hidden[:, 0], so a score shows which slot and source it read."""
 
-    def __call__(self, x, classifier_indices):
-        return (classifier_indices.to(x.dtype) * x[:, 0]).unsqueeze(-1).expand(-1, 2)
+    def __call__(self, x, probe_indices):
+        return (probe_indices.to(x.dtype) * x[:, 0]).unsqueeze(-1).expand(-1, 2)
 
 
 class _Model(torch.nn.Module):
@@ -43,32 +43,30 @@ class _Model(torch.nn.Module):
         super().__init__()
         num_slots = max(slot_of_marker.values())
         read_layers = read_layers or [None] * num_slots
-        is_classifier = [k == "classifier" for k in kinds or ["classifier"] * num_slots]
-        self.config = type("Cfg", (), {"max_classifier_labels": 2})()
-        self.classifier_head = _StubClassifierHead()
-        self.classifier_slot_mask_t = torch.tensor([False, *is_classifier])
+        is_probe = [k == "probe" for k in kinds or ["probe"] * num_slots]
+        self.config = type("Cfg", (), {"max_probe_labels": 2})()
+        self.probe_head = _StubProbeHead()
+        self.probe_slot_mask_t = torch.tensor([False, *is_probe])
         slots_by_layer = {}
-        for slot, (is_clf, layer) in enumerate(
-            zip(is_classifier, read_layers), start=1
-        ):
+        for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
             if is_clf:
                 slots_by_layer.setdefault(layer, []).append(slot)
-        self._classifier_final_layer_group = None
-        self._classifier_layer_groups = {}
+        self._probe_final_layer_group = None
+        self._probe_layer_groups = {}
         for layer, slot_ids in slots_by_layer.items():
-            name = f"_classifier_slots_{'final' if layer is None else layer}"
+            name = f"_probe_slots_{'final' if layer is None else layer}"
             self.register_buffer(name, torch.tensor(slot_ids))
             if layer is None:
-                self._classifier_final_layer_group = name
+                self._probe_final_layer_group = name
             else:
-                self._classifier_layer_groups[layer] = name
+                self._probe_layer_groups[layer] = name
 
 
 def _run(model, slot_of_marker, tokens):
-    """Call ``_compute_classifier_outputs`` on a flat token list; hidden[t] = t + 1."""
+    """Call ``_compute_probe_outputs`` on a flat token list; hidden[t] = t + 1."""
     indices = [slot_of_marker.get(t, 0) for t in tokens]
     hidden = torch.arange(1.0, len(tokens) + 1).unsqueeze(1).expand(-1, 4)
-    return GraniteSwitchModel._compute_classifier_outputs(
+    return GraniteSwitchModel._compute_probe_outputs(
         model, hidden, torch.tensor(indices), torch.zeros(len(tokens), 2)
     )
 
@@ -77,7 +75,7 @@ def _score(model, layer, hidden_value, indices, scores):
     hidden = torch.full((len(indices), 4), hidden_value)
     return GraniteSwitchModel._score_group(
         model,
-        model._classifier_layer_groups[layer],
+        model._probe_layer_groups[layer],
         hidden,
         torch.tensor(indices),
         scores,
@@ -113,7 +111,7 @@ def test_no_marker_is_all_zero():
 
 def test_transferred_marker_indices_need_no_input_ids():
     model = _Model({90: 2, 91: 3})
-    scores, slot = GraniteSwitchModel._compute_classifier_outputs(
+    scores, slot = GraniteSwitchModel._compute_probe_outputs(
         model, torch.ones(3, 4), torch.tensor([0, 2, 0]), torch.zeros(3, 2)
     )
     assert slot.tolist() == [0, 2, 0]
@@ -123,7 +121,7 @@ def test_transferred_marker_indices_need_no_input_ids():
 def test_final_layer_scoring_leaves_intermediate_slot_scores_untouched():
     model = _Model({90: 2, 91: 3}, read_layers=[None, 1, None])
     pre_scores = torch.tensor([[0.0, 0.0], [99.0, 99.0], [0.0, 0.0]])
-    scores, slot = GraniteSwitchModel._compute_classifier_outputs(
+    scores, slot = GraniteSwitchModel._compute_probe_outputs(
         model,
         torch.ones(3, 4),
         torch.tensor([0, 2, 3]),
@@ -146,8 +144,8 @@ def test_each_intermediate_layer_scores_only_its_own_slots():
 
 def test_slots_sharing_a_layer_form_one_group():
     model = _Model({90: 1, 91: 2})
-    assert model._classifier_layer_groups == {}
-    assert getattr(model, model._classifier_final_layer_group).tolist() == [1, 2]
+    assert model._probe_layer_groups == {}
+    assert getattr(model, model._probe_final_layer_group).tolist() == [1, 2]
     scores, slot = _run(model, {90: 1, 91: 2}, [90, 5, 91])
     assert slot.tolist() == [1, 0, 2]
     assert scores[0].tolist() == [1.0, 1.0]
@@ -155,9 +153,9 @@ def test_slots_sharing_a_layer_form_one_group():
 
 
 def test_lora_slots_form_no_group():
-    model = _Model({91: 2}, kinds=["lora", "classifier"])
-    assert getattr(model, model._classifier_final_layer_group).tolist() == [2]
-    assert model._classifier_layer_groups == {}
+    model = _Model({91: 2}, kinds=["lora", "probe"])
+    assert getattr(model, model._probe_final_layer_group).tolist() == [2]
+    assert model._probe_layer_groups == {}
     _, slot = _run(model, {91: 2}, [5, 91, 6])
     assert slot.tolist() == [0, 2, 0]
 
@@ -166,13 +164,11 @@ def test_profiling_random_slot_on_a_lora_slot_leaves_logits_untouched():
     """vLLM's profiling sampler run feeds random hidden states; 0.75 rounds to LoRA slot 1."""
     wrapper = GraniteSwitchForCausalLM.__new__(GraniteSwitchForCausalLM)
     torch.nn.Module.__init__(wrapper)
-    wrapper.model = _Model({91: 2}, kinds=["lora", "classifier"])
-    wrapper.config = type(
-        "Cfg", (), {"classifier_label_token_ids": [None, [100, 200]]}
-    )()
+    wrapper.model = _Model({91: 2}, kinds=["lora", "probe"])
+    wrapper.config = type("Cfg", (), {"probe_label_token_ids": [None, [100, 200]]})()
     logits = torch.randn(1, 300)
     expected = logits.clone()
-    out = GraniteSwitchForCausalLM._apply_classifier_verdict(
+    out = GraniteSwitchForCausalLM._apply_probe_verdict(
         wrapper, logits, torch.randn(1, 2), torch.tensor([0.75])
     )
     assert torch.equal(out, expected)
@@ -186,7 +182,7 @@ def test_scoring_resolves_replaced_registered_buffers():
     for tensor in old_buffers:
         tensor.zero_()
     scores = _score(model, 0, 3.0, [1, 2], torch.zeros(2, 2))
-    scores, slots = GraniteSwitchModel._compute_classifier_outputs(
+    scores, slots = GraniteSwitchModel._compute_probe_outputs(
         model,
         torch.full((2, 4), 5.0),
         torch.tensor([1, 2]),
@@ -206,7 +202,7 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
     on the last rank. With three stages, the middle rank only relays scores.
     Distinct values expose resets, wrong layers, stream selection and reliance
     on input_ids. The switch keeps the latest slot, like MultiSwitch, so only
-    the markers themselves may carry a classifier index. Markers route out of
+    the markers themselves may carry a probe index. Markers route out of
     the LoRA stream; the trailing LoRA token reads the adapted SR stream. The
     token slice matches vLLM's PP buffer contract.
     """
@@ -222,11 +218,11 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
             return torch.tensor(indices), input_ids
 
         def split_indices(self, indices):
-            is_classifier = indices >= 2
+            is_probe = indices >= 2
             zeros = torch.zeros_like(indices)
             return (
-                torch.where(is_classifier, zeros, indices),
-                torch.where(is_classifier, indices, zeros),
+                torch.where(is_probe, zeros, indices),
+                torch.where(is_probe, indices, zeros),
             )
 
     class Layer(torch.nn.Module):
@@ -241,20 +237,20 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
     model = _Model(
         {90: 2, 91: 3, 92: 4},
         read_layers=[None, 0, stages - 1, None],
-        kinds=["lora", "classifier", "classifier", "classifier"],
+        kinds=["lora", "probe", "probe", "probe"],
     )
     model.config.hidden_size = 4
     model.config.embedding_multiplier = 1.0
     model.config.fused_add_norm = False
     model.switch = Switch()
     model.adapter_token_ids = torch.tensor([89, 90, 91, 92])
-    model.classifier_control_token_ids_t = torch.tensor([90, 91, 92])
+    model.probe_control_token_ids_t = torch.tensor([90, 91, 92])
     model.lora_meta = model.lora_ctx = None
     model.decoder_interface = SRDecoderInterface() if sr else LoRADecoderInterface()
     model.layers = torch.nn.ModuleList([Layer() for _ in range(stages)])
     model.norm = torch.nn.Identity()
-    model._compute_classifier_outputs = (
-        GraniteSwitchModel._compute_classifier_outputs.__get__(model)
+    model._compute_probe_outputs = GraniteSwitchModel._compute_probe_outputs.__get__(
+        model
     )
     model.start_layer, model.end_layer = 0, 1
     monkeypatch.setattr(
@@ -269,8 +265,8 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
         inputs_embeds=torch.ones(5, 4, dtype=dtype),
     )[1:]
     assert isinstance(wire, IntermediateTensors)
-    assert wire["classifier_indices"].tolist() == [2, 3, 4, 0]
-    assert wire["classifier_scores"][:, 0].tolist() == [4, 0, 0, 0]
+    assert wire["probe_indices"].tolist() == [2, 3, 4, 0]
+    assert wire["probe_scores"][:, 0].tolist() == [4, 0, 0, 0]
     buffers = GraniteSwitchModel.make_empty_intermediate_tensors(
         model, 4, dtype, torch.device("cpu")
     )
@@ -288,7 +284,7 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
             model, None, torch.arange(4), intermediate_tensors=buffers
         )
         if not group.is_last_rank:
-            assert torch.equal(packed["classifier_scores"], wire["classifier_scores"])
+            assert torch.equal(packed["probe_scores"], wire["probe_scores"])
             for key, tensor in packed.items():
                 buffers[key].copy_(tensor)
     assert packed[:, -1].tolist() == [2, 3, 4, 0]

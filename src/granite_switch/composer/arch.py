@@ -112,13 +112,13 @@ class ArchDescriptor:
     # LoRA parameter keywords (for filtering)
     lora_keywords: list[str] = field(default_factory=lambda: ["lora_A", "lora_B"])
 
-    # Non-LoRA/classifier buffer keywords to exclude from base validation
+    # Non-LoRA/probe buffer keywords to exclude from base validation
     buffer_keywords: list[str] = field(
         default_factory=lambda: [
             "adapter_token_ids",
             "adapter_scalings",
             "control_to_substitute_lut",
-            "classifier_head",
+            "probe_head",
             "adapter_kind_lut",
         ]
     )

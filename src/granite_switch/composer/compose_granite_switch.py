@@ -69,7 +69,7 @@ from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
-    ANCHOR_MODE_CLASSIFIER,
+    ANCHOR_MODE_PROBE,
     ANCHOR_MODE_SR,
     add_audio_token,
     add_control_tokens,
@@ -122,17 +122,17 @@ def build_control_token_lists(tokenizer, all_discovered, base_reset):
         all_discovered,
         _probe_lora_substitute_token_id(tokenizer),
         base_reset=base_reset,
-        classifier_substitute_id=_classifier_substitute_token_id(tokenizer),
+        probe_slot_substitute_id=_probe_slot_substitute_token_id(tokenizer),
     )
     return adapter_token_ids, special_tokens, adapter_substitute_token_ids
 
 
-def _classifier_substitute_token_id(tokenizer) -> int:
+def _probe_slot_substitute_token_id(tokenizer) -> int:
     """The base's role-open marker id, which follows the last turn's close."""
     fmt = detect_template_format(tokenizer.chat_template)
     if fmt is None:
         raise ValueError(
-            "Unrecognized chat template; cannot pick the classifier substitute."
+            "Unrecognized chat template; cannot pick the probe substitute."
         )
     ids = tokenizer.encode(fmt.role_open_marker, add_special_tokens=False)
     if len(ids) != 1:
@@ -1000,7 +1000,7 @@ def build():
     step_start = time.time()
 
     discovered_adapters = []
-    classifier_meta: dict[str, dict] = {}
+    probe_meta: dict[str, dict] = {}
     if args.adapters:
         print("\n" + "=" * 80)
         print("Processing adapters")
@@ -1042,9 +1042,9 @@ def build():
                     print(msg)
                 discovered_adapters.extend(found)
             elif (path := Path(entry)).is_file() and path.suffix in (".yaml", ".yml"):
-                found, manifest_classifier_meta = discover_adapters_from_yaml(entry)
+                found, manifest_probe_meta = discover_adapters_from_yaml(entry)
                 discovered_adapters.extend(found)
-                classifier_meta.update(manifest_classifier_meta)
+                probe_meta.update(manifest_probe_meta)
             else:
                 # Single adapter directory
                 resolved = Path(resolved_path)
@@ -1086,11 +1086,11 @@ def build():
     # token lands, and SR has exactly one usable activation point — the anchor at
     # the end of the generation prompt — so a mislabelled SR checkpoint must not
     # be able to fall through to aLoRA or sequence-start placement.
-    # A classifier slot is labelled here for the same reason: its control token is
+    # A probe slot is labelled here for the same reason: its control token is
     # an end-locator, which is a placement mode, not a weight format, and the
     # manifest's ``kind`` decides it. An adapter satisfies at most one test -- an SR
-    # adapter carries ``cross_stream`` weights, a classifier slot carries a
-    # classifier head instead -- and SR goes first because it is read from the
+    # adapter carries ``cross_stream`` weights, a probe slot carries a
+    # probe head instead -- and SR goes first because it is read from the
     # artifact rather than from a label.
     external_discovered = [
         (
@@ -1098,8 +1098,8 @@ def build():
             name,
             ANCHOR_MODE_SR
             if path and is_shadow_residual_adapter(path)
-            else ANCHOR_MODE_CLASSIFIER
-            if classifier_meta.get(name, {}).get("kind") == "classifier"
+            else ANCHOR_MODE_PROBE
+            if probe_meta.get(name, {}).get("kind") == "probe"
             else tech,
             source,
         )
@@ -1110,9 +1110,9 @@ def build():
     ]
     all_discovered = external_discovered + built_in_discovered
 
-    # Order LoRA slots first, classifier slots last (Python sorts False before True)
+    # Order LoRA slots first, probe slots last (Python sorts False before True)
     all_discovered.sort(
-        key=lambda t: classifier_meta.get(t[1], {}).get("kind", "lora") == "classifier"
+        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") == "probe"
     )
 
     has_external = len(external_discovered) > 0
@@ -1263,37 +1263,37 @@ def build():
                 _anchor_text, _sub, _mode = load_activation_anchor(_path, tokenizer)
             adapter_substitute_token_ids[_sub_offset + _i] = _sub
 
-    # adapter_kinds marks which slots are classifiers (same control token as a
+    # adapter_kinds marks which slots are probes (same control token as a
     # LoRA); resolve each slot's label words to token ids for the vLLM verdict.
-    if classifier_meta:
+    if probe_meta:
         adapter_kinds = [
-            classifier_meta.get(name, {}).get("kind", "lora") for name in adapter_names
+            probe_meta.get(name, {}).get("kind", "lora") for name in adapter_names
         ]
-        classifier_names = [
+        probe_names = [
             name
             for name in adapter_names
-            if classifier_meta.get(name, {}).get("kind") == "classifier"
+            if probe_meta.get(name, {}).get("kind") == "probe"
         ]
 
-        if classifier_names:
+        if probe_names:
             # Full width (length num_adapters, indexed by adapter_index - 1): each
-            # classifier slot's label token ids. The config derives the per-slot
+            # probe slot's label token ids. The config derives the per-slot
             # counts and the padded bank width from this.
             per_slot_label_names: list[list[str] | None] = []
             per_slot_label_token_ids: list[list[int] | None] = []
-            # Full width too: each classifier slot's read layer (None = final).
+            # Full width too: each probe slot's read layer (None = final).
             per_slot_read_layer: list[int | None] = []
             for name, kind in zip(adapter_names, adapter_kinds):
-                if kind != "classifier":
+                if kind != "probe":
                     per_slot_label_names.append(None)
                     per_slot_label_token_ids.append(None)
                     per_slot_read_layer.append(None)
                     continue
-                labels = classifier_meta[name].get("labels")
+                labels = probe_meta[name].get("labels")
                 if not labels:
                     raise ValueError(
-                        f"Adapter '{name}' is declared kind=classifier but has no "
-                        f"'labels' in the manifest. Classifier slots need label "
+                        f"Adapter '{name}' is declared kind=probe but has no "
+                        f"'labels' in the manifest. Probe slots need label "
                         f"words (e.g. labels: [safe, unsafe]) so the verdict exit "
                         f"can emit them."
                     )
@@ -1302,12 +1302,12 @@ def build():
                 per_slot_label_token_ids.append(
                     resolve_label_token_ids(tokenizer, label_names)
                 )
-                per_slot_read_layer.append(classifier_meta[name].get("layer"))
+                per_slot_read_layer.append(probe_meta[name].get("layer"))
 
             optional_kwargs["adapter_kinds"] = adapter_kinds
-            optional_kwargs["classifier_label_token_ids"] = per_slot_label_token_ids
-            optional_kwargs["classifier_read_layers"] = per_slot_read_layer
-            print("\nClassifier slots:")
+            optional_kwargs["probe_label_token_ids"] = per_slot_label_token_ids
+            optional_kwargs["probe_read_layers"] = per_slot_read_layer
+            print("\nProbe slots:")
             for name, words, ids, layer in zip(
                 adapter_names,
                 per_slot_label_names,

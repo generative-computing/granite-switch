@@ -15,10 +15,10 @@ from tqdm import tqdm
 
 from .arch import ArchDescriptor
 
-# Filename + keys of a trained classifier-head artifact inside a classifier
+# Filename + keys of a trained probe-head artifact inside a probe
 # adapter directory.
-CLASSIFIER_HEAD_FILE = "classifier_head.safetensors"
-CLASSIFIER_HEAD_KEYS = ("weight", "bias")
+PROBE_HEAD_FILE = "probe_head.safetensors"
+PROBE_HEAD_KEYS = ("weight", "bias")
 
 # ---------------------------------------------------------------------------
 # Base weight loading
@@ -832,46 +832,46 @@ def validate_untied_lm_head_saved(output_path, expected_vocab_size, hidden_size)
 
 
 # ---------------------------------------------------------------------------
-# Classifier head transfer
+# Probe head transfer
 # ---------------------------------------------------------------------------
 
 
-def transfer_classifier_weights(
-    classifier_paths: list[str],
+def transfer_probe_weights(
+    probe_paths: list[str],
     slot_indices: list[int],
     model,
     num_labels_per_slot: list[int],
     hidden_size: int,
 ) -> None:
-    """Load trained classifier heads and transfer them into the switch model.
+    """Load trained probe heads and transfer them into the switch model.
 
-    A classifier slot is the classifier-head analog of a LoRA adapter: it shares
+    A probe slot is the probe-head analog of a LoRA adapter: it shares
     the same control-token / adapter-index space, so its head lives in bank row
-    ``slot = adapter_index - 1`` of ``model.model.classifier_head``. Each
-    classifier directory holds a ``classifier_head.safetensors`` with a
+    ``slot = adapter_index - 1`` of ``model.model.probe_head``. Each
+    probe directory holds a ``probe_head.safetensors`` with a
     ``weight`` ``[n_i, hidden]`` and a ``bias`` ``[n_i]`` where ``n_i`` is this
-    slot's own label count. The head bank is padded to ``max_classifier_labels``.
+    slot's own label count. The head bank is padded to ``max_probe_labels``.
 
     Args:
-        classifier_paths: Directories of the classifier slots (classifier-only).
+        probe_paths: Directories of the probe slots (probe-only).
         slot_indices: Global bank row for each path (``adapter_index - 1``),
-            aligned with *classifier_paths*. Classifiers are the non-zero-based
+            aligned with *probe_paths*. Probes are the non-zero-based
             ``k+1..n`` suffix, so these are not ``range(len)`` and must be passed.
-        model: GraniteSwitch model whose ``classifier_head`` is filled in place.
+        model: GraniteSwitch model whose ``probe_head`` is filled in place.
         num_labels_per_slot: Full-width per-slot label counts
-            (``config.classifier_num_labels_per_slot``, indexed by
+            (``config.probe_num_labels_per_slot``, indexed by
             ``adapter_index - 1``).
         hidden_size: Expected hidden size (``config.hidden_size``).
     """
     from safetensors.torch import load_file
 
-    head = getattr(model.model, "classifier_head", None)
+    head = getattr(model.model, "probe_head", None)
     if head is None:
         raise ValueError(
-            "transfer_classifier_weights was given classifier paths "
-            f"{classifier_paths} but the model built no classifier_head. This "
+            "transfer_probe_weights was given probe paths "
+            f"{probe_paths} but the model built no probe_head. This "
             "means adapter_kinds never reached the config (no slot is "
-            "kind=classifier). Pass adapter_kinds with a 'classifier' entry so "
+            "kind=probe). Pass adapter_kinds with a 'probe' entry so "
             "the head is constructed before loading trained weights."
         )
 
@@ -879,37 +879,37 @@ def transfer_classifier_weights(
     # silently corrupt another slot's head.
     if len(slot_indices) != len(set(slot_indices)):
         raise ValueError(
-            f"Duplicate classifier slot indices {slot_indices}; each classifier "
+            f"Duplicate probe slot indices {slot_indices}; each probe "
             "must map to a distinct bank row."
         )
     num_rows = head.weight.shape[0]
     for slot in slot_indices:
         if not (0 <= slot < num_rows):
             raise ValueError(
-                f"Classifier slot {slot} is out of range for a classifier bank "
+                f"Probe slot {slot} is out of range for a probe bank "
                 f"of {num_rows} rows (num_adapters)."
             )
 
-    print(f"Loading {len(classifier_paths)} trained classifier head(s)...")
+    print(f"Loading {len(probe_paths)} trained probe head(s)...")
     with torch.no_grad():
-        for path, slot in zip(classifier_paths, slot_indices):
+        for path, slot in zip(probe_paths, slot_indices):
             n_labels = num_labels_per_slot[slot]
-            head_file = Path(path) / CLASSIFIER_HEAD_FILE
+            head_file = Path(path) / PROBE_HEAD_FILE
             if not head_file.exists():
                 raise FileNotFoundError(
-                    f"Classifier slot '{path}' is missing its trained head "
-                    f"'{CLASSIFIER_HEAD_FILE}'. A classifier directory must "
-                    f"contain {CLASSIFIER_HEAD_FILE} with keys "
-                    f"{CLASSIFIER_HEAD_KEYS} (weight [n_labels, hidden], "
+                    f"Probe slot '{path}' is missing its trained head "
+                    f"'{PROBE_HEAD_FILE}'. A probe directory must "
+                    f"contain {PROBE_HEAD_FILE} with keys "
+                    f"{PROBE_HEAD_KEYS} (weight [n_labels, hidden], "
                     f"bias [n_labels]); it has no adapter_model.safetensors."
                 )
 
             sd = load_file(str(head_file))
             keys = set(sd.keys())
-            if keys != set(CLASSIFIER_HEAD_KEYS):
+            if keys != set(PROBE_HEAD_KEYS):
                 raise ValueError(
                     f"{head_file} must contain exactly keys "
-                    f"{set(CLASSIFIER_HEAD_KEYS)}, got {keys}."
+                    f"{set(PROBE_HEAD_KEYS)}, got {keys}."
                 )
 
             weight, bias = sd["weight"], sd["bias"]
@@ -918,7 +918,7 @@ def transfer_classifier_weights(
                     f"{head_file}: weight shape {tuple(weight.shape)} does not "
                     f"match this slot's expected (n_labels, hidden) = "
                     f"({n_labels}, {hidden_size}). Check the head's label count "
-                    f"against classifier_num_labels_per_slot[{slot}]={n_labels}."
+                    f"against probe_num_labels_per_slot[{slot}]={n_labels}."
                 )
             if tuple(bias.shape) != (n_labels,):
                 raise ValueError(
@@ -936,6 +936,6 @@ def transfer_classifier_weights(
                 bias.to(dtype=dst_w.dtype, device=dst_w.device)
             )
 
-            print(f"  Classifier: {path} -> classifier_head[{slot}, :{n_labels}]")
+            print(f"  Probe: {path} -> probe_head[{slot}, :{n_labels}]")
 
-    print(f"Loaded {len(classifier_paths)} classifier head(s)")
+    print(f"Loaded {len(probe_paths)} probe head(s)")

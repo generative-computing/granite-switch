@@ -1,15 +1,16 @@
-# Classifier Slots
+# Activation Probe Slots
 
-This guide explains how to compose a Granite Switch model with a **classifier slot** — a
-lightweight classification head fired by the same control token as a LoRA adapter — and how to
-serve it so the model emits a label *word* (`safe`, `unsafe`, …) for a detection request.
+This guide explains how to compose a Granite Switch model with an **activation probe slot** — a
+lightweight linear head over a hidden state, fired by the same control token as a LoRA adapter —
+and how to serve it so the model emits a label *word* (`safe`, `unsafe`, …) for a detection
+request.
 
 ## Overview
 
-A **classifier slot** holds a small linear classification head instead of a LoRA. It uses the same
-control-token machinery (one `<|name|>` token, one adapter index) and reads the configured layer's
-activation to produce per-label logits. Classifier and generation-adapter slots can coexist in one
-checkpoint; a request selects one slot.
+An **activation probe slot** (probe for short) holds a small linear head instead of a LoRA. It
+uses the same control-token machinery (one `<|name|>` token, one adapter index) and reads the
+configured layer's activation to produce per-label logits. Probe and generation-adapter slots can
+coexist in one checkpoint; a request selects one slot.
 
 At inference the verdict does not come back as a raw score vector. Each label word is resolved to a
 single token id at compose time, and the model rewrites the request's final logit row so that the
@@ -22,21 +23,21 @@ custom client.
    (weight/bias)         (io.yaml or YAML list)      (granite-switch)     (vLLM OpenAI API)
 ```
 
-Multiple classifier slots may coexist, and **each slot may have its own number of labels** (e.g. a
+Multiple probe slots may coexist, and **each slot may have its own number of labels** (e.g. a
 2-label `safe`/`unsafe` slot next to a 3-label `good`/`bad`/`neutral` slot).
 
 ## Prerequisites
 
 - Granite base model (e.g., `ibm-granite/granite-4.1-3b`)
-- A trained classifier head (see Step 1)
+- A trained probe head (see Step 1)
 - `granite-switch[vllm,compose]` installed
 
 See [PREREQUISITES.md](../PREREQUISITES.md) for detailed setup.
 
-## Step 1: Train (or stage) a classifier head
+## Step 1: Train (or stage) a probe head
 
-A classifier slot is **not** a LoRA, so its directory holds a different artifact. There is no
-`adapter_model.safetensors`; instead the directory must contain a **`classifier_head.safetensors`**
+A probe slot is **not** a LoRA, so its directory holds a different artifact. There is no
+`adapter_model.safetensors`; instead the directory must contain a **`probe_head.safetensors`**
 with exactly two tensors:
 
 | Key | Shape | Meaning |
@@ -71,7 +72,7 @@ from safetensors.torch import save_file
 HIDDEN = 2560  # granite-4.1-3b hidden size
 
 def make_head(name, labels):
-    """Write a synthetic classifier head for `name` under the library layout.
+    """Write a synthetic probe head for `name` under the library layout.
 
     A real head would carry trained weights; this one is zero-weight with a bias
     that forces row 0 to win, so the emitted label is deterministic.
@@ -81,8 +82,8 @@ def make_head(name, labels):
     weight = torch.zeros(len(labels), HIDDEN)
     bias = torch.full((len(labels),), -10.0)
     bias[0] = 10.0  # row 0 (labels[0]) always wins
-    save_file({"weight": weight, "bias": bias}, str(head_dir / "classifier_head.safetensors"))
-    # Every composed slot (LoRA or classifier) also needs an io.yaml — compose copies
+    save_file({"weight": weight, "bias": bias}, str(head_dir / "probe_head.safetensors"))
+    # Every composed slot (LoRA or probe) also needs an io.yaml — compose copies
     # it verbatim into the checkpoint's io_configs/. A two-line stub is enough here.
     (head_dir / "io.yaml").write_text(f"name: {name}\nmodel: ~\n")
     return str(head_dir)
@@ -90,7 +91,7 @@ def make_head(name, labels):
 
 > The directory layout `<name>/<name>/<target_model>/<technology>/` mirrors the library layout the
 > composer expects for a local adapter. The trailing `lora`/`alora` segment selects **token
-> placement** (LoRA vs activated-LoRA), independent of the fact that this slot is a classifier.
+> placement** (LoRA vs activated-LoRA), independent of the fact that this slot is a probe.
 >
 > The `io.yaml` is required for **every** slot: compose copies each slot's `io.yaml` into the
 > output's `io_configs/<name>/`, so a slot without one fails the copy step. Real adapters ship a
@@ -104,7 +105,7 @@ token id per label. If a label word does not encode to a single token in the bas
 compose fails loud and lists the offenders, e.g.:
 
 ```
-1 classifier label word(s) do not encode to a single token, ...
+1 probe label word(s) do not encode to a single token, ...
   'Ambiguous' → 3 tokens: ['Amb', 'igu', 'ous']
 ```
 
@@ -114,24 +115,24 @@ If no natural single-token word fits, the tokenizer's reserved `<|unused_N|>` to
 
 ## Step 2: Declare the slot in a manifest
 
-Classifier slots are declared with two extra keys — `kind: classifier` and `labels:` — on top of the
+Probe slots are declared with two extra keys — `kind: probe` and `labels:` — on top of the
 normal adapter fields. The simplest way to pass one or more of them to compose is a **YAML manifest**
 that maps each slot name to its path and metadata:
 
 ```yaml
-# ./adapters.yaml (one classifier slot)
+# ./adapters.yaml (one probe slot)
 safety:
   path: ./safety-head/safety/granite-4.1-3b/lora
   type: lora                 # token placement (lora vs alora); independent of `kind`
-  kind: classifier           # marks this slot a classifier head (default "lora" when omitted)
+  kind: probe                # marks this slot a probe head (default "lora" when omitted)
   labels: [safe, unsafe]     # label words, resolved to single token ids at compose
 ```
 
 `type` and `kind` are independent axes: `type` is the LoRA *technology* (drives control-token
-placement), while `kind` is whether the slot is a real LoRA or a classifier head. A plain LoRA entry
+placement), while `kind` is whether the slot is a real LoRA or a probe head. A plain LoRA entry
 simply omits `kind`/`labels`.
 
-A classifier entry may also set an optional `layer`, the zero-based decoder layer whose output the
+A probe entry may also set an optional `layer`, the zero-based decoder layer whose output the
 head reads (the residual stream after that layer, before the final norm). Omit it to read the final
 post-norm hidden state:
 
@@ -139,42 +140,42 @@ post-norm hidden state:
 safety_mid:
   path: ./safety-mid-head/safety_mid/granite-4.1-3b/lora
   type: lora
-  kind: classifier
+  kind: probe
   labels: [safe, unsafe]
   layer: 20                  # 0..num_decoder_layers - 1; omit for final
 ```
 
-Classifier slots can also be composed alongside Shadow Residual (SR) adapters; a classifier
+Probe slots can also be composed alongside Shadow Residual (SR) adapters; a probe
 request reads that layer's base stream. Decoder layer numbers exclude the switch's KV-cache slots.
 Pipeline parallelism preserves the same numbering across stages.
 
-You can mix LoRA and classifier entries in one manifest, and give each classifier its own `labels`
+You can mix LoRA and probe entries in one manifest, and give each probe its own `labels`
 list of any length:
 
 ```yaml
-# ./adapters.yaml — one real LoRA + two synthetic classifier slots (2 and 3 labels)
+# ./adapters.yaml — one real LoRA + two synthetic probe slots (2 and 3 labels)
 answerability:
   path: /path/to/answerability/granite-4.1-3b/lora   # a real LoRA (see below)
   type: lora
 safety:
   path: ./safety-head/safety/granite-4.1-3b/lora
   type: lora
-  kind: classifier
+  kind: probe
   labels: [safe, unsafe]
 faithfulness:
   path: ./faithfulness-head/faithfulness/granite-4.1-3b/lora
   type: lora
-  kind: classifier
+  kind: probe
   labels: [good, bad, neutral]      # single-token words — see the label rule above
 ```
 
 > **Slot ordering is automatic.** Compose stably reorders slots so all LoRA slots come first and
-> classifier slots last, then derives every downstream artifact (control tokens, chat template,
-> adapter indices) from that order. You do not need to order the manifest yourself; classifiers
+> probe slots last, then derives every downstream artifact (control tokens, chat template,
+> adapter indices) from that order. You do not need to order the manifest yourself; probes
 > ending up as the contiguous suffix is what lets the LoRA weight transfer stay positional and the
-> classifier head bank pad uniformly.
+> probe head bank pad uniformly.
 
-The script below download a rag lora and constructed two synthetic classifiers for testing.
+The script below download a rag lora and constructed two synthetic probes for testing.
 
 ```python
 from pathlib import Path
@@ -189,16 +190,16 @@ snap = snapshot_download(
 )
 lora_dir = str(Path(snap) / "answerability" / "granite-4.1-3b" / "lora")
 
-# 2. Two synthetic classifier slots with different label counts (make_head from Step 1).
+# 2. Two synthetic probe slots with different label counts (make_head from Step 1).
 safety_dir = make_head("safety", ["safe", "unsafe"])
 faith_dir = make_head("faithfulness", ["good", "bad", "neutral"])
 
-# 3. Emit the manifest pairing the real LoRA with the two synthetic classifiers.
+# 3. Emit the manifest pairing the real LoRA with the two synthetic probes.
 manifest = {
     "answerability": {"path": lora_dir, "type": "lora"},
-    "safety": {"path": safety_dir, "type": "lora", "kind": "classifier",
+    "safety": {"path": safety_dir, "type": "lora", "kind": "probe",
                "labels": ["safe", "unsafe"]},
-    "faithfulness": {"path": faith_dir, "type": "lora", "kind": "classifier",
+    "faithfulness": {"path": faith_dir, "type": "lora", "kind": "probe",
                      "labels": ["good", "bad", "neutral"]},
 }
 Path("./adapters.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
@@ -221,37 +222,37 @@ python -m granite_switch.composer.compose_granite_switch \
 Compose will:
 
 1. Load the base model and discover the slots from the manifest.
-2. Resolve each classifier's label words to single token ids (failing loud on multi-token words).
-3. Read each classifier's `classifier_head.safetensors` into the head bank at its slot.
+2. Resolve each probe's label words to single token ids (failing loud on multi-token words).
+3. Read each probe's `probe_head.safetensors` into the head bank at its slot.
 4. Stack everything into one checkpoint under `--output`.
 
 
 ```
-Classifier slots:
+Probe slots:
   safety → labels ['safe', 'unsafe'] → token ids [19193, 39257] @ final norm
   faithfulness → labels ['good', 'bad', 'neutral'] → token ids [19045, 14176, 60668] @ final norm
 ```
 
 A slot with `layer: 20` prints `@ layer 20` instead.
 
-The resulting `config.json` carries the per-slot classifier metadata as plain lists/ints, so it
+The resulting `config.json` carries the per-slot probe metadata as plain lists/ints, so it
 round-trips through `save_pretrained`/`from_pretrained` with no custom code, and both the HF and
 vLLM backends read it identically. Three fields are the stored contract:
 
 | Field | Meaning |
 |-------|---------|
-| `adapter_kinds` | per-slot `"lora"` / `"classifier"`, one entry per adapter — what marks a slot a classifier |
-| `classifier_label_token_ids` | per-slot list of label token ids, `null` on LoRA slots |
-| `classifier_read_layers` | per-slot zero-based decoder layer a classifier reads; `null` for the final post-norm state and on LoRA slots |
+| `adapter_kinds` | per-slot `"lora"` / `"probe"`, one entry per adapter — what marks a slot a probe |
+| `probe_label_token_ids` | per-slot list of label token ids, `null` on LoRA slots |
+| `probe_read_layers` | per-slot zero-based decoder layer a probe reads; `null` for the final post-norm state and on LoRA slots |
 
 The rest are **derived** from those in `GraniteSwitchConfig.__init__`, so they appear on the config
 object but are not independent inputs:
 
 | Derived field | From |
 |---------------|------|
-| `classifier_num_labels_per_slot` | `len()` of each slot's label token ids (`0` on LoRA slots) |
-| `max_classifier_labels` | `max()` of the above — the padded width the head bank is built with |
-| `classifier_control_token_ids` | the control-token ids of the classifier slots; both backends match these in `input_ids` to locate a verdict's read point |
+| `probe_num_labels_per_slot` | `len()` of each slot's label token ids (`0` on LoRA slots) |
+| `max_probe_labels` | `max()` of the above — the padded width the head bank is built with |
+| `probe_control_token_ids` | the control-token ids of the probe slots; both backends match these in `input_ids` to locate a verdict's read point |
 
 Note that the label *words* are not stored — only their token ids. Compose resolves and prints the
 words, but `config.json` keeps ids, so recovering the words means decoding them with the
@@ -267,7 +268,7 @@ python -m vllm.entrypoints.openai.api_server \
   --port 8000
 ```
 
-Fire a classifier by placing its control token at the very end of the prompt, after the last turn's
+Fire a probe by placing its control token at the very end of the prompt, after the last turn's
 close — one token per slot, `<|safety|>` for the `safety` slot, `<|faithfulness|>` for the other. The
 verdict is read at the control token, so leave out the generation prompt. The completion is the
 emitted label word:
@@ -286,7 +287,7 @@ curl http://localhost:8000/v1/completions \
 {"choices": [{"text": "safe", ...}], ...}
 ```
 
-Only the classifier request's final logit row is rewritten; every other (non-classifier) request runs
+Only the probe request's final logit row is rewritten; every other (non-probe) request runs
 untouched with its full vocabulary. If you request logprobs, you will see the label token ids
 carrying the verdict scores and the rest of the vocabulary pinned at the blanking floor — exactly the
 two labels for a 2-label slot, three for a 3-label slot.
@@ -294,7 +295,7 @@ two labels for a 2-label slot, three for a 3-label slot.
 ### Firing via the chat template (optional)
 
 Instead of placing `<|safety|>` by hand, you can let the composed model's chat template place it for
-you by passing `adapter_name` — a classifier slot is activated exactly like any other adapter. The
+you by passing `adapter_name` — a probe slot is activated exactly like any other adapter. The
 template appends the control token after the last turn:
 
 ```bash
@@ -324,14 +325,14 @@ curl http://localhost:8000/v1/completions \
 ```
 
 Only the label ids (`safe`, `unsafe`) will show finite logprobs; all other tokens sit at the blanking
-floor. That is the classifier head's per-label verdict surfaced through the standard logprobs
+floor. That is the probe head's per-label verdict surfaced through the standard logprobs
 channel.
 
 ## How it works (brief)
 
-- **Routing.** A classifier control token selects its slot like any adapter; its position is routed
+- **Routing.** A probe control token selects its slot like any adapter; its position is routed
   out of the LoRA stream and the head reads the activation there.
-- **Padded head bank.** All heads share one tensor padded to `max_classifier_labels` (like the LoRA
+- **Padded head bank.** All heads share one tensor padded to `max_probe_labels` (like the LoRA
   bank pads to `max_lora_rank`), keeping the vLLM head one compile-safe operation.
 - **Scoring.** Intermediate-layer slots are scored as that layer runs, final-layer slots after the
   final norm. Scores and slot id travel with the hidden states to the logits step, so this also

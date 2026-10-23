@@ -156,30 +156,30 @@ def test_multi_audio_checkpoint_loads_without_size_overrides(audio_multi):
 
 
 # --------------------------------------------------------------------------- #
-# A LoRA + classifier checkpoint composed with and without --enable-audio must
-# load strictly (no ignore_mismatched_sizes) and still route the classifier
+# A LoRA + probe checkpoint composed with and without --enable-audio must
+# load strictly (no ignore_mismatched_sizes) and still route the probe
 # marker to its head. The audio marker grows the vocabulary past the control
 # ids, so this also checks the saved control LUT matches the shipped config.
 # --------------------------------------------------------------------------- #
-_CLASSIFIER_BASE = "ibm-granite/granite-4.1-3b"
-_CLASSIFIER_LABELS = ["safe", "unsafe"]
+_PROBE_BASE = "ibm-granite/granite-4.1-3b"
+_PROBE_LABELS = ["safe", "unsafe"]
 
 
-def _write_classifier_manifest(root):
+def _write_probe_manifest(root):
     """A real LoRA plus a synthetic bias-only head (label 1 always wins)."""
     import torch
     from safetensors.torch import save_file
     from transformers import AutoConfig
 
-    from .test_classifier_compose import _find_rag_lora_dir
+    from .test_probe_compose import _find_rag_lora_dir
 
-    hidden = AutoConfig.from_pretrained(_CLASSIFIER_BASE).hidden_size
+    hidden = AutoConfig.from_pretrained(_PROBE_BASE).hidden_size
     head_dir = root / "safety" / "safety" / "granite-4.1-3b" / "lora"
     head_dir.mkdir(parents=True)
     bias = torch.tensor([-10.0, 10.0])
     save_file(
-        {"weight": torch.zeros(len(_CLASSIFIER_LABELS), hidden), "bias": bias},
-        str(head_dir / "classifier_head.safetensors"),
+        {"weight": torch.zeros(len(_PROBE_LABELS), hidden), "bias": bias},
+        str(head_dir / "probe_head.safetensors"),
     )
     (head_dir / "io.yaml").write_text("name: safety\nmodel: ~\n")
     manifest = root / "adapters.yaml"
@@ -190,21 +190,21 @@ def _write_classifier_manifest(root):
         "safety:\n"
         f"  path: {head_dir}\n"
         "  type: lora\n"
-        "  kind: classifier\n"
-        f"  labels: [{', '.join(_CLASSIFIER_LABELS)}]\n"
+        "  kind: probe\n"
+        f"  labels: [{', '.join(_PROBE_LABELS)}]\n"
     )
     return manifest
 
 
-def _compose_classifier(root, enable_audio):
-    manifest = _write_classifier_manifest(root)
+def _compose_probe(root, enable_audio):
+    manifest = _write_probe_manifest(root)
     output_dir = root / "model"
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
         "--base-model",
-        _CLASSIFIER_BASE,
+        _PROBE_BASE,
         "--adapters",
         str(manifest),
         "--output",
@@ -214,7 +214,7 @@ def _compose_classifier(root, enable_audio):
         cmd.append("--enable-audio")
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=BUILD_TIMEOUT)
     assert result.returncode == 0, (
-        f"classifier compose failed (exit {result.returncode}).\n"
+        f"probe compose failed (exit {result.returncode}).\n"
         f"STDOUT tail:\n{result.stdout[-2000:]}\n"
         f"STDERR tail:\n{result.stderr[-2000:]}"
     )
@@ -222,21 +222,19 @@ def _compose_classifier(root, enable_audio):
 
 
 @pytest.fixture(scope="module", params=[True, False], ids=["audio", "text"])
-def classifier_checkpoint(request, tmp_path_factory):
-    root = tmp_path_factory.mktemp(
-        "classifier-audio" if request.param else "classifier"
-    )
-    return request.param, _compose_classifier(root, enable_audio=request.param)
+def probe_checkpoint(request, tmp_path_factory):
+    root = tmp_path_factory.mktemp("probe-audio" if request.param else "probe")
+    return request.param, _compose_probe(root, enable_audio=request.param)
 
 
 @pytest.mark.xdist_group("multi_audio_compose_e2e")
-def test_classifier_checkpoint_loads_strictly_and_routes(classifier_checkpoint):
+def test_probe_checkpoint_loads_strictly_and_routes(probe_checkpoint):
     torch = pytest.importorskip("torch")
     from transformers import AutoTokenizer
 
     from granite_switch.hf import GraniteSwitchForCausalLM
 
-    enable_audio, output_dir = classifier_checkpoint
+    enable_audio, output_dir = probe_checkpoint
     config = json.loads((output_dir / "config.json").read_text())
     if enable_audio:
         # Guard the guard: the marker must push the vocabulary past the controls.
@@ -262,9 +260,9 @@ def test_classifier_checkpoint_loads_strictly_and_routes(classifier_checkpoint):
     assert input_ids[0, -1].item() == marker
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=False)
-    assert model.model._last_classifier_indices[0, -1].item() == 2
+    assert model.model._last_probe_indices[0, -1].item() == 2
     assert not model.model._last_lora_indices.any()
-    label_ids = model.config.classifier_label_token_ids[1]
+    label_ids = model.config.probe_label_token_ids[1]
     assert int(out.logits[0, -1].argmax()) == label_ids[1]
 
 

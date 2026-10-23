@@ -132,24 +132,24 @@ def test_no_mapping_is_not_an_error(switch_type):
     assert refresh_switch_control_lut(model) is False
 
 
-def test_classifier_routing_survives_audio_resize_and_strict_reload(tmp_path):
-    """Classifier + audio: every retained routing table must match the saved config.
+def test_probe_routing_survives_audio_resize_and_strict_reload(tmp_path):
+    """Probe + audio: every retained routing table must match the saved config.
 
     The control LUT is vocabulary-sized and is rebuilt after the resize; the
-    classifier kind LUT is indexed by adapter, so the resize cannot stale it.
+    probe kind LUT is indexed by adapter, so the resize cannot stale it.
     A strict reload (no ``ignore_mismatched_sizes``) must keep both, and the
-    classifier marker must still route to its head and emit a label word.
+    probe marker must still route to its head and emit a label word.
     """
     from granite_switch.composer.validator import validate_control_lut
 
     config = _config(
         "multi",
-        adapter_kinds=["lora", "classifier"],
-        classifier_label_token_ids=[None, [10, 11]],
+        adapter_kinds=["lora", "probe"],
+        probe_label_token_ids=[None, [10, 11]],
     )
     model = GraniteSwitchForCausalLM(config).eval()
     with torch.no_grad():
-        model.model.classifier_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
+        model.model.probe_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
     model.resize_token_embeddings(_VOCAB_WITH_AUDIO)
     assert refresh_switch_control_lut(model) is True
     validate_control_lut(model)
@@ -166,5 +166,5 @@ def test_classifier_routing_survives_audio_resize_and_strict_reload(tmp_path):
     with torch.no_grad():
         out = loaded(input_ids=torch.tensor([[1, 2, 3, _CTRL_IDS[1]]]), use_cache=False)
     assert loaded.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert loaded.model._last_classifier_indices.tolist() == [[0, 0, 0, 2]]
+    assert loaded.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
     assert int(out.logits[0, -1].argmax()) == 11

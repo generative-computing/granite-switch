@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Classifier-slot routing: the kind LUT and the LoRA/classifier index split."""
+"""Probe-slot routing: the kind LUT and the LoRA/probe index split."""
 
 import torch
 
-from granite_switch.classifier_routing import (
+from granite_switch.config import GraniteSwitchConfig
+from granite_switch.probe_routing import (
     build_adapter_kind_lut,
     split_adapter_indices,
 )
-from granite_switch.config import GraniteSwitchConfig
 
 
 def _config(adapter_kinds, label_ids, base_reset=False):
@@ -29,44 +29,44 @@ def _config(adapter_kinds, label_ids, base_reset=False):
         adapter_ranks=[4] * num_adapters,
         max_lora_rank=4,
         adapter_kinds=adapter_kinds,
-        classifier_label_token_ids=label_ids,
+        probe_label_token_ids=label_ids,
     )
 
 
 class TestAdapterKindLut:
-    def test_none_without_classifier_slots(self):
+    def test_none_without_probe_slots(self):
         assert build_adapter_kind_lut(_config(["lora", "lora"], None)) is None
 
-    def test_marks_classifier_adapter_indices(self):
-        cfg = _config(["lora", "classifier", "classifier"], [None, [100], [101, 102]])
+    def test_marks_probe_adapter_indices(self):
+        cfg = _config(["lora", "probe", "probe"], [None, [100], [101, 102]])
         assert build_adapter_kind_lut(cfg).tolist() == [False, False, True, True]
 
     def test_base_reset_token_does_not_shift_slots(self):
         """The LUT is indexed by adapter index, not by control-token position."""
-        cfg = _config(["lora", "classifier"], [None, [100, 101]], base_reset=True)
+        cfg = _config(["lora", "probe"], [None, [100, 101]], base_reset=True)
         assert build_adapter_kind_lut(cfg).tolist() == [False, False, True]
-        assert cfg.classifier_control_token_ids == [501]
+        assert cfg.probe_control_token_ids == [501]
 
 
 class TestSplitAdapterIndices:
-    def test_classifier_positions_leave_the_lora_stream(self):
-        cfg = _config(["lora", "classifier"], [None, [100, 101]])
-        lora, classifier = split_adapter_indices(
+    def test_probe_positions_leave_the_lora_stream(self):
+        cfg = _config(["lora", "probe"], [None, [100, 101]])
+        lora, probe = split_adapter_indices(
             build_adapter_kind_lut(cfg), torch.tensor([0, 1, 1, 0, 2])
         )
         assert lora.tolist() == [0, 1, 1, 0, 0]
-        assert classifier.tolist() == [0, 0, 0, 0, 2]
+        assert probe.tolist() == [0, 0, 0, 0, 2]
 
     def test_preserves_batched_shape(self):
-        cfg = _config(["classifier", "lora"], [[100, 101], None])
-        lora, classifier = split_adapter_indices(
+        cfg = _config(["probe", "lora"], [[100, 101], None])
+        lora, probe = split_adapter_indices(
             build_adapter_kind_lut(cfg), torch.tensor([[0, 2, 1], [1, 1, 0]])
         )
         assert lora.tolist() == [[0, 2, 0], [0, 0, 0]]
-        assert classifier.tolist() == [[0, 0, 1], [1, 1, 0]]
+        assert probe.tolist() == [[0, 0, 1], [1, 1, 0]]
 
-    def test_no_classifier_slots_pass_through(self):
+    def test_no_probe_slots_pass_through(self):
         indices = torch.tensor([0, 1, 2])
-        lora, classifier = split_adapter_indices(None, indices)
+        lora, probe = split_adapter_indices(None, indices)
         assert lora is indices
-        assert not classifier.any()
+        assert not probe.any()
