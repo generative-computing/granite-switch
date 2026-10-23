@@ -55,7 +55,7 @@ import time
 from pathlib import Path
 
 from . import staged
-from .common import load_spec
+from .common import CLASSIFIER, load_spec
 from .scorers.query_rewrite import PROMPT_FILE
 
 DISCOVERY_BEGIN = "=== ADAPTER_BENCH_DISCOVERY_BEGIN ==="
@@ -63,10 +63,11 @@ DISCOVERY_END = "=== ADAPTER_BENCH_DISCOVERY_END ==="
 STAGE_BEGIN = "=== ADAPTER_BENCH_STAGE_BEGIN ==="
 STAGE_END = "=== ADAPTER_BENCH_STAGE_END ==="
 
-# What each benchmarked technology was trained with, as read from the
+# What each benchmarked LoRA technology was trained with, as read from the
 # weights. Used for the draft selection, where the config names break ties; a
 # model's own shape in adapters.yaml goes over it (``expected``), and is also
-# checked when a pick is staged.
+# checked when a pick is staged. A classifier head is not a training run the
+# discovery finds: its training job writes the head, and it is picked by hand.
 EXPECTED = {
     "lora": {"rank": 16, "modules": "qkvo+mlp", "names": ("lora_qkvo_mlp_r16",)},
     "alora": {"rank": 32, "modules": "qkvo+mlp", "names": ("alora_qkvo_mlp_r32",)},
@@ -408,6 +409,8 @@ def draft_selection(spec, adapters: list[dict], evals: list[dict]) -> dict:
     for intrinsic in spec.intrinsics:
         picked = []
         for tech in spec.technologies:
+            if tech.id not in EXPECTED:
+                continue
             exp = expected(spec, tech.id)
             fits = [
                 a
@@ -577,6 +580,32 @@ def now() -> str:
     return dt.datetime.now(dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def stage_head(spec, intrinsic_id: str, src: Path, dest: Path, replace: bool) -> dict:
+    """Stage a classifier head: its weights, labels and io.yaml, and in the
+    provenance its labels and shape. Its labels must be the intrinsic's, in
+    order (``staged.labels_reason``)."""
+    head = spec.intrinsic(intrinsic_id).classifier
+    if head is None:
+        raise ValueError(f"{intrinsic_id} has no classifier in adapters.yaml")
+    reason = staged.labels_reason(src, head)
+    if reason:
+        raise ValueError(reason)
+    names = [staged.HEAD_FILE, staged.HEAD_META_FILE, "io.yaml"]
+    rows, hidden = staged.head_shape(src)
+    return copy_into(
+        {n: src / n for n in names if (src / n).is_file()},
+        dest,
+        {
+            "source": str(src),
+            "technology": CLASSIFIER,
+            "labels": list(head.labels),
+            "num_labels": rows,
+            "hidden_size": hidden,
+        },
+        replace,
+    )
+
+
 def kept(dest: Path, src: Path) -> dict | None:
     """The provenance of ``dest`` if it is already staged from ``src``, else None.
 
@@ -662,6 +691,12 @@ def cmd_apply(args) -> int:
                 reason = staged.check_adapter(src, tech_id)
                 if reason:
                     raise ValueError(reason)
+                if tech_id == CLASSIFIER:
+                    report["adapters"][key] = stage_head(
+                        spec, intrinsic_id, src, dest, args.replace
+                    )
+                    print(f"[stage] adapter {key}: ok (classifier head)")
+                    continue
                 if spec.model.shape(tech_id):
                     # A model with its own shape (attention only, say): an
                     # adapter of another shape, or one that also wrapped a

@@ -21,6 +21,9 @@ rejected instead of benchmarked under the wrong label:
   trainer) or ``alora_invocation_tokens`` (internal trainer).
 * aLoRA: non-empty ``alora_invocation_tokens``, no ``cross_stream``.
 * LoRA:  neither.
+* Classifier: no LoRA at all. ``classifier_head.safetensors`` holds a
+  ``weight [labels, hidden]`` and a ``bias [labels]``, and
+  ``classifier.json`` its ``labels`` in row order (``classifier_meta``).
 
 The composer accepts only the ``last_context_token`` form for SR, so an SR
 checkpoint with invocation tokens is converted before composing
@@ -46,10 +49,14 @@ import struct
 from dataclasses import dataclass
 from pathlib import Path
 
-from .common import Spec
+from .common import CLASSIFIER, NO_CLASSIFIER, Classifier, Spec
 
 CONFIG_FILE = "adapter_config.json"
 WEIGHTS_FILE = "adapter_model.safetensors"
+# A classifier head (PR #134's classifier slots): its weights, and its labels
+# and read layer.
+HEAD_FILE = "classifier_head.safetensors"
+HEAD_META_FILE = "classifier.json"
 EVAL_FILE = "evaluation.jsonl"
 PROVENANCE_FILE = "provenance.json"
 MODEL_FILE = "model.json"
@@ -87,8 +94,43 @@ def safetensors_keys(path: Path) -> list[str]:
     return [k for k in safetensors_header(path)[0] if k != "__metadata__"]
 
 
+def classifier_meta(head_dir: Path) -> dict:
+    """A staged head's ``classifier.json``: ``labels`` (row order) and ``layer``
+    (None reads the final hidden state)."""
+    return json.loads((head_dir / HEAD_META_FILE).read_text())
+
+
+def head_shape(head_dir: Path) -> tuple[int, int]:
+    """``(labels, hidden)`` of a head, from its header; raises if malformed."""
+    header, _ = safetensors_header(head_dir / HEAD_FILE)
+    tensors = {k: v["shape"] for k, v in header.items() if k != "__metadata__"}
+    if set(tensors) != {"weight", "bias"}:
+        raise ValueError(f"{HEAD_FILE} must hold exactly weight and bias")
+    (labels, hidden), (bias,) = tensors["weight"], tensors["bias"]
+    if bias != labels:
+        raise ValueError(f"{HEAD_FILE}: {labels} weight rows but {bias} biases")
+    return labels, hidden
+
+
+def classifier_reason(head_dir: Path) -> str | None:
+    """None if the folder is a usable classifier head, else why not."""
+    if not (head_dir / HEAD_FILE).is_file():
+        return f"no {HEAD_FILE}"
+    try:
+        labels = classifier_meta(head_dir).get("labels")
+        rows, _ = head_shape(head_dir)
+    except (OSError, ValueError, KeyError, struct.error):
+        return f"unreadable {HEAD_FILE} or {HEAD_META_FILE}"
+    if not labels or len(labels) != rows:
+        return f"{HEAD_META_FILE} labels do not match the head's {rows} rows"
+    return None
+
+
 def detect_technology(adapter_dir: Path) -> tuple[str | None, str | None]:
     """``(technology, None)`` for a usable checkpoint, else ``(None, reason)``."""
+    if (adapter_dir / HEAD_FILE).is_file():
+        reason = classifier_reason(adapter_dir)
+        return (None, reason) if reason else ("classifier", None)
     config_path = adapter_dir / CONFIG_FILE
     weights_path = adapter_dir / WEIGHTS_FILE
     if not config_path.is_file():
@@ -269,13 +311,19 @@ def fingerprint(adapter_dir: Path) -> dict:
     try:
         provenance = json.loads((adapter_dir / PROVENANCE_FILE).read_text())
     except (OSError, ValueError):
-        return {}
+        provenance = {}
+    files = provenance.get("files", {})
     found = {
-        "weights_sha256": provenance.get("files", {}).get(WEIGHTS_FILE),
+        "weights_sha256": files.get(WEIGHTS_FILE) or files.get(HEAD_FILE),
         "rank": provenance.get("rank"),
         "cross_rank": provenance.get("cross_rank"),
         "staged_at": provenance.get("staged_at"),
     }
+    if (adapter_dir / HEAD_FILE).is_file():  # a head names its labels itself
+        try:
+            found["labels"] = classifier_meta(adapter_dir).get("labels")
+        except (OSError, ValueError):
+            pass
     return {k: v for k, v in found.items() if v is not None}
 
 
@@ -315,6 +363,19 @@ def routing_reason(adapter_dir: Path) -> str | None:
     if shared is None:
         return "SR adapter: expert routing mode unknown"
     return None if shared is True else "SR adapter routes experts on its own"
+
+
+def labels_reason(head_dir: Path, head: Classifier) -> str | None:
+    """None if a staged head's labels are the intrinsic's, in its order.
+
+    The head's rows mean its labels in order, and the scorer maps them by
+    name, so a head trained on other labels, or ordered otherwise, would
+    score as if its verdicts were swapped.
+    """
+    labels = tuple(classifier_meta(head_dir).get("labels") or ())
+    if labels != head.labels:
+        return f"classifier head labels {list(labels)}, not {list(head.labels)}"
+    return None
 
 
 def check_adapter(adapter_dir: Path, expected_tech: str) -> str | None:
@@ -367,12 +428,16 @@ def discover(
         ev = eval_path(bench_root, intrinsic.id)
         for tech in spec.technologies:
             ad = adapter_dir(bench_root, intrinsic.id, tech.id)
-            if not ev.is_file():
+            if tech.id == CLASSIFIER and intrinsic.classifier is None:
+                reason = NO_CLASSIFIER
+            elif not ev.is_file():
                 reason = "eval set not staged"
             elif not ad.is_dir():
                 reason = "adapter not staged"
             else:
                 reason = check_adapter(ad, tech.id)
+                if reason is None and tech.id == CLASSIFIER:
+                    reason = labels_reason(ad, intrinsic.classifier)
                 if reason is None and tech.id == "sr":
                     reason = shared_kv_reason(ad)
                 if reason is None and tech.id == "sr" and spec.model.shared_routing:

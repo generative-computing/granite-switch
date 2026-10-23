@@ -35,7 +35,7 @@ import traceback
 from pathlib import Path
 
 from . import staged
-from .common import RESCORE_BEGIN, RESCORE_END, format_block, load_spec
+from .common import CLASSIFIER, RESCORE_BEGIN, RESCORE_END, format_block, load_spec
 from .run_benchmark import now, score_cell
 from .scorers import ScorerUnavailable
 
@@ -95,6 +95,7 @@ def rescore(entry: dict, work_root: Path, bench_root: Path, spec, stamp: str) ->
             answers,
             staged.eval_path(bench_root, intrinsic.id).parent,
             run_dir / "scores" / intrinsic.id / f"{column}.rescore-{stamp}.json",
+            head=intrinsic.classifier if column == CLASSIFIER else None,
         )
     except ScorerUnavailable as e:
         result["error"] = f"scorer unavailable ({e})"

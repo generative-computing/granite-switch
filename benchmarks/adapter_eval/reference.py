@@ -56,6 +56,7 @@ from . import release as releases
 from . import staged
 from .common import (
     BASE_COLUMN,
+    CLASSIFIER,
     REFERENCE_COLUMNS,
     REFERENCE_LIBRARIES,
     error,
@@ -328,7 +329,10 @@ def main(argv: list[str] | None = None) -> int:
     jobs = []
     for intrinsic_id, column, adapter, ev in runnable:
         key = f"{intrinsic_id}/{column}"
-        if adapter is not None:
+        if adapter is not None and column == CLASSIFIER:
+            # A head is no LoRA: nothing to convert or check against the base.
+            run_meta["adapters"][key] = staged.fingerprint(adapter)
+        elif adapter is not None:
             run_meta["adapters"][key] = staged.fingerprint(adapter)
             dest = copies / intrinsic_id / column
             try:
@@ -375,7 +379,10 @@ def main(argv: list[str] | None = None) -> int:
                     work / "generate" / intrinsic_id / f"{column}.status.json"
                 ),
                 "limit": args.limit,
-                "max_new_tokens": spec.intrinsic(intrinsic_id).max_new_tokens,
+                # A head's verdict is one label token (hf_generate.py).
+                "max_new_tokens": 1
+                if column == CLASSIFIER
+                else spec.intrinsic(intrinsic_id).max_new_tokens,
                 "max_model_len": args.max_model_len,
                 "token_budget": args.token_budget,
                 "max_batch": args.max_batch,
@@ -409,11 +416,13 @@ def main(argv: list[str] | None = None) -> int:
             continue
         gpu = gpu or st.get("gpu")
         try:
+            intrinsic = spec.intrinsic(intrinsic_id)
             metrics = score_cell(
-                spec.intrinsic(intrinsic_id).scorer,
+                intrinsic.scorer,
                 Path(job["out_path"]),
                 Path(job["eval_path"]).parent,
                 work / "scores" / intrinsic_id / f"{column}.json",
+                head=intrinsic.classifier if column == CLASSIFIER else None,
             )
         except ScorerUnavailable as e:
             cells[intrinsic_id][column] = skipped(str(e))

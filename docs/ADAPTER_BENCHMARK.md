@@ -19,13 +19,15 @@ The benchmark catches this. For one commit it:
 Nothing is trained. The adapters and eval sets are fixed ("staged") once, so
 two commits are always compared on the same inputs.
 
-Each adapter is measured in three forms:
+Each adapter is measured in three forms, and some intrinsics also have a
+classifier head:
 
 | Technology | Configuration |
 |---|---|
 | LoRA | all-linear, r=16 |
 | aLoRA (activated LoRA) | all-linear, r=32 |
 | SR (Shadow Residual) | q,o + MLP, r=32, cross-stream r=32, shared KV |
+| Classifier | a linear head on the frozen base model's final hidden state, composed as a classifier slot (granite-switch PR #134) |
 
 The base model, the intrinsics and their headline metrics are listed in
 [adapters.yaml](../benchmarks/adapter_eval/adapters.yaml).
@@ -33,17 +35,21 @@ The base model, the intrinsics and their headline metrics are listed in
 ### Columns
 
 The table has two sections. **Task Quality** is how well the adapters do
-their tasks: per intrinsic, 10 columns in four groups:
+their tasks: per intrinsic, 13 columns in four groups:
 
 | Group | Columns | What it shows | Per commit |
 |---|---|---|---|
-| granite-switch (vLLM) | LoRA, aLoRA, SR | the adapters composed with the commit, under its vLLM backend | yes |
-| HF + PEFT | LoRA, aLoRA, SR | the same checkpoints without granite-switch, with Hugging Face transformers and PEFT | no |
+| granite-switch (vLLM) | LoRA, aLoRA, SR, Classifier | the adapters composed with the commit, under its vLLM backend | yes |
+| HF + PEFT | LoRA, aLoRA, SR, Classifier | the same checkpoints without granite-switch, with Hugging Face transformers and PEFT (a classifier head: on the HF base model's final hidden state) | no |
 | Base | one | the base model with no adapter, told the answer format | no |
-| Gain ratio | LoRA, aLoRA, SR | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
+| Gain ratio | LoRA, aLoRA, SR, Classifier | (granite-switch − Base) ÷ (HF + PEFT − Base) | yes |
+
+An intrinsic without a classifier head shows `—` ("no classifier head for this
+task") in that column, on every row. See [Classifier heads](#classifier-heads).
 
 **Serving Quality - Throughput** is how fast they are served, per
-technology rather than per intrinsic, in two blocks of 9 columns:
+technology rather than per intrinsic (not the classifier: it decodes nothing),
+in two blocks of 9 columns:
 
 | Block | Each cell |
 |---|---|
@@ -87,9 +93,10 @@ HF + PEFT beats the base model by less than 1 point, the cell shows `n/a`.
   versions (vLLM, torch, transformers), the GPU, each adapter checkpoint (ranks
   and the start of its weights checksum, never its storage path), whether the
   composed checkpoints held classifier slots, and the reference run.
-  - A classifier slot holds a classifier head instead of an adapter. The
-    benchmark's manifests never ask for one, so the box says "none", or names
-    each checkpoint the composer gave one anyway.
+  - A classifier slot holds a classifier head instead of an adapter. The box
+    names each composed checkpoint that held one, and how many: those of the
+    Classifier column ([Classifier heads](#classifier-heads)), and any the
+    composer gave a checkpoint unasked.
   - The run reads this from each composed checkpoint's config
     (`adapter_kinds`). A row from before that says "none requested".
 - A diagram at the top shows the pipeline: pick adapters, compose, evaluate,
@@ -107,7 +114,8 @@ submit.sh bench main
                                        convert SR activation (if needed)
                                        rename MLP weights (if needed)
                                        check weight names against the base
-                                       compose #1: LoRA + aLoRA adapters
+                                       compose #1: LoRA + aLoRA adapters,
+                                         and the classifier heads
                                        compose #2: SR adapters
                                        generate (vLLM, greedy) per adapter
                                        score, print the results block
@@ -903,6 +911,75 @@ scored again; older rows stay as they were. Some cells are left as they are:
   `rescore` tries it again.
 - a cell whose row ran again in the meantime. Its new run already used the
   new scorer.
+
+## Classifier heads
+
+A classifier slot (granite-switch PR #134) holds a linear head instead of an
+adapter. Its control token, placed last in the prompt, makes the model emit
+one label word, the head's verdict on the final hidden state there. The
+**Classifier** column benchmarks one such head per intrinsic that has one.
+The PR calls them "classifier slots" up to 861b917 and "activation probe
+slots" since aa7dd88; the benchmark composes a head under the name the
+commit's composer uses.
+
+**Which intrinsics, and what labels.** An intrinsic's `classifier` entry in
+[adapters.yaml](../benchmarks/adapter_eval/adapters.yaml) lists its labels, in
+the head's row order, and the answer each means to the intrinsic's scorer:
+
+| Intrinsic | Labels | Scored as |
+|---|---|---|
+| Answerability | `yes`, `no` | `"answerable"`, `"unanswerable"`: those words are several tokens, a label must be one |
+| Guardian-core | `yes`, `no` | as they are |
+
+The other intrinsics have no head; their Classifier cells say so.
+
+**How a head is trained.** On the frozen base model, from the LoRA / aLoRA
+adapters' own training rows, by the team tools' `launch.py train --model <id>
+--heads` (one GPU, followed):
+
+1. Each row is rendered as the benchmark renders the classifier column, with
+   no generation prompt and the base's role-open marker last
+   (`prompts.classifier_ids`), where a composed model embeds its classifier
+   marker. A row whose conversation is an eval row is left out.
+2. The row's answer is read by the intrinsic's own scorer and mapped to a
+   label.
+3. The final, normed hidden state at the last token is the feature; a
+   multinomial logistic regression with L2 (picked on the val rows) is the
+   head, saved as `classifier_head.safetensors` (`weight [labels, hidden]`,
+   `bias`) and `classifier.json` (its labels).
+4. A head that does no better than the majority label on the val rows fails
+   its checks and is never picked.
+
+**Staging.** A head is picked and staged like an adapter: its run's
+`checkpoints/` in the selection, under the `classifier` technology. Staging
+copies the head, its labels and an `io.yaml`, and refuses labels that are not
+the intrinsic's, in order.
+
+**How it runs.**
+- It is composed into the LoRA / aLoRA checkpoint, with its labels and the
+  composer's kind: `kind: classifier`, or `kind: probe` with the head as
+  `probe_head.safetensors` (a link to the staged head). The run records which
+  (`classifier_slot_kind`). A model with no adapter staged (the 8B, the 30B)
+  composes its heads beside a filler LoRA, whose delta is zero and which no
+  prompt selects: neither composer can compose heads alone.
+- Its prompts render with `adapter_name`, as an adapter's do, and must end in
+  its marker. One token is generated, with no CUDA graphs (an engine of its
+  own): a classifier slot's FULL CUDA-graph replay differs from eager under
+  vLLM 0.26 (granite-switch 1a78c29).
+- The saved answers are the label words; scoring maps them to the scorer's
+  answers, so a mapping change is a rescore.
+- A commit whose composer has no classifier slots skips the column ("no
+  classifier slots in this commit"). Until PR #134 is merged, that is every
+  commit on main: the column's rows are of the PR's head.
+- Its reference cell is the same head on the HF base model's final hidden
+  state, with no granite-switch: its gain ratio is the share of the head's
+  gain granite-switch keeps.
+
+**Adding the column's cells to a row.** `submit.sh bench <ref> --only
+answerability/classifier,guardian_core/classifier` runs just those cells and
+merges them into the commit's row; `submit.sh reference --only
+answerability/classifier,guardian_core/classifier` fills their reference
+cells.
 
 ## Adding an intrinsic or an adapter
 

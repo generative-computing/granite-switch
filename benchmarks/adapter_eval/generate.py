@@ -29,6 +29,12 @@ Prompts are rendered by the composed tokenizer's chat template with
 ``adapter_name``, in the job's document style and chat-template options
 (``prompts.py``). An unknown name silently renders the base-model prompt, so
 every prompt is checked to contain the adapter's control token.
+
+A classifier job (``"classifier": true``) names its head the same way: the
+template drops the generation prompt and appends the head's marker as the
+last token, where the head reads. Its prompts must end in that marker; the
+verdict is the first generated token, the label word. (granite-switch PR #134
+also took ``classifier_name`` up to 861b917; ``adapter_name`` works in both.)
 """
 
 from __future__ import annotations
@@ -62,6 +68,10 @@ def render(tok, row: dict, job: dict, control_token_id: int | None) -> list[int]
     ids = list(tok(text, add_special_tokens=False).input_ids)
     if control_token_id is not None and control_token_id not in ids:
         raise ControlTokenMissing(f"control token id for {adapter_name} not in prompt")
+    if job.get("classifier") and (
+        control_token_id is None or ids[-1] != control_token_id
+    ):
+        raise ControlTokenMissing(f"classifier marker for {adapter_name} is not last")
     return ids
 
 
@@ -189,7 +199,10 @@ def run(spec: dict) -> dict:
                 completion = out.outputs[0]
                 row["generated_content"] = completion.text
                 row["prompt_tokens"] = len(prompt["prompt_token_ids"])
-                truncated += completion.finish_reason == "length"
+                # A classifier's one-token answer always stops at its length.
+                truncated += completion.finish_reason == "length" and not job.get(
+                    "classifier"
+                )
             write_jsonl(Path(job["out_path"]), kept)
             status["jobs"][key].update(
                 n_generated=len(kept),

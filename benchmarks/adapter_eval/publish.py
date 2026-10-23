@@ -59,7 +59,9 @@ from . import stage
 from .common import (
     BASE_COLUMN,
     BEGIN_MARKER,
+    CLASSIFIER,
     END_MARKER,
+    NO_CLASSIFIER,
     REFERENCE_BEGIN,
     REFERENCE_COLUMNS,
     REFERENCE_END,
@@ -186,7 +188,7 @@ def throughput_done(row: dict, spec: Spec) -> bool:
     True for a model that does not measure it (``serving`` in adapters.yaml)."""
     if not spec.model.measures(THROUGHPUT):
         return True
-    for tech in spec.technologies:
+    for tech in spec.serving_technologies:
         entry = (row.get("throughput") or {}).get(tech.id)
         if entry is None or is_error(entry):
             return False
@@ -214,7 +216,7 @@ def switching_done(row: dict, spec: Spec) -> bool:
     has. True for a model that does not measure it."""
     if not spec.model.measures(SWITCHING):
         return True
-    for tech in spec.technologies:
+    for tech in spec.serving_technologies:
         entry = (row.get(SWITCHING) or {}).get(tech.id)
         if entry is None or is_error(entry):
             return False
@@ -235,12 +237,20 @@ def switching_speedup(row: dict, tech_id: str, spec: Spec) -> float | None:
     return None if not gs or native is None else native / gs
 
 
+def has_cell(intrinsic, column: str) -> bool:
+    """Whether an intrinsic has a cell in a column: the classifier column only
+    for an intrinsic with a classifier head (adapters.yaml)."""
+    return column != CLASSIFIER or intrinsic.classifier is not None
+
+
 def missing_cells(row: dict, spec: Spec) -> list[str]:
     """What keeps ``row`` from being a cache hit: ``intrinsic/tech`` cells,
     ``throughput`` and ``switching``."""
     out = []
     for intrinsic in spec.intrinsics:
         for tech in spec.technologies:
+            if not has_cell(intrinsic, tech.id):
+                continue
             cell = row["cells"].get(intrinsic.id, {}).get(tech.id)
             if cell is None or is_error(cell):
                 out.append(f"{intrinsic.id}/{tech.id}")
@@ -263,8 +273,9 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
     """Put a run's results into ``data`` and return the stored row.
 
     A full run replaces the commit's row for its model. An ``--only`` run
-    replaces just those intrinsics, and the throughput if it ran it, inside
-    the existing row of the same ``bench_version``.
+    replaces just those intrinsics, or ``intrinsic/technology`` cells, and the
+    throughput if it ran it, inside the existing row of the same
+    ``bench_version``.
     """
     spec = spec.for_model(spec.model_of(results))
     refuse_private(spec)
@@ -284,6 +295,11 @@ def merge(data: dict, results: dict, spec: Spec) -> dict:
             if picked in (THROUGHPUT, SWITCHING):
                 if picked in results:  # absent when the model does not measure it
                     old[picked] = results[picked]
+            elif "/" in picked:
+                intrinsic_id, tech_id = picked.split("/", 1)
+                new = results["cells"].get(intrinsic_id, {}).get(tech_id)
+                if new is not None:
+                    old["cells"].setdefault(intrinsic_id, {})[tech_id] = new
             else:
                 old["cells"][picked] = results["cells"][picked]
         old.setdefault("updates", []).append(run)
@@ -314,6 +330,8 @@ def reference_missing(reference: dict, spec: Spec) -> list[str]:
     out = []
     for intrinsic in spec.intrinsics:
         for column in REFERENCE_COLUMNS:
+            if not has_cell(intrinsic, column):
+                continue
             cell = reference["cells"].get(intrinsic.id, {}).get(column)
             if cell is None or is_error(cell):
                 out.append(f"{intrinsic.id}/{column}")
@@ -422,6 +440,12 @@ def _stale(cell: dict, intrinsic) -> bool:
     return is_scored(cell) and cell.get("score_version", 1) < intrinsic.score_version
 
 
+def release_technologies(spec: Spec):
+    """The technologies a release can hold: a published checkpoint has no
+    classifier head, so that column is not in any release."""
+    return tuple(t for t in spec.technologies if t.id != CLASSIFIER)
+
+
 def release_missing(row: dict | None, spec: Spec) -> list[str]:
     """What keeps a release's row from being a cache hit: ``intrinsic/tech``
     cells (one scored with an older score_version runs again; releases are not
@@ -429,7 +453,7 @@ def release_missing(row: dict | None, spec: Spec) -> list[str]:
     row = row or {}
     out = []
     for intrinsic in spec.intrinsics:
-        for tech in spec.technologies:
+        for tech in release_technologies(spec):
             cell = row.get("cells", {}).get(intrinsic.id, {}).get(tech.id)
             if cell is None or is_error(cell) or _stale(cell, intrinsic):
                 out.append(f"{intrinsic.id}/{tech.id}")
@@ -454,6 +478,8 @@ def release_reference_missing(row: dict | None, spec: Spec) -> list[str]:
     out = []
     for intrinsic in spec.intrinsics:
         for column in REFERENCE_COLUMNS:
+            if column == CLASSIFIER:  # not in any release (release_technologies)
+                continue
             cell = (
                 reference["cells"].get(intrinsic.id, {}).get(column)
                 if current
@@ -1418,8 +1444,15 @@ def _task_cells(
         mark = f"in-{intrinsic.id}"
         by_tech = gs_cells.get(intrinsic.id, {})
         by_column = {} if ref_cells is None else ref_cells.get(intrinsic.id, {})
-        gs = [by_tech.get(t.id) for t in techs]
-        ref = [by_column.get(t.id) for t in techs]
+        # An intrinsic with no classifier head says so in that column, on
+        # every row, those from before the column existed too.
+        none = {
+            t.id: {"skipped": NO_CLASSIFIER}
+            for t in techs
+            if not has_cell(intrinsic, t.id)
+        }
+        gs = [none.get(t.id) or by_tech.get(t.id) for t in techs]
+        ref = [none.get(t.id) or by_column.get(t.id) for t in techs]
         base = by_column.get(BASE_COLUMN)
         scored = [
             v
@@ -1464,11 +1497,12 @@ def _task_cells(
 
 
 def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
-    techs = spec.technologies
-    n = len(techs)
-    # The serving blocks the model measures; each is 3 groups of n columns.
+    n = len(spec.technologies)
+    # The serving blocks the model measures; each is 3 groups of a column per
+    # technology they measure (not a classifier: it answers in one token).
     blocks = [b for b in (THROUGHPUT, SWITCHING) if spec.model.measures(b)]
-    serving_width = 3 * n * len(blocks)
+    techs = spec.serving_technologies
+    serving_width = 3 * len(techs) * len(blocks)
     sizes = {"gs": n, "ref": n, "base": 1, "ratio": n}
     width = sum(sizes.values())
     count = len(spec.intrinsics)
@@ -1499,12 +1533,12 @@ def _model_table(rows: list[dict], reference: dict | None, spec: Spec) -> str:
     }
     for block, unit in (labels[b] for b in blocks):
         head[1].append(
-            f'<th class="grp-thr i-start" colspan="{3 * n}">{_esc(block)}<br>'
+            f'<th class="grp-thr i-start" colspan="{3 * len(techs)}">{_esc(block)}<br>'
             f"<small>{_esc(unit)}</small></th>"
         )
         for label in (*ENGINES.values(), SPEEDUP_LABEL):
             head[2].append(
-                f'<th class="grp-thr start" colspan="{n}">{_esc(label)}</th>'
+                f'<th class="grp-thr start" colspan="{len(techs)}">{_esc(label)}</th>'
             )
             for k, tech in enumerate(techs):
                 first = "start" if k == 0 else ""
@@ -1856,7 +1890,7 @@ def _release_table(rows: list[dict], spec: Spec) -> str:
 FLOW = f"""<figure class="flow">
 <div class="lane"><div class="tag">Every commit</div>
 <div class="step gs"><b>1. Pick adapters</b><span>trained LoRA, aLoRA and SR
-checkpoints, staged once per base model</span></div><div class="arrow">&rarr;</div>
+checkpoints and classifier heads, staged once per base model</span></div><div class="arrow">&rarr;</div>
 <div class="step gs"><b>2. Compose</b><span>the commit's composer builds one
 checkpoint holding every adapter</span></div><div class="arrow">&rarr;</div>
 <div class="step gs"><b>3. Evaluate</b><span>its vLLM backend answers each eval
@@ -1951,14 +1985,15 @@ throughput in tokens per second, agents' time to finish in seconds.</p>
 <section class="notes">
 <h2>Reading the table</h2>
 <ul class="note">
-<li>Each intrinsic shows its headline metric. The best of its seven accuracy
+<li>Each intrinsic shows its headline metric. The best of its nine accuracy
 columns is <b>bold</b>. Hover a cell for all its metrics, or for why it is
 empty.</li>
 <li><b>{_esc(ENGINE_LABEL)}</b>: the adapters composed into the base model by
 each commit's composer, and served by its vLLM backend.</li>
 <li><b>{_esc(REFERENCE_LABEL)}</b>: the same adapter checkpoints without
 granite-switch, loaded with Hugging Face transformers and PEFT. SR runs on a
-standalone Hugging Face implementation of the Shadow Residual model.</li>
+standalone Hugging Face implementation of the Shadow Residual model. A
+classifier head runs on the Hugging Face base model's final hidden state.</li>
 <li><b>{_esc(BASE_LABEL)}</b>: the base model with no adapter. A final
 instruction tells it the answer format each scorer expects, which only the
 adapters were trained on.</li>
@@ -1968,6 +2003,13 @@ model that granite-switch keeps. <b>n/a</b>: the adapter gains under
 divide by.</li>
 <li><b>—</b> no adapter or eval set for this cell; <b>·</b> not run;
 <b>error</b> the run failed. Greyed rows used an older benchmark version.</li>
+<li><b>Classifier</b>: a linear head on the base model's final hidden state at
+the end of the conversation, trained on the frozen base model, composed as a
+classifier slot (granite-switch PR #134, which now calls it an activation
+probe) beside the LoRA and aLoRA adapters.
+Its answer is one label word, the first generated token; yes / no, read as
+answerable / unanswerable for answerability. Only some intrinsics have one; it
+is not timed, as it decodes nothing.</li>
 <li><b>{_esc(TASK_LABEL)}</b> is how well the adapters do their tasks;
 <b>{_esc(SERVING_LABEL)}</b> how fast they are served, per technology rather
 than per intrinsic, both engines on the same GPU one after the other in each
@@ -2067,10 +2109,19 @@ def summary(
     ]
     for intrinsic in spec.intrinsics:
         headline = intrinsic.headline
-        gs = row["cells"].get(intrinsic.id, {})
-        ref = {} if gap else reference["cells"].get(intrinsic.id, {})
+        # No classifier head: "—" in that column, as on the page.
+        none = {
+            t.id: {"skipped": NO_CLASSIFIER}
+            for t in techs
+            if not has_cell(intrinsic, t.id)
+        }
+        gs = {**row["cells"].get(intrinsic.id, {}), **none}
+        ref = {**({} if gap else reference["cells"].get(intrinsic.id, {})), **none}
         ratios = []
         for t in techs:
+            if t.id in none:
+                ratios.append("—")
+                continue
             values = [
                 _headline(gs.get(t.id), headline),
                 _headline(ref.get(t.id), headline),
@@ -2090,12 +2141,16 @@ def summary(
     if gap:
         lines += ["", f"No {REFERENCE_LABEL} and {BASE_LABEL} columns yet: {gap}."]
 
+    # The speed lines: only the technologies the serving blocks measure.
+    serving = spec.serving_technologies
+    serving_labels = " / ".join(t.label for t in serving)
+
     def speeds(engine: str) -> str:
         values = [
             "—"
             if not has_engine(t.id, engine)
             else tokens_per_s(row, t.id, engine, spec)
-            for t in techs
+            for t in serving
         ]
         return " / ".join(
             "·" if v is None else v if isinstance(v, str) else f"{v:,.0f}"
@@ -2109,7 +2164,7 @@ def summary(
             else "·"
             if (v := p95_seconds(row, t.id, engine, spec)) is None
             else f"{v:,.0f}"
-            for t in techs
+            for t in serving
         )
 
     def percents(ratios: list[float | None]) -> str:
@@ -2119,23 +2174,23 @@ def summary(
             else "·"
             if r is None
             else percent_faster(r)
-            for t, r in zip(techs, ratios, strict=True)
+            for t, r in zip(serving, ratios, strict=True)
         )
 
     if spec.model.measures(THROUGHPUT):
         lines += [
             "",
-            f"{decode_label(spec)}, tokens/s, {labels}: {ENGINE_LABEL} {speeds('gs')}; "
+            f"{decode_label(spec)}, tokens/s, {serving_labels}: {ENGINE_LABEL} {speeds('gs')}; "
             f"{NATIVE_LABEL} {speeds('native')}; {SPEEDUP_LABEL.lower()} "
-            + percents([speedup(row, t.id, spec) for t in techs]),
+            + percents([speedup(row, t.id, spec) for t in serving]),
         ]
     if spec.model.measures(SWITCHING):
         lines += [
             "",
-            f"{switching_label(spec)}, p95 seconds to complete, {labels}: "
+            f"{switching_label(spec)}, p95 seconds to complete, {serving_labels}: "
             f"{ENGINE_LABEL} {seconds('gs')}; {NATIVE_LABEL} {seconds('native')}; "
             f"{SPEEDUP_LABEL.lower()} "
-            + percents([switching_speedup(row, t.id, spec) for t in techs]),
+            + percents([switching_speedup(row, t.id, spec) for t in serving]),
         ]
     return "\n".join(lines)
 

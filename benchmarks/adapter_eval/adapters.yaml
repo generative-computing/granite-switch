@@ -216,6 +216,14 @@ technologies:
   - id: sr
     label: SR
     source: "Shadow Residual (q,o + MLP, r=32, cross r=32, shared KV)"
+  # A classifier slot: a linear head on the frozen base model's final hidden
+  # state at the end of the prompt, composed into the LoRA / aLoRA checkpoint,
+  # its verdict emitted as one label word. Only intrinsics with a `classifier`
+  # entry have one; it answers in one token, so it has no serving blocks.
+  - id: classifier
+    label: Classifier
+    source: "Linear head on the final hidden state (frozen base, logistic regression)"
+    serving: false
 
 # Decode throughput, the Throughput columns: per technology, granite-switch
 # against stock vLLM serving the same adapters (native-lora), measured by the
@@ -278,6 +286,12 @@ intrinsics:
     headline: accuracy
     headline_label: Accuracy
     max_new_tokens: 200
+    # Its classifier head's labels, in the head's row order, and each as the
+    # scorer reads an answer. A label must be one token of the base model's
+    # tokenizer, and "answerable" / "unanswerable" are several.
+    classifier:
+      labels: ["yes", "no"]
+      to_answer: {"yes": '"answerable"', "no": '"unanswerable"'}
   - id: query_clarification
     name: Query clarification
     scorer: query_clarification
@@ -290,6 +304,10 @@ intrinsics:
     headline: accuracy
     headline_label: Accuracy
     max_new_tokens: 24
+    # yes: the text is a risk; no: it is not. The scorer reads them as they are.
+    classifier:
+      labels: ["yes", "no"]
+      to_answer: {"yes": "yes", "no": "no"}
   - id: requirement_check
     name: Requirement check
     scorer: requirements

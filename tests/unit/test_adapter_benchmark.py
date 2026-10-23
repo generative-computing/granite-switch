@@ -225,8 +225,15 @@ def switching_for(spec, gs: float = 40.0, native: float = 60.0) -> dict:
 
 
 def cells_for(spec, value: float = 0.5) -> dict:
+    """A scored cell per intrinsic and technology; the classifier column of an
+    intrinsic with no classifier head skipped, as a run leaves it."""
     return {
-        i.id: {t.id: {i.headline: value, "n": 10} for t in spec.technologies}
+        i.id: {
+            t.id: {i.headline: value, "n": 10}
+            if t.id != common.CLASSIFIER or i.classifier
+            else common.skipped(common.NO_CLASSIFIER)
+            for t in spec.technologies
+        }
         for i in spec.intrinsics
     }
 
@@ -267,9 +274,12 @@ def main_tables(page: str) -> str:
 
 
 def test_spec_loads_and_covers_every_compose_group():
-    assert {t.id for t in SPEC.technologies} == {"lora", "alora", "sr"}
+    assert {t.id for t in SPEC.technologies} == {"lora", "alora", "sr", "classifier"}
     assert common.compose_group("lora") == common.compose_group("alora")
     assert common.compose_group("sr") != common.compose_group("lora")
+    # A classifier slot rides in the LoRA / aLoRA checkpoint, and is not timed.
+    assert common.compose_group("classifier") == common.compose_group("lora")
+    assert [t.id for t in SPEC.serving_technologies] == ["lora", "alora", "sr"]
     assert common.adapter_name("answerability", "sr") == "answerability_sr"
     for intrinsic in SPEC.intrinsics:
         get_scorer(intrinsic.scorer)  # every intrinsic has a scorer
@@ -770,7 +780,12 @@ def test_render_cells_and_escaping():
 def reference_for(value: float = 0.5, cells: dict | None = None, **run) -> dict:
     if cells is None:
         cells = {
-            i.id: {c: {i.headline: value, "n": 10} for c in common.REFERENCE_COLUMNS}
+            i.id: {
+                c: {i.headline: value, "n": 10}
+                if c != common.CLASSIFIER or i.classifier
+                else common.skipped(common.NO_CLASSIFIER)
+                for c in common.REFERENCE_COLUMNS
+            }
             for i in SPEC.intrinsics
         }
     return {
@@ -909,11 +924,12 @@ def test_render_reference_columns():
 
     page = main_tables(publish.render(page_data(row, old, reference=ref), SPEC))
 
-    # Every model has its table: Task Quality, 10 columns per intrinsic in four
-    # groups; then Serving Quality, two throughput blocks of 9 columns.
+    # Every model has its table: Task Quality, 13 columns per intrinsic in four
+    # groups; then Serving Quality, two throughput blocks of 9 columns (the
+    # classifier answers in one token: no serving columns).
     n = len(SPEC.intrinsics) * len(SPEC.models)
     tables = len(SPEC.models)
-    assert page.count('colspan="10"') == n
+    assert page.count('colspan="13"') == n
     assert page.count(f">{publish.TASK_LABEL}</th>") == tables
     assert page.count(f">{publish.SERVING_LABEL}</th>") == tables
     assert page.count(f">{publish.ENGINE_LABEL}</th>") == n + 2 * tables
@@ -940,7 +956,7 @@ def test_render_reference_columns():
     # Stock vLLM has no SR: no number and no speedup.
     assert 'title="stock vLLM has no SR implementation">—</td>' in page
     assert 'title="no stock-vLLM SR to compare with">—</td>' in page
-    # The best of the 7 accuracy columns can be a reference column.
+    # The best of the 9 accuracy columns can be a reference column.
     best = (
         '<td class="num best grp-ref in-answerability" title="accuracy=0.9000, n=10">'
         "90.0</td>"
@@ -1008,7 +1024,7 @@ def test_render_has_a_tab_per_model_with_its_own_rows():
     # Column-group switches, and what they need to resize the headers.
     for group in publish.GROUP_LABELS:
         assert f'data-group="{group}"' in page
-    assert 'data-gs="3" data-ref="3" data-base="1" data-ratio="3"' in page
+    assert 'data-gs="4" data-ref="4" data-base="1" data-ratio="4"' in page
 
 
 def test_page_filters():
@@ -1027,9 +1043,9 @@ def test_page_filters():
         mark = f"in-{intrinsic.id}"
         assert f'data-intrinsic="{intrinsic.id}" checked> {intrinsic.name}' in controls
         # Its filter hides every cell marked with it: its header names it, and
-        # each of its 10 columns in a row carries the mark.
+        # each of its 13 columns in a row carries the mark.
         assert f"table.hide-{mark} .{mark} {{ display: none; }}" in page
-        assert f'{mark}" colspan="10"' in page
+        assert f'{mark}" colspan="13"' in page
         assert f'data-intrinsic="{intrinsic.id}">{intrinsic.name}<br>' in page
         assert row.count(f'{mark}"') == 3 * len(SPEC.technologies) + 1
     # Task Quality's header is sized by the script, to what is left under it,
@@ -1214,8 +1230,22 @@ def test_summary_for_the_pr_comment():
     answerability = next(line for line in lines if line.startswith("| Answerability"))
     # granite-switch, HF + PEFT, Base, then (0.8 - 0.5) / (0.9 - 0.5) = 0.75.
     assert answerability == (
-        "| Answerability | 80.0 / 80.0 / — | 90.0 / 90.0 / 90.0 | 50.0 "
-        "| 0.75 / 0.75 / · |"
+        "| Answerability | 80.0 / 80.0 / — / 80.0 | 90.0 / 90.0 / 90.0 / 90.0 | 50.0 "
+        "| 0.75 / 0.75 / · / 0.75 |"
+    )
+    # An intrinsic with no classifier head has none to show, as on the page,
+    # also in a row and reference from before the column, which hold no cell.
+    for by_column in (cells["requirement_check"], ref["cells"]["requirement_check"]):
+        del by_column[common.CLASSIFIER]
+    text = publish.summary(
+        page_data(results_for(cells=cells), reference=ref), SPEC, SHA_A, "ran"
+    )
+    requirements = next(
+        line for line in text.splitlines() if line.startswith("| Requirement")
+    )
+    assert requirements == (
+        "| Requirement check | 80.0 / 80.0 / 80.0 / — | 90.0 / 90.0 / 90.0 / — "
+        "| 50.0 | 0.75 / 0.75 / 0.75 / — |"
     )
     # Then both throughput blocks, per technology.
     assert lines[-3] == (
@@ -1262,9 +1292,11 @@ def test_rescore_targets_are_the_cells_scored_with_an_older_version():
     targets = publish.rescore_targets(data, bumped)
     assert [(t["kind"], t["column"]) for t in targets] == [
         ("row", "alora"),
+        ("row", "classifier"),
         ("row", "lora"),
         ("reference", "alora"),
         ("reference", "base"),
+        ("reference", "classifier"),
         ("reference", "lora"),
         ("reference", "sr"),
     ]  # the row's error cell needs generating, not scoring
@@ -1275,7 +1307,7 @@ def test_rescore_targets_are_the_cells_scored_with_an_older_version():
         "finished": "2026-10-01T10:00:00Z",
         "sha": SHA_A,
     }
-    assert targets[2]["run_ts"] == "20261001T1100Z"
+    assert targets[3]["run_ts"] == "20261001T1100Z"  # the first reference target
     # --only scores an intrinsic again whatever its version.
     forced = publish.rescore_targets(data, SPEC, ["guardian_core"])
     assert {t["intrinsic"] for t in forced} == {"guardian_core"}
@@ -2357,9 +2389,10 @@ def test_run_records_each_checkpoints_classifier_slots(tmp_path, monkeypatch):
 
     def compose_with_config(python, repo_dir, manifest, path, base, out, flags):
         out.mkdir(parents=True, exist_ok=True)
-        # The aLoRA one with a classifier slot; a composer from before them
-        # writes no adapter_kinds.
-        kinds = ["lora", "classifier"] if "alora" in out.name else None
+        # The aLoRA one with two classifier slots, under PR #134's old name
+        # and its new one ("probe"); a composer from before them writes no
+        # adapter_kinds.
+        kinds = ["lora", "classifier", "probe"] if "alora" in out.name else None
         (out / "config.json").write_text(
             json.dumps({"adapter_kinds": kinds} if kinds else {})
         )
@@ -2371,7 +2404,7 @@ def test_run_records_each_checkpoints_classifier_slots(tmp_path, monkeypatch):
     # Every checkpoint it composed, and only those.
     assert results["run"]["classifier_slots"] == {
         "single_stream": 0,
-        "throughput_alora": 1,
+        "throughput_alora": 2,
         "throughput_lora": 0,
     }
     assert {c[0] for c in composes} == set(results["run"]["classifier_slots"])
@@ -2391,6 +2424,215 @@ def test_only_throughput_runs_no_accuracy(tmp_path, monkeypatch):
     assert run_benchmark.main(bench_argv(tmp_path, "--only", "answerability")) == 0
     results = json.loads((tmp_path / "work" / "results.json").read_text())
     assert "throughput" not in results and not engines
+
+
+def bench_with_a_head(tmp_path, monkeypatch, slot_kind: str | None = "classifier"):
+    """A bench root with answerability's classifier head alone (as on the 8B
+    and 30B), every step faked, the composer composing heads as ``slot_kind``
+    (None: it has no classifier slots); returns the manifests composed and the
+    generate jobs."""
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    make_head(staged.adapter_dir(bench, "answerability", "classifier"))
+    monkeypatch.setattr(
+        run_benchmark,
+        "commit_info",
+        lambda repo: {"sha": SHA_A, "date": "2026-09-01", "subject": "s"},
+    )
+    monkeypatch.setattr(run_benchmark, "composer_flags", lambda *a: set())
+    monkeypatch.setattr(run_benchmark, "composer_slot_kind", lambda *a: slot_kind)
+    monkeypatch.setattr(run_benchmark, "head_reason", lambda *a: None)
+    manifests, jobs = [], []
+
+    def fake_compose(python, repo_dir, manifest, manifest_path, base, out, flags):
+        manifests.append(manifest)
+        return True
+
+    def fake_generate(python, harness_root, jobs_path, spec):
+        for job in spec["jobs"]:
+            jobs.append(job)
+            rows = staged.read_jsonl(Path(job["eval_path"]))
+            staged.write_jsonl(
+                Path(job["out_path"]), [{**r, "generated_content": "yes"} for r in rows]
+            )
+        ok = {"ok": True, "n_generated": 3, "truncated": 0}
+        return {"jobs": {j["key"]: dict(ok) for j in spec["jobs"]}}
+
+    monkeypatch.setattr(run_benchmark, "compose", fake_compose)
+    monkeypatch.setattr(run_benchmark, "generate", fake_generate)
+    monkeypatch.setattr(run_benchmark, "clear_compile_caches", lambda: None)
+    return manifests, jobs
+
+
+def test_a_classifier_head_is_composed_generated_and_scored(tmp_path, monkeypatch):
+    manifests, jobs = bench_with_a_head(tmp_path, monkeypatch)
+    base = write_base(tmp_path / "base")
+    (base / "config.json").write_text(json.dumps({"hidden_size": 64}))
+    argv = [
+        "--bench-root", str(tmp_path / "bench"),
+        "--work-dir", str(tmp_path / "work"),
+        "--repo-dir", str(tmp_path),
+        "--base-model", str(base),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert run_benchmark.main(argv) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    # Composed with its kind and labels, beside a filler LoRA: the composer
+    # cannot compose classifier slots alone.
+    (manifest,) = manifests
+    assert manifest["answerability_classifier"]["kind"] == "classifier"
+    assert manifest["answerability_classifier"]["labels"] == ["yes", "no"]
+    assert manifest[run_benchmark.FILLER]["type"] == "lora"
+    assert results["run"]["filler_lora"] == "single_stream"
+    # One token, rendered as a classifier; its "yes" scored as "answerable".
+    (job,) = jobs
+    assert job["classifier"] is True and job["max_new_tokens"] == 1
+    assert results["cells"]["answerability"]["classifier"]["accuracy"] == 1.0
+    # A head's fingerprint names its labels.
+    assert results["run"]["adapters"]["answerability/classifier"]["labels"] == [
+        "yes",
+        "no",
+    ]
+    assert results["run"]["classifier_slot_kind"] == "classifier"
+    staged_head = staged.adapter_dir(tmp_path / "bench", "answerability", "classifier")
+    assert manifest["answerability_classifier"]["path"] == str(staged_head)
+
+
+def test_a_composer_of_probes_gets_the_head_as_a_probe(tmp_path, monkeypatch):
+    # PR #134 since aa7dd88: the kind is "probe", the head probe_head.safetensors.
+    manifests, _ = bench_with_a_head(tmp_path, monkeypatch, slot_kind="probe")
+    base = write_base(tmp_path / "base")
+    (base / "config.json").write_text(json.dumps({"hidden_size": 64}))
+    argv = [
+        "--bench-root", str(tmp_path / "bench"),
+        "--work-dir", str(tmp_path / "work"),
+        "--repo-dir", str(tmp_path),
+        "--base-model", str(base),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert run_benchmark.main(argv) == 0
+    (manifest,) = manifests
+    entry = manifest["answerability_classifier"]
+    assert entry["kind"] == "probe" and entry["labels"] == ["yes", "no"]
+    head = Path(entry["path"])
+    staged_head = staged.adapter_dir(tmp_path / "bench", "answerability", "classifier")
+    # A copy beside the staged head, which stays as it was.
+    assert head != staged_head
+    assert (head / "probe_head.safetensors").resolve() == (
+        staged_head / staged.HEAD_FILE
+    ).resolve()
+    assert (head / "io.yaml").is_file() and not (
+        staged_head / "probe_head.safetensors"
+    ).exists()
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert results["run"]["classifier_slot_kind"] == "probe"
+    assert common.is_scored(results["cells"]["answerability"]["classifier"])
+
+
+def test_composer_slot_kind_reads_the_composers_name_for_a_head(tmp_path):
+    pkg = tmp_path / "granite_switch" / "composer"
+    pkg.mkdir(parents=True)
+    for init in (tmp_path / "granite_switch", pkg):
+        (init / "__init__.py").write_text("")
+    setup = pkg / "tokenizer_setup.py"
+    python = sys.executable
+    for constants, kind in (
+        ("ANCHOR_MODE_SR = 'sr'\n", None),  # before classifier slots
+        ("ANCHOR_MODE_CLASSIFIER = 'classifier'\n", "classifier"),  # to 861b917
+        ("ANCHOR_MODE_PROBE = 'probe'\n", "probe"),  # since aa7dd88
+    ):
+        setup.write_text(constants)
+        assert run_benchmark.composer_slot_kind(python, tmp_path) == kind
+    setup.unlink()  # no composer at all
+    assert run_benchmark.composer_slot_kind(python, tmp_path) is None
+
+
+def test_classifier_cells_get_an_eager_engine_of_their_own(tmp_path, monkeypatch):
+    engines = []
+
+    def fake_generate(python, harness_root, jobs_path, spec):
+        engines.append((spec["llm"]["enforce_eager"], [j["key"] for j in spec["jobs"]]))
+        for job in spec["jobs"]:
+            rows = staged.read_jsonl(Path(job["eval_path"]))
+            staged.write_jsonl(
+                Path(job["out_path"]), [{**r, "generated_content": "yes"} for r in rows]
+            )
+        ok = {"ok": True, "n_generated": 3, "truncated": 0}
+        return {"jobs": {j["key"]: dict(ok) for j in spec["jobs"]}, "vllm": "0.26"}
+
+    monkeypatch.setattr(run_benchmark, "generate", fake_generate)
+    bench = tmp_path / "bench"
+    write_answerability_eval(bench)
+    cells = {}
+    group = [
+        staged.StagedCell(
+            "answerability", tech, None, staged.eval_path(bench, "answerability"), None
+        )
+        for tech in ("lora", "classifier")
+    ]
+    for c in group:
+        cells.setdefault(c.intrinsic, {})[c.tech] = common.error("not run")
+    args = types.SimpleNamespace(
+        python="py", limit=None, max_model_len=4096, gpu_memory_utilization=0.8,
+        enforce_eager=False, prefix_caching=False, no_chunked_prefill=False,
+    )  # fmt: skip
+    names = {(c.intrinsic, c.tech): f"{c.intrinsic}_{c.tech}" for c in group}
+    run_meta = {"vllm": None, "gpu": None, "scheduler": None}
+    run_benchmark.generate_and_score(
+        args, SPEC, tmp_path, tmp_path / "work", tmp_path, "single_stream", group,
+        names, cells, run_meta, None,
+    )  # fmt: skip
+    # The adapters keep the run's engine; the head runs eager, alone.
+    assert engines == [
+        (False, ["answerability/lora"]),
+        (True, ["answerability/classifier"]),
+    ]
+    assert run_meta["vllm"] == "0.26"
+    assert common.is_scored(cells["answerability"]["classifier"])
+
+
+def test_a_classifier_cell_is_skipped_on_a_commit_without_classifier_slots(
+    tmp_path, monkeypatch
+):
+    manifests, jobs = bench_with_a_head(tmp_path, monkeypatch, slot_kind=None)
+    base = write_base(tmp_path / "base")
+    (base / "config.json").write_text(json.dumps({"hidden_size": 64}))
+    argv = [
+        "--bench-root", str(tmp_path / "bench"),
+        "--work-dir", str(tmp_path / "work"),
+        "--repo-dir", str(tmp_path),
+        "--base-model", str(base),
+        "--only", "answerability",
+    ]  # fmt: skip
+    assert run_benchmark.main(argv) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    assert results["cells"]["answerability"]["classifier"] == common.skipped(
+        "no classifier slots in this commit"
+    )
+    assert not manifests and not jobs  # nothing left to compose
+
+
+def test_only_one_cell_runs_and_merges_just_it(tmp_path, monkeypatch):
+    composes, engines, _ = bench_with_lora_and_alora(tmp_path, monkeypatch)
+    argv = bench_argv(tmp_path, "--only", "answerability/alora")
+    assert run_benchmark.main(argv) == 0
+    results = json.loads((tmp_path / "work" / "results.json").read_text())
+    # Only that cell: no LoRA cell, no speed blocks.
+    assert set(results["cells"]["answerability"]) == {"alora"}
+    assert [sorted(m) for _, m in composes] == [["answerability_alora"]]
+    assert not engines
+    # Merged into the commit's row, the row's other cells stay.
+    row = results_for(cells=cells_for(SPEC, 0.7))
+    data = page_data(row)
+    results["bench_version"] = SPEC.bench_version
+    stored = publish.merge(data, results, SPEC)
+    assert stored["cells"]["answerability"]["lora"] == {"accuracy": 0.7, "n": 10}
+    assert (
+        stored["cells"]["answerability"]["alora"]
+        == results["cells"]["answerability"]["alora"]
+    )
+    with pytest.raises(ValueError, match="unknown technology"):
+        run_benchmark.main(bench_argv(tmp_path, "--only", "answerability/qlora"))
 
 
 def test_only_switching_runs_just_it(tmp_path, monkeypatch):
@@ -2807,6 +3049,238 @@ def test_compose_manifest_keeps_lora_and_alora_of_one_intrinsic_apart(tmp_path):
         "answerability_lora": {"path": str(tmp_path / "lora"), "type": "lora"},
         "answerability_alora": {"path": str(tmp_path / "alora"), "type": "alora"},
     }
+
+
+def make_head(folder: Path, labels=("yes", "no"), hidden: int = 64) -> Path:
+    """A staged-style classifier head: weight [labels, hidden], bias [labels]."""
+    write_safetensors(
+        folder / staged.HEAD_FILE,
+        {"weight": [len(labels), hidden], "bias": [len(labels)]},
+    )
+    (folder / staged.HEAD_META_FILE).write_text(
+        json.dumps({"labels": list(labels), "layer": None})
+    )
+    (folder / "io.yaml").write_text("name: head\nmodel: ~\n")
+    return folder
+
+
+def test_classifier_cells_exist_only_for_intrinsics_with_a_head(tmp_path):
+    write_eval(staged.eval_path(tmp_path, "answerability"))
+    write_eval(staged.eval_path(tmp_path, "query_clarification"))
+    make_head(staged.adapter_dir(tmp_path, "answerability", "classifier"))
+    make_head(staged.adapter_dir(tmp_path, "query_clarification", "classifier"))
+    cells = {
+        (c.intrinsic, c.tech): c.skip_reason
+        for c in staged.discover(
+            tmp_path, SPEC, ["answerability", "query_clarification"]
+        )
+    }
+    assert cells["answerability", "classifier"] is None
+    # No classifier in adapters.yaml: skipped, whatever is staged.
+    assert cells["query_clarification", "classifier"] == common.NO_CLASSIFIER
+    # A head of other labels, or in another order, is not the intrinsic's.
+    make_head(
+        staged.adapter_dir(tmp_path, "answerability", "classifier"), ("no", "yes")
+    )
+    (cell,) = [
+        c
+        for c in staged.discover(tmp_path, SPEC, ["answerability"])
+        if c.tech == "classifier"
+    ]
+    assert "labels ['no', 'yes'], not ['yes', 'no']" in cell.skip_reason
+
+
+def test_detect_technology_reads_a_classifier_head(tmp_path):
+    head = make_head(tmp_path / "head")
+    assert staged.detect_technology(head) == ("classifier", None)
+    assert staged.head_shape(head) == (2, 64)
+    # Labels that do not match the head's rows, or a stray tensor, are refused.
+    (head / staged.HEAD_META_FILE).write_text(json.dumps({"labels": ["yes"]}))
+    assert "do not match the head's 2 rows" in staged.detect_technology(head)[1]
+    write_safetensors(head / staged.HEAD_FILE, {"weight": [2, 64]})
+    assert "unreadable" in staged.detect_technology(head)[1]
+
+
+def test_classifier_answers_are_mapped_for_the_scorer():
+    answerability = SPEC.intrinsic("answerability").classifier
+    assert answerability.labels == ("yes", "no")
+    assert answerability.answer("yes") == '"answerable"'
+    assert answerability.answer(" no") == '"unanswerable"'
+    assert answerability.answer("maybe") == "maybe"  # not a label: as generated
+    assert SPEC.intrinsic("guardian_core").classifier.answer("yes") == "yes"
+    assert SPEC.intrinsic("requirement_check").classifier is None
+    with pytest.raises(ValueError, match="each with its answer"):
+        common.make_intrinsic(
+            {
+                "id": "x",
+                "name": "X",
+                "scorer": "guardian",
+                "headline": "accuracy",
+                "headline_label": "Accuracy",
+                "max_new_tokens": 1,
+                "classifier": {"labels": ["yes", "no"], "to_answer": {"yes": "yes"}},
+            }
+        )
+
+
+def test_score_cell_maps_a_classifiers_labels(tmp_path):
+    preds = tmp_path / "preds.jsonl"
+    staged.write_jsonl(
+        preds,
+        [
+            {"ground_truth": "answerable", "generated_content": "yes"},
+            {"ground_truth": "unanswerable", "generated_content": "no"},
+            {"ground_truth": "answerable", "generated_content": "no"},
+        ],
+    )
+    head = SPEC.intrinsic("answerability").classifier
+    metrics = run_benchmark.score_cell(
+        "answerability", preds, tmp_path, tmp_path / "scores.json", head=head
+    )
+    assert metrics["accuracy"] == pytest.approx(2 / 3)
+    # The saved answers keep the label words, for a later rescore.
+    assert [r["generated_content"] for r in staged.read_jsonl(preds)] == [
+        "yes",
+        "no",
+        "no",
+    ]
+    # Unmapped, a bare label word is no answerability label.
+    plain = run_benchmark.score_cell(
+        "answerability", preds, tmp_path, tmp_path / "plain.json"
+    )
+    assert plain["accuracy"] == 0
+
+
+def test_compose_manifest_gives_a_head_its_kind_and_labels(tmp_path):
+    head = make_head(tmp_path / "head")
+    cells = [
+        staged.StagedCell("answerability", "lora", tmp_path / "lora", None, None),
+        staged.StagedCell("answerability", "classifier", head, None, None),
+    ]
+    paths = {(c.intrinsic, c.tech): c.adapter_dir for c in cells}
+    manifest = run_benchmark.compose_manifest(cells, paths)
+    assert manifest["answerability_classifier"] == {
+        "path": str(head),
+        "type": "lora",
+        "kind": "classifier",
+        "labels": ["yes", "no"],
+    }
+    assert "kind" not in manifest["answerability_lora"]
+    # Dumped as the composer reads it: yes / no stay strings, not booleans.
+    import yaml
+
+    text = yaml.safe_dump(manifest, sort_keys=True)
+    assert yaml.safe_load(text)["answerability_classifier"]["labels"] == ["yes", "no"]
+
+
+def test_filler_lora_adds_nothing(tmp_path):
+    from safetensors.torch import load_file
+
+    base = write_base(tmp_path / "base")
+    (base / "config.json").write_text(json.dumps({"hidden_size": 8}))
+    filler = run_benchmark.filler_lora(tmp_path / "filler", base)
+    assert staged.detect_technology(filler) == ("lora", None)
+    weights = load_file(str(filler / staged.WEIGHTS_FILE))
+    a = next(w for k, w in weights.items() if ".lora_A." in k)
+    b = next(w for k, w in weights.items() if ".lora_B." in k)
+    assert (tuple(a.shape), tuple(b.shape)) == ((1, 8), (8, 1))
+    # Its delta B @ A is zero; A is not, or the composer leaves the module out.
+    assert not b.any() and a.all()
+    assert json.loads((filler / staged.CONFIG_FILE).read_text())["r"] == 1
+    # o_proj's input is the heads' width, which a base can set apart.
+    config = {"hidden_size": 8, "num_attention_heads": 4, "head_dim": 4}
+    (base / "config.json").write_text(json.dumps(config))
+    filler = run_benchmark.filler_lora(tmp_path / "wide", base)
+    weights = load_file(str(filler / staged.WEIGHTS_FILE))
+    shapes = sorted(tuple(w.shape) for w in weights.values())
+    assert shapes == [(1, 16), (8, 1)]
+
+
+def test_classifier_ids_end_in_the_role_open_marker():
+    class Tok:
+        def get_vocab(self):
+            return {"<|start_of_role|>": 7}
+
+        def apply_chat_template(self, messages, add_generation_prompt, **kw):
+            self.generation = add_generation_prompt
+            return "<conversation>"
+
+        def __call__(self, text, add_special_tokens):
+            return types.SimpleNamespace(input_ids=[1, 2, 3])
+
+    tok = Tok()
+    row = {"messages": [{"role": "user", "content": "q"}]}
+    assert prompts.classifier_ids(tok, row, "native", {}) == [1, 2, 3, 7]
+    assert tok.generation is False  # no generation prompt before the marker
+
+
+def test_a_classifier_prompt_names_its_head_and_must_end_in_its_marker():
+    from benchmarks.adapter_eval import generate
+
+    class Tok:
+        """A composed tokenizer: the head's marker (id 9) where the template
+        puts it, after the conversation (or, misplaced, before the end)."""
+
+        def __init__(self, marker_last: bool):
+            self.marker_last = marker_last
+
+        def apply_chat_template(self, messages, **kw):
+            self.kw = kw
+            return "conversation<|answerability_classifier|>"
+
+        def __call__(self, text, add_special_tokens):
+            ids = [1, 2, 9] if self.marker_last else [1, 9, 2]
+            return types.SimpleNamespace(input_ids=ids)
+
+    row = {"messages": [{"role": "user", "content": "q"}]}
+    job = {"adapter_name": "answerability_classifier", "classifier": True}
+    tok = Tok(marker_last=True)
+    assert generate.render(tok, row, job, 9) == [1, 2, 9]
+    # adapter_name names it, which both versions of PR #134 take for a head.
+    assert tok.kw["adapter_name"] == "answerability_classifier"
+    assert "classifier_name" not in tok.kw
+    with pytest.raises(generate.ControlTokenMissing, match="not last"):
+        generate.render(Tok(marker_last=False), row, job, 9)
+    # An adapter's control token may sit anywhere.
+    lora = {"adapter_name": "answerability_classifier"}
+    assert generate.render(Tok(marker_last=False), row, lora, 9) == [1, 9, 2]
+
+
+def test_render_says_which_intrinsics_have_no_classifier_head():
+    old = results_for()
+    for by_tech in old["cells"].values():
+        by_tech.pop("classifier", None)  # a row from before the column
+    page = publish.render(page_data(old, reference=reference_for()), SPEC)
+    # The intrinsics without a head say so, on old rows too; those with one
+    # are just not run yet.
+    assert f'title="{common.NO_CLASSIFIER}">—</td>' in page
+    assert publish.missing_cells(old, SPEC) == [
+        "answerability/classifier",
+        "guardian_core/classifier",
+    ]
+    # A classifier answers in one token: no throughput or switching column.
+    assert 'colspan="9">' in page  # each serving block: 3 groups of 3
+
+
+def test_release_rows_need_no_classifier(tmp_path):
+    rows = publish.release_rows(
+        json.loads(
+            json.dumps(
+                {
+                    "releases": {
+                        SPEC.model_id: [
+                            {"cells": cells_for(SPEC), "release": {"revision": "x"}}
+                        ]
+                    }
+                }
+            )
+        ),
+        SPEC.model_id,
+    )
+    for by_tech in rows[0]["cells"].values():
+        by_tech.pop("classifier", None)
+    missing = publish.release_missing(rows[0], SPEC)
+    assert not [m for m in missing if m.endswith("/classifier")]
 
 
 def test_check_bench_root(tmp_path):
@@ -3856,7 +4330,12 @@ def test_apply_checks_the_models_shape_and_routing(tmp_path, capsys, private_spe
         c.tech: c.skip_reason
         for c in staged.discover(bench, private_spec, ["answerability"])
     }
-    assert cells == {"lora": None, "alora": "adapter not staged", "sr": None}
+    assert cells == {
+        "lora": None,
+        "alora": "adapter not staged",
+        "sr": None,
+        "classifier": "adapter not staged",
+    }
     # Staged, a checkpoint that routes on its own is still refused.
     set_config(
         staged.adapter_dir(bench, "answerability", "sr"), share_moe_routing=False

@@ -148,9 +148,11 @@ def chat_text(
     documents: str,
     template_kwargs: dict,
     instruction: dict | None = None,
+    generation_prompt: bool = True,
     **extra,
 ) -> str:
-    """A row's prompt, ending in the generation prompt.
+    """A row's prompt, ending in the generation prompt (unless
+    ``generation_prompt`` is False: a classifier head's prompt).
 
     ``documents`` is the row's document style, ``template_kwargs`` its model's
     chat-template options, ``instruction`` a base-model instruction
@@ -173,8 +175,30 @@ def chat_text(
         messages,
         tools=row.get("tools"),
         documents=documents_arg,
-        add_generation_prompt=True,
+        add_generation_prompt=generation_prompt,
         tokenize=False,
         **template_kwargs,
         **extra,
     )
+
+
+# The token a granite-switch classifier marker is embedded as: the base
+# template's role-open marker, the first token of its generation prompt. The
+# composed model's template drops the generation prompt and appends the
+# marker last, so a head reads the hidden state at this token.
+ROLE_OPEN = ("<|start_of_role|>", "<|im_start|>")
+
+
+def classifier_ids(
+    tokenizer, row: dict, documents: str, template_kwargs: dict
+) -> list[int]:
+    """A row's prompt as a classifier head reads it on the base model: the
+    conversation without a generation prompt, then the role-open marker."""
+    text = chat_text(
+        tokenizer, row, documents, template_kwargs, generation_prompt=False
+    )
+    vocab = tokenizer.get_vocab()
+    marker = next((m for m in ROLE_OPEN if m in vocab), None)
+    if marker is None:
+        raise ValueError("the tokenizer has no role-open marker")
+    return [*tokenizer(text, add_special_tokens=False).input_ids, vocab[marker]]

@@ -25,6 +25,11 @@ The model per column:
   pod at a pinned commit) with the checkpoint loaded by PEFT, as that repo's
   own generation does. The checkpoint's invocation tokens were dropped first
   (``staged.peft_sr_copy``).
+* ``classifier``: the base model and the staged head, no generation. Each
+  prompt is the conversation without a generation prompt, then the base's
+  role-open marker (``prompts.classifier_ids``), where a composed model's
+  classifier marker is embedded; the head reads the final hidden state there
+  and its best-scoring label is the answer.
 
 Prompts are rendered by the base tokenizer's chat template, with the same
 documents, tools, document style and chat-template options as the
@@ -59,8 +64,15 @@ import time
 import traceback
 from pathlib import Path
 
-from .prompts import chat_text
-from .staged import CONFIG_FILE, WEIGHTS_FILE, read_jsonl, write_jsonl
+from .prompts import chat_text, classifier_ids
+from .staged import (
+    CONFIG_FILE,
+    HEAD_FILE,
+    WEIGHTS_FILE,
+    classifier_meta,
+    read_jsonl,
+    write_jsonl,
+)
 
 
 class CellFailed(Exception):
@@ -250,11 +262,81 @@ def generate_rows(model, tok, prompts: list[list[int]], budgets: list[int], job:
     return outputs, truncated
 
 
+def classify_rows(model, head: dict, prompts: list[list[int]], job: dict) -> list[int]:
+    """Each prompt's best-scoring head row: the head (``weight [labels, hidden]``,
+    ``bias``) on the base model's final hidden state at the prompt's last
+    token. One prompt per forward pass: no padding to change the numbers."""
+    import torch
+
+    weight = head["weight"].to("cuda", torch.float32)
+    bias = head["bias"].to("cuda", torch.float32)
+    picks = []
+    for k, ids in enumerate(prompts):
+        with torch.no_grad():
+            hidden = model.model(torch.tensor([ids], device="cuda")).last_hidden_state
+        scores = weight @ hidden[0, -1].float() + bias
+        picks.append(int(scores.argmax()))
+        if (k + 1) % 500 == 0:
+            print(f"[hf_generate] {job['key']}: {k + 1} / {len(prompts)}", flush=True)
+    return picks
+
+
+def run_classifier(job: dict) -> dict:
+    """A classifier reference cell: the staged head on the HF base model."""
+    import torch
+    from safetensors.torch import load_file
+    from transformers import AutoTokenizer
+
+    key = job["key"]
+    head_dir = Path(job["adapter_dir"])
+    labels = classifier_meta(head_dir)["labels"]
+    head = load_file(str(head_dir / HEAD_FILE))
+    tok = AutoTokenizer.from_pretrained(job["base_model"])
+    rows = read_jsonl(Path(job["eval_path"]), job.get("limit"))
+    kept, prompts, too_long = [], [], 0
+    for row in rows:
+        ids = classifier_ids(
+            tok,
+            row,
+            job.get("documents", "native"),
+            job.get("chat_template_kwargs", {}),
+        )
+        if len(ids) > int(job["max_model_len"]):
+            too_long += 1
+            continue
+        kept.append(row)
+        prompts.append(ids)
+    if not kept:
+        raise CellFailed("no rows left to classify")
+    t0 = time.time()
+    with load_lock(job.get("load_lock")):
+        model = load_model({**job, "column": "base"})
+    print(f"[hf_generate] {key}: model loaded in {time.time() - t0:.0f}s", flush=True)
+    t0 = time.time()
+    for row, ids, pick in zip(kept, prompts, classify_rows(model, head, prompts, job)):
+        row["generated_content"] = labels[pick]
+        row["prompt_tokens"] = len(ids)
+    write_jsonl(Path(job["out_path"]), kept)
+    seconds = round(time.time() - t0, 1)
+    print(f"[hf_generate] {key}: {len(kept)} rows in {seconds:.0f}s", flush=True)
+    return {
+        "ok": True,
+        "n_rows": len(rows),
+        "too_long": too_long,
+        "n_generated": len(kept),
+        "truncated": 0,
+        "seconds": seconds,
+        "gpu": torch.cuda.get_device_name(0),
+    }
+
+
 def run(job: dict) -> dict:
     import torch
     from safetensors.torch import load_file
     from transformers import AutoTokenizer
 
+    if job["column"] == "classifier":
+        return run_classifier(job)
     key = job["key"]
     max_model_len = int(job["max_model_len"])
     tok = AutoTokenizer.from_pretrained(job["base_model"])

@@ -39,13 +39,23 @@ FULL_SHA = re.compile(r"[0-9a-f]{40}")
 PYPI_VERSION = re.compile(r"\d+(\.\d+)*")
 
 # Technologies composed into the same checkpoint. SR is a whole-checkpoint
-# dual-stream mode and the composer refuses to mix it with LoRA / aLoRA.
-COMPOSE_GROUPS = {"single_stream": ("lora", "alora"), "dual_stream": ("sr",)}
+# dual-stream mode and the composer refuses to mix it with LoRA / aLoRA. A
+# classifier slot (a linear head, no LoRA) rides in the LoRA / aLoRA
+# checkpoint: the composer cannot compose classifiers on their own, and its
+# marker selects the head without changing the active adapter.
+CLASSIFIER = "classifier"
+COMPOSE_GROUPS = {
+    "single_stream": ("lora", "alora", CLASSIFIER),
+    "dual_stream": ("sr",),
+}
 
 # Reference columns (``reference.py``): each technology's staged checkpoint
-# with HF + PEFT and no granite-switch, and the base model with no adapter.
+# with HF + PEFT (a classifier: its head on the HF base model) and no
+# granite-switch, and the base model with no adapter.
 BASE_COLUMN = "base"
-REFERENCE_COLUMNS = ("lora", "alora", "sr", BASE_COLUMN)
+REFERENCE_COLUMNS = ("lora", "alora", "sr", CLASSIFIER, BASE_COLUMN)
+# The skip reason of an intrinsic with no classifier head (adapters.yaml).
+NO_CLASSIFIER = "no classifier head for this task"
 # Libraries whose versions the reference run records.
 REFERENCE_LIBRARIES = ("torch", "transformers", "peft")
 
@@ -144,6 +154,25 @@ class Technology:
     id: str
     label: str
     source: str
+    # Whether the serving blocks (throughput, switching) measure it. A
+    # classifier answers in one token: there is nothing to decode or switch.
+    serving: bool = True
+
+
+@dataclass(frozen=True)
+class Classifier:
+    """An intrinsic's classifier head (``classifier`` in adapters.yaml): its
+    label words, in the head's row order, and what each means to the scorer."""
+
+    # Single-token words: the head's verdict is emitted as one of them.
+    labels: tuple[str, ...]
+    # Each label as the intrinsic's scorer reads an answer, e.g. "yes" ->
+    # '"answerable"' for answerability, whose own words are several tokens.
+    to_answer: dict
+
+    def answer(self, label: str) -> str:
+        """The scorer's form of a generated label word; any other text as is."""
+        return self.to_answer.get(label.strip(), label)
 
 
 @dataclass(frozen=True)
@@ -157,6 +186,30 @@ class Intrinsic:
     # Bumped when only this intrinsic's scoring changes: its saved answers are
     # scored again (rescore.py) instead of generated again.
     score_version: int = 1
+    # Its classifier head, when it has one; None skips its classifier cell.
+    classifier: Classifier | None = None
+
+
+def make_intrinsic(raw: dict) -> Intrinsic:
+    """An ``intrinsics`` entry, its ``classifier`` checked: two or more labels,
+    each mapped to the scorer's answer."""
+    raw = dict(raw)
+    head = raw.pop("classifier", None)
+    if head is not None:
+        labels = tuple(str(label) for label in head.get("labels") or ())
+        to_answer = {str(k): str(v) for k, v in (head.get("to_answer") or {}).items()}
+        if (
+            set(head) - {"labels", "to_answer"}
+            or len(labels) < 2
+            or len(set(labels)) != len(labels)
+            or set(to_answer) != set(labels)
+        ):
+            raise ValueError(
+                f"intrinsic {raw.get('id')}: a classifier needs two or more "
+                "distinct labels, each with its answer in to_answer"
+            )
+        head = Classifier(labels=labels, to_answer=to_answer)
+    return Intrinsic(**raw, classifier=head)
 
 
 @dataclass(frozen=True)
@@ -281,6 +334,11 @@ class Spec:
         """The models the results page shows."""
         return tuple(m for m in self.models if not m.private)
 
+    @property
+    def serving_technologies(self) -> tuple[Technology, ...]:
+        """The technologies the serving blocks (throughput, switching) measure."""
+        return tuple(t for t in self.technologies if t.serving)
+
     def source(self, tech_id: str) -> str:
         """How the model's adapters of a technology were trained, for the page."""
         own = self.model.technologies.get(tech_id, {}).get("source")
@@ -397,7 +455,7 @@ def load_spec(path: Path = SPEC_PATH, model: str | None = None) -> Spec:
         reference_version=int(raw["reference_version"]),
         models=models,
         technologies=tuple(Technology(**t) for t in raw["technologies"]),
-        intrinsics=tuple(Intrinsic(**i) for i in raw["intrinsics"]),
+        intrinsics=tuple(make_intrinsic(i) for i in raw["intrinsics"]),
         model_id=ids[0],
         throughput=Throughput(**raw.get("throughput", {})),
         switching=Switching(**raw.get("switching", {})),

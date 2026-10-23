@@ -8,22 +8,25 @@ commit::
     cd <harness> && <commit>/.venv/bin/python -m benchmarks.adapter_eval.run_benchmark \\
         --repo-dir <commit checkout> --bench-root <staged adapters + eval> \\
         --work-dir <outputs> [--model granite-4.2-3b] [--limit 20] \\
-        [--only answerability,guardian_core]
+        [--only answerability,guardian_core/classifier]
 
 Steps:
 
 1. Find the staged cells (``staged.py``) of the model's bench root; a
    missing or malformed checkpoint becomes a skipped cell.
 2. Compose twice with the commit's composer CLI: all LoRA + aLoRA adapters
-   into one checkpoint, all SR adapters into another. SR is a
-   whole-checkpoint dual-stream mode and cannot be mixed with the others.
+   and classifier heads into one checkpoint, all SR adapters into another. SR
+   is a whole-checkpoint dual-stream mode and cannot be mixed with the others.
    SR checkpoints that turn on at invocation tokens are first converted to
    the composer's single-anchor form (``staged.sr_anchor_copy``), and MLP
    weights saved without their ``mlp.`` level are renamed
    (``staged.mlp_key_copy``). A checkpoint with a LoRA weight that still
    names no base-model weight is an error cell: the composer would drop it
-   without a word.
-3. Generate greedily for every cell, one subprocess per composed checkpoint.
+   without a word. A classifier head must fit the base (``head_reason``),
+   on a commit whose composer has classifier slots; heads with no adapter
+   beside them get a filler LoRA (``filler_lora``).
+3. Generate greedily for every cell, one subprocess per composed checkpoint
+   (the classifier cells, one token each, in an eager engine of their own).
 4. Score every cell and print the results block (``common.py``) that
    ``publish.py`` reads from the pod log. It also records the library
    versions, each staged checkpoint's fingerprint (``staged.fingerprint``)
@@ -55,6 +58,7 @@ from . import release as releases
 from . import staged, switching
 from . import throughput as switch_bench
 from .common import (
+    CLASSIFIER,
     COMPOSE_GROUPS,
     adapter_name,
     compose_group,
@@ -165,38 +169,147 @@ def compose(
 
 
 def compose_manifest(
-    cells: list[staged.StagedCell], paths: dict[tuple[str, str], Path]
+    cells: list[staged.StagedCell],
+    paths: dict[tuple[str, str], Path],
+    slot_kind: str = CLASSIFIER,
 ) -> dict:
     """The composer's adapter manifest for one compose group.
 
     ``paths`` maps (intrinsic, technology) to the folder to compose: the
     staged checkpoint or its converted copy. One intrinsic has both a LoRA
     and an aLoRA cell in the same group, so the technology is part of the key.
+    A classifier head is declared as the composer's ``slot_kind``
+    (``composer_slot_kind``).
     """
-    return {
-        adapter_name(c.intrinsic, c.tech): {
-            "path": str(paths[c.intrinsic, c.tech]),
+    manifest = {}
+    for c in cells:
+        path = paths[c.intrinsic, c.tech]
+        entry = {
+            "path": str(path),
             # SR is detected by the composer from the weights; the manifest
             # type only chooses between aLoRA and LoRA placement.
             "type": "alora" if c.tech == "alora" else "lora",
         }
-        for c in cells
+        if c.tech == CLASSIFIER:
+            # The head's labels in its row order; the composer turns each
+            # into its token id. No layer: it reads the final hidden state.
+            entry.update(kind=slot_kind, labels=staged.classifier_meta(path)["labels"])
+        manifest[adapter_name(c.intrinsic, c.tech)] = entry
+    return manifest
+
+
+# The adapter slot a checkpoint of classifiers alone gets: the composer
+# cannot compose classifier slots without an adapter beside them (its compose
+# report reads the adapters' module analysis, which classifiers have none of).
+FILLER = "filler_lora"
+
+
+def filler_lora(dest: Path, base_dir: Path) -> Path:
+    """A rank-1 LoRA on the first layer's o_proj of the base model whose
+    ``lora_B`` is zero, so it adds nothing to any output; no prompt selects it.
+    Its ``lora_A`` is not zero: the composer leaves a module with all-zero
+    weights out, and then has no module to put the adapter in."""
+    import torch
+    from safetensors.torch import save_file
+
+    config = json.loads((base_dir / "config.json").read_text())
+    hidden = config["hidden_size"]
+    # o_proj reads the attention heads' outputs, which need not be hidden wide.
+    heads = config.get("num_attention_heads")
+    head_dim = config.get("head_dim") or (hidden // heads if heads else None)
+    width = heads * head_dim if heads and head_dim else hidden
+    dest.mkdir(parents=True, exist_ok=True)
+    stem = "base_model.model.model.layers.0.self_attn.o_proj"
+    save_file(
+        {
+            f"{stem}.lora_A.weight": torch.ones(1, width),
+            f"{stem}.lora_B.weight": torch.zeros(hidden, 1),
+        },
+        str(dest / staged.WEIGHTS_FILE),
+    )
+    config = {
+        "peft_type": "LORA",
+        "r": 1,
+        "lora_alpha": 1,
+        "target_modules": ["o_proj"],
     }
+    (dest / staged.CONFIG_FILE).write_text(json.dumps(config))
+    (dest / "io.yaml").write_text(f"name: {FILLER}\nmodel: ~\n")
+    return dest
+
+
+# What a composer with classifier slots (granite-switch PR #134) calls a head:
+# its manifest kind, the head's file name, and the kind its checkpoints'
+# adapter_kinds record. The PR named them "classifier" up to 861b917 and
+# "probe" (activation probe) since aa7dd88; a composer knows its own name as
+# its tokenizer setup's placement mode.
+SLOT_KINDS = {
+    "classifier": {
+        "mode": "ANCHOR_MODE_CLASSIFIER",
+        "head_file": staged.HEAD_FILE,
+    },
+    "probe": {"mode": "ANCHOR_MODE_PROBE", "head_file": "probe_head.safetensors"},
+}
+
+
+def composer_slot_kind(python: str, repo_dir: Path) -> str | None:
+    """The kind the commit's composer composes a head as, or None when it has
+    no classifier slots: it would read a head as a LoRA and fail the compose."""
+    probe = (
+        "import granite_switch.composer.tokenizer_setup as t\n"
+        f"print(next((k for k, v in {SLOT_KINDS!r}.items() if hasattr(t, v['mode'])), ''))"
+    )
+    res = subprocess.run(
+        [python, "-c", probe], cwd=repo_dir, capture_output=True, text=True
+    )
+    return (res.stdout.strip() or None) if res.returncode == 0 else None
+
+
+def head_copy(src: Path, dest: Path, kind: str) -> Path:
+    """A staged head as a composer of ``kind`` reads it: its files linked, the
+    head under that composer's file name. The staged head itself as it is when
+    the names already agree."""
+    name = SLOT_KINDS[kind]["head_file"]
+    if name == staged.HEAD_FILE:
+        return src
+    staged.link_others(src, dest, staged.HEAD_FILE)
+    link = dest / name
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to((src / staged.HEAD_FILE).resolve())
+    return dest
+
+
+def head_reason(head_dir: Path, base_model: str, hidden_size: int) -> str | None:
+    """None if a staged head fits the base model: its width is the base's
+    hidden size, and each label is one token of its tokenizer, as the composer
+    requires. Checked before composing, so a bad head is its own error cell
+    and not a failed compose of the whole checkpoint."""
+    from transformers import AutoTokenizer
+
+    rows, width = staged.head_shape(head_dir)
+    if width != hidden_size:
+        return f"classifier head is {width} wide, the base model {hidden_size}"
+    tokenizer = AutoTokenizer.from_pretrained(base_model)
+    for label in staged.classifier_meta(head_dir)["labels"]:
+        if len(tokenizer.encode(str(label), add_special_tokens=False)) != 1:
+            return f"classifier label {label!r} is not one token"
+    return None
 
 
 def classifier_slots(model_root: Path) -> dict[str, int]:
     """Per composed checkpoint under ``model_root`` (a pod's is new each run),
     its classifier slots, for the page's details box: adapter slots that hold
     a classifier head instead of an adapter (``adapter_kinds`` in its config;
-    a composer without them writes none). The run's manifests never ask for
-    one."""
+    a composer without them writes none). The manifests ask for one per
+    staged head (the Classifier column), and for none in any other checkpoint."""
     found = {}
     for config in sorted(model_root.glob("*/config.json")):
         try:
             kinds = json.loads(config.read_text()).get("adapter_kinds") or []
         except (OSError, ValueError):
             continue
-        found[config.parent.name] = kinds.count("classifier")
+        found[config.parent.name] = sum(kinds.count(kind) for kind in SLOT_KINDS)
     return found
 
 
@@ -388,12 +501,14 @@ def run_switching(
         harness_root,
         "switching",
     )[0]:
-        return {t.id: error("workload generation failed") for t in spec.technologies}
+        return {
+            t.id: error("workload generation failed") for t in spec.serving_technologies
+        }
     # The fleet builder reads the base weights from a local folder, not a repo id.
     base_dir = base_model_dir(base_model)
     vocab = json.loads((base_dir / "config.json").read_text())["vocab_size"]
     out: dict[str, dict] = {}
-    for k, tech in enumerate(spec.technologies):
+    for k, tech in enumerate(spec.serving_technologies):
         try:
             anchor = sr_anchor() if tech.id == "sr" else None
         except Exception as e:
@@ -483,11 +598,11 @@ def throughput_fleets(
     names modules the base model lacks, is left out and named in the second
     value. ``sr_anchor`` returns the SR anchor.
     """
-    fleets: dict[str, list[dict]] = {t.id: [] for t in spec.technologies}
+    fleets: dict[str, list[dict]] = {t.id: [] for t in spec.serving_technologies}
     left_out: list[str] = []
     base_modules: set[str] | None = None
     for cell in staged.discover(bench_root, spec, None):
-        if cell.skip_reason:
+        if cell.skip_reason or cell.tech not in fleets:
             continue
         key = f"{cell.intrinsic}/{cell.tech}"
         dest = copies / "throughput" / cell.intrinsic / cell.tech
@@ -526,7 +641,7 @@ def run_throughput(
     a fleet's adapters is reused.
     """
     out: dict[str, dict] = {}
-    for k, tech in enumerate(spec.technologies):
+    for k, tech in enumerate(spec.serving_technologies):
         fleet = fleets[tech.id]
         if not fleet:
             out[tech.id] = skipped("no adapter staged")
@@ -578,8 +693,18 @@ def speeds(entry: dict) -> dict:
     return {e: entry[e].get("tokens_per_s", entry[e].get("error")) for e in entry}
 
 
-def score_cell(scorer_name: str, pred_path: Path, eval_dir: Path, out_path: Path):
+def score_cell(
+    scorer_name: str, pred_path: Path, eval_dir: Path, out_path: Path, head=None
+):
+    """Score a cell's saved answers. A classifier cell's answers are label
+    words: ``head`` (its ``common.Classifier``) maps each to the scorer's form
+    first. The saved file keeps the words, so a mapping change is a rescore."""
     rows = staged.read_jsonl(pred_path)
+    if head is not None:
+        rows = [
+            {**r, "generated_content": head.answer(r.get("generated_content", ""))}
+            for r in rows
+        ]
     result = get_scorer(scorer_name)(
         rows, ScoreContext(eval_dir=eval_dir, env=dict(os.environ))
     )
@@ -602,6 +727,7 @@ def generate_and_score(
     jobs = []
     for c in group_cells:
         intrinsic = spec.intrinsic(c.intrinsic)
+        head = c.tech == CLASSIFIER
         jobs.append(
             {
                 "key": f"{c.intrinsic}/{c.tech}",
@@ -609,30 +735,58 @@ def generate_and_score(
                 "eval_path": str(c.eval_path),
                 "out_path": str(work / "predictions" / c.intrinsic / f"{c.tech}.jsonl"),
                 "limit": args.limit,
-                "max_new_tokens": intrinsic.max_new_tokens,
+                # A classifier's verdict is its first generated token.
+                "max_new_tokens": 1 if head else intrinsic.max_new_tokens,
+                "classifier": head,
                 **spec.model.prompt_for(c.tech),
             }
         )
-    status = generate(
-        args.python,
-        harness_root,
-        work / "generate" / f"{group}.jobs.json",
-        {
-            "model_dir": str(model_dir),
-            "status_path": str(work / "generate" / f"{group}.status.json"),
-            "llm": {
-                "max_model_len": args.max_model_len,
-                "gpu_memory_utilization": args.gpu_memory_utilization,
-                "tensor_parallel_size": spec.model.tensor_parallel_size,
-                "enforce_eager": args.enforce_eager,
-                "enable_prefix_caching": args.prefix_caching,
-                "enable_chunked_prefill": not args.no_chunked_prefill,
-                "max_num_batched_tokens": token_budget,
+
+    def engine(part: str, part_jobs: list[dict], eager: bool) -> dict:
+        return generate(
+            args.python,
+            harness_root,
+            work / "generate" / f"{group}{part}.jobs.json",
+            {
+                "model_dir": str(model_dir),
+                "status_path": str(work / "generate" / f"{group}{part}.status.json"),
+                "llm": {
+                    "max_model_len": args.max_model_len,
+                    "gpu_memory_utilization": args.gpu_memory_utilization,
+                    "tensor_parallel_size": spec.model.tensor_parallel_size,
+                    "enforce_eager": eager,
+                    "enable_prefix_caching": args.prefix_caching,
+                    "enable_chunked_prefill": not args.no_chunked_prefill,
+                    "max_num_batched_tokens": token_budget,
+                },
+                "jobs": part_jobs,
             },
-            "jobs": jobs,
-        },
-    )
-    if "failed" in status:
+        )
+
+    # Classifier cells get an engine of their own, without CUDA graphs: under
+    # vLLM 0.26 a classifier slot's FULL CUDA-graph replay differs from eager
+    # (granite-switch 1a78c29). The other cells keep the run's own engine.
+    adapters = [j for j in jobs if not j["classifier"]]
+    heads = [j for j in jobs if j["classifier"]]
+    status: dict = {"jobs": {}}
+    for part, part_jobs, eager in (
+        ("", adapters, args.enforce_eager),
+        (".classifier", heads, True),
+    ):
+        if not part_jobs:
+            continue
+        done = engine(part, part_jobs, eager)
+        if "failed" in done:
+            for job in part_jobs:
+                status["jobs"][job["key"]] = {
+                    "ok": False,
+                    "reason": "generation failed",
+                }
+            continue
+        status["jobs"].update(done["jobs"])
+        for k in ("vllm", "gpu", "scheduler"):
+            status.setdefault(k, done.get(k))
+    if all(not st.get("ok") for st in status["jobs"].values()):
         for c in group_cells:
             cells[c.intrinsic][c.tech] = error("generation failed")
         return
@@ -646,11 +800,13 @@ def generate_and_score(
             cells[c.intrinsic][c.tech] = error(st.get("reason", "generation failed"))
             continue
         try:
+            intrinsic = spec.intrinsic(c.intrinsic)
             metrics = score_cell(
-                spec.intrinsic(c.intrinsic).scorer,
+                intrinsic.scorer,
                 Path(job["out_path"]),
                 c.eval_path.parent,
                 work / "scores" / c.intrinsic / f"{c.tech}.json",
+                head=intrinsic.classifier if c.tech == CLASSIFIER else None,
             )
         except ScorerUnavailable as e:
             cells[c.intrinsic][c.tech] = skipped(str(e))
@@ -938,8 +1094,21 @@ def main(argv: list[str] | None = None) -> int:
     measure_switching = spec.model.measures(SWITCHING) and (
         only is None or SWITCHING in only
     )
+    # An entry is an intrinsic (all its cells), "intrinsic/technology" (that
+    # cell alone, e.g. a new classifier head), or a serving block.
+    cell_only = {tuple(o.split("/", 1)) for o in only or () if "/" in o}
+    for intrinsic_id, tech_id in cell_only:
+        spec.select([intrinsic_id])  # raises on an unknown intrinsic
+        if tech_id not in {t.id for t in spec.technologies}:
+            raise ValueError(f"--only {intrinsic_id}/{tech_id}: unknown technology")
     picked = (
-        None if only is None else [o for o in only if o not in (THROUGHPUT, SWITCHING)]
+        None
+        if only is None
+        else list(
+            dict.fromkeys(
+                o.split("/", 1)[0] for o in only if o not in (THROUGHPUT, SWITCHING)
+            )
+        )
     )
     work = args.work_dir.resolve()
     model_root = (args.model_dir or work / "models").resolve()
@@ -952,7 +1121,14 @@ def main(argv: list[str] | None = None) -> int:
 
     cells: dict[str, dict[str, dict]] = {}
     runnable: dict[str, list[staged.StagedCell]] = {g: [] for g in COMPOSE_GROUPS}
+    whole = set(only or ())
     for cell in staged.discover(args.bench_root, spec, picked) if picked != [] else []:
+        if (
+            cell_only
+            and cell.intrinsic not in whole
+            and ((cell.intrinsic, cell.tech) not in cell_only)
+        ):
+            continue  # --only named other cells of this intrinsic
         cells.setdefault(cell.intrinsic, {})
         if cell.skip_reason:
             cells[cell.intrinsic][cell.tech] = skipped(cell.skip_reason)
@@ -1002,7 +1178,37 @@ def main(argv: list[str] | None = None) -> int:
                 paths[c.intrinsic, c.tech] = dest
                 run_meta["sr_anchor_converted"].append(c.intrinsic)
                 print(f"[convert] {c.intrinsic}/sr: {json.dumps(change)}")
-        for c in list(group_cells):
+        heads = [c for c in group_cells if c.tech == CLASSIFIER]
+        slot_kind = composer_slot_kind(args.python, args.repo_dir) if heads else None
+        if heads and slot_kind is None:
+            for c in heads:
+                cells[c.intrinsic][c.tech] = skipped(
+                    "no classifier slots in this commit"
+                )
+                group_cells.remove(c)
+            heads = []
+        if heads:
+            run_meta["classifier_slot_kind"] = slot_kind
+        for c in heads:
+            try:
+                hidden = json.loads(
+                    (base_model_dir(base_model) / "config.json").read_text()
+                )["hidden_size"]
+                reason = head_reason(c.adapter_dir, base_model, hidden)
+                if reason is None:
+                    paths[c.intrinsic, c.tech] = head_copy(
+                        paths[c.intrinsic, c.tech],
+                        copies / c.intrinsic / c.tech,
+                        slot_kind,
+                    )
+            except Exception as e:
+                traceback.print_exc()
+                reason = f"classifier head check failed ({type(e).__name__})"
+            if reason:
+                print(f"[check] {c.intrinsic}/{c.tech}: {reason}")
+                cells[c.intrinsic][c.tech] = error(reason)
+                group_cells.remove(c)
+        for c in [c for c in group_cells if c.tech != CLASSIFIER]:
             key = (c.intrinsic, c.tech)
             dest = copies / c.intrinsic / c.tech
             try:
@@ -1033,10 +1239,15 @@ def main(argv: list[str] | None = None) -> int:
         if not group_cells:
             continue
         model_dir = model_root / group
+        manifest = compose_manifest(group_cells, paths, slot_kind or CLASSIFIER)
+        if all(c.tech == CLASSIFIER for c in group_cells):
+            filler = filler_lora(copies / FILLER, base_model_dir(base_model))
+            manifest[FILLER] = {"path": str(filler), "type": "lora"}
+            run_meta["filler_lora"] = group
         if not compose(
             args.python,
             args.repo_dir,
-            compose_manifest(group_cells, paths),
+            manifest,
             work / "manifests" / f"{group}.yaml",
             base_model,
             model_dir,
