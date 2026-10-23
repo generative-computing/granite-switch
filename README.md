@@ -52,12 +52,12 @@ pip install "granite-switch[dev]"       # Everything
 
 Requires Python 3.11+ and PyTorch 2.11+.
 
-> **vLLM version note:** `[vllm]` accepts any line from `0.26.x` to `0.30.x`. The floor is
+> **vLLM version note:** `[vllm]` accepts any line from `0.26.x` to `0.32.x`. The floor is
 > `transformers>=5.16`: `0.26` is the earliest vLLM whose model code handles the
-> transformers-5.13+ `full_attention` layer-type rename. One tree serves all five lines —
+> transformers-5.13+ `full_attention` layer-type rename. One tree serves all seven lines —
 > where their APIs differ, the backend checks for the capability rather than the version. All
 > of them require PyTorch 2.11+ (CUDA 13+). To pin a single line for development, use the
-> `vllm26` / `vllm30` dependency *groups* — the two ends of the range, which is also what CI
+> `vllm26` / `vllm32` dependency *groups* — the two ends of the range, which is also what CI
 > tests on every GPU run.
 
 ### Compose a Model

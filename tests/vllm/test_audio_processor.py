@@ -44,6 +44,48 @@ def _make_info(*, max_model_len=131072, **cfg_attrs):
     return info
 
 
+def _call_hook(proc, *, prompt, audios, mm_kwargs=None):
+    """Invoke ``_call_hf_processor`` the way the ACTIVE vLLM line calls it.
+
+    The hook has three upstream shapes and only two of them call it at all, so a
+    test that hardcodes one line's keywords passes on that line and raises on the
+    others. The eras, and what each one hands the hook:
+
+    * A (0.26-0.28) ``(prompt, mm_data, mm_kwargs, tok_kwargs)`` -- raw mm data,
+      still under vLLM's plural ``audios`` key, and the hook owns tokenization.
+    * B (0.29-0.30) the hook does not exist; ``_apply_hf_processor_main`` is the
+      only seam. Tests that need the hook specifically are skipped, because there
+      is nothing to call -- ``_apply_uncached`` covers the behaviour instead.
+    * C (0.31+) ``(hf_data, hf_kwargs)`` -- already-extracted mm data, with
+      ``_get_hf_mm_inputs`` having renamed ``audios`` -> ``audio`` on the way in
+      (``vllm/multimodal/processing/processor.py``, "HF processors accept
+      (images, text, videos, audio)"). Passing the plural key here would exercise
+      a path production never takes.
+
+    Dispatch is on the base class's shape via the module's own
+    ``_base_hook_era``, deliberately reusing the discriminator under test rather
+    than reimplementing it: a second copy could drift from the first and then
+    these tests would agree with themselves while disagreeing with production.
+    """
+    era = proc_mod._base_hook_era(super(GraniteSwitchASRMultiModalProcessor, proc))
+    if era == proc_mod._ERA_MAIN_ONLY:
+        pytest.skip(
+            "vLLM 0.29-0.30 deleted _call_hf_processor; there is no hook to call "
+            "on this line. _apply_uncached covers the same behaviour end to end."
+        )
+    if era == proc_mod._ERA_CALL_HF_MM:  # 0.31+
+        return proc._call_hf_processor(
+            hf_data={"audio": audios} if audios else {},
+            hf_kwargs=mm_kwargs or {},
+        )
+    return proc._call_hf_processor(  # 0.26-0.28
+        prompt=prompt,
+        mm_data={"audios": audios} if audios else {},
+        mm_kwargs=mm_kwargs or {},
+        tok_kwargs={},
+    )
+
+
 class TestProcessingInfoGating:
     def test_disabled_reports_no_modalities(self):
         info = _make_info(asr_enabled=False)
@@ -241,11 +283,11 @@ class TestCallHfProcessorMerge:
         )
         proc = _make_processor(info, monkeypatch, capture)
 
-        bf = proc._call_hf_processor(
+        bf = _call_hook(
+            proc,
             prompt="<|audio|>",
-            mm_data={"audios": [np.zeros(1600, dtype=np.float32)]},
+            audios=[np.zeros(1600, dtype=np.float32)],
             mm_kwargs={"language": "fr"},  # per-request override
-            tok_kwargs={},
         )
         # config 'task' retained, request 'language' wins over config 'de'.
         assert capture["generate_kwargs"] == {"task": "transcribe", "language": "fr"}
@@ -262,11 +304,11 @@ class TestCallHfProcessorMerge:
         )
         proc = _make_processor(info, monkeypatch, capture)
 
-        proc._call_hf_processor(
+        _call_hook(
+            proc,
             prompt="<|audio|>",
-            mm_data={"audios": [np.zeros(1600, dtype=np.float32)]},
+            audios=[np.zeros(1600, dtype=np.float32)],
             mm_kwargs={"asr_generate_kwargs": {"num_beams": 99, "task": "translate"}},
-            tok_kwargs={},
         )
         gk = capture["generate_kwargs"]
         assert gk == {"language": "de", "task": "translate"}
@@ -277,12 +319,7 @@ class TestCallHfProcessorMerge:
         info = _make_info(asr_enabled=True, asr_model_id="w", asr_device="cpu")
         proc = _make_processor(info, monkeypatch, capture)
 
-        bf = proc._call_hf_processor(
-            prompt="just text",
-            mm_data={},
-            mm_kwargs={},
-            tok_kwargs={},
-        )
+        bf = _call_hook(proc, prompt="just text", audios=[])
         # No audio → transcriber never touched, no audio fields emitted.
         assert capture == {}
         assert "audio_token_ids" not in bf
@@ -296,16 +333,13 @@ class TestMultiClipAndBudget:
         info = _make_info(asr_enabled=True, asr_model_id="w")
         proc = _make_processor(info, monkeypatch, capture)
 
-        bf = proc._call_hf_processor(
+        bf = _call_hook(
+            proc,
             prompt="<|audio|> and <|audio|>",
-            mm_data={
-                "audios": [
-                    np.zeros(1600, dtype=np.float32),
-                    np.zeros(1600, dtype=np.float32),
-                ]
-            },
-            mm_kwargs={},
-            tok_kwargs={},
+            audios=[
+                np.zeros(1600, dtype=np.float32),
+                np.zeros(1600, dtype=np.float32),
+            ],
         )
         # Each faked transcript is [1,2,3]; two clips -> per-item sizes [3,3],
         # flat length 6 (spliced at the two markers by _get_prompt_updates).
@@ -398,11 +432,8 @@ class TestEmptyAndSilentClip:
             info, monkeypatch, "", ids_for=self._ids_for
         )
 
-        bf = proc._call_hf_processor(
-            prompt="<|audio|>",
-            mm_data={"audios": [np.zeros(1600, dtype=np.float32)]},
-            mm_kwargs={},
-            tok_kwargs={},
+        bf = _call_hook(
+            proc, prompt="<|audio|>", audios=[np.zeros(1600, dtype=np.float32)]
         )
         # One token, not zero — the item is still a findable placeholder.
         assert bf["audio_num_tokens"].tolist() == [1]
@@ -483,16 +514,13 @@ class TestEmptyAndSilentClip:
             ),
         )
 
-        bf = proc._call_hf_processor(
+        bf = _call_hook(
+            proc,
             prompt="<|audio|> <|audio|>",
-            mm_data={
-                "audios": [
-                    np.zeros(1600, dtype=np.float32),
-                    np.zeros(1600, dtype=np.float32),
-                ]
-            },
-            mm_kwargs={},
-            tok_kwargs={},
+            audios=[
+                np.zeros(1600, dtype=np.float32),
+                np.zeros(1600, dtype=np.float32),
+            ],
         )
         # The silent clip contributes 1 token instead of 0, so both items keep a
         # distinct, non-empty span and neither gets dropped.
@@ -612,22 +640,31 @@ class TestPromptUpdatesAreApplied:
     def _apply_uncached(self, proc, items, prompt_text):
         """vLLM's ``apply()`` with cache=None, minus the hashing/cache plumbing.
 
-        Two shapes, because 0.29 split text processing away from MM processing:
+        Three shapes, because upstream reshaped this chain twice:
 
-        * 0.26 - 0.28: one ``_apply_hf_processor_text_mm`` call returns the prompt
-          ids, the MM tensors AND the ``is_update_applied`` flag together.
-        * 0.29+: ``apply()`` tokenizes the prompt itself (upstream of the processor,
-          then ``_postprocess_prompt``), ``_apply_hf_processor_main`` returns the MM
-          tensors only, and ``_maybe_apply_prompt_updates`` no longer takes a flag.
+        * era A (0.26 - 0.28): one ``_apply_hf_processor_text_mm`` call returns the
+          prompt ids, the MM tensors AND the ``is_update_applied`` flag together.
+        * era B (0.29 - 0.30): ``apply()`` tokenizes the prompt itself (upstream of
+          the processor, then ``_postprocess_prompt``),
+          ``_apply_hf_processor_main(mm_items, hf_processor_mm_kwargs)`` returns the
+          MM tensors only, and ``_maybe_apply_prompt_updates`` drops the flag.
+        * era C (0.31+): the ``hf_processor_mm_kwargs`` kwarg became ``hf_kwargs``,
+          and ``_maybe_apply_prompt_updates`` collapsed its four loose arguments
+          into a single ``MultiModalProcessingResult`` NamedTuple
+          ``(prompt_ids, kwargs, hashes, prompt_updates)``. Calling it era-B style
+          raises ``TypeError: ... unexpected keyword argument
+          'hf_processor_mm_kwargs'`` — loud, unlike the hook-era bug, but it still
+          has to be handled for the suite to run on this line at all.
 
-        Everything after that — ``_get_mm_fields_config`` →
-        ``_get_mm_prompt_updates`` → ``_maybe_apply_prompt_updates`` — is unchanged
-        on every line, which is why only the first call differs here.
+        ``_get_mm_fields_config`` → ``_get_mm_prompt_updates`` are unchanged on
+        every line, which is why only the ends of the chain differ here.
         """
         from vllm.multimodal.inputs import MultiModalKwargsItems
 
+        era = proc_mod._base_hook_era(super(GraniteSwitchASRMultiModalProcessor, proc))
+
         flag_kwargs = {}
-        if hasattr(proc, "_apply_hf_processor_text_mm"):  # 0.26 - 0.28
+        if era == proc_mod._ERA_CALL_HF:  # 0.26 - 0.28
             prompt_ids, processed, is_update_applied = proc._apply_hf_processor_text_mm(
                 prompt_text=prompt_text,
                 mm_items=items,
@@ -641,15 +678,35 @@ class TestPromptUpdatesAreApplied:
             prompt_ids = proc._postprocess_prompt(
                 proc.info.get_tokenizer().encode(prompt_text, add_special_tokens=False)
             )
+            mm_kwarg_name = (
+                "hf_kwargs"
+                if era == proc_mod._ERA_CALL_HF_MM
+                else "hf_processor_mm_kwargs"
+            )
             processed = proc._apply_hf_processor_main(
                 mm_items=items,
-                hf_processor_mm_kwargs={},
+                **{mm_kwarg_name: {}},
             )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             processed, proc._get_mm_fields_config(processed, {})
         )
         updates = proc._get_mm_prompt_updates(items, {}, mm_kwargs)
+
+        if era == proc_mod._ERA_CALL_HF_MM:  # 0.31+: one result object
+            from vllm.multimodal.processing.processor import MultiModalProcessingResult
+
+            return proc._maybe_apply_prompt_updates(
+                mm_items=items,
+                mm_res=MultiModalProcessingResult(
+                    prompt_ids=prompt_ids,
+                    kwargs=mm_kwargs,
+                    # Unused by _maybe_apply_prompt_updates (it validates kwargs
+                    # and updates, then splices); apply() is what populates them.
+                    hashes={},
+                    prompt_updates=updates,
+                ),
+            )
         return proc._maybe_apply_prompt_updates(
             mm_items=items,
             prompt_ids=prompt_ids,
