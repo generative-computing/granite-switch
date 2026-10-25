@@ -23,6 +23,7 @@ Code paths covered:
   - End-to-end: adapter_config.json → render (no patching)
 """
 
+import json
 import os
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -31,6 +32,8 @@ import pytest
 from jinja2 import Environment
 
 from granite_switch.composer.tokenizer_setup import (
+    _wrap_message_loop_for_history_adapters,
+    add_control_tokens,
     configure_audio_chat_template,
     configure_chat_template,
     detect_template_format,
@@ -1423,3 +1426,428 @@ class TestShadowResidualAnchorPlacement:
             configure_chat_template(
                 tokenizer, [(self._SR_GRANITE, "answerability", "sr")]
             )
+
+
+class TestShadowResidualHistoryAdapters:
+    """``history_adapters`` restores SR control tokens in earlier assistant turns.
+
+    For SR the token at a history position changes no KV (K/V come from the base
+    stream) and no used output; what it buys is id equality with what was sent,
+    which is what vLLM's prefix cache keys on. So the central property is a prefix
+    relation: the turn-N prompt plus the model's answer must be a prefix of the
+    turn-N+1 render.
+
+    Renders use HF's whitespace flags (``trim_blocks``/``lstrip_blocks``), as
+    ``apply_chat_template`` and vLLM do: under plain Jinja the 4.2 template's own
+    history-truncation path leaks whitespace, so the prefix relation fails there
+    even without this feature.
+    """
+
+    _ENV = Environment(trim_blocks=True, lstrip_blocks=True)
+
+    _SR_GRANITE = os.path.join(_FIXTURES, "sr_answerability_adapter")
+    _SR_CHATML = os.path.join(_FIXTURES, "sr_answerability_adapter_chatml")
+
+    _MESSAGES = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+        {"role": "user", "content": "Q3"},
+    ]
+
+    @staticmethod
+    def _raise(message):
+        raise ValueError(message)
+
+    def _granite(self):
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
+        configure_chat_template(
+            tokenizer,
+            [(self._SR_GRANITE, "sr1", "sr"), (self._SR_GRANITE, "sr2", "sr")],
+        )
+        return tokenizer
+
+    def _chatml(self):
+        tokenizer = _SRTokenizer(_CHATML_TEMPLATE, {"</think>": [49154]})
+        configure_chat_template(
+            tokenizer,
+            [(self._SR_CHATML, "sr1", "sr"), (self._SR_CHATML, "sr2", "sr")],
+        )
+        return tokenizer
+
+    def _render(self, tokenizer, messages, **kwargs):
+        return self._ENV.from_string(tokenizer.chat_template).render(
+            messages=messages,
+            add_generation_prompt=True,
+            raise_exception=self._raise,
+            **kwargs,
+        )
+
+    def test_granite_history_headers_carry_their_control_tokens(self):
+        result = self._render(
+            self._granite(),
+            self._MESSAGES,
+            adapter_name="sr1",
+            history_adapters=["sr1", "sr2"],
+        )
+        assert "<|start_of_role|>assistant<|sr1|>A1<|end_of_text|>" in result
+        assert "<|start_of_role|>assistant<|sr2|>A2<|end_of_text|>" in result
+        assert result.endswith("<|start_of_role|>assistant<|sr1|>")
+
+    def test_granite_sent_prompt_is_prefix_of_next_turn(self):
+        tokenizer = self._granite()
+        sent = self._render(
+            tokenizer, self._MESSAGES[:3], adapter_name="sr2", history_adapters=["sr1"]
+        )
+        nxt = self._render(
+            tokenizer,
+            self._MESSAGES,
+            adapter_name="sr1",
+            history_adapters=["sr1", "sr2"],
+        )
+        assert nxt.startswith(sent + "A2<|end_of_text|>\n")
+
+    def test_chatml_no_thinking_sent_prompt_is_prefix_of_next_turn(self):
+        tokenizer = self._chatml()
+        sent = self._render(
+            tokenizer,
+            self._MESSAGES[:3],
+            enable_thinking=False,
+            adapter_name="sr2",
+            history_adapters=["sr1"],
+        )
+        nxt = self._render(
+            tokenizer,
+            self._MESSAGES,
+            enable_thinking=False,
+            adapter_name="sr1",
+            history_adapters=["sr1", "sr2"],
+        )
+        assert "<|im_start|>assistant\n<|sr1|></think>A1" in nxt
+        assert nxt.startswith(sent + "A2<|im_end|>\n")
+
+    def test_chatml_thinking_places_tokens_but_breaks_the_prefix(self):
+        """With thinking on and the answer stored as returned, the sent prompt
+        ends ``<|sr2|>\\n`` but history re-renders as ``<|sr2|></think>A``, so no
+        prefix relation holds. The next test shows the caller-side fix.
+        """
+        tokenizer = self._chatml()
+        sent = self._render(
+            tokenizer,
+            self._MESSAGES[:3],
+            enable_thinking=True,
+            adapter_name="sr2",
+            history_adapters=["sr1"],
+        )
+        nxt = self._render(
+            tokenizer,
+            self._MESSAGES,
+            enable_thinking=True,
+            adapter_name="sr1",
+            history_adapters=["sr1", "sr2"],
+        )
+        assert "<|im_start|>assistant\n<|sr2|></think>A2" in nxt
+        assert not nxt.startswith(sent + "A2")
+
+    @pytest.mark.parametrize("truncate", [False, True])
+    def test_chatml_thinking_prefix_holds_with_think_restored(self, truncate):
+        """With thinking on, the control token takes ``<think>``'s place in the sent
+        prompt, so the model's text starts after it. Storing ``"<think>\\n"`` + that
+        text gives the template its header back and the prefix holds -- but only
+        with ``truncate_history_thinking=False``: truncation strips the reasoning
+        out of every answer before the last user turn.
+        """
+        tokenizer = self._chatml()
+        answers = ["R1\n</think>\nA1", "R2\n</think>\nA2"]
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "<think>\n" + answers[0]},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "<think>\n" + answers[1]},
+            {"role": "user", "content": "Q3"},
+        ]
+        kwargs = {"enable_thinking": True, "truncate_history_thinking": truncate}
+        sent = self._render(
+            tokenizer,
+            messages[:3],
+            adapter_name="sr2",
+            history_adapters=["sr1"],
+            **kwargs,
+        )
+        nxt = self._render(
+            tokenizer,
+            messages,
+            adapter_name="sr1",
+            history_adapters=["sr1", "sr2"],
+            **kwargs,
+        )
+        assert sent.endswith("<|im_start|>assistant\n<|sr2|>\n")
+        assert nxt.startswith(sent + answers[1] + "<|im_end|>\n") is not truncate
+
+    @pytest.mark.parametrize("fmt", ["granite", "chatml"])
+    def test_base_turn_emits_no_history_tokens(self, fmt):
+        tokenizer = self._granite() if fmt == "granite" else self._chatml()
+        result = self._render(
+            tokenizer, self._MESSAGES, history_adapters=["sr1", "sr2"]
+        )
+        assert "<|sr" not in result
+
+    @pytest.mark.parametrize("fmt", ["granite", "chatml"])
+    def test_history_adapters_none_is_a_no_op(self, fmt):
+        tokenizer = self._granite() if fmt == "granite" else self._chatml()
+        absent = self._render(tokenizer, self._MESSAGES, adapter_name="sr1")
+        explicit_none = self._render(
+            tokenizer, self._MESSAGES, adapter_name="sr1", history_adapters=None
+        )
+        all_none = self._render(
+            tokenizer,
+            self._MESSAGES,
+            adapter_name="sr1",
+            history_adapters=[None, None],
+        )
+        assert absent == explicit_none == all_none
+        assert absent.count("<|sr1|>") == 1
+
+    def test_absent_history_adapters_matches_the_unpatched_template(self):
+        """The wrap is invisible when unused: undoing the generation-prompt
+        substitution reproduces the original template's render exactly."""
+        for enable_thinking in (False, True):
+            base = self._ENV.from_string(_CHATML_TEMPLATE).render(
+                messages=self._MESSAGES,
+                add_generation_prompt=True,
+                enable_thinking=enable_thinking,
+            )
+            patched = self._render(
+                self._chatml(),
+                self._MESSAGES,
+                enable_thinking=enable_thinking,
+                adapter_name="sr1",
+            )
+            assert patched.replace("<|sr1|>", "<think>") == base
+        base = self._ENV.from_string(_GRANITE_TEMPLATE).render(
+            messages=self._MESSAGES, add_generation_prompt=True
+        )
+        patched = self._render(self._granite(), self._MESSAGES, adapter_name="sr1")
+        assert patched.replace("<|sr1|>", "<|end_of_role|>") == base
+
+    def test_render_identical_under_plain_jinja(self):
+        """The class renders with HF's flags; the filter block must not shift
+        whitespace under plain Jinja either."""
+        env = Environment()
+        for tokenizer, site, base_template in (
+            (self._granite(), "<|end_of_role|>", _GRANITE_TEMPLATE),
+            (self._chatml(), "<think>", _CHATML_TEMPLATE),
+        ):
+            base = env.from_string(base_template).render(
+                messages=self._MESSAGES, add_generation_prompt=True
+            )
+            patched = env.from_string(tokenizer.chat_template).render(
+                messages=self._MESSAGES,
+                add_generation_prompt=True,
+                adapter_name="sr1",
+                raise_exception=self._raise,
+            )
+            assert patched.replace("<|sr1|>", site) == base
+
+    def test_index_counts_assistant_messages_only(self):
+        messages = [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "A1"},
+            {"role": "tool", "content": "T1"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "A2"},
+            {"role": "user", "content": "Q3"},
+        ]
+        result = self._render(
+            self._granite(),
+            messages,
+            adapter_name="sr1",
+            history_adapters=[None, "sr2"],
+        )
+        assert "assistant<|end_of_role|>A1" in result
+        assert "assistant<|sr2|>A2" in result
+
+    @pytest.mark.parametrize(
+        "history_adapters",
+        [["sr2"], ["sr2", "sr2", "sr2"], []],
+        ids=["too-short", "too-long", "empty"],
+    )
+    def test_length_mismatch_raises(self, history_adapters):
+        """One entry per assistant message, no more and no fewer: a list that
+        does not line up would put tokens on the wrong turns."""
+        with pytest.raises(ValueError, match="has 2 assistant messages"):
+            self._render(
+                self._granite(),
+                self._MESSAGES,
+                adapter_name="sr1",
+                history_adapters=history_adapters,
+            )
+
+    def test_length_is_not_checked_on_a_base_turn(self):
+        """A base turn does not read the list, so a wrong length is not an error."""
+        result = self._render(self._granite(), self._MESSAGES, history_adapters=["sr2"])
+        assert "<|sr" not in result
+
+    def test_unknown_adapter_raises(self):
+        with pytest.raises(ValueError, match="not a Shadow Residual adapter"):
+            self._render(
+                self._granite(),
+                self._MESSAGES,
+                adapter_name="sr1",
+                history_adapters=["nope", None],
+            )
+
+    def test_non_sr_checkpoint_is_unaffected(self):
+        with patch(_PATCH_TARGET, return_value="<requirements>"):
+            tokenizer = _make_tokenizer()
+            configure_chat_template(tokenizer, [("/path/a", "req_check", "alora")])
+        assert "history_adapters" not in tokenizer.chat_template
+        assert "assistant_idx" not in tokenizer.chat_template
+
+    def test_chatml_answer_containing_the_site_is_not_rewritten(self):
+        """4.2 writes its own ``<think></think>`` header only when the answer has
+        no think tags, so for this answer the first ``<think>`` is the answer's
+        own text. Matching the full header leaves it alone."""
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "See <think> tag"},
+            {"role": "user", "content": "Q2"},
+        ]
+        result = self._render(
+            self._chatml(),
+            messages,
+            enable_thinking=False,
+            adapter_name="sr1",
+            history_adapters=["sr2"],
+        )
+        assert "<|im_start|>assistant\nSee <think> tag<|im_end|>" in result
+        assert "<|sr2|>" not in result
+
+    def test_bare_string_raises(self):
+        """A string is a sequence of characters, not a list of names."""
+        with pytest.raises(ValueError, match="must be a list"):
+            self._render(
+                self._granite(),
+                self._MESSAGES,
+                adapter_name="sr1",
+                history_adapters="sr1",
+            )
+
+    def test_non_string_entry_raises_the_named_error(self):
+        with pytest.raises(ValueError, match="not a Shadow Residual adapter"):
+            self._render(
+                self._granite(),
+                self._MESSAGES,
+                adapter_name="sr1",
+                history_adapters=[["sr1"], None],
+            )
+
+    def test_wrap_rejects_a_result_that_does_not_parse(self):
+        """An ``endfor`` inside a comment fools the tag scan; the wrapped
+        template must fail at compose time, not at render time."""
+        template = (
+            "{%- set ns = namespace(adapter_type='') %}"
+            "{%- for message in messages %}{# a {% endfor %} b #}"
+            "{{ message.content }}{%- endfor %}"
+        )
+        with pytest.raises(ValueError, match="does not parse"):
+            _wrap_message_loop_for_history_adapters(template, "messages", "<x>", "<x>")
+
+    def test_wrap_counts_plus_whitespace_control_tags(self):
+        """``{%+ for`` opens a loop like ``{%- for`` does."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) %}"
+            "{%- for message in messages %}"
+            "{%+ for x in [1] %}{{ message.content }}{% endfor %}"
+            "{%- endfor %}"
+        )
+        wrapped = _wrap_message_loop_for_history_adapters(
+            template, "messages", "<x>", "<x>"
+        )
+        rendered = self._ENV.from_string(wrapped).render(
+            messages=[{"role": "user", "content": "a"}], adapter_map={}
+        )
+        assert rendered == "a"
+
+
+class TestShadowResidualHistoryAdaptersTokenIds:
+    """The prefix relation on token ids, with the real Granite tokenizers.
+
+    vLLM's prefix cache keys on ids, not text; matching strings can still
+    tokenize differently at a boundary such as the one right after a control
+    token. Skipped when the tokenizer cannot be fetched.
+    """
+
+    _CASES = [
+        (
+            "ibm-granite/granite-4.1-3b",
+            "sr_answerability_adapter",
+            {},
+            "<|end_of_text|>",
+        ),
+        (
+            "ibm-granite/granite-4.2-3b",
+            "sr_answerability_adapter_chatml",
+            {"enable_thinking": False},
+            "<|im_end|>",
+        ),
+    ]
+
+    @staticmethod
+    def _ids(out):
+        # transformers 5.x returns a BatchEncoding here; 4.x returns a plain list.
+        return list(out["input_ids"]) if hasattr(out, "keys") else list(out)
+
+    @pytest.mark.parametrize(
+        "model,fixture,kwargs,turn_end", _CASES, ids=["granite-4.1", "granite-4.2"]
+    )
+    def test_sent_ids_are_prefix_of_next_turn(
+        self, model, fixture, kwargs, turn_end, tmp_path
+    ):
+        from transformers import AutoTokenizer
+
+        try:
+            tokenizer = AutoTokenizer.from_pretrained(model)
+        except Exception as e:
+            pytest.skip(f"could not fetch {model} tokenizer: {e}")
+        # The fixture pins the fake tokenizer's site id; drop it so the composer
+        # resolves the id against the real one.
+        with open(os.path.join(_FIXTURES, fixture, "adapter_config.json")) as f:
+            adapter_config = json.load(f)
+        adapter_config.pop("last_context_token_id", None)
+        adapter_path = str(tmp_path / fixture)
+        os.makedirs(adapter_path)
+        with open(os.path.join(adapter_path, "adapter_config.json"), "w") as f:
+            json.dump(adapter_config, f)
+        adapters = [
+            (adapter_path, "sr1", "sr", None),
+            (adapter_path, "sr2", "sr", None),
+        ]
+        add_control_tokens(tokenizer, adapters)
+        configure_chat_template(tokenizer, [a[:3] for a in adapters])
+
+        messages = TestShadowResidualHistoryAdapters._MESSAGES
+        sent = self._ids(
+            tokenizer.apply_chat_template(
+                messages[:3],
+                add_generation_prompt=True,
+                adapter_name="sr2",
+                history_adapters=[None],
+                **kwargs,
+            )
+        )
+        answer = tokenizer.encode(
+            messages[3]["content"] + turn_end, add_special_tokens=False
+        )
+        nxt = self._ids(
+            tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                adapter_name="sr1",
+                history_adapters=[None, "sr2"],
+                **kwargs,
+            )
+        )
+        assert nxt[: len(sent) + len(answer)] == sent + answer
