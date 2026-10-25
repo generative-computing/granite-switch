@@ -144,6 +144,47 @@ No manual configuration is needed — pass SR adapter paths to the composer and 
 `validate_cross_stream_population` then asserts every adapter in a `dual_stream` checkpoint
 has non-zero `cross_stream` weights, catching a silent load failure.
 
+## Keeping Control Tokens in History
+
+A text-based multi-turn caller re-renders history from `messages`, which carry no
+control tokens, so an SR turn's header renders with its site token instead of the
+control token that was sent. For SR this changes no KV and no used output, but the
+ids no longer match what was sent and the prefix cache misses from there on.
+
+Pass `history_adapters`, exactly one entry per assistant message (the adapter
+that produced it, or `None`), and the template puts the tokens back. The control
+token replaces the site token; nothing is added:
+
+```python
+tokenizer.apply_chat_template(messages, add_generation_prompt=True,
+                              adapter_name="sr2", history_adapters=[None, "sr1"])
+# vLLM /v1/chat/completions and mellea: same keys inside chat_template_kwargs
+```
+
+```
+4.1                    assistant<|end_of_role|>A1    -> assistant<|sr1|>A1
+4.2 enable_thinking=F  assistant\n<think></think>A1  -> assistant\n<|sr1|></think>A1
+```
+
+A list of the wrong length, or an entry that is not an SR adapter, raises. No
+effect when the current turn is base.
+
+For the cache to hit, the caller must:
+
+* store the exact answer text the model produced (no post-processing), and send
+  `skip_special_tokens: False` so a control token generated mid-answer is not
+  stripped from it;
+* on Granite 4.2 with `enable_thinking=True`, store `"<think>\n"` + the returned
+  text and pass `truncate_history_thinking=False`; otherwise history thinking is
+  rewritten and the match breaks right after the control token;
+* serve Granite 4.2 with `--chat-template-content-format string`, or vLLM rejects
+  every chat request with a 400.
+
+Even exact text can re-encode to different ids (the model may emit `"\n"` + `"\n"`
+where the tokenizer picks `"\n\n"`), so the cache misses from that point on that
+turn. Only a caller that keeps the generated ids and sends them to `/v1/completions`
+avoids this.
+
 ## Config Parameters
 
 | Parameter | Type | Default | Description |
