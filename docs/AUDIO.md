@@ -56,7 +56,8 @@ settings into `config.json` so the checkpoint is self-describing:
 - `asr_model_id` — HF id of the speech-to-text model (default:
   `ibm-granite/granite-speech-5.0-470m-turboctc`, a 470M English conformer CTC
   encoder). Override with `--asr-model <hf-id>`, e.g. `openai/whisper-small` for
-  multilingual.
+  multilingual. The default loads at a pinned Hub revision; see
+  [The default model's revision](#the-default-models-revision).
 - `asr_device` — `cuda` (default): the default encoder is small and its speed
   comes from running on GPU. Set `--asr-device cpu` to leave vLLM's whole GPU
   memory budget to the KV cache — transcription is then several times slower
@@ -84,6 +85,28 @@ options configure the cascade; they do not enable it. Passing one without
 `--asr-model openai/whisper-small` on its own gets you no audio. This is
 deliberate: one explicit flag decides, rather than the decision being inferred
 from which options happen to be set.
+
+### The default model's revision
+
+The default model loads at a fixed Hub commit, `947f59a`, its English-only
+release. A model id with no revision loads whatever the Hub repo holds today, and
+on 2026-10-21 this repo was replaced in place by a multilingual release that
+capitalizes and punctuates. Every default transcript changed with no code change
+here (`What is the capital of Israel?` instead of `what is the capital of
+israel`). The pin keeps the default reproducible.
+
+- The pin applies only to the default model. Any other `--asr-model` loads its
+  newest revision unless you pin it yourself.
+- To choose a revision, set `revision` in `asr_pipeline_kwargs` (see *Tuning the
+  ASR model* below). It overrides the pin, for the default model or any other.
+  `"revision": "main"` follows the newest release.
+- Granite Switch 0.1.1 loads the default unpinned, so it already runs the new
+  release. To restore the transcripts this page describes, add this to the
+  checkpoint's `config.json`:
+
+  ```json
+  "asr_pipeline_kwargs": {"revision": "947f59af40db9791170a0628cf0f3f4812d720f1"}
+  ```
 
 ### Tuning the ASR model
 
@@ -322,7 +345,9 @@ fallback.
 - **Transcripts from the CTC default are lowercase and unpunctuated**
   (`what is the capital of israel`). They are spliced into the prompt as ordinary
   text, so the LLM reads them that way. A generative backend such as Whisper
-  restores case and punctuation.
+  restores case and punctuation. This and the English-only point above describe
+  the pinned revision; the Hub repo's newer release differs on both (see
+  [The default model's revision](#the-default-models-revision)).
 - **HF `pipeline` backends only.** Any `automatic-speech-recognition` pipeline
   model works via config alone; a non-pipeline backend (cloud STT, faster-whisper,
   a custom encoder) still needs a code-level plug point — tracked as future work.
@@ -372,6 +397,7 @@ pytest -m "audio and not gpu" -v -s --tb=short
 - `tests/integration/test_asr_ctc_default_gpu.py` (GPU, downloads the ~1GB
   checkpoint) — the default CTC model through `ASRTranscriber`: bfloat16 on CUDA,
   CTC classification, a correct transcript with client decode kwargs dropped, the
-  float16/BatchNorm guard, and the 120s single-pass/chunked boundary.
+  float16/BatchNorm guard, and the 120s single-pass/chunked boundary. It asserts
+  exact transcripts, so it depends on the pinned revision.
 - End-to-end (GPU): compose an `--enable-audio` checkpoint, then an audio request
   through vLLM produces an answer and text-only requests are unaffected.

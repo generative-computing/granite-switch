@@ -560,6 +560,49 @@ class TestLoadMergesPipelineKwargs:
         assert kwargs["batch_size"] == 4  # extra kwarg passed through
 
 
+class TestDefaultModelRevisionPin:
+    """The default model loads at a fixed Hub commit, not whatever is newest.
+
+    Its Hub repo was replaced in place by a cased, punctuated multilingual release,
+    which changed every transcript with no code change here. The pin keeps the
+    default reproducible; it must stay overridable and touch no other model.
+    """
+
+    def _load_kwargs(self, model_id, pipeline_kwargs=None):
+        factory = mock.Mock(return_value=mock.Mock())
+        with _patched_pipeline(factory):
+            asr.ASRTranscriber(
+                model_id=model_id, device="cpu", pipeline_kwargs=pipeline_kwargs
+            ).load()
+        return factory.call_args.kwargs
+
+    def test_pin_is_a_full_commit_sha(self):
+        # A branch or tag name can move; only a full sha pins the content.
+        assert len(asr.DEFAULT_ASR_MODEL_REVISION) == 40
+        int(asr.DEFAULT_ASR_MODEL_REVISION, 16)
+
+    def test_default_model_loads_at_the_pinned_revision(self):
+        kwargs = self._load_kwargs(asr.DEFAULT_ASR_MODEL_ID)
+        assert kwargs["model"] == asr.DEFAULT_ASR_MODEL_ID
+        assert kwargs["revision"] == asr.DEFAULT_ASR_MODEL_REVISION
+
+    def test_default_resolved_from_none_is_pinned_too(self):
+        # A checkpoint with asr_model_id=None reaches the model through this path.
+        factory = mock.Mock(return_value=mock.Mock())
+        with _patched_pipeline(factory):
+            asr.get_transcriber(None, "cpu", pipeline_kwargs={"pin-check": 1}).load()
+        assert factory.call_args.kwargs["revision"] == asr.DEFAULT_ASR_MODEL_REVISION
+
+    def test_pipeline_kwargs_revision_overrides_the_pin(self):
+        kwargs = self._load_kwargs(
+            asr.DEFAULT_ASR_MODEL_ID, pipeline_kwargs={"revision": "main"}
+        )
+        assert kwargs["revision"] == "main"
+
+    def test_other_models_are_not_pinned(self):
+        assert "revision" not in self._load_kwargs("openai/whisper-small")
+
+
 def _smi(csv_text):
     """mock.patch target: a subprocess.run result whose stdout is ``csv_text``."""
     return mock.Mock(return_value=mock.Mock(stdout=csv_text))

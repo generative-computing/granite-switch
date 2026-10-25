@@ -7,7 +7,8 @@ pipeline_kwargs), so a process loads each ASR model at most once.
 
 Device defaults to CUDA (the default CTC encoder is small and GPU-bound work is
 what makes it fast); dtype follows the device unless a checkpoint sets
-``asr_dtype``. See docs/AUDIO.md.
+``asr_dtype``. The default model loads at a pinned Hub revision. See
+docs/AUDIO.md.
 """
 
 from __future__ import annotations
@@ -27,6 +28,14 @@ import numpy as np
 # steer: output is lowercase and unpunctuated and language/task decode kwargs do
 # not apply. English only.
 DEFAULT_ASR_MODEL_ID = "ibm-granite/granite-speech-5.0-470m-turboctc"
+
+# Hub commit the default model is loaded at: its English-only release. The repo's
+# main branch moved to a multilingual release on 2026-10-21 that capitalizes and
+# punctuates, which silently changed every transcript (and broke the GPU test), so
+# the default is pinned. Applied whenever DEFAULT_ASR_MODEL_ID is loaded; a
+# "revision" in asr_pipeline_kwargs overrides it, and any other model id loads
+# unpinned.
+DEFAULT_ASR_MODEL_REVISION = "947f59af40db9791170a0628cf0f3f4812d720f1"
 
 # Call-time chunk window handed to a *generative* (seq2seq) pipeline, which has a
 # fixed input window and stitches its own chunks from timestamps. Never handed to
@@ -245,6 +254,8 @@ class ASRTranscriber:
                 "device": self.device,
                 "torch_dtype": _resolve_torch_dtype(self.dtype, self.device),
             }
+            if self.model_id == DEFAULT_ASR_MODEL_ID:
+                kwargs["revision"] = DEFAULT_ASR_MODEL_REVISION
             # pipeline_kwargs last: a checkpoint may override any default above.
             kwargs.update(self.pipeline_kwargs)
             try:
