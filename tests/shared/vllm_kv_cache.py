@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Allocate a real KV cache for an :class:`Attention` layer, on any vLLM 0.26+.
+"""Build real FlashAttention inputs for an :class:`Attention` layer, on any vLLM 0.26+.
 
 These harnesses hand the tensor to a real FlashAttention kernel (they build real
 ``FlashAttentionMetadata``: slot_mapping, block_table, query_start_loc, seq_lens),
@@ -30,6 +30,40 @@ reintroduces the staticmethod tells us immediately if the two ever disagree.
 """
 
 import torch
+
+
+def cascade_kwargs() -> dict:
+    """The cascade-attention fields of ``FlashAttentionMetadata``, if it has any.
+
+    vLLM 0.32 removed cascade attention outright (upstream ``e1a508625``,
+    "[Attention] Remove cascade attention", #61126), deleting five REQUIRED
+    positional fields of the metadata dataclass: ``use_cascade``,
+    ``common_prefix_len``, ``cu_prefix_query_lens``, ``prefix_kv_lens`` and
+    ``suffix_kv_lens``. Every harness here constructs the metadata by hand and
+    passed all five to say "no cascade, this is one plain prefill", so on 0.32
+    each construction raises ``TypeError: FlashAttentionMetadata.__init__() got
+    an unexpected keyword argument 'use_cascade'``.
+
+    They cannot simply be dropped: on 0.26 - 0.31 they have no defaults, so
+    omitting them is the same ``TypeError`` in the other direction. Hence a
+    dict spliced in per line, keyed on whether the dataclass still declares the
+    field — the shape of the API, not ``vllm.__version__``.
+
+    Semantics are unchanged either way. The values below are precisely "cascade
+    off", which is what 0.32 made the only possibility, so a harness that omits
+    them on 0.32 gets the same attention it asked for on 0.31.
+    """
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionMetadata
+
+    if "use_cascade" not in FlashAttentionMetadata.__dataclass_fields__:  # 0.32+
+        return {}
+    return {
+        "use_cascade": False,
+        "common_prefix_len": 0,
+        "cu_prefix_query_lens": None,
+        "prefix_kv_lens": None,
+        "suffix_kv_lens": None,
+    }
 
 
 def kv_cache_shape(attn, vllm_config, num_blocks: int, block_size: int):

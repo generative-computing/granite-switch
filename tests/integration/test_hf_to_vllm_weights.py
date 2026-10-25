@@ -68,7 +68,7 @@ SEED = 42
 # ── Distributed init ─────────────────────────────────────────────────
 
 from tests.shared.vllm_distributed import ensure_distributed as _ensure_distributed
-from tests.shared.vllm_kv_cache import setup_kv_cache
+from tests.shared.vllm_kv_cache import cascade_kwargs, setup_kv_cache
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -297,11 +297,7 @@ class _HFToVLLMWeightTestBase:
                 seq_lens=seq_lens,
                 block_table=block_table,
                 slot_mapping=slot_mapping,
-                use_cascade=False,
-                common_prefix_len=0,
-                cu_prefix_query_lens=None,
-                prefix_kv_lens=None,
-                suffix_kv_lens=None,
+                **cascade_kwargs(),
                 causal=True,
             )
         else:
