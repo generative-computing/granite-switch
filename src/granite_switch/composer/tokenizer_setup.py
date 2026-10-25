@@ -145,6 +145,10 @@ ANCHOR_MODE_ALORA = "alora"
 #: the end of the generation prompt (Shadow Residual, ``last_context_token``).
 ANCHOR_MODE_SR = "sr"
 
+#: Placement mode where the control token is emitted as the very last token,
+#: after the last turn's close (probe slot, manifest ``kind``).
+ANCHOR_MODE_PROBE = "probe"
+
 
 def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
     """Load alora_invocation_tokens from adapter_config.json.
@@ -832,6 +836,7 @@ def build_substitute_token_ids(
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
     lora_substitute_id: int,
     base_reset: bool = False,
+    probe_slot_substitute_id: int | None = None,
 ) -> list[int]:
     """Build the token-exchange substitute ids, index-aligned with the control tokens.
 
@@ -845,12 +850,14 @@ def build_substitute_token_ids(
       * base-reset: ``lora_substitute_id`` as well. The token is placed at a turn
         boundary, where the role-open marker is exactly what the decoder expects
         at that position.
+      * probe: ``probe_slot_substitute_id``, the base's role-open marker.
 
     Args:
         discovered_adapters: ``(adapter_path, adapter_name, technology, source)`` tuples.
         lora_substitute_id: Probed sequence-start token id.
         base_reset: When True, prepend the base-reset slot's substitute so the
             list stays aligned with ``add_control_tokens(base_reset=True)``.
+        probe_slot_substitute_id: The base's role-open marker id.
 
     Returns:
         One substitute id per control token, in the same order.
@@ -859,9 +866,37 @@ def build_substitute_token_ids(
     for adapter_path, _name, technology, _source in discovered_adapters:
         if technology == "alora":
             substitute_ids.append(get_alora_first_invocation_token_id(adapter_path))
+        elif technology == "probe":
+            if probe_slot_substitute_id is None:
+                raise ValueError("A probe slot needs probe_slot_substitute_id.")
+            substitute_ids.append(probe_slot_substitute_id)
         else:
             substitute_ids.append(lora_substitute_id)
     return substitute_ids
+
+
+def resolve_label_token_ids(tokenizer, label_names: list[str]) -> list[int]:
+    """Turn each probe label word into its single token id."""
+    token_ids: list[int] = []
+    non_atomic: list[str] = []
+    for word in label_names:
+        # Same encode as the control-token check: bare word, no special tokens.
+        encoded = tokenizer.encode(word, add_special_tokens=False)
+        if len(encoded) != 1:
+            sub_tokens = tokenizer.convert_ids_to_tokens(encoded)
+            non_atomic.append(f"{word!r} → {len(encoded)} tokens: {sub_tokens}")
+        else:
+            token_ids.append(encoded[0])
+
+    if non_atomic:
+        raise ValueError(
+            f"{len(non_atomic)} probe label word(s) do not encode to a "
+            f"single token, but the vLLM probe exit writes the verdict at "
+            f"one token id per label. Choose a single-token synonym for each:\n  "
+            + "\n  ".join(non_atomic)
+        )
+
+    return token_ids
 
 
 def configure_chat_template(
@@ -935,6 +970,11 @@ def configure_chat_template(
     # still costing compute. Callers therefore classify SR from the checkpoint
     # weights (``is_shadow_residual_adapter``) and pass ``sr`` here, rather than
     # trusting a directory label that no SR training run produces.
+    # A probe slot arrives as technology ``probe``, like SR arrives as
+    # ``sr``: the caller derives the placement mode (SR from the checkpoint
+    # weights, probe from the manifest's ``kind``) and passes it in
+    # the discovered tuple. ``technology`` is the placement axis this function
+    # dispatches on; a probe is a fourth mode alongside lora / alora / sr.
     adapter_mapping: dict[str, dict[str, str]] = {}
     sr_anchors: set[str] = set()
     for adapter_info in discovered_adapters:
@@ -983,6 +1023,9 @@ def configure_chat_template(
 
     mapping_entries = []
     for adapter_name, info in adapter_mapping.items():
+        # ``type`` is the placement mode: lora (sequence start) / alora (before
+        # the invocation text) / sr (replaces the generation-prompt anchor) /
+        # probe (very last token, after the last turn's close).
         if "invocation_text" in info:
             mapping_entries.append(
                 f"    '{adapter_name}': {{'token': '{info['token']}', "
@@ -1010,6 +1053,12 @@ def configure_chat_template(
 {%- set adapter_invocation_text = adapter_map[adapter_name]['invocation_text'] %}
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
+{%- endif %}
+{#- A probe reads its verdict at the marker, so nothing may follow it:
+    drop the generation prompt even when the caller asks for one. -#}
+{%- set probe_mode = adapter_type == 'probe' %}
+{%- if probe_mode %}
+{%- set add_generation_prompt = false %}
 {%- endif %}
 
 """
@@ -1282,6 +1331,13 @@ def configure_chat_template(
                 + modified_chat_template[insertion_point:]
             )
 
+    # Probe placement: the marker is the very last token, after the last
+    # turn's close.
+    if any(i["type"] == ANCHOR_MODE_PROBE for i in adapter_mapping.values()):
+        modified_chat_template += (
+            "\n{%- if probe_mode %}{{- adapter_token }}{%- endif %}"
+        )
+
     # Insert alora fallback before generation prompt
     gen_prompt_pattern = r"(\{%- if add_generation_prompt %\})"
     match = re.search(gen_prompt_pattern, modified_chat_template)
@@ -1385,7 +1441,9 @@ def configure_chat_template(
     tokenizer.chat_template = modified_chat_template
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")
     for adapter_name, info in adapter_mapping.items():
-        if info["type"] == ANCHOR_MODE_SR:
+        if info["type"] == ANCHOR_MODE_PROBE:
+            placement = "after the last turn's close (last token; read point = marker)"
+        elif info["type"] == ANCHOR_MODE_SR:
             placement = f"replacing '{sr_site}' in the generation prompt"
             anchor = next(iter(sr_anchors))
             if sr_site != anchor:

@@ -43,7 +43,7 @@ _VOCAB_NO_AUDIO = 202
 _VOCAB_WITH_AUDIO = 203
 
 
-def _config(switch_type):
+def _config(switch_type, **overrides):
     return GraniteSwitchConfig(
         vocab_size=_BASE_VOCAB,
         hidden_size=32,
@@ -63,6 +63,7 @@ def _config(switch_type):
         adapter_substitute_token_ids=list(_SUB_IDS),
         switch_type=switch_type,
         torch_dtype=torch.float32,
+        **overrides,
     )
 
 
@@ -129,3 +130,41 @@ def test_no_mapping_is_not_an_error(switch_type):
 
     assert model.model.switch.control_to_substitute_lut is None
     assert refresh_switch_control_lut(model) is False
+
+
+def test_probe_routing_survives_audio_resize_and_strict_reload(tmp_path):
+    """Probe + audio: every retained routing table must match the saved config.
+
+    The control LUT is vocabulary-sized and is rebuilt after the resize; the
+    probe kind LUT is indexed by adapter, so the resize cannot stale it.
+    A strict reload (no ``ignore_mismatched_sizes``) must keep both, and the
+    probe marker must still route to its head and emit a label word.
+    """
+    from granite_switch.composer.validator import validate_control_lut
+
+    config = _config(
+        "multi",
+        adapter_kinds=["lora", "probe"],
+        probe_label_token_ids=[None, [10, 11]],
+    )
+    model = GraniteSwitchForCausalLM(config).eval()
+    with torch.no_grad():
+        model.model.probe_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
+    model.resize_token_embeddings(_VOCAB_WITH_AUDIO)
+    assert refresh_switch_control_lut(model) is True
+    validate_control_lut(model)
+
+    kind_lut = model.model.switch.adapter_kind_lut
+    assert kind_lut.tolist() == [False, False, True]
+
+    model.save_pretrained(tmp_path / "composed")
+    loaded = GraniteSwitchForCausalLM.from_pretrained(tmp_path / "composed").eval()
+    switch = loaded.model.switch
+    assert switch.control_to_substitute_lut.numel() == loaded.config.vocab_size
+    torch.testing.assert_close(switch.adapter_kind_lut, kind_lut)
+
+    with torch.no_grad():
+        out = loaded(input_ids=torch.tensor([[1, 2, 3, _CTRL_IDS[1]]]), use_cache=False)
+    assert loaded.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
+    assert loaded.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    assert int(out.logits[0, -1].argmax()) == 11
