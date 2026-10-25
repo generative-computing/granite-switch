@@ -306,7 +306,11 @@ of the new version show `·` in the reference columns.
    pod from a Kubernetes secret, by name.
 
 2. Log in to the cluster with `oc login`, in the namespace set in
-   `local.env`.
+   `local.env`. `submit.sh` submits and follows with whatever login `oc` has
+   now: before it submits or fetches, it stops if that cluster runs no
+   AppWrappers (a login to another cluster), if the login has expired, or if
+   it cannot create jobs in the namespace, and says which. A job runs on when
+   the login changes; switch back (`oc config use-context`) and `fetch` it.
 
 3. Add the Helm repository that provides the `mlbatch/pytorchjob-generator`
    chart, and check that `helm template` can find it.
@@ -327,7 +331,7 @@ Everything goes through
 | `submit.sh reference [flags]` | Computes the reference columns and publishes them. |
 | `submit.sh rescore [--only a,b]` | Scores saved answers again after a scoring change, and publishes the new scores. Generates nothing. |
 | `submit.sh script <ref> <file.py>` | Runs one local Python file on a GPU pod, with the commit installed and the bench root mounted. For one-off checks; the output is only in the log. |
-| `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. |
+| `submit.sh fetch <job>` | Resumes following a job (after Ctrl-C) and collects its output. A job no longer on the cluster (deleted once it succeeded) is said to be gone, with where its log is saved. |
 | `submit.sh stage --release <rev>` | Fetches a Hugging Face release into its folder (see [Hugging Face releases](#hugging-face-releases)). |
 | `submit.sh bench --release <rev> [flags]` | Benchmarks the release as published, on its own serving commit, and publishes its row. |
 | `submit.sh reference --release <rev> [flags]` | Computes the release's HF + PEFT and Base columns. |

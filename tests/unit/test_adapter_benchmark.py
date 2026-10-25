@@ -5405,6 +5405,106 @@ def test_the_launcher_runs_no_reference_for_a_release_that_shows_another(tmp_pat
     )
 
 
+def submit_sh(tmp_path: Path, oc: str, *argv: str) -> subprocess.CompletedProcess:
+    """submit.sh from a copy of the harness, with a fake oc and settings that
+    reach no cluster; nothing is rendered unless argv asks for a submit."""
+    harness = tmp_path / "repo" / "benchmarks" / "adapter_eval"
+    if not harness.exists():
+        shutil.copytree(
+            VELA.parent, harness, ignore=shutil.ignore_patterns("local", "__pycache__")
+        )
+        (harness.parent / "__init__.py").write_text("")
+        (harness / "vela" / "local").mkdir()
+        (harness / "vela" / "local" / "local.env").write_text("NAMESPACE=nowhere\n")
+    bin_dir = tmp_path / "bin"
+    fake_tool(bin_dir / "oc", oc)
+    return subprocess.run(
+        ["bash", str(harness / "vela" / "submit.sh"), *argv],
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "LOCAL_PYTHON": sys.executable,
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+        },
+    )
+
+
+# oc logged in to another cluster: it answers, but runs no AppWrappers.
+OTHER_CLUSTER_OC = """
+case "$*" in
+"whoami --show-server") echo https://other.example:30767 ;;
+"get --raw /apis/workload.codeflare.dev"*)
+    echo 'Error from server (NotFound): the server could not find the requested resource' >&2
+    exit 1 ;;
+*) exit 0 ;;
+esac
+"""
+# The jobs' cluster, its login expired.
+EXPIRED_OC = """
+case "$*" in
+"whoami --show-server") echo https://api.vela.example:6443 ;;
+*) echo 'error: You must be logged in to the server (Unauthorized)' >&2; exit 1 ;;
+esac
+"""
+# The jobs' cluster, logged in; the job asked for is gone (deleted once it
+# succeeded).
+GONE_OC = """
+case "$*" in
+"whoami --show-server") echo https://api.vela.example:6443 ;;
+"get --raw"*) echo '{"kind":"APIGroup"}' ;;
+"auth can-i"*) echo yes ;;
+"get appwrapper"*)
+    echo "Error from server (NotFound): appwrappers \"$3\" not found" >&2; exit 1 ;;
+"get pods"*) ;;
+*) exit 0 ;;
+esac
+"""
+
+
+@pytest.mark.parametrize(
+    "oc, says",
+    [
+        (OTHER_CLUSTER_OC, "runs no AppWrappers: not the jobs' cluster"),
+        (EXPIRED_OC, "its login may have expired"),
+        ("exit 1\n", "log in to the cluster"),
+    ],
+)
+def test_fetch_needs_a_login_that_runs_the_jobs(tmp_path, oc, says):
+    """The first classifier-head runs met a login to another cluster and an
+    expired one: the launcher says which, instead of a cluster error or a
+    wait for nothing."""
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    job = "adapter-bench-bench-aaaaaaaa-0101"
+    submit_sh(tmp_path, "exit 0\n")  # the harness copy
+    jobs = tmp_path / "repo" / "benchmarks" / "adapter_eval" / "vela" / "local" / "jobs"
+    jobs.mkdir()
+    (jobs / f"{job}.env").write_text("MODE=bench\nK8S=/nowhere.yaml\n")
+    done = submit_sh(tmp_path, oc, "fetch", job)
+    assert done.returncode == 1
+    assert says in done.stderr, done.stdout + done.stderr
+
+
+def test_fetch_says_a_finished_job_is_gone(tmp_path):
+    if shutil.which("bash") is None:
+        pytest.skip("needs bash")
+    job = "adapter-bench-bench-aaaaaaaa-0101"
+    submit_sh(tmp_path, "exit 0\n")
+    local = tmp_path / "repo" / "benchmarks" / "adapter_eval" / "vela" / "local"
+    (local / "jobs").mkdir()
+    (local / "jobs" / f"{job}.env").write_text("MODE=bench\nK8S=/nowhere.yaml\n")
+    (local / "logs").mkdir()
+    (local / "logs" / f"{job}.log").write_text("done\n")
+    done = submit_sh(tmp_path, GONE_OC, "fetch", job)
+    assert done.returncode == 1
+    assert f"{job} is no longer on the cluster" in done.stderr
+    assert done.stderr.rstrip().endswith(
+        f"its log is saved: {local / 'logs' / f'{job}.log'}"
+    )
+
+
 def test_render_job_of_a_release_served_from_pypi(tmp_path, monkeypatch):
     render_job = load_render_job()
     monkeypatch.setattr(render_job, "harness_version", lambda: ("f" * 40, False))

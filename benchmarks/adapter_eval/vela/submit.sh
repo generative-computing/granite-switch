@@ -129,7 +129,51 @@ elif [[ "$MODE" == bench && -z "$REF" ]]; then
     usage
 fi
 
+# --- the cluster login --------------------------------------------------------
+
+# The jobs are AppWrappers (the chart renders one): the cluster oc is logged in
+# to must run them, and the login may create them in NAMESPACE. Otherwise a
+# job is refused ("no matches for kind AppWrapper"), or following one finds
+# nothing. Asks only what any login may ask.
+JOB_API=workload.codeflare.dev
+check_login() {
+    local server out
+    server=$(oc whoami --show-server 2>/dev/null || true)
+    [[ -n "$server" ]] || die "log in to the cluster: oc login (if its host does not resolve, connect the VPN)"
+    # A cluster that does not tell its API groups (Forbidden) is left to the
+    # rights check below.
+    if ! out=$(oc get --raw "/apis/$JOB_API" --request-timeout=30s 2>&1 >/dev/null) &&
+        [[ "$out" != *Forbidden* ]]; then
+        if [[ "$out" == *NotFound* ]]; then
+            die "oc is logged in to $server, which runs no AppWrappers: not the jobs' cluster. Switch to its login (oc config get-contexts, then oc config use-context <name>), or log in to it (oc login)"
+        fi
+        die "oc cannot reach $server (${out##*$'\n'}): its login may have expired, or the VPN is off. Log in again (oc login)"
+    fi
+    oc auth can-i create "appwrappers.$JOB_API" -n "$NAMESPACE" --request-timeout=30s >/dev/null 2>&1 ||
+        die "the login to $server cannot create jobs in $NAMESPACE: log in to the cluster that holds it (oc login)"
+}
+
 # --- follow a submitted job ----------------------------------------------------
+
+# Whether the job is still on the cluster: yes, no, or unknown (no answer).
+job_exists() {
+    local out
+    if out=$(oc get appwrapper "$JOB" -n "$NAMESPACE" -o name 2>&1); then
+        echo yes
+    elif [[ "$out" == *NotFound* ]]; then
+        echo no
+    else
+        echo unknown
+    fi
+}
+# Stop: the job is no longer on the cluster, so there is nothing to follow. A
+# succeeded job is deleted once its log is saved; a failed one is kept a day,
+# or less.
+gone() {
+    local log=$LOCAL_DIR/logs/$JOB.log saved="no log of it is saved here"
+    [[ -f "$log" ]] && saved="its log is saved: $log"
+    die "$JOB is no longer on the cluster (it finished, or was deleted); $saved"
+}
 
 pod_name() {
     oc get pods -n "$NAMESPACE" -o name 2>/dev/null | grep "^pod/${JOB}-" | head -n 1 || true
@@ -144,6 +188,7 @@ follow() {
     while [[ -z "$pod" ]]; do
         pod=$(pod_name)
         if [[ -z "$pod" ]]; then
+            if [[ "$(job_exists)" == no ]]; then gone; fi
             if ((waited % 300 == 0)); then say "no pod yet after ${waited}s (queued?)"; fi
             sleep 30
             waited=$((waited + 30))
@@ -241,6 +286,7 @@ finish() {
 
 if [[ "$MODE" == fetch ]]; then
     [[ -f "$LOCAL_DIR/jobs/$JOB.env" ]] || die "no record of $JOB in $LOCAL_DIR/jobs"
+    check_login
     # shellcheck source=/dev/null
     source "$LOCAL_DIR/jobs/$JOB.env"
     follow
@@ -420,6 +466,7 @@ if [[ -n "$DRY_RUN" ]]; then
     exit 0
 fi
 
+check_login
 mkdir -p "$LOCAL_DIR/jobs"
 {
     printf 'MODE=%q\nSHA=%q\nLIMIT=%q\nONLY=%q\n' "$MODE" "$SHA" "$LIMIT" "$ONLY"
