@@ -9,6 +9,8 @@ import os
 import re
 from dataclasses import dataclass
 
+import jinja2
+
 from .adapter_loader import load_adapter_config
 
 # Name of the optional return-to-base control token (``<|base_reset|>``). It is
@@ -550,6 +552,185 @@ def _replace_anchor_in_generation_prompt(
             f"that never activates."
         )
     return head + region, site, count
+
+
+#: A ``for`` / ``endfor`` statement tag, for depth-matching the message loop.
+#: Accepts every whitespace-control spelling: ``{%``, ``{%-`` and ``{%+``.
+_FOR_TAG_RE = re.compile(r"\{%[-+]?\s*(for|endfor)\b")
+
+
+def _jinja_string_literal(text: str) -> str:
+    """*text* as a single-quoted Jinja string literal that renders back to it."""
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+    return "'" + escaped + "'"
+
+
+def _sr_history_header(template: str, site: str) -> str:
+    """The rendered assistant header, through *site*, that history turns repeat.
+
+    Taken from the base template's generation prompt: every branch opens with
+    the same assistant header, and a history assistant turn renders that same
+    header before its content (``<|start_of_role|>assistant<|end_of_role|>`` on
+    4.1, ``<|im_start|>assistant\\n<think>`` on 4.2, where the history turn
+    continues ``</think>``).
+
+    Raises:
+        ValueError: If the generation prompt's branches share no prefix that
+            contains *site*.
+    """
+    _, region = _split_at_generation_prompt(template)
+    literals = [_unescape_literal(body) for body in _generation_prompt_literals(region)]
+    prefix = os.path.commonprefix(literals) if literals else ""
+    cut = prefix.rfind(site)
+    if cut == -1:
+        raise ValueError(
+            f"The generation prompt's branches share no prefix containing the "
+            f"Shadow Residual substitution site {site!r} ({literals!r}), so the "
+            f"history_adapters rewrite has no header to match."
+        )
+    return prefix[: cut + len(site)]
+
+
+def _wrap_message_loop_for_history_adapters(
+    template: str, loop_var_source: str, header: str, site: str
+) -> str:
+    """Let ``history_adapters`` put SR control tokens back into history turns.
+
+    Rendering history from ``messages`` emits every assistant header with the
+    SR *site* (the token the control token replaced at generation time), so the
+    re-rendered ids diverge from the ones that were sent and the prefix cache
+    misses. ``history_adapters[k]`` names the adapter that produced the k-th
+    assistant message; this rewrites that message's header back so its *site*
+    is the control token.
+
+    The match is on the whole *header* (e.g. ``<|im_start|>assistant\\n<think>``),
+    which ends in *site*, not on *site* alone. Granite 4.2 writes its own
+    ``<think></think>`` only when the answer has no think tags, so for an answer
+    that mentions ``<think>`` the first bare ``<think>`` is the answer's text; the
+    header text cannot occur there.
+
+    The main loop body is wrapped in ``{% filter replace(header, new, 1) %}``,
+    so the replacement applies to the body's rendered text, rather than
+    rewriting each assistant emission in the source: the 4.2 template emits the
+    assistant header from several branches and reads ``<think>`` in its own
+    history-truncation logic, so a token placed in the source would be seen
+    (and stripped, or misread) by that logic. Rendered-text replacement runs
+    after it and is indifferent to which branch ran.
+
+    Only applied when the current turn is SR (``ns.adapter_type == 'sr'``): a
+    base turn after a kept SR token would generate under SR (latest-wins).
+
+    ``history_adapters`` must have exactly one entry per assistant message
+    (``None`` for a turn that had no adapter); any other length raises.
+
+    Raises:
+        ValueError: If *header* does not end in *site*, the template has no
+            main message loop with a matching ``endfor``, or the wrapped
+            template no longer parses (e.g. an ``endfor`` inside a comment
+            fooled the tag scan).
+    """
+    if not header.endswith(site):
+        raise ValueError(
+            f"history_adapters header {header!r} does not end in the Shadow "
+            f"Residual substitution site {site!r}."
+        )
+    open_tag = re.search(
+        r"\{%[-+]?\s*for message in " + re.escape(loop_var_source) + r"\s*[-+]?%\}",
+        template,
+    )
+    if open_tag is None:
+        raise ValueError(
+            f"No '{{%- for message in {loop_var_source} %}}' loop in the chat "
+            f"template, so history_adapters has nothing to wrap."
+        )
+    depth = 1
+    for tag in _FOR_TAG_RE.finditer(template, open_tag.end()):
+        depth += 1 if tag.group(1) == "for" else -1
+        if depth == 0:
+            close_at = tag.start()
+            break
+    else:
+        raise ValueError(
+            "The chat template's message loop has no matching endfor, so "
+            "history_adapters has nothing to wrap."
+        )
+
+    # Checked once, before the loop: a list that does not line up one-to-one
+    # with the assistant messages is a caller bug, and silently padding or
+    # truncating it would put tokens on the wrong turns.
+    precheck = (
+        "{%- if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        " and history_adapters is defined and history_adapters is not none %}\n"
+        "{%- if history_adapters is string or history_adapters is mapping"
+        " or history_adapters is not iterable %}\n"
+        "{{- raise_exception('history_adapters must be a list of adapter names "
+        "(or none), one per assistant message') }}\n"
+        "{%- endif %}\n"
+        "{%- set _gs_expected = " + loop_var_source + " | selectattr('role', "
+        "'equalto', 'assistant') | list | length %}\n"
+        "{%- if history_adapters | length != _gs_expected %}\n"
+        "{{- raise_exception('history_adapters has ' ~ (history_adapters | length)"
+        " ~ ' entries but the conversation has ' ~ _gs_expected ~ ' assistant "
+        "messages; pass exactly one entry (an adapter name or none) per "
+        "assistant message') }}\n"
+        "{%- endif %}\n"
+        "{%- for _gs_entry in history_adapters %}\n"
+        # ``is not string`` first: ``or`` short-circuits, so an unhashable entry
+        # never reaches the ``in`` lookup and gets this message, not a TypeError.
+        "{%- if _gs_entry is not none and (_gs_entry is not string"
+        " or _gs_entry not in adapter_map"
+        " or adapter_map[_gs_entry]['type'] != '" + ANCHOR_MODE_SR + "') %}\n"
+        "{{- raise_exception('history_adapters names ' ~ _gs_entry ~ ', which is "
+        "not a Shadow Residual adapter of this checkpoint') }}\n"
+        "{%- endif %}\n"
+        "{%- endfor %}\n"
+        "{%- endif %}\n"
+    )
+    # Picks this message's replacement before its body renders; the default
+    # (header -> header) leaves the body untouched.
+    choose = (
+        "\n{%- set _gs_new = " + _jinja_string_literal(header) + " %}\n"
+        "{%- if message.role == 'assistant' %}\n"
+        "{%- if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        " and history_adapters is defined and history_adapters is not none"
+        " and history_adapters[ns.assistant_idx] is not none %}\n"
+        "{%- set _gs_new = "
+        + _jinja_string_literal(header[: len(header) - len(site)])
+        + " ~ adapter_map[history_adapters[ns.assistant_idx]]['token'] %}\n"
+        "{%- endif %}\n"
+        "{%- set ns.assistant_idx = ns.assistant_idx + 1 %}\n"
+        "{%- endif %}\n"
+        "{%- filter replace(" + _jinja_string_literal(header) + ", _gs_new, 1) %}"
+    )
+    wrapped = (
+        template[: open_tag.start()]
+        + precheck
+        + template[open_tag.start() : open_tag.end()]
+        + choose
+        + template[open_tag.end() : close_at]
+        + "{%- endfilter %}\n"
+        + template[close_at:]
+    )
+
+    # The tag scan is textual, so a template it misreads composes fine and then
+    # fails at render time. Parse both versions to catch that here instead; a
+    # template that does not parse even before the wrap (an extension tag this
+    # environment lacks) is left for the real renderer to judge.
+    env = jinja2.Environment(extensions=["jinja2.ext.loopcontrols"])
+    try:
+        env.parse(template)
+    except jinja2.TemplateSyntaxError:
+        return wrapped
+    try:
+        env.parse(wrapped)
+    except jinja2.TemplateSyntaxError as exc:
+        raise ValueError(
+            f"Wrapping the chat template's message loop for history_adapters "
+            f"produced a template that does not parse ({exc}). The loop's "
+            f"endfor was probably mis-identified, e.g. one inside a comment or "
+            f"a string."
+        ) from exc
+    return wrapped
 
 
 def add_control_tokens(
@@ -1165,7 +1346,9 @@ def configure_chat_template(
             "\n                       adapter_invocation_text=adapter_invocation_text,"
             "\n                       adapter_invocation_drop_chars=adapter_invocation_drop_chars,"
             "\n                       alora_target_idx=-1,"
-            "\n                       skip_next_role_marker=false"
+            # history_adapters state (SR only): the assistant message being visited.
+            + ("\n                       assistant_idx=0," if sr_anchors else "")
+            + "\n                       skip_next_role_marker=false"
             "\n                       )"
         )
         modified_chat_template = (
@@ -1318,6 +1501,12 @@ def configure_chat_template(
             for name, info in adapter_mapping.items()
             if info["type"] == ANCHOR_MODE_SR
         }
+        modified_chat_template = _wrap_message_loop_for_history_adapters(
+            modified_chat_template,
+            fmt.loop_var_source,
+            _sr_history_header(base_chat_template, sr_site),
+            sr_site,
+        )
 
     # Skip-once wrapper for every role-open marker emission in the template.
     # ns.skip_next_role_marker is set to true immediately after a LoRA or
@@ -1411,5 +1600,9 @@ def configure_chat_template(
         print(
             f"  - SR tokens: substituted for {sr_site!r} in all "
             f"{sr_replacements} generation-prompt render path(s)"
+        )
+        print(
+            f"  - SR history: history_adapters=[...] restores {sr_site!r} -> "
+            f"control token in earlier assistant turns"
         )
     return fmt.name, sr_substitute_token_ids
