@@ -10,8 +10,8 @@ rank-32 ones, and **up to 5.9× faster** with one rank-512 adapter. At idle (no 
 ## Motivation and Availability
 
 As part of our mission to create a modular model architecture where adapter libraries are used to enhance
-a model, we encountered the problem that existing infrastructure for serving adapters introduced 
-unnecessary performance overheads. These overheads are noticeable even when a single adapter, regardless of 
+a model, we encountered the problem that existing infrastructure for serving adapters introduced
+unnecessary performance overheads. These overheads are noticeable even when a single adapter, regardless of
 its size, is introduced, but become very pronounced when the adapters have diverse sizes, which we anticipate will be a common
 scenario when a developer is integrating library components from different contributors into a single checkpoint.
 
@@ -36,7 +36,7 @@ expensive in our setting.
 ## What SWITCH does differently
 
 SWITCH is named after its design: **S**witched delta, **W**-ext fusion, **I**n-place,
-**T**iled, **C**onditional skip, **H**eterogeneous rank. 
+**T**iled, **C**onditional skip, **H**eterogeneous rank.
 
 Existing Punica technology, as implemented in vLLM, exhibits the following properties:
 
@@ -108,7 +108,7 @@ adapter. The figure below compares each system **as it currently implemented**: 
 
 ![Idle vs adapter-active throughput at 12 adapters loaded, against the base model with LoRA off](figures/fig3_dispatch_3b_b32.png)
 
-Of note is that the overhead at idle that the SWITCH implementation in Granite Switch and vLLM exhibit is unrelated to the SWITCH kernels themselves, and rather 
+Of note is that the overhead at idle that the SWITCH implementation in Granite Switch and vLLM exhibit is unrelated to the SWITCH kernels themselves, and rather
 related to the fact that SWITCH is operating as a single computational graph, whereas vLLM does not run an adapter specific graph when no adapters are present. It would be relatively
 straightforward to implement SWITCH with two graphs, in which case the performance in the no adapter case would match vLLM/Punica exactly. As indicated earlier, we are currently focused in the setting where the model discovers which adapters need to be applied to which tokens through its switch layer, and currently there is no support in vLLM for adapting the computational graph once the model is already invoked.
 
