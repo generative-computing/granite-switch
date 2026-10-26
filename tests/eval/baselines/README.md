@@ -12,12 +12,22 @@ file.
 
 ## Recording one
 
-From a known-good vLLM line, with the checkpoint staged:
+Record on the GPU runner that also does the checking, via the workflow's
+`eval-record` suite — not locally and not on another cluster. A baseline captured
+elsewhere was not reproducible here: it missed by a systematic ~0.004 mean JSD on
+both vLLM configs, identically on the 0.26 and 0.30 legs. Same-environment
+recording makes the baseline reproducible by construction, so later movement is
+attributable to the vLLM line and nothing else.
 
 ```bash
-uv run --group dev-vllm30 \
-  .claude/skills/upgrade-vllm/scripts/record_eval_baseline.py --config all
+gh workflow run gpu-tests.yaml --ref <branch> \
+  -f suite=eval-record -f sha=<sha> -f no_cache=true
 ```
+
+The run prints each baseline JSON into the pod log for a human to extract and
+commit; it writes nothing to the repo. `eval-record` is deliberately
+non-cacheable, since the log *is* the artifact. See
+`tests/eval/test_record_baselines.py`.
 
 Baselines must be captured **before** a port, on the version you already trust. A
 baseline captured on the version under test proves nothing.
