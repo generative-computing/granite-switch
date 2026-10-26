@@ -159,26 +159,87 @@ def test_generation_is_deterministic(engine, control_ids, tokenizer):
     )
 
 
+def _gen_with_logprobs(llm, seqs):
+    """Generate greedily, returning (token_ids, per-step sorted logprob list)."""
+    from vllm import SamplingParams
+    from vllm.inputs import TokensPrompt
+
+    sp = SamplingParams(
+        temperature=0.0, max_tokens=MAX_NEW_TOKENS, ignore_eos=True, logprobs=5
+    )
+    prompts = [TokensPrompt(prompt_token_ids=list(s)) for s in seqs]
+    out = []
+    for o in llm.generate(prompts, sampling_params=sp):
+        comp = o.outputs[0]
+        steps = [
+            sorted((lp.logprob for lp in d.values()), reverse=True)
+            for d in (comp.logprobs or [])
+        ]
+        out.append(([int(t) for t in comp.token_ids], steps))
+    return out
+
+
 def test_batched_generation_matches_solo(engine, control_ids, tokenizer):
-    """Each request must generate the same tokens alone as when co-batched.
+    """Each request must route the same alone as when co-batched.
 
     This is the observable consequence of correct per-request counting anchors.
     With a global anchor, a request's routing depends on what else is in the flat
     batch, and its output drifts. Prompt lengths are distinct so requests are not
     accidentally interchangeable.
+
+    Tie-tolerant rather than token-exact, and the tolerance is measured, not
+    assumed. A token-exact assertion here is not a statement about routing: vLLM
+    reduces a co-batched request's logits in a different order than a solo one, so
+    a position where the top two candidates are already equal in bf16 can flip on
+    sub-ULP noise. Measured on an A100 (vLLM 0.26, bf16) the third request does
+    exactly that at step 8 -- solo's top-2 logprobs are the *same bf16 value*
+    (-1.07067, -1.07067; gap 0.000000), so which one greedy picks is arbitrary and
+    both answers are equally correct.
+
+    Note the earlier attempt recorded above ``_QUESTIONS``: real-language prompts
+    replaced junk filler to get off near-ties, and a routing probe confirmed
+    routing was already identical in both runs. That reduced the tie rate but
+    could not remove it, because no prompt guarantees a strictly-separated argmax
+    at every position. So the tie is excluded by *measurement* instead: a
+    divergence is accepted only where the top-2 gap is zero.
+
+    What that still catches is the bug the test exists for. A request whose anchor
+    came from the wrong place in the flat batch retrieves a different adapter and
+    computes a genuinely different distribution, so its divergence sits at a
+    separated argmax (nonzero gap) -- which fails here. Only coin-flips pass.
     """
     a, b, c = control_ids
     seqs = [_prompt(tokenizer, q, t) for q, t in zip(_QUESTIONS, (a, b, c))]
 
-    solo = [_gen(engine, [s])[0] for s in seqs]
-    batched = _gen(engine, seqs)
+    solo = [_gen_with_logprobs(engine, [s])[0] for s in seqs]
+    batched = _gen_with_logprobs(engine, seqs)
 
-    mismatches = [i for i in range(len(seqs)) if solo[i] != batched[i]]
-    assert not mismatches, (
-        f"batched generation diverged from solo for request(s) {mismatches}:\n"
+    real = []
+    for i, ((s_toks, s_steps), (b_toks, _)) in enumerate(zip(solo, batched)):
+        div = next(
+            (j for j in range(min(len(s_toks), len(b_toks))) if s_toks[j] != b_toks[j]),
+            None,
+        )
+        if div is None:
+            continue
+        # Gap between the best and second-best candidate in the SOLO run at the
+        # position that diverged. Exactly 0.0 means the two are indistinguishable
+        # in bf16, so the pick is a coin flip; anything above that is a real
+        # difference in the distribution and therefore a routing suspect.
+        top = s_steps[div] if div < len(s_steps) else []
+        gap = (top[0] - top[1]) if len(top) > 1 else float("inf")
+        print(f"req {i}: diverged at step {div}, solo top-2 gap {gap:.6f}")
+        if gap > 0.0:
+            real.append((i, div, gap, s_toks, b_toks))
+
+    assert not real, (
+        "batched generation diverged from solo at a position where the argmax was "
+        "strictly separated, so it is not a tie-break -- suspect per-request "
+        "counting anchors:\n"
         + "\n".join(
-            f"  req {i}: solo={solo[i]}\n         batched={batched[i]}"
-            for i in mismatches
+            f"  req {i}: step {div}, solo top-2 gap {gap:.6f}\n"
+            f"    solo={s}\n    batched={b}"
+            for i, div, gap, s, b in real
         )
     )
 
