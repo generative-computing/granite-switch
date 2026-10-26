@@ -58,10 +58,13 @@ def test_adapter_eval(config_name):
     assert baseline is not None, (
         f"{cfg.name}: checkpoint is staged at {model_dir} but "
         f"{core.baseline_path(cfg.name)} does not exist, so there is nothing to "
-        "compare against. Record it from a KNOWN-GOOD vLLM line:\n"
-        f"  uv run --group dev-vllm<known-good> "
-        f".claude/skills/upgrade-vllm/scripts/record_eval_baseline.py "
-        f"--config {cfg.name}"
+        "compare against. Record it from a KNOWN-GOOD vLLM line, on the GPU "
+        "runner that does the checking -- a baseline captured in a different "
+        "environment missed by a systematic ~0.004 mean JSD:\n"
+        "  gh workflow run gpu-tests.yaml --ref <branch> "
+        "-f suite=eval-record -f sha=<sha> -f no_cache=true\n"
+        f"The run prints every baseline into its log; commit the {cfg.name} one "
+        "to tests/eval/baselines/. See tests/eval/baselines/README.md."
     )
 
     # The baseline's continuations, not freshly generated ones: the measurement is
