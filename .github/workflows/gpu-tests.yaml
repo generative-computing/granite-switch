@@ -60,11 +60,11 @@ on:
       # family is added HERE and nowhere else -- this entry plus its arm in the
       # Resolve test scope step below.
       suite:
-        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs)."
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), skips (the formerly-skipped tests being un-gated)."
         required: false
         default: full
         type: choice
-        options: [full, short, dev, audio, multi]
+        options: [full, short, dev, audio, multi, skips]
       # RESULT CACHE OPT-OUT. Default off, i.e. cache on: the expensive thing here is
       # a GPU run, and re-running one for a commit+scope that was already tested buys
       # nothing in the common case (a reviewer re-reading a PR, a second maintainer
@@ -237,6 +237,42 @@ jobs:
               PATHS='-m "audio and not deep" tests/'
               SUFFIX="audio"
               LEG="$LABEL-audio"
+              ;;
+            # The tests that the skip audit un-gated, as one narrow scope. Exists
+            # because `full` is not currently a usable way to check them: every
+            # full-suite run since 2026-10-18 has been cancelled from outside the pod
+            # at ~95-120 min (see the three-timeout note above -- it is none of
+            # ours), so a 3h46m suite is stopped around 40% and reports no summary.
+            # These three paths finish far inside that window.
+            #
+            # What each one is here to prove, since all three were changed by edits
+            # that no CPU box can check:
+            #   tests/hf/test_quantization.py        16 tests that used to skip on an
+            #                                       env flag; 4 of them now gate on a
+            #                                       real Quanto float8 probe that only
+            #                                       means anything on a GPU.
+            #   tests/composer/test_skinning_...py   was @pytest.mark.skip outright; now
+            #                                       gates top-k JSD/Jaccard + argmax,
+            #                                       plus exact config multipliers. This
+            #                                       scope is what measured the bf16 noise
+            #                                       floor the thresholds are calibrated
+            #                                       against -- a CPU box runs it in fp32
+            #                                       and sees none of it. It is also what
+            #                                       caught x86 contracting the logits
+            #                                       0.37%, which retired a numeric
+            #                                       logit-scale gate as unportable.
+            #   tests/unit/test_bitmask_computation  34 tests, no longer 2 skips. Cheap,
+            #                                       and it cannot even be COLLECTED off
+            #                                       GPU: it imports lora_kernel_meta,
+            #                                       which imports vllm.distributed.
+            #
+            # NOT a substitute for `full`, and deliberately not wired into the
+            # /gpu-test comment path's defaults. Delete this arm once the ~95 min
+            # cancellation is fixed and `full` is trustworthy again.
+            skips)
+              PATHS="tests/hf/test_quantization.py tests/composer/test_skinning_equivalence.py tests/unit/test_bitmask_computation.py"
+              SUFFIX="skips"
+              LEG="$LABEL-skips"
               ;;
             # Everything `full` runs, but on TWO GPUs. Not a different test
             # selection -- a different SHAPE of pod.

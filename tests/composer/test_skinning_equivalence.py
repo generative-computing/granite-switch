@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Verify skinned GraniteSwitch models produce bit-exact logits vs the originals.
+"""Verify skinned GraniteSwitch models reproduce the originals' logits.
+
+Neither backend checks bit-exactness: the skin's fused projections sum in a
+different order than the unfused reference, so both workers compare within a
+measured noise bound and pair it with an exact top-token check. See CLAUDE.md
+Gotcha #9.
 
 Each model runs in its own subprocess so CUDA context is fully torn down between
 tests (avoids OOM and stale-state issues that plague in-process model reloading).
@@ -174,22 +179,29 @@ def _run_vllm_test(model_name, timeout, fast=False):
 
 # ── HF tests (slow) ──────────────────────────────────────────────
 #
-# SKIPPED: The GraniteSwitch HF backend uses fused QKV/gate-up projections
-# (symmetric with vLLM) rather than the separate projections used by upstream
-# HuggingFace GraniteMoeHybrid.  Fused projections change the floating-point
-# reduction order, so bit-exact equivalence with the upstream HF model is not
-# achievable.  The vLLM skinning tests below are the authoritative equivalence
-# check — both sides use the same fused-projection architecture.
+# The GraniteSwitch HF backend uses fused QKV/gate-up projections (symmetric with
+# vLLM) rather than the separate projections upstream HuggingFace uses, and fusing
+# changes the order of a floating-point sum. This test therefore used to carry an
+# unconditional @pytest.mark.skip, on the correct observation that bit-exact
+# equivalence is unreachable -- but the conclusion drawn from it was too strong.
+# Its worker now gates DISTRIBUTION equivalence (top-k JSD + Jaccard swept over k,
+# plus an exact argmax check; see _skinning_equivalence_worker._compare_logits),
+# reusing the metric and thresholds tests/vllm/_generation_equivalence_worker.py
+# already calibrated, so the test can run instead. Those three checks live after
+# log_softmax and so cannot see a uniform logit scaling; that bug is gated exactly
+# on the config instead (_compare_multipliers), because a numeric estimate of the
+# scale differs 13x between arm64 and x86 on the same correct skin.
+#
+# Worth having rather than deleting: both vLLM skinning tests below need a GPU, so
+# this is the only end-to-end check that the composer's weight transfer produces a
+# model matching the original, and it runs on CPU.
 
 
-@pytest.mark.skip(
-    reason="HF backend uses fused projections (not bit-exact with upstream HF)"
-)
 @pytest.mark.slow
 @pytest.mark.requires_model
 @pytest.mark.parametrize("model_name", ALL_MODELS, ids=_short_name)
 def test_skinning_equivalence_hf(model_name):
-    """Skin *model_name* to GraniteSwitch and assert bit-exact logits via HF."""
+    """Skin *model_name* to GraniteSwitch and compare logits via HF (CPU)."""
     _run_worker(HF_WORKER, model_name, HF_TIMEOUT)
 
 

@@ -11,11 +11,14 @@ CONCURRENT  two PRESERVE conversations in flight together. Each has its own toke
     forwards. The arm fails loudly if the scheduler never actually co-batched them,
     because then it proves nothing about concurrency.
 
-EVICT  a cache far too small to keep the conversation resident. PRESERVE's *saving*
-    must degrade -- that is inherent, and not a bug -- while its *correctness* must
-    not. The same ids are recomputed and recomputation reproduces the same routing.
-    If correctness tracked cache pressure the policy would be unusable in
-    production, where pressure is the normal condition.
+EVICT  a cache far too small to keep both conversations resident. PRESERVE's
+    *saving* must degrade -- that is inherent, and not a bug -- while its
+    *correctness* must not. The same ids are recomputed and recomputation
+    reproduces the same routing. If correctness tracked cache pressure the policy
+    would be unusable in production, where pressure is the normal condition.
+    Pressure comes from a second conversation rather than from one conversation
+    outgrowing the cache; see the test's own docstring for why that is the only
+    satisfiable form.
 
 Attribution under concurrency is the part that has produced false results before,
 so it lives in ``attribute_spans`` and is unit-tested on CPU in
@@ -149,27 +152,55 @@ def test_two_preserve_conversations_do_not_disturb_each_other():
 
 
 def test_correctness_survives_cache_eviction():
+    """Cache pressure must cost recomputation, never routing correctness.
+
+    Two conversations share one deliberately tiny cache, rather than one
+    conversation growing past it. That is forced by arithmetic, not taste. vLLM
+    will not start unless the KV cache holds one whole ``max_model_len`` request,
+    so every servable turn satisfies ``capacity >= max_model_len >= prompt +
+    max_tokens``; and under PRESERVE a turn's prompt *contains* the previous
+    turn's transcript as its own prefix, i.e. the same blocks. So a single
+    conversation that the server can serve is one whose history still fits, and
+    nothing is ever evicted -- while the first turn that would overflow the cache
+    is the one the server refuses. The earlier single-conversation form of this
+    test sat in exactly that gap and died at engine init (a 256-token cache
+    against ``max_model_len=4096``), which is why the fix is a second
+    conversation rather than a different ``--blocks``.
+
+    A second conversation with a different filler has a disjoint prefix and thus
+    its own blocks, so it applies pressure the first conversation did not create.
+    Measured at turn 3 the two prompts are ~173 and ~148 tokens: each alone needs
+    189 of the 256 available and stays servable, while together they need ~321
+    and evict each other.
+    """
     data = _run("evict", _model_dir(), extra=["--blocks", "16", "--turns", "4"])
     assert not data.get("error"), data["error"]
 
-    print(f"\n  cache: {data['blocks']} blocks ({data['blocks'] * 16} tokens)")
+    capacity = data["blocks"] * 16
+    print(
+        f"\n  cache: {data['blocks']} blocks ({capacity} tokens), "
+        f"max_model_len {data.get('max_model_len', capacity)}"
+    )
     hdr = (
-        f"\n  {'turn':>4s} {'prompt':>7s} {'hits':>6s} {'ceil':>6s} {'short':>6s} "
-        f"{'want':>5s}  decode  history"
+        f"\n  {'turn':>4s} {'conv':>4s} {'prompt':>7s} {'hits':>6s} {'ceil':>6s} "
+        f"{'short':>6s} {'want':>5s}  decode  history"
     )
     print(hdr)
     print("  " + "-" * (len(hdr) - 3))
     for t in data["turns"]:
         short = t["reusable_ceiling"] - t["hits_delta"]
         print(
-            f"  {t['turn']:>4d} {t['prompt_len']:>7d} {t['hits_delta']:>6.0f} "
-            f"{t['reusable_ceiling']:>6d} {short:>6.0f} "
+            f"  {t['turn']:>4d} {t.get('label', '-'):>4s} {t['prompt_len']:>7d} "
+            f"{t['hits_delta']:>6.0f} {t['reusable_ceiling']:>6d} {short:>6.0f} "
             f"{t['expected_index']:>5d}  {t['decode_indices']!s:>8s}  "
             f"{t['history_routing']}"
         )
 
     turns = data["turns"]
     assert turns, "no turns were run"
+
+    def _name(t):
+        return f"turn {t['turn']}/{t.get('label', '-')}"
 
     # ── Anti-vacuity: eviction has to have actually bitten ──────────────────
     # NOT "the final prompt exceeds the cache": a request larger than the whole
@@ -178,9 +209,8 @@ def test_correctness_survives_cache_eviction():
     # rather than strict. Eviction is instead evidenced directly: hits below what
     # the block arithmetic made available means blocks that should have been
     # resident were not.
-    capacity = data["blocks"] * 16
     shortfalls = {
-        t["turn"]: t["reusable_ceiling"] - t["hits_delta"]
+        _name(t): t["reusable_ceiling"] - t["hits_delta"]
         for t in turns
         if t["hits_delta"] < t["reusable_ceiling"]
     }
@@ -191,20 +221,20 @@ def test_correctness_survives_cache_eviction():
         "not below one full request, or the server cannot serve at all."
     )
     print(
-        f"  eviction bit on turns {sorted(shortfalls)} "
+        f"  eviction bit on {sorted(shortfalls)} "
         f"(shortfall vs the block-math ceiling: {shortfalls})"
     )
 
     # ── The claim: the saving degrades, the routing does not ────────────────
     for t in turns:
         assert t["decode_indices"] == [t["expected_index"]], (
-            f"turn {t['turn']}: generated with adapter index(es) "
+            f"{_name(t)}: generated with adapter index(es) "
             f"{t['decode_indices']}, wanted {t['expected_index']}. Cache pressure "
             "must cost recomputation, never correctness -- evicted blocks are "
             "recomputed from the same ids and must reproduce the same routing."
         )
         assert t["answer_ids_source"] == "logprobs", (
-            f"turn {t['turn']}: the answer was re-encoded from text, so the "
+            f"{_name(t)}: the answer was re-encoded from text, so the "
             "transcript may not match what was sent and any hit rate below is "
             "unattributable to eviction"
         )
