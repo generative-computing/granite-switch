@@ -66,23 +66,23 @@
 <text x="581.5" y="162" class="d-sub">generation</text>
 <rect x="660.5" y="154" width="9" height="9" rx="1" fill="#ef5350"/>
 <text x="674.5" y="162" class="d-sub">prefill</text>
-<rect x="734.6" y="154" width="9" height="9" rx="1" fill="#80deea"/>
+<rect x="734.6" y="154" width="9" height="9" rx="1" fill="#9575cd"/>
 <text x="748.6" y="162" class="d-sub">adapter switching (rtt)</text>
 <rect x="909.5" y="154" width="9" height="9" rx="1" fill="#fff176"/>
 <text x="923.5" y="162" class="d-sub">act (tool call)</text>
 <text x="0" y="182" class="d-lane">lora-vllm</text>
 <text x="0" y="198" class="d-sub">stock vLLM LoRA</text>
 <g><title>generation on base</title><rect x="130" y="173" width="48" height="24" rx="2" fill="#9e9e9e"/><text x="154" y="189" class="d-chip" text-anchor="middle">base</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="190" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="240" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad9</title><rect x="292" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="316" y="189" class="d-chip" text-anchor="middle">ad9</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="352" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="402" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad12</title><rect x="454" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="478" y="189" class="d-chip" text-anchor="middle">ad12</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="514" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="564" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad45</title><rect x="616" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="640" y="189" class="d-chip" text-anchor="middle">ad45</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="676" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="726" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad22</title><rect x="778" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="802" y="189" class="d-chip" text-anchor="middle">ad22</text></g>
 <text x="834" y="189" class="d-sub">…</text>

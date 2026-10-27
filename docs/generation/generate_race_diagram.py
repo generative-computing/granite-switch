@@ -26,7 +26,7 @@ Usage:
 
 import sys
 
-DEC, PRE, RTT, TOOL, DONE = "#4fc3f7", "#ef5350", "#80deea", "#fff176", "#66bb6a"
+DEC, PRE, RTT, TOOL, DONE = "#4fc3f7", "#ef5350", "#9575cd", "#fff176", "#66bb6a"
 BASE = "#9e9e9e"
 W = 1024
 # The grid race's agent 6 (64 agents, 512 tokens): its adapters, in order.

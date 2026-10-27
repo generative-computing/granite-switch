@@ -56,6 +56,38 @@
       text-align: right;
     }
 
+    /* ── Tiles, config card, tracks ── */
+    .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 15rem));
+             gap: 0.6rem; margin-top: 0.7rem; }
+    @media (max-width: 760px) { .tiles { grid-template-columns: 1fr; } }
+    .tile { border: 1px solid #2d2d2d; background: #1a1a1a; padding: 0.55rem 0.7rem; }
+    .tile h4 { color: #8a8a8a; font-size: 10.5px; font-weight: 700;
+               letter-spacing: 0.06em; margin-bottom: 0.35rem; }
+    .tile .vals { display: flex; align-items: baseline; gap: 0.6rem; flex-wrap: wrap; }
+    .tile .sr   { color: #66bb6a; font-size: 18px; font-weight: 600; }
+    .tile .sr small, .tile .lora small { font-size: 10.5px; font-weight: 400;
+                                         color: #777; margin-left: 0.25rem; }
+    .tile .lora { color: #bdbdbd; font-size: 13px; }
+    .tile p { color: #6f6f6f; font-size: 11px; margin-top: 0.3rem; }
+    .config-card { display: grid; grid-template-columns: max-content 1fr;
+                   gap: 0.25rem 1.1rem; border: 1px solid #2d2d2d; background: #1a1a1a;
+                   padding: 0.6rem 0.9rem; margin: 0 0 0.75rem; max-width: 52rem;
+                   font-size: 12px; }
+    .config-card dt { color: #8a8a8a; font-weight: 600; }
+    .config-card dd { color: #cccccc; margin: 0; }
+    .config-card dd small { color: #777; }
+    .tracks { border: 1px solid #333; border-bottom: none; padding: 0.45rem 0.6rem 0.3rem;
+              background: #1b1b1b; }
+    .track { display: grid; grid-template-columns: 16rem 1fr 13rem; align-items: center;
+             gap: 0.7rem; margin-bottom: 0.25rem; font-size: 12px; }
+    .track .name { color: #9cdcfe; font-weight: 600; }
+    .track .name small { color: #777; font-weight: 400; margin-left: 0.3rem; }
+    .track .bar { height: 12px; background: #262626; border-radius: 2px; overflow: hidden; }
+    .track .fill { height: 100%; width: 0; background: #4fc3f7; border-radius: 2px;
+                   transition: width 0.15s linear; }
+    .track.done .fill { background: #66bb6a; }
+    .track .count { color: #8a8a8a; text-align: right; white-space: nowrap; }
+    .track.done .count { color: #66bb6a; font-weight: 600; }
     /* ── The pitch and the details ── */
     .pitch { margin: 0.2rem 0 0.7rem; }
     .lead { color: #bdbdbd; font-size: 14px; line-height: 1.5; max-width: 60rem; }
@@ -265,6 +297,7 @@
   must start a new request at every switch and prefill the agent's context again;
   granite-switch's Shadow Residual (SR) switches in place.</p>
   <p class="hero" id="hero"></p>
+  <div class="tiles" id="tiles"></div>
 </div>
 
 <div class="details-bar">
@@ -302,7 +335,6 @@
       <dd>The lanes ran one after the other on one GPU, each after an untimed
       warm-up, and are replayed side by side.</dd>
     </dl>
-    <p class="setup" id="setup"></p>
   </div>
   <div class="diagram">
     <div class="machine" data-agents="react" hidden>
@@ -385,23 +417,23 @@
 <text x="581.5" y="150" class="d-sub">generation</text>
 <rect x="660.5" y="142" width="9" height="9" rx="1" fill="#ef5350"/>
 <text x="674.5" y="150" class="d-sub">prefill</text>
-<rect x="734.6" y="142" width="9" height="9" rx="1" fill="#80deea"/>
+<rect x="734.6" y="142" width="9" height="9" rx="1" fill="#9575cd"/>
 <text x="748.6" y="150" class="d-sub">adapter switching (rtt)</text>
 <rect x="909.5" y="142" width="9" height="9" rx="1" fill="#fff176"/>
 <text x="923.5" y="150" class="d-sub">act (tool call)</text>
 <text x="0" y="170" class="d-lane">lora-vllm</text>
 <text x="0" y="186" class="d-sub">stock vLLM LoRA</text>
 <g><title>generation on ad25</title><rect x="130" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="154" y="177" class="d-chip" text-anchor="middle">ad25</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="161" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="190" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="240" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad57</title><rect x="292" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="316" y="177" class="d-chip" text-anchor="middle">ad57</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="161" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="352" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="402" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad34</title><rect x="454" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="478" y="177" class="d-chip" text-anchor="middle">ad34</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="161" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="514" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="564" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad14</title><rect x="616" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="640" y="177" class="d-chip" text-anchor="middle">ad14</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="161" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="676" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="726" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad24</title><rect x="778" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="802" y="177" class="d-chip" text-anchor="middle">ad24</text></g>
 <text x="834" y="177" class="d-sub">…</text>
@@ -481,23 +513,23 @@
 <text x="581.5" y="162" class="d-sub">generation</text>
 <rect x="660.5" y="154" width="9" height="9" rx="1" fill="#ef5350"/>
 <text x="674.5" y="162" class="d-sub">prefill</text>
-<rect x="734.6" y="154" width="9" height="9" rx="1" fill="#80deea"/>
+<rect x="734.6" y="154" width="9" height="9" rx="1" fill="#9575cd"/>
 <text x="748.6" y="162" class="d-sub">adapter switching (rtt)</text>
 <rect x="909.5" y="154" width="9" height="9" rx="1" fill="#fff176"/>
 <text x="923.5" y="162" class="d-sub">act (tool call)</text>
 <text x="0" y="182" class="d-lane">lora-vllm</text>
 <text x="0" y="198" class="d-sub">stock vLLM LoRA</text>
 <g><title>generation on base</title><rect x="130" y="173" width="48" height="24" rx="2" fill="#9e9e9e"/><text x="154" y="189" class="d-chip" text-anchor="middle">base</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="190" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="240" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad9</title><rect x="292" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="316" y="189" class="d-chip" text-anchor="middle">ad9</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="352" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="402" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad12</title><rect x="454" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="478" y="189" class="d-chip" text-anchor="middle">ad12</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="514" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="564" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad45</title><rect x="616" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="640" y="189" class="d-chip" text-anchor="middle">ad45</text></g>
-<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="173" width="8" height="24" rx="2" fill="#80deea"/></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="173" width="8" height="24" rx="2" fill="#9575cd"/></g>
 <g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="676" y="173" width="100" height="24" rx="2" fill="#ef5350"/><text x="726" y="189" class="d-chip" text-anchor="middle">prefill again</text></g>
 <g><title>generation on ad22</title><rect x="778" y="173" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="802" y="189" class="d-chip" text-anchor="middle">ad22</text></g>
 <text x="834" y="189" class="d-sub">…</text>
@@ -573,6 +605,7 @@
 </div>
 
 <div class="configs" id="configs"></div>
+<dl class="config-card" id="configCard"></dl>
 <div class="controls">
   <button id="playBtn">&#9654; Play</button>
   <div class="speed-group">
@@ -588,6 +621,7 @@
   </div>
 </div>
 
+<div class="tracks" id="tracks"></div>
 <div class="race-grid" id="raceGrid"></div>
 <div class="result" id="result"></div>
 <div class="legend" id="legend"></div>
@@ -608,7 +642,7 @@ const PHASES = {
   'start':    {color: '#9cdcfe', label: s => 'starting'},
   'prefill':  {color: '#ef5350', label: s => fmtPrefill(s)},
   'decode':   {color: '#4fc3f7', label: s => `${stepName(s.node)} ${s.adapter || ''}  ${s.tokens}/${s.total}`},
-  'rtt':      {color: '#80deea', label: s => 'adapter switching (rtt)'},
+  'rtt':      {color: '#9575cd', label: s => 'adapter switching (rtt)'},
   'tool':     {color: '#fff176', label: s => 'act (tool call)'},
   'rtt+tool': {color: '#fff176', label: s => 'adapter switching (rtt), act (tool call)'},
   'done':     {color: '#66bb6a', label: s => `done ${s.wall.toFixed(1)}s`},
@@ -960,6 +994,7 @@ function render() {
   }
   updateMetrics();
   updateResult();
+  updateTracks();
 }
 
 // ── Playback engine ──────────────────────────────────────────────────────────
@@ -1100,15 +1135,88 @@ function describe() {
   set('aboutAdapters', w.adapters);
   document.querySelectorAll('.diagram [data-agents]').forEach(el =>
     el.hidden = el.dataset.agents !== (react ? 'react' : 'grid'));
+}
+
+// The steps of the generator's cycles (CYCLES in benchmarks/gen_agent_configs.py).
+const CYCLE_STEPS = {
+  classic5: ['think', 'prepare_call', 'act', 'observe', 'reflect'],
+};
+// The models' names on the page, by the run's model id.
+const MODEL_NAMES = {'granite-4.1-3b': 'Granite 4.1 3B', 'granite-4.2-3b': 'Granite 4.2 3B'};
+
+// The chosen race's settings, one labeled line each.
+function updateConfig() {
+  const meta = eventData.metadata || {};
+  const w    = meta.workload || {};
   const lane = Object.values(meta.lanes || {})[0] || {};
-  const bits = [
-    meta.model,
-    meta.commit?.sha ? `commit ${meta.commit.sha.slice(0, 8)}` : null,
-    lane.gpu,
-    lane.vllm ? `vLLM ${lane.vllm}` : null,
-    meta.timestamp ? meta.timestamp.slice(0, 10) : null,
-  ].filter(Boolean);
-  document.getElementById('setup').textContent = bits.join(' · ');
+  const react = w.agents === 'react';
+  const steps = (w.cycles || []).map(c => CYCLE_STEPS[c]).filter(Boolean)[0];
+  const rows = [
+    ['Agent architecture', react
+      ? `ReAct${steps ? ` <small>· ${steps.join(' → ')}, and around again</small>` : ''}`
+      : `fixed steps <small>· ${w.span}-token generations, a new adapter at each</small>`],
+    ['# Agents', `${fmtN(meta.runs)} per lane`],
+    ['Concurrency', `${fmtN(meta.concurrency)} at a time <small>· the next starts when one ` +
+      `finishes</small>`],
+    ['Tokens per agent', w.decode_mix
+      ? `${w.decode_mix.map(fmtN).join(' · ')} <small>(${fmtN(meta.runs / w.decode_mix.length)}` +
+        ` agents each)</small>`
+      : fmtN(w.decode_tokens)],
+    ['Adapters', `${fmtN(w.adapters)} synthetic, rank ${w.rank}`],
+    ['Network', 'same datacenter <small>· 2–10 ms per adapter switching (rtt)</small>'],
+    ['Run', [MODEL_NAMES[meta.model] || meta.model, lane.gpu,
+             lane.vllm && `vLLM ${lane.vllm}`,
+             meta.commit?.sha && `commit ${meta.commit.sha.slice(0, 8)}`,
+             meta.timestamp?.slice(0, 10)].filter(Boolean).join(' · ')],
+  ];
+  document.getElementById('configCard').innerHTML =
+    rows.map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join('');
+}
+
+// Why SR is faster, from the chosen race's lanes: what each lane recomputed,
+// how many requests it sent, and how much of the resent context was cached.
+function updateTiles() {
+  const lanes = eventData.metadata?.lanes || {};
+  const sr = lanes['gs-sr-vllm'] || {}, lora = lanes['lora-vllm'] || {};
+  const hit = l => l.resent_tokens ? l.resent_cached_tokens / l.resent_tokens * 100 : null;
+  const num = n => n === null || n === undefined ? '—'
+    : n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e4 ? `${(n / 1e3).toFixed(0)}k` : fmtN(n);
+  const pct = x => x === null ? '—' : `${x.toFixed(1)}%`;
+  const tiles = [
+    ['PROMPT TOKENS COMPUTED AGAIN', num(sr.reprefilled_tokens), num(lora.reprefilled_tokens),
+     'Stock vLLM re-prefills the context at every switch.'],
+    ['REQUESTS', num(sr.requests), num(lora.requests),
+     'Stock vLLM sends a new request at every switch.'],
+    ['CONTEXT ALREADY CACHED', pct(hit(sr)), pct(hit(lora)),
+     'Its cache is per adapter, so a switch misses it.'],
+  ];
+  document.getElementById('tiles').innerHTML = tiles.map(([h, a, b, p]) =>
+    `<div class="tile"><h4>${h}</h4><div class="vals">` +
+    `<span class="sr">${a}<small>SR</small></span>` +
+    `<span class="lora">${b}<small>stock vLLM</small></span></div><p>${p}</p></div>`).join('');
+}
+
+// One bar per lane: its agents done, filling as the race plays.
+function buildTracks() {
+  document.getElementById('tracks').innerHTML = eventData.servers.map((srv, i) =>
+    `<div class="track" id="track-${i}"><span class="name">${srv}` +
+    `<small>${LANE_TITLES[srv] || ''}</small></span>` +
+    `<div class="bar"><div class="fill" id="track-fill-${i}"></div></div>` +
+    `<span class="count" id="track-count-${i}"></span></div>`).join('');
+}
+
+function updateTracks() {
+  eventData.servers.forEach((srv, i) => {
+    const done = state[i].filter(s => s.status === 'done').length;
+    const track = document.getElementById(`track-${i}`);
+    if (!track) return;
+    const all = done === numRuns;
+    track.classList.toggle('done', all);
+    document.getElementById(`track-fill-${i}`).style.width = `${done / numRuns * 100}%`;
+    document.getElementById(`track-count-${i}`).textContent = all
+      ? `all ${numRuns} done · ${fmtTime(laneWall(srv))}`
+      : `${done}/${numRuns} done · ${fmtTime(playbackTime)}`;
+  });
 }
 
 // ── Init ─────────────────────────────────────────────────────────────────────
@@ -1144,9 +1252,12 @@ function choose(key) {
   }
 
   describe();
+  updateConfig();
   indexCached();
   computeMaxima();
   updateHero();
+  updateTiles();
+  buildTracks();
   buildGrid();
   resetPlayback();
   render();
@@ -1165,11 +1276,13 @@ function fmtLengths(w) {
   return `${m.slice(0, -1).join(', ')} or ${m[m.length - 1]} tokens`;
 }
 
+// A race's short name on the picker; its settings are in the config card.
 function configLabel(race) {
   const meta = race.metadata || {};
   const w = meta.workload || {};
-  return `${w.agents === 'react' ? 'ReAct · ' : ''}${meta.runs} agents · ` +
-         `${meta.concurrency} at a time · ${fmtLengths(w)}`;
+  if (w.agents === 'react') return 'ReAct';
+  const what = w.decode_mix ? 'mixed lengths' : `${fmtN(w.decode_tokens)} tokens`;
+  return `Fixed steps · ${meta.runs} agents · ${meta.concurrency} at a time · ${what}`;
 }
 
 // The ReAct race first, as the demo; the switching block's races behind a button.
