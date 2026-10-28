@@ -1,9 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Put a recorded agent race into its page, ``docs/agent_race.html``.
 
-Runs locally, on the log of the pod that ran ``run_race.py``::
+The page lives on main, not on this branch: give a main checkout's copy. Runs
+locally, on the log of the pod that ran ``run_race.py``::
 
-    python -m benchmarks.adapter_eval.race.build_page <pod.log> [--page <html>]
+    python -m benchmarks.adapter_eval.race.build_page <pod.log> \
+        --page <main checkout>/docs/agent_race.html
+
+The page then goes to main in a PR of its own.
 
 The page holds one race per configuration (agents per lane, agents at a time,
 tokens per agent), chosen on the page. The race is read from between the log's
@@ -25,8 +29,6 @@ from pathlib import Path
 from . import lane
 from .run_race import decode_block
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
-PAGE = REPO_ROOT / "docs" / "agent_race.html"
 EMBED = re.compile(r"^const RACE_EVENTS_EMBEDDED = (.*); // <<RACE_EVENTS>>$", re.M)
 
 
@@ -197,7 +199,12 @@ def add_switches(race: dict, fleet: list[dict]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("log", type=Path, nargs="?", help="the race pod's saved log")
-    p.add_argument("--page", type=Path, default=PAGE)
+    p.add_argument(
+        "--page",
+        type=Path,
+        required=True,
+        help="the page: docs/agent_race.html in a main checkout",
+    )
     p.add_argument(
         "--add-switches",
         type=Path,

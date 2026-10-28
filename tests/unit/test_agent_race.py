@@ -338,9 +338,17 @@ def test_sr_adapters_are_named_as_the_fleet_names_them(tmp_path):
     assert lane.sr_adapters(tmp_path) == {5: "ad0", 6: "ad17"}
 
 
+# The page lives on main; its races sit on one line of it, which is all the
+# page builder reads and writes.
+PAGE_TEMPLATE = """<!DOCTYPE html>
+<html><body><script>
+const RACE_EVENTS_EMBEDDED = null; // <<RACE_EVENTS>>
+</script></body></html>
+"""
+
+
 def test_build_page_keeps_a_race_per_number_of_agents(tmp_path):
-    # The page, emptied of the races it holds.
-    page = build_page.embed((REPO_ROOT / "docs" / "agent_race.html").read_text(), None)
+    page = build_page.embed(PAGE_TEMPLATE, None)
     assert "const RACE_EVENTS_EMBEDDED = null; // <<RACE_EVENTS>>" in page
     out = tmp_path / "agent_race.html"
     out.write_text(page)
@@ -391,6 +399,9 @@ def test_build_page_keeps_a_race_per_number_of_agents(tmp_path):
     log.write_text(run_race.encode_block(leaky))
     with pytest.raises(SystemExit, match="absolute paths"):
         build_page.main([str(log), "--page", str(out)])
+    # The page is a main checkout's: there is none here to default to.
+    with pytest.raises(SystemExit):
+        build_page.main([str(log)])
 
 
 def test_switches_added_to_an_old_race_are_the_ones_recorded(stub_vllm, fleet):
