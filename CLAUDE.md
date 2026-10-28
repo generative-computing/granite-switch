@@ -38,7 +38,6 @@ granite-switch/
 │       │       ├── __init__.py
 │       │       ├── adapter_analysis.py
 │       │       ├── compose_report.py
-│       │       ├── hiding_constant_report.py
 │       │       ├── model_card.py
 │       │       └── population_table.py
 │       │
@@ -85,7 +84,7 @@ granite-switch/
 │   ├── vllm/                            # vLLM-specific tests
 │   ├── composer/                        # Compose system tests
 │   ├── integration/                     # Cross-backend integration tests
-│   ├── audio/                           # Audio/ASR tests (pytest -m audio)
+│   ├── audio/                           # Audio test fixtures (sample .wav)
 │   └── shared/                          # Shared test utilities and parametrized cases
 │
 ├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
@@ -114,7 +113,9 @@ uv sync --extra vllm
 # With compose tools
 uv sync --extra compose
 
-# Everything (development) -- `dev` is a dependency group, not an extra
+# Development (hf + compose + audio extras, pytest, vLLM 0.26) -- `dev` is a
+# dependency group, not an extra. `--group dev-latest` swaps in the newest vLLM line;
+# add `--extra tutorials` to run the tutorials.
 uv sync --group dev
 ```
 
@@ -157,7 +158,6 @@ from granite_switch.composer import GraniteSwitchComposer
 - **`tests/vllm/`**: vLLM implementation tests
 - **`tests/composer/`**: Compose system tests
 - **`tests/integration/`**: Cross-implementation and end-to-end integration tests
-- **`tests/audio/`**: Audio/ASR tests (`pytest -m audio`)
 - **`tests/shared/`**: Shared test utilities and parametrized cases
 
 **IMPORTANT: `tests/` is for official regression tests ONLY.** Do NOT place throwaway diagnostic,
@@ -255,8 +255,8 @@ The Granite Switch extends the base Granite model with:
 
 2. **Control Tokens**
    - Each adapter has a control token `<|adapter|>` that fires the switch
-   - KV hiding uses group-based control dimensions (K=finfo.min, Q=per-adapter policy)
-   - Control tokens are KV-hidden to prevent cross-request interference
+   - The switch reads the original ids, then rewrites each control token to its substitute id
+     (`adapter_substitute_token_ids`, `token_exchange.py`) so the decoder never embeds it
 
 3. **Chat Template Integration**
    - Maps adapter names to control tokens
@@ -267,7 +267,7 @@ The Granite Switch extends the base Granite model with:
      "how many control tokens so far" into an address, and a Kerdock/DG coded-memory head
      reads back the adapter written there
    - Routing is latest-wins and supports any number of transitions per request, including a
-     return to base via a base-reset control token
+     return to base via `<|base_reset|>` (only when composed with `--base-reset-token`)
    - The codebook is constructed, not trained; config knobs are the `ms_*` fields
    - See [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md)
 
@@ -275,10 +275,9 @@ The Granite Switch extends the base Granite model with:
 
 #### HuggingFace Backend (`granite_switch.hf`)
 
-**Purpose**: Model building, prototyping, and training
+**Purpose**: Model building, prototyping, and reference inference
 
 - Full `transformers` integration (`PreTrainedModel`, `GenerationMixin`)
-- Training with `Trainer` API
 - Standard PyTorch operations
 
 #### vLLM Backend (`granite_switch.vllm`)
@@ -308,7 +307,7 @@ set. See [docs/SR_ARCHITECTURE.md](docs/SR_ARCHITECTURE.md) for full details.
 Both backends share the same weight format:
 
 ```python
-# Built/trained with HuggingFace
+# Built with HuggingFace
 model_hf.save_pretrained("./checkpoint")
 
 # Loaded directly with vLLM
@@ -335,12 +334,12 @@ Always use config values - never hardcode these parameters.
   "num_adapters": 4,
   "adapter_token_ids": [100, 101, 102, 103],
   "adapter_names": ["adapter_0", "adapter_1", "adapter_2", "adapter_3"],
-  "hiding_groups": {"all_controls": ["adapter_0", "adapter_1", "adapter_2", "adapter_3"]},
-  "hiding_policy": {"base": ["all_controls"], "adapter_0": ["all_controls"], "...": "..."},
-  "lora_rank": 8,
-  "lora_alpha": 8.0,
+  "adapter_substitute_token_ids": [10, 11, 12, 13],
+  "max_lora_rank": 8,
+  "adapter_ranks": [8, 8, 8, 8],
   "switch_head_dim": 32,
-  "control_dims": 32
+  "ms_code_type": "kerdock",
+  "ms_code_m": 6
 }
 ```
 
@@ -394,12 +393,6 @@ attribute on the module.
 The HF MultiSwitch tests (`tests/hf/test_multi_switch.py`) probe each non-eager attention backend once
 and parametrize over the ones that work on the current platform. Unavailable backends are skipped.
 
-### 7. Known Limitation: Hidden Count Offset When Position 0 is in a Hiding Group
-
-When position 0 is a control token in a hiding group (e.g., a LoRA prefix token with
-`add_bos_token=False`), `hidden_count` is off by 1, causing a 1-position RoPE offset. This is
-acceptable because adapter detection is exact and RoPE is robust to small positional shifts.
-
 ### 8. Known Limitation: TP Row-Parallel Bias Doubling
 
 `SwitchedLoRALinear`'s row-parallel bypass path passes bias to all TP ranks instead of
@@ -448,6 +441,7 @@ runs inside the `@support_torch_compile` region (`src/granite_switch/vllm/granit
 default-configured server never sets them. Any test reading them must pass `enforce_eager=True` and
 must assert they are present, not skip on `None`. The same reason is why a host-side validation check
 cannot live in `MultiSwitch.forward`.
+
 ### 12. Pre-Fusion SR Checkpoints Must Be Re-Composed
 
 SR used to build unfused Q/K/V and gate/up/down projections (`unfused_qkv=True`); it now uses
@@ -479,9 +473,13 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 
 ## Documentation
 
+- `CONTRIBUTING.md` - Contribution guidelines, uv/dev setup, and DCO sign-off
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
+- `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
+- `docs/AUDIO.md` - Audio input (ASR cascade)
+- `docs/CICD.md` - Pre-commit hooks and CI setup
 
 ## Git Workflow
 

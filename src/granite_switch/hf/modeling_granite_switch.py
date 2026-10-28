@@ -410,7 +410,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 )
 
             # Token-exchange LUT lives on the switch module (see hf/switch/
-            # single.py); the switch rewrites input_ids in-place during its
+            # multi.py); the switch rewrites input_ids in-place during its
             # forward pass, so the decoder side needs no substitute table.
 
         else:

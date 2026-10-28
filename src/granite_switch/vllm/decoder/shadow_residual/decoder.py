@@ -20,10 +20,13 @@ the natural SWITCH layout and the perf path. K/V LoRA slices of the fused qkv ar
 left zero (SR does not adapt K/V), which the loader marks as loaded. TP=1 for v1.
 """
 
+import contextlib
+
 import torch
 from torch import nn
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.attention.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -41,6 +44,45 @@ from .wcross_shunt import WCrossShunt
 
 def _max_lora_rank(config) -> int:
     return max(config.adapter_ranks) if getattr(config, "adapter_ranks", None) else 0
+
+
+@contextlib.contextmanager
+def _doubled_padding_mask(m: int):
+    """Match the forward context's ``is_padding`` to SR's doubled router batch.
+
+    vLLM >= 0.27 passes an ``is_padding`` mask to the topk_softmax/topk_sigmoid
+    kernels so they can skip the padded rows of the batch. The router reads it off
+    the forward context and slices it to the number of gating rows
+    (``fused_moe/router/fused_topk_router.py::_get_padding_mask``), and the kernel
+    then *requires* the lengths to agree:
+
+        RuntimeError: dispatch_topk_launch, topk_softmax_kernels.cu:785,
+                      is_padding size mismatch, expected: 16384
+
+    The runner sizes the mask to the padded token count ``m``, but SR routes the
+    whole ``[2M, H]`` stack in one expert call, so the kernel sees ``2 * m`` gating
+    rows against an ``m``-entry mask. Doubling the mask is the right answer rather
+    than a workaround: adapter row ``i`` is the same token as base row ``i``, so it
+    is padding exactly when the base row is.
+
+    Inert where there is nothing to match: no forward context (unit tests), no
+    ``is_padding`` field at all (``ForwardContext`` gained it at 0.25.1 — absent at
+    0.24.0, which is why this is ``getattr`` and not attribute access), no mask
+    (``VLLM_MOE_SKIP_PADDING=0``, or 0.25/0.26 where the field exists but no kernel
+    consumes it), or a mask whose length is not ``m`` — in that last case the
+    premise of the doubling does not hold, and failing loudly in the kernel beats
+    silently masking the wrong rows.
+    """
+    ctx = get_forward_context() if is_forward_context_available() else None
+    mask = getattr(ctx, "is_padding", None) if ctx is not None else None
+    if mask is None or mask.shape[0] != m:
+        yield
+        return
+    ctx.is_padding = torch.cat([mask, mask], dim=0)
+    try:
+        yield
+    finally:
+        ctx.is_padding = mask
 
 
 class ShadowResidualAttention(nn.Module):
@@ -303,7 +345,9 @@ class ShadowResidualDecoderLayer(nn.Module):
             logits, _ = self.block_sparse_moe.gate(normed[:m])  # [M, E]
             logits = torch.cat([logits, logits], dim=0)  # [2M, E]
             # FusedMoE modifies its input in place.
-            mlp_out = self.block_sparse_moe.experts(normed.clone(), logits)
+            # The doubled rows also need a doubled padding mask (>= 0.27).
+            with _doubled_padding_mask(m):
+                mlp_out = self.block_sparse_moe.experts(normed.clone(), logits)
 
         if self.has_shared_mlp:
             # Only ROUTING is shared. The dense shared MLP still runs per-stream

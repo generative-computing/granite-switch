@@ -43,6 +43,25 @@ def register():
     """
     from vllm import ModelRegistry
 
+    # FlashAttention 3 computes wrong attention when captured inside a FULL CUDA
+    # graph on this vLLM line, so for a granite_switch model we report the FA2
+    # cudagraph-support level (UNIFORM_BATCH), which downgrades FULL to
+    # FULL_AND_PIECEWISE (attention runs eagerly, output matches the reference).
+    # See fa3_schedule and issue #139.
+    from .fa3_schedule import patch_flash_attn_schedule
+
+    patch_flash_attn_schedule()
+
+    # Separately, size FA3's ahead-of-time schedule to the switch's own attention
+    # layers (SR's doubled Q-heads, the counting/memory heads). The downgrade
+    # above only acts under FULL cudagraphs; under enforce_eager FA3 still crashes
+    # with "scheduler_metadata must have shape (metadata_size)" unless the AOT
+    # schedule is sized correctly. The two patches touch different seams (one
+    # wraps get_cudagraph_support, the other __init__) and compose. See issue #139.
+    from .fa3_aot_schedule import patch_flash_attn_aot_schedule
+
+    patch_flash_attn_aot_schedule()
+
     # Register config with transformers AutoConfig
     try:
         from transformers import AutoConfig

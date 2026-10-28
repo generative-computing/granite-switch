@@ -9,7 +9,7 @@ sequence and never knows a control token existed.
 Backend-neutral on purpose. The table is a pure function of three config
 fields (``vocab_size``, ``adapter_token_ids``, ``adapter_substitute_token_ids``),
 so it belongs at the same tier as :mod:`granite_switch.config` rather than
-inside either backend — all four switch engines (HF/vLLM x Single/Multi) build
+inside either backend — both switch engines (HF and vLLM MultiSwitch) build
 the identical table and must agree on its size.
 
 Contract:

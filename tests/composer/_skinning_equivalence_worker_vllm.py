@@ -176,10 +176,18 @@ def cmd_run(args):
     # Save logprobs
     with open(output_path, "w") as f:
         json.dump({"logprobs": all_logprobs}, f)
-    print(f"  saved logprobs to {output_path}")
+        f.flush()
+        os.fsync(f.fileno())
+    print(f"  saved logprobs to {output_path}", flush=True)
 
+    # vLLM/NCCL/CUDA background threads can abort during interpreter teardown
+    # ("terminate called without an active exception" -> SIGABRT), which would
+    # mask a run whose output is already safely on disk. The output is written
+    # and fsynced above, and the downstream compare step reads it from disk and
+    # needs no graceful vLLM shutdown, so skip Python's atexit/static
+    # destruction entirely rather than race the C++ teardown.
     del llm
-    return 0
+    os._exit(0)
 
 
 # ── compare mode ──────────────────────────────────────────────────
