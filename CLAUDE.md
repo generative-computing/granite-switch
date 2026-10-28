@@ -89,6 +89,7 @@ granite-switch/
 │   ├── make_synth_fleet.py, verify_composed.py, gen_switching_grid.py,
 │   │   bench_switching_grid.py, bench_agent_sim.py  # Its switching experiment, copied unchanged
 │   │                                    #   but for a --tensor-parallel-size flag (default 1)
+│   ├── gen_agent_configs.py             # Its ReAct agent generator (the paper's agents), copied unchanged
 │   └── adapter_eval/                    # Adapter accuracy benchmark (docs/ADAPTER_BENCHMARK.md)
 │       ├── adapters.yaml                # Benchmark definition: models, intrinsics, technologies, versions
 │       ├── run_benchmark.py             # In-pod driver: compose, generate, score, print results block
@@ -106,6 +107,9 @@ granite-switch/
 │       ├── rescore.py                   # In-pod: score saved answers again after a scoring change
 │       ├── common.py                    # Spec loading, cell helpers, results-block format
 │       ├── scorers/                     # One scorer per intrinsic
+│       ├── race/                        # Agent race, SR vs stock vLLM LoRA (docs/AGENT_RACE.md):
+│       │                                #   lane.py, run_race.py (pod), react.py (ReAct agents),
+│       │                                #   build_page.py -> the page on main (docs/agent_race.html)
 │       └── vela/                        # Vela job rendering + submit.sh (settings in gitignored local/)
 │
 ├── .pre-commit/                         # Pre-commit hook scripts (validate_links.py)
@@ -483,6 +487,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
 - `docs/ADAPTER_BENCHMARK.md` - Adapter accuracy benchmark: running it, caching, adding adapters
+- `docs/AGENT_RACE.md` - Agent race: running and recording races of granite-switch SR against stock vLLM LoRA (the page is on main)
 
 ## Git Workflow
 

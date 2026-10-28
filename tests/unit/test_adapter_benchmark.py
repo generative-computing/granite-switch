@@ -3958,6 +3958,29 @@ def test_script_job_ships_the_script(tmp_path, monkeypatch):
     with tarfile.open(fileobj=io.BytesIO(payload)) as tar:
         assert tar.extractfile("extra/script.py").read() == b"print('hi')\n"
 
+    def shipped(script_path):
+        assert (
+            render_job.main([*argv, "--sha", SHA_A, "--script", str(script_path)]) == 0
+        )
+        env = {
+            e["name"]: e["value"]
+            for e in json.loads(out.read_text())["environmentVariables"]
+            if "value" in e
+        }
+        names = []
+        for var in ("ADAPTER_BENCH_HARNESS_TGZ", "ADAPTER_BENCH_SWITCH_TGZ"):
+            assert len(env[var]) <= render_job.MAX_PAYLOAD
+            with tarfile.open(fileobj=io.BytesIO(base64.b64decode(env[var]))) as tar:
+                names += tar.getnames()
+        return names
+
+    # The agent race's code goes only with a job that runs it, in the switch
+    # benchmark's payload; any other job leaves it out.
+    race = f"{render_job.RACE_DIR}/lane.py"
+    assert race not in shipped(script)
+    run_race = render_job.REPO / render_job.RACE_DIR / "run_race.py"
+    assert race in shipped(run_race)
+
 
 def git_repo_with_sr_code(root: Path, code_dir: str) -> str:
     """A git repo holding a fake SR model package; returns its commit sha."""
