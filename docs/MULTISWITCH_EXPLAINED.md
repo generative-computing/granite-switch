@@ -163,7 +163,7 @@ return torch.clamp(torch.round(count).long(), 0, capacity - 1)
 
 > **Why `-1e9` and not `-inf`**
 >
-> IEEE-754 defines `0 * +/-inf = NaN`, and the one-hot query has zeros at exactly the dimensions where the mask sits. `-1e9` gives `0 * -1e9 = 0` and still `exp(-1e9) ~= 0` in the softmax, so it masks without poisoning the product (`hf/switch/multi.py:72-76`, `vllm/switch/multi.py:108-112`).
+> IEEE-754 defines `0 * +/-inf = NaN`, and the one-hot query has zeros at exactly the dimensions where the mask sits. `-1e9` gives `0 * -1e9 = 0` and still `exp(-1e9) ~= 0` in the softmax, so it masks without poisoning the product (`hf/switch/multi.py:72-76`, `vllm/switch/multi.py:111-116`). Only bfloat16 and float32 hold `-1e9` finite, which is why the vLLM switch refuses a float16 or fp8 KV cache at startup (section 8).
 
 Note what `n` does *not* depend on: absolute position, sequence length, or batch composition. Only the count of control tokens causally before the query. That is what makes the same routing survive prefill, decode, chunked prefill and co-batching.
 
@@ -556,16 +556,18 @@ One constant, compared with `>` in both places, so 188 is legal and only 189 is 
 
 Under vLLM the smaller one governs, so the advertised 2048 is not reachable there.
 
-### `--kv-cache-dtype fp8` is unguarded -- *(no check)*
+### float16 and fp8 KV caches are rejected at startup -- *(checked)*
 
-Two values in these heads flow through the paged KV cache and both exceed fp8 e4m3's maximum of about 448:
+Both heads build their keys and values in the model dtype and store them in the KV-cache dtype. Two of those values survive only in bfloat16 or float32:
 
-| value | magnitude | source |
-|---|---|---|
-| masking constant | `-1e9` | `vllm/switch/multi.py:112` (`_NEG_INF`) |
-| memory key scale | `code(n) * 28` | `ms_memory_gain` default 28.0 |
+| value | stored as | breaks under | how |
+|---|---|---|---|
+| counting mask | `-1e9` (`MASK_VALUE`, `vllm/switch/_kv_dtype.py`) | float16, fp8 e5m2 | becomes `-inf`; the one-hot query then computes `0 * -inf = NaN` and every write address is wrong |
+| memory value | the adapter id | fp8 e4m3, above 16 adapters | e4m3 holds integers exactly only up to 16; 17+ round to a neighbouring id |
 
-An fp8 cache would saturate the mask and collapse the codeword separation the gain was chosen to guarantee. Nothing currently rejects the flag.
+The memory *keys* are not the problem: codeword entries are +/-1/8, so `code(n) * 28` peaks at 3.5, well inside fp8's range. With a bf16 model, a simulated e4m3 cache routed every token correctly up to 16 adapters and misrouted 54 of 565 tokens at 20 adapters; float16 and e5m2 caches got every write address wrong.
+
+`MultiSwitch.__init__` calls `check_switch_kv_dtype(model_dtype, cache_config.cache_dtype)`, which accepts only bfloat16 or float32 storage -- the dtypes the switch has been validated on -- and raises a `ValueError` naming the flag otherwise. That covers `--dtype float16` (the keys are built in the model dtype, so no cache dtype can rescue it), `--kv-cache-dtype float16`, and every fp8 variant. e4m3 with at most 16 adapters is refused too, though the simulation above passes: no GPU run under vLLM's fp8 attention backends has validated it. Pinned by `tests/unit/test_switch_kv_dtype.py`.
 
 ### One render emits one control token -- *(template limit, not engine)*
 
@@ -598,6 +600,7 @@ Test counts are `grep -c '^\s*def test_'` over the tree. Two files shrank in the
 |---|---|---|
 | **unit -- CPU, fast** |  |  |
 | `tests/unit/test_counting_ceiling.py` | 8 | the 188 bound as arithmetic, per dtype; RE_PREFILL never accumulates |
+| `tests/unit/test_switch_kv_dtype.py` | 7 | the float16 / fp8 KV-cache guard, and the arithmetic it rests on |
 | `tests/unit/test_conversation_policy.py` | 37 | the placement matrix (append vs re-prefill) and RE_PREFILL id reuse |
 | `tests/unit/test_conversation_span_attribution.py` | 19 | which adapter owns which span |
 | `tests/unit/test_conversation_transport.py` | 9 | ids-only transport; `chat_payload` removed |

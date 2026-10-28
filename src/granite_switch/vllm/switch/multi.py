@@ -106,12 +106,14 @@ from granite_switch.token_exchange import (
     apply_token_exchange,
     build_control_to_substitute_lut,
 )
+from granite_switch.vllm.switch._kv_dtype import MASK_VALUE, check_switch_kv_dtype
 
 # Large negative finite value for masking. NOT literal -inf because IEEE 754
 # defines 0 * ±inf = NaN, and our one-hot Q vectors have zeros at dimensions
 # where K has the mask value. Using -1e9 gives 0*(-1e9)=0 (clean) and
-# exp(-1e9) ≈ 0 in softmax (same masking effect).
-_NEG_INF = -1e9
+# exp(-1e9) ≈ 0 in softmax (same masking effect). Only bf16/fp32 hold it
+# finite, which is why __init__ calls check_switch_kv_dtype.
+_NEG_INF = MASK_VALUE
 
 
 class MultiSwitch(nn.Module):
@@ -278,6 +280,10 @@ class MultiSwitch(nn.Module):
 
         cache_config = vllm_config.cache_config if vllm_config is not None else None
         quant_config = vllm_config.quant_config if vllm_config is not None else None
+
+        # Both heads store _NEG_INF and integer adapter ids in the KV cache;
+        # float16 and fp8 corrupt them without any error, so refuse at startup.
+        check_switch_kv_dtype(self.dtype, getattr(cache_config, "cache_dtype", "auto"))
 
         # Counting head: single query head, single KV head.
         counting_kwargs = dict(
