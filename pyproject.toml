@@ -20,10 +20,12 @@ Documentation = "https://github.com/generative-computing/granite-switch/tree/mai
 
 [project.optional-dependencies]
 hf = ["accelerate>=0.20.0"]
-# Every line from 0.26 through 0.30 is supported by one tree; the backend uses
+# Every line from 0.26 through 0.32 is supported by one tree; the backend uses
 # capability checks (hasattr) rather than version comparisons where the two
 # differ. Pin a specific line with the per-line dependency groups below.
-vllm = ["vllm>=0.26.0,<0.31.0"]
+# 0.32 adds the native structured-decisions API (/v1/systemone) that
+# granite_switch.vllm.structured_decisions registers against.
+vllm = ["vllm>=0.26.0,<0.33.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
@@ -44,6 +46,10 @@ tutorials = [
 
 [project.entry-points."vllm.general_plugins"]
 register_granite_switch = "granite_switch.vllm:register"
+# Native structured-decisions (/v1/systemone) support for the decision adapter. The callback
+# inserts GraniteSwitchDecisionStrategy into vLLM's READ_STRATEGIES; it is a no-op on vLLM
+# lines without the structured_decisions API (< 0.32). See structured_decisions.py.
+register_structured_decisions = "granite_switch.vllm.structured_decisions:register_structured_decisions"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -79,51 +85,73 @@ vllm30     = ["vllm>=0.30.0,<0.31.0"]
 # supported line that simply isn't worth its own per-run leg. Removable once the
 # matrix rename is on main.
 vllm27     = ["vllm>=0.27.0,<0.28.0"]
+# 0.32 is the newest supported line and the one the native structured-decisions
+# strategy targets. It is the current `dev-latest` ceiling.
+vllm32     = ["vllm>=0.32.0,<0.33.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
 dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
 dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
+dev-vllm32 = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-switch[hf,compose,audio]"]
 # The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
 # CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
 # the ceiling is repointing this one line instead of chasing the version through
-# every caller. Currently the 0.30 line.
-dev-latest = [{ include-group = "dev-vllm30" }]
+# every caller. Currently the 0.32 line (native structured decisions).
+dev-latest = [{ include-group = "dev-vllm32" }]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
 # Only the per-line GROUPS are mutually exclusive now. The `vllm` extra spans
-# 0.26-0.30, so it overlaps every group and no longer conflicts with any of them --
+# 0.26-0.32, so it overlaps every group and no longer conflicts with any of them --
 # which is what made `uv sync` unsatisfiable while the extra said 0.30-only and the
 # default group said 0.26.
-# Every pair that would pull two different vLLM lines into one venv. Three lines
-# are declared (0.26 / 0.27 / 0.30) with a bare and a dev- flavour each, so the
-# 26-side {vllm26, dev}, the 27-side {vllm27, dev-vllm27} and the 30-side
-# {vllm30, dev-vllm30} give 3 x (2 x 2) = 12 cross-line pairs. `test` is absent
-# deliberately: it reaches vllm26 through `include-group = "dev"` and uv derives
-# that transitively -- main's two-line version listed it nowhere either.
+# Every pair that would pull two different vLLM lines into one venv. Four lines
+# are declared (0.26 / 0.27 / 0.30 / 0.32) with a bare and a dev- flavour each, so
+# the 26-side {vllm26, dev}, the 27-side {vllm27, dev-vllm27}, the 30-side
+# {vllm30, dev-vllm30} and the 32-side {vllm32, dev-vllm32} are mutually exclusive.
+# dev-latest aliases dev-vllm32, so it conflicts with every non-32 side too.
+# `test` is absent deliberately: it reaches vllm26 through `include-group = "dev"`
+# and uv derives that transitively -- main's two-line version listed it nowhere either.
 conflicts = [
     # 0.26 vs 0.27
     [{ group = "vllm26" },     { group = "vllm27" }],
     [{ group = "vllm26" },     { group = "dev-vllm27" }],
     [{ group = "dev" },        { group = "vllm27" }],
     [{ group = "dev" },        { group = "dev-vllm27" }],
-    # 0.26 vs 0.30 (dev-latest aliases dev-vllm30, so it conflicts with the 0.26 side too)
+    # 0.26 vs 0.30
     [{ group = "vllm26" },     { group = "vllm30" }],
     [{ group = "vllm26" },     { group = "dev-vllm30" }],
-    [{ group = "vllm26" },     { group = "dev-latest" }],
     [{ group = "dev" },        { group = "vllm30" }],
     [{ group = "dev" },        { group = "dev-vllm30" }],
+    # 0.26 vs 0.32 (dev-latest aliases dev-vllm32, so it conflicts with the 0.26 side too)
+    [{ group = "vllm26" },     { group = "vllm32" }],
+    [{ group = "vllm26" },     { group = "dev-vllm32" }],
+    [{ group = "vllm26" },     { group = "dev-latest" }],
+    [{ group = "dev" },        { group = "vllm32" }],
+    [{ group = "dev" },        { group = "dev-vllm32" }],
     [{ group = "dev" },        { group = "dev-latest" }],
     # 0.27 vs 0.30
     [{ group = "vllm27" },     { group = "vllm30" }],
     [{ group = "vllm27" },     { group = "dev-vllm30" }],
-    [{ group = "vllm27" },     { group = "dev-latest" }],
     [{ group = "dev-vllm27" }, { group = "vllm30" }],
     [{ group = "dev-vllm27" }, { group = "dev-vllm30" }],
+    # 0.27 vs 0.32
+    [{ group = "vllm27" },     { group = "vllm32" }],
+    [{ group = "vllm27" },     { group = "dev-vllm32" }],
+    [{ group = "vllm27" },     { group = "dev-latest" }],
+    [{ group = "dev-vllm27" }, { group = "vllm32" }],
+    [{ group = "dev-vllm27" }, { group = "dev-vllm32" }],
     [{ group = "dev-vllm27" }, { group = "dev-latest" }],
+    # 0.30 vs 0.32
+    [{ group = "vllm30" },     { group = "vllm32" }],
+    [{ group = "vllm30" },     { group = "dev-vllm32" }],
+    [{ group = "vllm30" },     { group = "dev-latest" }],
+    [{ group = "dev-vllm30" }, { group = "vllm32" }],
+    [{ group = "dev-vllm30" }, { group = "dev-vllm32" }],
+    [{ group = "dev-vllm30" }, { group = "dev-latest" }],
 ]
 
 [tool.coverage.run]
