@@ -222,8 +222,8 @@ def _switch_lora_expand_kernel(
         return
 
     pid_n = tl.program_id(1)
-    m_range = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    n_range = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+    n_range = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
     mask_n = n_range < N
 
@@ -267,7 +267,7 @@ def _switch_lora_expand_kernel(
     # output delta. The static_range unrolls at compile time, so absent tiers
     # (NA_r == 0) emit no code. Only the tier-16 loop is annotated; tiers 32..512
     # are the identical pattern with r and the tier offsets substituted.
-    r16 = tl.arange(0, 16)
+    r16 = tl.arange(0, 16).to(tl.int64)
     for a in tl.static_range(NA_16):
         if (bitmask >> a) & 1:  # adapter (a+1) in this tile?
             mask_a = (adap_ids == (a + 1)) & mask_m  # rows that select it
@@ -292,7 +292,7 @@ def _switch_lora_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r32 = tl.arange(0, 32)
+    r32 = tl.arange(0, 32).to(tl.int64)
     for a in tl.static_range(NA_32):
         if (bitmask >> (id_off_32 + a)) & 1:
             mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
@@ -314,7 +314,7 @@ def _switch_lora_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r64 = tl.arange(0, 64)
+    r64 = tl.arange(0, 64).to(tl.int64)
     for a in tl.static_range(NA_64):
         if (bitmask >> (id_off_64 + a)) & 1:
             mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
@@ -336,7 +336,7 @@ def _switch_lora_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r128 = tl.arange(0, 128)
+    r128 = tl.arange(0, 128).to(tl.int64)
     for a in tl.static_range(NA_128):
         if (bitmask >> (id_off_128 + a)) & 1:
             mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
@@ -358,7 +358,7 @@ def _switch_lora_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r256 = tl.arange(0, 256)
+    r256 = tl.arange(0, 256).to(tl.int64)
     for a in tl.static_range(NA_256):
         if (bitmask >> (id_off_256 + a)) & 1:
             mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
@@ -380,7 +380,7 @@ def _switch_lora_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r512 = tl.arange(0, 512)
+    r512 = tl.arange(0, 512).to(tl.int64)
     for a in tl.static_range(NA_512):
         if (bitmask >> (id_off_512 + a)) & 1:
             mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
@@ -530,7 +530,7 @@ def _accum_slice_delta(
 
     # Same per-tier accumulation as the in-place expand kernel; see there for the
     # annotated tier-16 loop. Tiers 32..512 repeat the pattern.
-    r16 = tl.arange(0, 16)
+    r16 = tl.arange(0, 16).to(tl.int64)
     for a in tl.static_range(NA_16):
         if (bitmask >> a) & 1:
             mask_a = (adap_ids == (a + 1)) & mask_m
@@ -552,7 +552,7 @@ def _accum_slice_delta(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r32 = tl.arange(0, 32)
+    r32 = tl.arange(0, 32).to(tl.int64)
     for a in tl.static_range(NA_32):
         if (bitmask >> (id_off_32 + a)) & 1:
             mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
@@ -574,7 +574,7 @@ def _accum_slice_delta(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r64 = tl.arange(0, 64)
+    r64 = tl.arange(0, 64).to(tl.int64)
     for a in tl.static_range(NA_64):
         if (bitmask >> (id_off_64 + a)) & 1:
             mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
@@ -596,7 +596,7 @@ def _accum_slice_delta(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r128 = tl.arange(0, 128)
+    r128 = tl.arange(0, 128).to(tl.int64)
     for a in tl.static_range(NA_128):
         if (bitmask >> (id_off_128 + a)) & 1:
             mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
@@ -618,7 +618,7 @@ def _accum_slice_delta(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r256 = tl.arange(0, 256)
+    r256 = tl.arange(0, 256).to(tl.int64)
     for a in tl.static_range(NA_256):
         if (bitmask >> (id_off_256 + a)) & 1:
             mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
@@ -640,7 +640,7 @@ def _accum_slice_delta(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r512 = tl.arange(0, 512)
+    r512 = tl.arange(0, 512).to(tl.int64)
     for a in tl.static_range(NA_512):
         if (bitmask >> (id_off_512 + a)) & 1:
             mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
@@ -701,8 +701,8 @@ def _switch_lora_expand_swiglu_kernel(
     # equals the token count behind AdapIdx/Bitmask, because routing is per token
     # and the decoder preserves token count. The unmasked Bitmask load relies on
     # it.
-    m_range = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    h_range = pid_h * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+    h_range = (pid_h * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
     mask_h = h_range < H
     base_mask = mask_m[:, None] & mask_h[None, :]
@@ -918,8 +918,8 @@ def _switch_lora_shrink_expand_kernel(
         return
 
     pid_n = tl.program_id(1)
-    m_range = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    n_range = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
+    n_range = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
     mask_n = n_range < N
 
@@ -950,7 +950,7 @@ def _switch_lora_shrink_expand_kernel(
     lb_off_256 = lb_off_128 + NA_128 * N * 128
     lb_off_512 = lb_off_256 + NA_256 * N * 256
 
-    r16 = tl.arange(0, 16)
+    r16 = tl.arange(0, 16).to(tl.int64)
     for a in tl.static_range(NA_16):
         if (bitmask >> a) & 1:  # adapter (a+1) in this tile?
             mask_a = (adap_ids == (a + 1)) & mask_m  # rows that select it
@@ -972,7 +972,7 @@ def _switch_lora_shrink_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r32 = tl.arange(0, 32)
+    r32 = tl.arange(0, 32).to(tl.int64)
     for a in tl.static_range(NA_32):
         if (bitmask >> (id_off_32 + a)) & 1:
             mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
@@ -994,7 +994,7 @@ def _switch_lora_shrink_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r64 = tl.arange(0, 64)
+    r64 = tl.arange(0, 64).to(tl.int64)
     for a in tl.static_range(NA_64):
         if (bitmask >> (id_off_64 + a)) & 1:
             mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
@@ -1016,7 +1016,7 @@ def _switch_lora_shrink_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r128 = tl.arange(0, 128)
+    r128 = tl.arange(0, 128).to(tl.int64)
     for a in tl.static_range(NA_128):
         if (bitmask >> (id_off_128 + a)) & 1:
             mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
@@ -1038,7 +1038,7 @@ def _switch_lora_shrink_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r256 = tl.arange(0, 256)
+    r256 = tl.arange(0, 256).to(tl.int64)
     for a in tl.static_range(NA_256):
         if (bitmask >> (id_off_256 + a)) & 1:
             mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
@@ -1060,7 +1060,7 @@ def _switch_lora_shrink_expand_kernel(
             ).to(tl.float32)
             delta += tl.dot(shrink, lb)
 
-    r512 = tl.arange(0, 512)
+    r512 = tl.arange(0, 512).to(tl.int64)
     for a in tl.static_range(NA_512):
         if (bitmask >> (id_off_512 + a)) & 1:
             mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
