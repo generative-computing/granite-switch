@@ -49,6 +49,10 @@ tutorials = [
 
 [project.entry-points."vllm.general_plugins"]
 register_granite_switch = "granite_switch.vllm:register"
+# Native structured-decisions (/v1/systemone) support for the decision adapter. The callback
+# inserts GraniteSwitchDecisionStrategy into vLLM's READ_STRATEGIES; it is a no-op on vLLM
+# lines without the structured_decisions API (< 0.32). See structured_decisions.py.
+register_structured_decisions = "granite_switch.vllm.structured_decisions:register_structured_decisions"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
