@@ -18,11 +18,19 @@ The focus is the content SHAPE matrix that was previously uncovered:
 * multiple text parts (join behaviour),
 * parts-list across multiple turns and in a system message,
 * parts-list while an adapter is active (the flatten must run before the ALoRA
-  Pass 2 ``rsplit``).
+  Pass 2 ``rsplit``),
+* parts-list on every role vLLM wraps — assistant history, assistant-with-tool-
+  calls, tool, and a role outside the known branches.
 
 Break criterion: the rendered prompt must never contain the Python list-repr
 marker ``[{'type'`` — that means a parts list leaked into the prompt instead of
 being flattened.
+
+**That criterion alone is not sufficient**, and relying on it is how the
+assistant-with-tool-calls case slipped through a green 2886-test GPU run: the
+ChatML assistant branch gates on ``content is string``, so a parts list there is
+DROPPED rather than repr'd. An absence cannot be detected by looking for a
+marker. Tests covering a role must therefore also assert the text is PRESENT.
 
 A separate class pins the *trigger*: that the composed template resolves to the
 vLLM content format the template can actually honour, using a local
@@ -272,6 +280,131 @@ class TestContentShapeRealTokenizer:
         )
         assert "sunny, 72F" in out
         assert _REPR_MARKER not in out
+
+    def test_assistant_history_parts_flattened(
+        self, model_id, family, adapter_dir, name, atype
+    ):
+        """An assistant turn sent as a parts list must flatten.
+
+        Under 'openai' vLLM wraps *every* message's content, assistant history
+        included — it is vLLM that produces this shape, not the client. Patching
+        only the roles thought of as "incoming" (user/system/tool) left each
+        earlier assistant turn rendering as [{'type': 'text', 'text': 'a1'}].
+        """
+        tok = _configure(model_id, adapter_dir, name, atype)
+        out = _render(
+            tok,
+            [
+                {"role": "user", "content": _text_part("q1")},
+                {"role": "assistant", "content": _text_part("a1-assistant-reply")},
+                {"role": "user", "content": _text_part("q2")},
+            ],
+        )
+        assert "a1-assistant-reply" in out, (
+            f"assistant text missing ({family}): {out!r}"
+        )
+        assert _REPR_MARKER not in out, f"list repr leaked ({family}): {out!r}"
+
+    def test_assistant_text_kept_with_tool_calls(
+        self, model_id, family, adapter_dir, name, atype
+    ):
+        """A parts-list assistant turn carrying tool calls must keep its text.
+
+        This asserts PRESENCE, not the absence of the list-repr, which is the
+        whole point: the ChatML assistant branch gates on ``content is string``,
+        so a parts list fails the check and the text is DROPPED rather than
+        repr'd. A no-list-repr assertion reports this case as passing while the
+        text silently vanishes from the history — so only a positive assertion
+        catches it.
+        """
+        tok = _configure(model_id, adapter_dir, name, atype)
+        out = _render(
+            tok,
+            [
+                {"role": "user", "content": _text_part("what is the weather?")},
+                {
+                    "role": "assistant",
+                    "content": _text_part("Let me check the weather"),
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "get_weather",
+                                "arguments": {"city": "Paris"},
+                            },
+                        }
+                    ],
+                },
+                {"role": "tool", "content": _text_part("sunny, 72F")},
+                {"role": "user", "content": _text_part("thanks")},
+            ],
+        )
+        assert "Let me check the weather" in out, (
+            f"assistant text dropped next to tool_calls ({family}): {out!r}"
+        )
+        assert "get_weather" in out, f"tool call missing ({family}): {out!r}"
+        assert _REPR_MARKER not in out, f"list repr leaked ({family}): {out!r}"
+
+    def test_unknown_role_parts_renders_like_string(
+        self, model_id, family, adapter_dir, name, atype
+    ):
+        """A role outside the known branches must render, not raise.
+
+        ChatML's catch-all ``else`` concatenates message.content straight onto a
+        string, so a parts list there raised TypeError before the normalize pass
+        ran. Base 4.2 only escapes this because vLLM detects 'string' for it and
+        flattens upstream — composing removes that protection, so this is a
+        composed-only regression.
+
+        Asserted as equality against the equivalent plain-string render rather
+        than as text presence, because what a template DOES with an unknown role
+        differs by family: 4.2 has a catch-all that emits it, 4.1 has none and
+        drops it (true of a plain string there too, so not a bug). Equality is
+        the family-agnostic claim and the stronger one — flattening must make a
+        parts list behave exactly like the string it carries, whatever that is.
+        """
+        tok = _configure(model_id, adapter_dir, name, atype)
+        as_parts = _render(
+            tok,
+            [
+                {"role": "user", "content": _text_part("summarize")},
+                {"role": "document", "content": _text_part("doc-body-text")},
+            ],
+        )
+        as_string = _render(
+            tok,
+            [
+                {"role": "user", "content": "summarize"},
+                {"role": "document", "content": "doc-body-text"},
+            ],
+        )
+        assert as_parts == as_string, (
+            f"parts-list render diverged from the string render ({family}):\n"
+            f"parts={as_parts!r}\nstring={as_string!r}"
+        )
+        assert _REPR_MARKER not in as_parts, (
+            f"list repr leaked ({family}): {as_parts!r}"
+        )
+
+
+def test_chatml_injections_raise_on_missing_anchor():
+    """Every ChatML injection must fail loudly when its anchor is absent.
+
+    Two of the three originally returned the template unchanged, so a base-template
+    revision that moved an anchor would compose GREEN and then render wrongly at
+    serve time. A composer cannot no-op a correctness fix: the checkpoint is
+    written and published before anyone renders a prompt.
+    """
+    from granite_switch.composer.tokenizer_setup import (
+        _inject_chatml_content_flatten,
+        _inject_chatml_system_message_flatten,
+    )
+
+    anchorless = "{{- '<|im_start|>user\\n' }}{{ messages }}"
+    with pytest.raises(ValueError, match="ChatML message loop"):
+        _inject_chatml_content_flatten(anchorless, marker=None)
+    with pytest.raises(ValueError, match="leading-system-message"):
+        _inject_chatml_system_message_flatten(anchorless)
 
 
 # ────────────────────────────────────────────────────────────────────
