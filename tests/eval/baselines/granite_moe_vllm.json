@@ -4249,7 +4249,7 @@
   ]
  ],
  "checkpoint_fingerprint": "da2c066319fb00d3",
- "config": "granite5_vllm",
+ "config": "granite_moe_vllm",
  "continuations": [
   [
    578,
@@ -4356,7 +4356,7 @@
    1844
   ]
  ],
- "description": "Granite 5 + LoRA/aLoRA adapter, vLLM backend",
+ "description": "MoE base + LoRA/aLoRA adapter, vLLM backend",
  "max_tokens": 24,
  "prompts": [
   "Summarize the following in one sentence: The committee met on Tuesday and voted to postpone the budget review until the next quarter.",

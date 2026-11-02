@@ -128,7 +128,7 @@ class EvalConfig:
     fallback_env: str | None = None
 
 
-#: The four evaluation configs. Granite 4.2 and Granite 5 with LoRA/aLoRA adapters
+#: The four evaluation configs. A dense and a MoE base with LoRA/aLoRA adapters
 #: on vLLM, an SR (dual-stream) adapter on vLLM, and one adapter on the HF backend
 #: -- so a break that lives in the HF path cannot hide behind a green vLLM leg.
 EVAL_CONFIGS: dict[str, EvalConfig] = {
@@ -138,11 +138,11 @@ EVAL_CONFIGS: dict[str, EvalConfig] = {
         "vllm",
         "Granite 4.2 + LoRA/aLoRA adapter, vLLM backend",
     ),
-    "granite5_vllm": EvalConfig(
-        "granite5_vllm",
-        "GSW_EVAL_G5_DIR",
+    "granite_moe_vllm": EvalConfig(
+        "granite_moe_vllm",
+        "GSW_EVAL_GMOE_DIR",
         "vllm",
-        "Granite 5 + LoRA/aLoRA adapter, vLLM backend",
+        "MoE base + LoRA/aLoRA adapter, vLLM backend",
     ),
     "sr_vllm": EvalConfig(
         "sr_vllm",
@@ -171,7 +171,7 @@ COMPOSE_RECIPES: dict[str, tuple[str, tuple[str, ...]]] = {
         "ibm-granite/granite-4.1-3b",
         ("ibm-granite/granitelib-guardian-r1.0", "ibm-granite/granitelib-core-r1.0"),
     ),
-    "granite5_vllm": (
+    "granite_moe_vllm": (
         "ibm-granite/granite-4.0-micro",
         ("ibm-granite/granitelib-rag-r1.0",),
     ),
@@ -310,7 +310,7 @@ def fingerprint(model_dir: Path) -> str:
 EVAL_ADAPTERS: dict[str, str] = {
     "granite42_vllm": "factuality-correction",
     "granite42_hf": "factuality-correction",
-    "granite5_vllm": "answerability",
+    "granite_moe_vllm": "answerability",
 }
 
 
@@ -400,9 +400,10 @@ def _run_vllm(
         # recomputed or served from a cached block depends on what ran earlier in
         # the same engine. That made the capture depend on pass order: prompt 0,
         # the longest, was the only one whose numbers moved between two runs of
-        # the same vLLM line (granite42_vllm 0.000000 -> 0.001857, granite5_vllm
-        # 0.001914 -> 0.003221 across the 0.26 and 0.30 legs of run
-        # 39556314476), while the shorter prompts reproduced byte-identically.
+        # the same vLLM line (granite42_vllm 0.000000 -> 0.001857,
+        # granite_moe_vllm 0.001914 -> 0.003221 across the 0.26 and 0.30 legs
+        # of run 39556314476), while the shorter prompts reproduced
+        # byte-identically.
         "enable_prefix_caching": False,
     }
     # vLLM measures gpu_memory_utilization against TOTAL memory and refuses to
@@ -560,12 +561,13 @@ def capture(
 #: other, and `jsd_bits` renormalizes over the union, so that token contributes
 #: roughly its entire mass in bits however small the underlying logit difference
 #: was. Measured on the two `eval-record` recordings of run 39578693370
-#: (granite5_vllm prompt 0): ~3 such tokens per position holding 0.0157 mass gave
-#: mean JSD 0.016248 at k=20, versus 0.000378 at k<=10 over the same positions --
-#: a 43x artifact that is pure truncation, not distribution movement. That is what
-#: made granite5_vllm fail at 0.003472 > 0.003 on the 0.26 leg of run 39587132597
-#: while granite42_vllm read exactly 0.000000 on the same leg: the ordering was
-#: backwards for a version regression, because it was never about the version.
+#: (granite_moe_vllm prompt 0): ~3 such tokens per position holding 0.0157 mass
+#: gave mean JSD 0.016248 at k=20, versus 0.000378 at k<=10 over the same
+#: positions -- a 43x artifact that is pure truncation, not distribution
+#: movement. That is what made granite_moe_vllm fail at 0.003472 > 0.003 on the
+#: 0.26 leg of run 39587132597 while granite42_vllm read exactly 0.000000 on the
+#: same leg: the ordering was backwards for a version regression, because it was
+#: never about the version.
 #: Keeping k < TOP_K means every compared token was ranked well inside both
 #: captures, so presence is not itself a measurement. Sensitivity is retained: a
 #: 30% logit scaling still reads mean JSD 0.011 and a one-position top-2 swap reads
