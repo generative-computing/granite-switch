@@ -849,6 +849,13 @@ class TestConfigureChatTemplateChatML:
         assert after.startswith("assistant\n<think>")
 
 
+# NOTE: the ChatML content-format flattening (OpenAI-style parts list must not
+# render as a Python list-repr) is covered end-to-end with the real 4.1/4.2
+# tokenizers in ``test_chat_template_real_tokenizer.py``
+# (``TestContentShapeRealTokenizer`` + ``TestContentFormatDetection``), which
+# supersede an earlier mock-tokenizer version of these checks.
+
+
 # ════════════════════════════════════════════════════════════════════
 # Audio: <|audio|> marker preservation, and coexistence with adapters
 # ════════════════════════════════════════════════════════════════════
@@ -1092,9 +1099,9 @@ class TestAudioChatTemplateChatML:
     def test_pass2_anchor_survives_injection(self):
         """The ALoRA Pass 2 anchor must remain findable after audio injection.
 
-        The flattening block is appended after the content assignment rather
-        than replacing it precisely so configure_chat_template can still anchor
-        on it, in either call order.
+        The normalize pass is inserted before the message loop rather than at the
+        content assignment, so that assignment stays intact for
+        configure_chat_template to anchor Pass 2 on, in either call order.
         """
         tokenizer = _make_chatml_audio_tokenizer()
         configure_audio_chat_template(tokenizer)
@@ -1106,7 +1113,7 @@ class TestAudioChatTemplateChatML:
         tokenizer = SimpleNamespace(
             chat_template="{{- '<|im_start|>user\\n' }}{{ messages }}"
         )
-        with pytest.raises(ValueError, match="ChatML per-message content assignment"):
+        with pytest.raises(ValueError, match="ChatML message loop"):
             configure_audio_chat_template(tokenizer)
 
 

@@ -725,53 +725,171 @@ def _inject_audio_granite_format(template: str, marker: str) -> str:
     return template.replace(_GRANITE_TEXT_PART_BRANCH, new, 1)
 
 
-def _inject_audio_chatml(template: str, marker: str) -> str:
-    """Rebuild ChatML's stringified content from its parts, emitting the marker.
+# Marker that identifies the ChatML content-normalize block (so the audio pass
+# can find and upgrade a text-only block rather than inject a competing second
+# one).
+_CHATML_FLATTEN_SENTINEL = "{#- gs:chatml-content-normalize -#}"
 
-    ChatML has no content-part loop at all: its user/system branch does
-    ``{%- set content = message.content | string %}``, so a multimodal parts
-    *list* renders as that list's Python repr — base64 audio payload included —
-    and the marker never appears.
+# The ChatML message loop. The normalize pass is injected immediately before it,
+# so every role-dispatch branch inside the loop sees a plain-string `content`.
+_CHATML_MESSAGE_LOOP = "{%- for message in loop_messages %}"
 
-    The flattening block is appended immediately *after* that assignment rather
-    than replacing it, which keeps the statement intact as
-    :func:`configure_chat_template`'s ALoRA Pass 2 anchor. Since Pass 2 is
-    inserted directly after the same anchor, calling this after
-    ``configure_chat_template`` lands the flattening ahead of Pass 2 — required,
-    because Pass 2 calls ``rsplit`` on ``content`` and so needs a string.
 
-    Part joining mirrors the granite_format loop: a text part is newline-
-    separated from whatever precedes it, and the marker is appended directly.
-    Part *order* is preserved, so the transcript the ASR processor splices in
-    lands where the clip sat relative to the text.
+def _chatml_content_flatten_block(marker: str | None) -> str:
+    """The Jinja block that normalizes every ChatML message's ``content``.
+
+    ChatML reads ``message.content`` at *seven* sites with different shapes of
+    assumption: the user/system branch stringifies it (rendering a parts list as
+    its Python repr ``[{'type': 'text', ...}]``), the assistant branch gates on
+    ``content is string`` (silently DROPPING a parts list's text when the turn
+    also carries tool calls), the tool branch emits it straight into
+    ``<tool_response>``, and the catch-all ``else`` concatenates it to a string
+    (``TypeError`` on a list). Under vLLM's ``openai`` content format *every*
+    message arrives as a parts list, including assistant history, because vLLM
+    wraps plain strings too.
+
+    Patching those sites individually is only ever as complete as the list of
+    sites someone remembered — three were missed on the first pass. So instead
+    this rebuilds ``loop_messages`` with flattened content ONCE, before the loop,
+    which is what the granite_format (4.1) family already does natively. Text
+    parts are newline-joined in order; everything else is dropped. Role-agnostic
+    by construction, so a role added to a future base template is covered
+    without touching this code.
+
+    ``dict(_m, content=...)`` makes a flattened *copy* — the messages are not
+    mutated, which also keeps this working under the immutable Jinja sandbox
+    ``transformers`` renders with.
+
+    When *marker* is given (audio enabled) an extra branch emits it for audio
+    parts, interleaved in part order so the ASR transcript lands where the clip
+    sat. When *marker* is ``None`` the block is text-only. Note that normalizing
+    centrally widens audio to *any* role, where the previous per-site injection
+    reached user/system only; emitting a marker too widely is the safe direction,
+    since a DROPPED audio part is what crashes vLLM's prompt replacement.
+
+    The sentinel comment lets :func:`configure_audio_chat_template` recognize a
+    text-only block already injected by :func:`configure_chat_template` and
+    upgrade it in place, rather than stack a second competing block.
     """
-    if _CHATML_CONTENT_SET not in template:
+    audio_branch = (
+        (
+            "            {%- if _e.type is defined and 'audio' in _e.type %}\n"
+            "                {%- set _c.val = _c.val + '" + marker + "' %}\n"
+            "            {%- elif _e.type is defined and _e.type == 'text' %}\n"
+        )
+        if marker is not None
+        else "            {%- if _e.type is defined and _e.type == 'text' %}\n"
+    )
+    return (
+        _CHATML_FLATTEN_SENTINEL + "\n"
+        "{#- Normalize every message's content to a plain string before the loop:\n"
+        " under vLLM's 'openai' content format each content arrives as a parts\n"
+        " list, and the branches below variously repr it, drop it, or raise. -#}\n"
+        "{%- set _norm = namespace(msgs=[]) %}\n"
+        "{%- for _m in loop_messages %}\n"
+        "    {%- if _m.content is not string and _m.content is iterable "
+        "and _m.content is not mapping %}\n"
+        "        {%- set _c = namespace(val='') %}\n"
+        "        {%- for _e in _m.content %}\n"
+        + audio_branch
+        + "                {%- if _c.val != '' %}\n"
+        "                    {%- set _c.val = _c.val + '\\n' %}\n"
+        "                {%- endif %}\n"
+        "                {%- set _c.val = _c.val + _e.text %}\n"
+        "            {%- endif %}\n"
+        "        {%- endfor %}\n"
+        "        {%- set _norm.msgs = _norm.msgs + [dict(_m, content=_c.val)] %}\n"
+        "    {%- else %}\n"
+        "        {%- set _norm.msgs = _norm.msgs + [_m] %}\n"
+        "    {%- endif %}\n"
+        "{%- endfor %}\n"
+        "{%- set loop_messages = _norm.msgs %}\n"
+    )
+
+
+# The ChatML preamble pulls the leading system message's content into a scalar
+# `system_message` that is later concatenated with a string. A parts list there
+# crashes the render ("can only concatenate str (not list)") before the main
+# loop runs, so it needs the same flatten as the per-message user/system branch.
+_CHATML_SYSTEM_MESSAGE_SET = '{%- set system_message = messages[0]["content"] %}'
+
+
+def _inject_chatml_system_message_flatten(template: str) -> str:
+    """Flatten a parts-list leading system message in the ChatML preamble.
+
+    Appends a block after ``{%- set system_message = messages[0]["content"] %}``
+    that, when that content is a non-string iterable, rebuilds it as the newline-
+    joined text parts. Text-only: an audio part in the *leading system* message
+    is still dropped (matching the per-message audio scope and the fact that no
+    caller places a clip in the system turn).
+
+    This site is NOT covered by the pre-loop normalize pass: the preamble reads
+    ``messages[0]["content"]`` directly, before ``loop_messages`` exists.
+
+    Raises:
+        ValueError: if the anchor is absent. A silent no-op here would compose a
+            checkpoint that renders a parts-list system turn as a ``TypeError``,
+            with nothing failing until a prompt is served.
+    """
+    if _CHATML_SYSTEM_MESSAGE_SET not in template:
         raise ValueError(
-            "Could not find the ChatML per-message content assignment "
-            f"({_CHATML_CONTENT_SET!r}) to inject audio handling; the base chat "
-            "template may have changed."
+            "Could not find the ChatML leading-system-message assignment "
+            f"({_CHATML_SYSTEM_MESSAGE_SET!r}) to inject content flattening; "
+            "the base chat template may have changed."
         )
     block = (
         "\n"
-        "        {#- Audio: ChatML stringifies message.content, so rebuild it from\n"
-        "         the parts when it is a list — otherwise a multimodal turn renders\n"
-        "         as a Python repr and the audio marker never appears. -#}\n"
-        "        {%- if message.content is not string and message.content is iterable %}\n"
-        "            {%- set _audio = namespace(val='') %}\n"
-        "            {%- for entry in message.content %}\n"
-        "                {%- if entry.type is defined and 'audio' in entry.type %}\n"
-        "                    {%- set _audio.val = _audio.val + '" + marker + "' %}\n"
-        "                {%- elif entry.type is defined and entry.type == 'text' %}\n"
-        "                    {%- if _audio.val != '' %}\n"
-        "                        {%- set _audio.val = _audio.val + '\\n' %}\n"
-        "                    {%- endif %}\n"
-        "                    {%- set _audio.val = _audio.val + entry.text %}\n"
-        "                {%- endif %}\n"
-        "            {%- endfor %}\n"
-        "            {%- set content = _audio.val %}\n"
-        "        {%- endif %}"
+        "{%- if system_message is not string and system_message is iterable %}\n"
+        "    {%- set _sys = namespace(val='') %}\n"
+        "    {%- for entry in system_message %}\n"
+        "        {%- if entry.type is defined and entry.type == 'text' %}\n"
+        "            {%- if _sys.val != '' %}\n"
+        "                {%- set _sys.val = _sys.val + '\\n' %}\n"
+        "            {%- endif %}\n"
+        "            {%- set _sys.val = _sys.val + entry.text %}\n"
+        "        {%- endif %}\n"
+        "    {%- endfor %}\n"
+        "    {%- set system_message = _sys.val %}\n"
+        "{%- endif %}"
     )
-    return template.replace(_CHATML_CONTENT_SET, _CHATML_CONTENT_SET + block, 1)
+    return template.replace(
+        _CHATML_SYSTEM_MESSAGE_SET, _CHATML_SYSTEM_MESSAGE_SET + block, 1
+    )
+
+
+def _inject_chatml_content_flatten(template: str, marker: str | None) -> str:
+    """Insert (or upgrade) the ChatML content-normalize block.
+
+    Inserted immediately *before* the message loop, so every role-dispatch
+    branch inside the loop reads an already-flattened string. ALoRA Pass 1 is
+    injected at the same anchor and must still see the ORIGINAL content shape —
+    it scans for the invocation text in both string and parts form — so this
+    block goes in first and Pass 1 lands before it.
+
+    If a text-only block (marked by :data:`_CHATML_FLATTEN_SENTINEL`) is already
+    present — injected by :func:`configure_chat_template` — and *marker* is
+    given, the existing block is swapped for the audio-aware variant instead of
+    stacking a second block that would re-normalize ``loop_messages``.
+
+    Raises:
+        ValueError: if the message-loop anchor is absent.
+    """
+    desired = _chatml_content_flatten_block(marker)
+    if _CHATML_FLATTEN_SENTINEL in template:
+        # A block is already installed; swap it wholesale (upgrade text-only ->
+        # audio, or re-inject identically).
+        existing = _chatml_content_flatten_block(None)
+        if existing in template:
+            return template.replace(existing, desired, 1)
+        # Already the audio variant (or an unexpected shape): leave as-is.
+        return template
+    if _CHATML_MESSAGE_LOOP not in template:
+        raise ValueError(
+            "Could not find the ChatML message loop "
+            f"({_CHATML_MESSAGE_LOOP!r}) to inject content normalization; the "
+            "base chat template may have changed."
+        )
+    return template.replace(_CHATML_MESSAGE_LOOP, desired + _CHATML_MESSAGE_LOOP, 1)
 
 
 def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
@@ -787,8 +905,11 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
 
     * **granite_format** (3.x / 4.0 / 4.1) — one ``elif`` added to the existing
       content-part loop. See :func:`_inject_audio_granite_format`.
-    * **chatml** (Granite 4.2) — no content-part loop exists, so a flattening
-      block rebuilds ``content`` from the parts. See :func:`_inject_audio_chatml`.
+    * **chatml** (Granite 4.2) — no content-part loop exists, so a normalize
+      pass before the message loop rebuilds each ``content`` from its parts. A
+      text-only pass is already installed by :func:`configure_chat_template`;
+      this upgrades it in place to also emit the marker for audio parts. See
+      :func:`_inject_chatml_content_flatten`.
 
     Matching on ``'audio' in entry.type`` covers ``audio`` / ``input_audio`` /
     ``audio_url`` in both.
@@ -796,9 +917,13 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
     Call *after* :func:`configure_chat_template`, gated on audio being enabled;
     the ChatML path depends on that order.
 
-    Scope is the per-message loop. An audio part in the leading system message is
-    dropped by both families — matching the pre-existing granite_format
-    behaviour, and not a shape any caller sends.
+    An audio part in the leading *system* message is dropped by both families —
+    matching the pre-existing granite_format behaviour, and not a shape any
+    caller sends. Otherwise ChatML's scope is now every role, because the
+    normalize pass it upgrades is role-agnostic (granite_format remains
+    per-message-loop). Widening the marker is the safe direction: a *dropped*
+    audio part is what fails vLLM's prompt replacement, an extra marker in a
+    role no caller uses is inert.
 
     Raises:
         ValueError: if the template family is unrecognized or its injection
@@ -819,7 +944,7 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
         )
 
     if fmt.name == "chatml":
-        tokenizer.chat_template = _inject_audio_chatml(template, marker)
+        tokenizer.chat_template = _inject_chatml_content_flatten(template, marker)
     else:
         tokenizer.chat_template = _inject_audio_granite_format(template, marker)
     print(
@@ -1272,6 +1397,23 @@ def configure_chat_template(
                 + alora_pass2
                 + modified_chat_template[insertion_point:]
             )
+        # Normalize every message's content to a plain string BEFORE the loop.
+        # vLLM's content-format auto-detector resolves to 'openai' whenever a
+        # template iterates message.content (which the ALoRA Pass 1 scan above
+        # does), and then feeds every content as a parts list — assistant history
+        # included, since it wraps plain strings too. ChatML's branches variously
+        # repr that list, silently drop it, or raise on it, so normalizing once
+        # up front is what makes all of them correct; patching each branch is
+        # only ever as complete as the list of branches someone remembered.
+        # Text-only here; the audio pass upgrades this same block.
+        modified_chat_template = _inject_chatml_content_flatten(
+            modified_chat_template, marker=None
+        )
+        # Not covered by the pass above: the preamble reads messages[0]["content"]
+        # directly, before loop_messages exists, and concatenates it to a string.
+        modified_chat_template = _inject_chatml_system_message_flatten(
+            modified_chat_template
+        )
     else:
         match = re.search(fmt.user_role_anchor_re, modified_chat_template)
         if match:
