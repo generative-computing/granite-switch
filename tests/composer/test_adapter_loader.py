@@ -537,7 +537,9 @@ class TestAdapterLoadingFromYAML:
             yaml.dump(manifest_data, f)
 
         input_path = str(manifest_file)
-        yaml_adapters = discover_adapters_from_yaml(input_path)
+        yaml_adapters, probe_meta = discover_adapters_from_yaml(input_path)
+        # No entry declared kind/labels, so no probe metadata.
+        assert probe_meta == {}
 
         # Verification of Parity: compare (path, name, technology) - source differs by design
         # discover_adapters returns source=None, discover_adapters_from_yaml returns source=manifest_path
@@ -547,3 +549,42 @@ class TestAdapterLoadingFromYAML:
         adapters_without_source = [(p, n, t) for p, n, t, _ in adapters]
         yaml_without_source = [(p, n, t) for p, n, t, _ in yaml_adapters]
         assert sorted(adapters_without_source) == sorted(yaml_without_source)
+
+
+class TestManifestProbeMetadata:
+    """discover_adapters_from_yaml surfaces optional probe declarations."""
+
+    def test_kind_and_labels_are_parsed(self, tmp_path):
+        manifest = tmp_path / "manifest.yaml"
+        yaml.dump(
+            {
+                "rag": {"path": "/p/rag", "type": "lora"},
+                "hallucination": {
+                    "path": "/p/hall",
+                    "type": "lora",
+                    "kind": "probe",
+                    "labels": ["faithful", "hallucinated"],
+                },
+            },
+            manifest.open("w"),
+        )
+
+        found, probe_meta = discover_adapters_from_yaml(str(manifest))
+
+        # The adapter tuples are unchanged (still 4-wide).
+        assert {(n) for _, n, _, _ in found} == {"rag", "hallucination"}
+        # Only the probe entry appears in the metadata dict.
+        assert probe_meta == {
+            "hallucination": {
+                "kind": "probe",
+                "labels": ["faithful", "hallucinated"],
+                "layer": None,
+            }
+        }
+
+    def test_plain_manifest_has_no_probe_metadata(self, tmp_path):
+        manifest = tmp_path / "manifest.yaml"
+        yaml.dump({"rag": {"path": "/p/rag", "type": "lora"}}, manifest.open("w"))
+
+        _found, probe_meta = discover_adapters_from_yaml(str(manifest))
+        assert probe_meta == {}

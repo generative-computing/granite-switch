@@ -34,9 +34,11 @@ from .core.lora import (
     SwitchedLoRALinear,
     replace_shared_mlp_projections_with_lora,
 )
+from .core.probe import SwitchedProbeHead
 from .switch import create_switch
 
 logger = logging.get_logger(__name__)
+
 
 # transformers 5.9.0 renamed `input_embeds` -> `inputs_embeds` and dropped the
 # unused `cache_position` kwarg in `create_causal_mask`.
@@ -417,6 +419,22 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             self.switch = None
             self.adapter_token_ids = None
 
+        # Probe heads: optional alternative for LoRA adapters. A probe
+        # slot shares the adapter index/token machinery, but its index is tagged
+        # as "probe" (via the switch's adapter_kind_lut). The switch's
+        # split_indices() routes those positions out of the LoRA stream (so LoRA
+        # no-ops there) and into a probe stream. The head reads its
+        # configured layer (the final post-norm state by default), scoring
+        # intermediate layers as the decoder runs and keeping only marker rows.
+        if "probe" in getattr(config, "adapter_kinds", []):
+            self.probe_head = SwitchedProbeHead(
+                hidden_size=config.hidden_size,
+                num_probe_slots=config.num_adapters,
+                max_num_labels=config.max_probe_labels,
+            )
+        else:
+            self.probe_head = None
+
         # Decoder layers
         if config.num_adapters > 0:
             layer_offset = self.switch.num_cache_layers
@@ -460,6 +478,57 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         if config.dual_stream:
             for layer in self.layers:
                 nn.init.zeros_(layer.cross_stream.base_layer.weight)
+
+    def _locate_probe_markers(self, input_ids, probe_indices, attention_mask):
+        """``(rows, pos, slots, markers_by_layer)`` for this forward's markers.
+
+        ``markers_by_layer`` maps each read layer (None = final) to the marker
+        indices that read it. ``None`` when there is no probe marker. Each
+        marker must be its row's last real token, since the verdict replaces
+        that position's logits.
+        """
+        if self.probe_head is None:
+            return None
+        if input_ids is None:
+            if bool((probe_indices > 0).any()):
+                raise RuntimeError("Probe requests need input_ids, not inputs_embeds.")
+            return None
+        marker_ids = torch.tensor(
+            self.config.probe_control_token_ids,
+            device=input_ids.device,
+            dtype=input_ids.dtype,
+        )
+        rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
+        if rows.numel() == 0:
+            return None
+
+        batch_size, seq_length = input_ids.shape
+        if attention_mask is not None and attention_mask.dim() == 2:
+            real = attention_mask[:, -seq_length:].long()
+            cols = torch.arange(seq_length, device=real.device)
+            last = (real * cols).max(dim=1).values
+        else:
+            last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
+        misplaced = pos != last[rows]
+        if bool(misplaced.any()):
+            bad = sorted(set(rows[misplaced].tolist()))
+            raise RuntimeError(
+                f"Probe request(s) {bad}: control token is not their last token."
+            )
+
+        slots = probe_indices[rows, pos]
+        read_layers = self.config.probe_read_layers or [None] * len(
+            self.config.adapter_kinds
+        )
+        by_layer: dict[int | None, list[int]] = {}
+        for marker_idx, slot in enumerate(slots.tolist()):
+            layer = read_layers[slot - 1] if slot > 0 else None
+            by_layer.setdefault(layer, []).append(marker_idx)
+        markers_by_layer = {
+            layer: torch.tensor(indices, device=input_ids.device)
+            for layer, indices in by_layer.items()
+        }
+        return rows, pos, slots, markers_by_layer
 
     def forward(
         self,
@@ -587,6 +656,15 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 device=device,
             )
 
+        # Split the single adapter_indices stream into a LoRA stream and
+        # a probe stream. Probe positions are zeroed in lora_indices
+        # (so the LoRA path no-ops there).
+        if self.switch is not None:
+            lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+        else:
+            lora_indices = adapter_indices
+            probe_indices = torch.zeros_like(adapter_indices)
+
         # Embed once, on the (possibly-rewritten) input_ids. The decoder is
         # token-exchange-agnostic — it just embeds whatever the switch
         # passed through.
@@ -594,8 +672,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             inputs_embeds = self.embed_tokens(modified_input_ids)
         inputs_embeds = inputs_embeds * self.embedding_multiplier
 
-        # Expose adapter_indices for tests and debugging.
+        # Expose adapter_indices for tests and debugging. _last_adapter_indices is
+        # the full stream (LoRA + probe); _last_lora_indices is what the
+        # decoder routes on; _last_probe_indices is the probe-only
+        # stream the verdict reads.
         self._last_adapter_indices = adapter_indices
+        self._last_lora_indices = lora_indices
+        self._last_probe_indices = probe_indices
 
         position_embeddings = None
         if self.rotary_emb is not None:
@@ -615,7 +698,27 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        for decoder_layer in self.layers:
+        # Resolve probe read positions before the decoder runs, so each read
+        # layer scores only its marker rows as it produces them.
+        markers = self._locate_probe_markers(input_ids, probe_indices, attention_mask)
+        self._last_probe_verdict = None
+        if markers is not None:
+            probe_rows, probe_pos, probe_slots, markers_by_layer = markers
+            probe_verdict = inputs_embeds.new_zeros(
+                (probe_rows.numel(), self.config.max_probe_labels)
+            )
+
+        def score_markers(layer, hidden):
+            """Score the markers that read ``layer`` (None = final) from ``hidden``."""
+            if markers is None or layer not in markers_by_layer:
+                return
+            idx = markers_by_layer[layer]
+            probe_verdict[idx] = self.probe_head(
+                hidden[probe_rows[idx], probe_pos[idx]],
+                probe_slots[idx],
+            )
+
+        for layer_idx, decoder_layer in enumerate(self.layers):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
@@ -628,7 +731,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
-                adapter_indices=adapter_indices,
+                adapter_indices=lora_indices,
                 **kwargs,
             )
 
@@ -636,6 +739,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 h_base, hidden_states = layer_outputs[0]
             else:
                 hidden_states = layer_outputs[0]
+
+            score_markers(layer_idx, hidden_states)
 
             if output_attentions:
                 if layer_outputs[1] is not None:
@@ -645,6 +750,16 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        if markers is not None:
+            score_markers(None, hidden_states)
+            self._last_probe_verdict = (
+                probe_rows,
+                probe_pos,
+                probe_verdict,
+                probe_slots,
+                seq_length,
+            )
 
         if not return_dict:
             return tuple(
@@ -764,6 +879,10 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         logits = logits / self.config.logits_scaling
 
+        # Probe exit: a probe request reports its verdict as a
+        # generated label word (like a guardian LoRA).
+        logits = self._apply_probe_verdict(logits)
+
         loss = None
         if labels is not None:
             loss = self.loss_function(
@@ -780,3 +899,33 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def _apply_probe_verdict(self, logits: torch.Tensor) -> torch.Tensor:
+        """Rewrite each probe marker's logit row to emit its label word.
+
+        The row is blanked to ``-inf`` and the slot's per-label verdict scores are
+        placed on its label token ids (``probe_label_token_ids``).
+        """
+        pending = getattr(self.model, "_last_probe_verdict", None)
+        if pending is None:
+            return logits
+        rows, pos, verdict, slots, seq_length = pending
+
+        # logits keeps the last logits.shape[1] positions (logits_to_keep).
+        cols = pos - (seq_length - logits.shape[1])
+        if bool((cols < 0).any()):
+            raise RuntimeError(
+                "A probe marker's logits were not kept (logits_to_keep)."
+            )
+
+        # Each marker writes only its own slot's label ids and only that slot's
+        # real label count (verdict[i, :n]); padded columns are never read.
+        per_slot_label_ids = self.config.probe_label_token_ids
+        logits[rows, cols, :] = float("-inf")
+        for i, (r, c, slot) in enumerate(
+            zip(rows.tolist(), cols.tolist(), slots.tolist())
+        ):
+            ids = per_slot_label_ids[slot - 1]
+            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
+            logits[r, c, label_ids] = verdict[i, : len(ids)].to(logits.dtype)
+        return logits

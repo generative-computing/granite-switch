@@ -153,3 +153,125 @@ def test_multi_audio_checkpoint_loads_without_size_overrides(audio_multi):
         assert lut[ctrl_id].item() == sub_id, ctrl_id
     # Every non-control id stays a sentinel, so ordinary tokens pass through.
     assert int((lut >= 0).sum()) == len(model.config.adapter_token_ids)
+
+
+# --------------------------------------------------------------------------- #
+# A LoRA + probe checkpoint composed with and without --enable-audio must
+# load strictly (no ignore_mismatched_sizes) and still route the probe
+# marker to its head. The audio marker grows the vocabulary past the control
+# ids, so this also checks the saved control LUT matches the shipped config.
+# --------------------------------------------------------------------------- #
+_PROBE_BASE = "ibm-granite/granite-4.1-3b"
+_PROBE_LABELS = ["safe", "unsafe"]
+
+
+def _write_probe_manifest(root):
+    """A real LoRA plus a synthetic bias-only head (label 1 always wins)."""
+    import torch
+    from safetensors.torch import save_file
+    from transformers import AutoConfig
+
+    from .test_probe_compose import _find_rag_lora_dir
+
+    hidden = AutoConfig.from_pretrained(_PROBE_BASE).hidden_size
+    head_dir = root / "safety" / "safety" / "granite-4.1-3b" / "lora"
+    head_dir.mkdir(parents=True)
+    bias = torch.tensor([-10.0, 10.0])
+    save_file(
+        {"weight": torch.zeros(len(_PROBE_LABELS), hidden), "bias": bias},
+        str(head_dir / "probe_head.safetensors"),
+    )
+    (head_dir / "io.yaml").write_text("name: safety\nmodel: ~\n")
+    manifest = root / "adapters.yaml"
+    manifest.write_text(
+        "rag:\n"
+        f"  path: {_find_rag_lora_dir()}\n"
+        "  type: lora\n"
+        "safety:\n"
+        f"  path: {head_dir}\n"
+        "  type: lora\n"
+        "  kind: probe\n"
+        f"  labels: [{', '.join(_PROBE_LABELS)}]\n"
+    )
+    return manifest
+
+
+def _compose_probe(root, enable_audio):
+    manifest = _write_probe_manifest(root)
+    output_dir = root / "model"
+    cmd = [
+        sys.executable,
+        "-m",
+        "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        _PROBE_BASE,
+        "--adapters",
+        str(manifest),
+        "--output",
+        str(output_dir),
+    ]
+    if enable_audio:
+        cmd.append("--enable-audio")
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=BUILD_TIMEOUT)
+    assert result.returncode == 0, (
+        f"probe compose failed (exit {result.returncode}).\n"
+        f"STDOUT tail:\n{result.stdout[-2000:]}\n"
+        f"STDERR tail:\n{result.stderr[-2000:]}"
+    )
+    return output_dir
+
+
+@pytest.fixture(scope="module", params=[True, False], ids=["audio", "text"])
+def probe_checkpoint(request, tmp_path_factory):
+    root = tmp_path_factory.mktemp("probe-audio" if request.param else "probe")
+    return request.param, _compose_probe(root, enable_audio=request.param)
+
+
+@pytest.mark.xdist_group("multi_audio_compose_e2e")
+def test_probe_checkpoint_loads_strictly_and_routes(probe_checkpoint):
+    torch = pytest.importorskip("torch")
+    from transformers import AutoTokenizer
+
+    from granite_switch.hf import GraniteSwitchForCausalLM
+
+    enable_audio, output_dir = probe_checkpoint
+    config = json.loads((output_dir / "config.json").read_text())
+    if enable_audio:
+        # Guard the guard: the marker must push the vocabulary past the controls.
+        assert config["vocab_size"] > max(config["adapter_token_ids"]) + 1
+    _assert_lut_matches(output_dir, config["vocab_size"])
+
+    model = GraniteSwitchForCausalLM.from_pretrained(
+        str(output_dir), dtype=torch.float32
+    ).eval()
+    switch = model.model.switch
+    assert switch.control_to_substitute_lut.numel() == model.config.vocab_size
+    assert switch.adapter_kind_lut.tolist() == [False, False, True]
+
+    tokenizer = AutoTokenizer.from_pretrained(str(output_dir))
+    input_ids = tokenizer.apply_chat_template(
+        [{"role": "user", "content": "Is this text safe? The weather is nice."}],
+        adapter_name="safety",
+        add_generation_prompt=True,
+        return_tensors="pt",
+        return_dict=True,
+    )["input_ids"]
+    marker = tokenizer.convert_tokens_to_ids("<|safety|>")
+    assert input_ids[0, -1].item() == marker
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=False)
+    assert model.model._last_probe_indices[0, -1].item() == 2
+    assert not model.model._last_lora_indices.any()
+    label_ids = model.config.probe_label_token_ids[1]
+    assert int(out.logits[0, -1].argmax()) == label_ids[1]
+
+
+def _assert_lut_matches(output_dir, vocab_size):
+    from safetensors import safe_open
+
+    for path in sorted(output_dir.glob("*.safetensors")):
+        with safe_open(str(path), framework="pt") as f:
+            if _LUT_KEY in f.keys():
+                assert f.get_slice(_LUT_KEY).get_shape()[0] == vocab_size
+                return
+    pytest.fail(f"{_LUT_KEY} not found in {output_dir}")

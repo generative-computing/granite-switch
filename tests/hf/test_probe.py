@@ -1,0 +1,396 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Probe-substitute path tests for GraniteSwitchForCausalLM (HF backend).
+
+A probe slot is an alternative to a LoRA adapter: it shares the adapter
+index/control-token machinery, the switch splits probe positions out of
+the LoRA stream, and the probe head reads its slot's read layer (the final
+hidden state by default) to emit ONE verdict per request. The verdict is read at
+the control token, which must be the request's last token.
+
+The verdict exits as a GENERATED LABEL WORD, matching the vLLM backend: the LM
+head rewrites the marker's logit row so the vocab is -inf except at
+``probe_label_token_ids``, where the per-label verdict scores are placed. There is no separate float ``probe_logits`` output field.
+
+CPU, random weights, no checkpoint — mirrors tests/hf/test_model_forward.py.
+"""
+
+import pytest
+import torch
+
+from granite_switch.config import GraniteSwitchConfig
+from granite_switch.hf import GraniteSwitchForCausalLM
+
+
+def _set_adapter_token_ids(model, token_ids):
+    model.model.adapter_token_ids.data = torch.tensor(token_ids, dtype=torch.long)
+
+
+def _probe_config(
+    adapter_kinds,
+    num_labels=2,
+    label_token_ids=(100, 200),
+):
+    # Full-width label token ids (length num_adapters, None on LoRA slots). Every
+    # probe slot gets the same ids here; mixed counts are covered by the
+    # compose tests.
+    label_token_ids = list(label_token_ids)
+    return GraniteSwitchConfig(
+        vocab_size=300,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=4,  # 2 switch cache layers + 2 decoder layers
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_adapters=2,
+        adapter_token_ids=[250, 251],
+        adapter_substitute_token_ids=[1, 1],
+        adapter_names=["adapter_1", "adapter_2"],
+        adapter_kinds=adapter_kinds,
+        probe_label_token_ids=[
+            list(label_token_ids) if k == "probe" else None for k in adapter_kinds
+        ],
+        max_lora_rank=4,
+        adapter_ranks=[4, 4],
+        switch_head_dim=16,
+    )
+
+
+def test_probe_head_built_only_when_slot_present():
+    m_lora = GraniteSwitchForCausalLM(_probe_config(["lora", "lora"]))
+    m_clf = GraniteSwitchForCausalLM(_probe_config(["lora", "probe"]))
+    assert m_lora.model.probe_head is None
+    assert m_clf.model.probe_head is not None
+    # Bank sized to the full index space so slot = index - 1 addresses it.
+    assert m_clf.model.probe_head.num_probe_slots == 2
+    assert m_clf.model.probe_head.num_labels == 2
+
+
+def test_probe_rewrites_last_logit_row_to_label_word():
+    # adapter 2 (token 251) is a probe. Its verdict rides the LM logits:
+    # the last prompt row is -inf everywhere except at the label token ids,
+    # where the per-label verdict scores land — so decoding emits a label word.
+    config = _probe_config(["lora", "probe"], label_token_ids=(100, 200))
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    # Marker (251) last; this test checks the label-word rewrite of the emitted row.
+    input_ids = torch.tensor([[10, 20, 30, 40, 50, 60, 70, 251]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids)
+
+    last_row = out.logits[0, -1, :]  # [vocab]
+    # Single probe slot -> probe position 0; its own label ids.
+    label_ids = config.probe_label_token_ids[1]  # slot 2 -> index 1
+    n = len(label_ids)
+    non_label = [t for t in range(config.vocab_size) if t not in label_ids]
+
+    # Every non-label token is blanked; the label ids carry the verdict.
+    assert torch.isinf(last_row[non_label]).all()
+    assert (last_row[non_label] < 0).all()
+    assert torch.isfinite(last_row[torch.tensor(label_ids)]).all()
+    # The label-id scores equal the probe head's per-label verdict, sliced
+    # to this slot's real label count (padded columns are never scattered).
+    verdict = model.model._last_probe_verdict[2][0, :n]  # [n_labels]
+    assert torch.allclose(last_row[torch.tensor(label_ids)], verdict.to(last_row.dtype))
+    # The argmax (emitted token) is one of the label ids.
+    assert int(last_row.argmax()) in label_ids
+
+
+def test_lora_and_probe_slots_select_separately():
+    config = _probe_config(["lora", "probe"])
+    model = GraniteSwitchForCausalLM(config).eval()
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+
+    # The LoRA control token selects slot 1 for the following tokens.
+    with torch.no_grad():
+        model(input_ids=torch.tensor([[10, 250, 20, 30]]))
+    assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
+    assert not model.model._last_probe_indices.any()
+    assert model.model._last_probe_verdict is None
+
+    # The probe marker selects slot 2 and routes out of the LoRA stream.
+    input_ids = torch.tensor([[10, 20, 30, 251]])
+    with torch.no_grad():
+        output = model(input_ids=input_ids)
+
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
+    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    label_ids = config.probe_label_token_ids[1]
+    last_logits = output.logits[0, -1]
+    assert torch.isfinite(last_logits[torch.tensor(label_ids)]).all()
+    assert torch.isneginf(
+        last_logits[[i for i in range(config.vocab_size) if i not in label_ids]]
+    ).all()
+
+
+def test_non_probe_request_logits_untouched():
+    # No probe token (251) present -> last token is base (index 0), the
+    # head's last-token verdict row is zero, and NO row is blanked: a
+    # non-probe request keeps a full finite vocab row.
+    config = _probe_config(["lora", "probe"])
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    input_ids = torch.tensor([[10, 20, 30, 40]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids)
+
+    assert (model.model._last_probe_indices == 0).all()
+    # Full finite vocab row — nothing blanked.
+    assert torch.isfinite(out.logits[0, -1, :]).all()
+
+
+def test_mixed_batch_only_probe_row_rewritten():
+    # Batch: row 0 is a probe request (251 fires), row 1 is plain LM.
+    config = _probe_config(["lora", "probe"], label_token_ids=(100, 200))
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    input_ids = torch.tensor(
+        [
+            [10, 20, 30, 40, 251],  # probe
+            [10, 20, 30, 40, 50],  # plain
+        ]
+    )
+    with torch.no_grad():
+        out = model(input_ids=input_ids)
+
+    label_ids = torch.tensor(config.probe_label_token_ids[1])  # slot 2
+    non_label = [
+        t for t in range(config.vocab_size) if t not in set(label_ids.tolist())
+    ]
+
+    # Probe row rewritten; plain row fully finite.
+    assert torch.isinf(out.logits[0, -1, non_label]).all()
+    assert torch.isfinite(out.logits[1, -1, :]).all()
+
+
+def test_decode_step_after_verdict_is_plain_lm():
+    # After the verdict token, a cached decode step carries no marker, so it runs
+    # as a plain LM step: no verdict, full finite vocab row.
+    config = _probe_config(["lora", "probe"])
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    input_ids = torch.tensor([[10, 20, 30, 251]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=True)
+    assert model.model._last_probe_verdict is not None
+
+    with torch.no_grad():
+        step = model(
+            input_ids=torch.tensor([[100]]),
+            past_key_values=out.past_key_values,
+            use_cache=True,
+        )
+    assert model.model._last_probe_verdict is None
+    assert torch.isfinite(step.logits).all()
+
+
+def test_probe_missing_label_token_ids_fails_loud():
+    # A probe slot with no resolved label token ids cannot emit a label word.
+    # Rejected when the config is built, so a bad checkpoint fails at load rather
+    # than at the first inference.
+    with pytest.raises(ValueError, match="probe_label_token_ids"):
+        GraniteSwitchConfig(
+            vocab_size=300,
+            hidden_size=64,
+            intermediate_size=128,
+            num_hidden_layers=3,
+            num_attention_heads=4,
+            num_key_value_heads=4,
+            num_adapters=2,
+            adapter_token_ids=[250, 251],
+            adapter_substitute_token_ids=[1, 1],
+            adapter_names=["adapter_1", "adapter_2"],
+            adapter_kinds=["lora", "probe"],
+            probe_label_token_ids=None,
+            max_lora_rank=4,
+            adapter_ranks=[4, 4],
+            switch_head_dim=16,
+        )
+
+
+def test_lora_only_path_unaffected():
+    # A model with no probe slot behaves exactly as before: no probe
+    # head, no verdict, full finite LM logits.
+    config = _probe_config(["lora", "lora"])
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    input_ids = torch.tensor([[10, 250, 20, 251, 30, 40]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids)
+
+    assert model.model.probe_head is None
+    assert model.model._last_probe_verdict is None
+    assert torch.isfinite(out.logits).all()
+    assert out.logits.shape == (1, 6, config.vocab_size)
+
+
+def test_lora_generation_on_mixed_model_decodes():
+    # A model composed WITH a probe slot also serves plain LoRA/base
+    # generation. Firing the LoRA (adapter 1, token 250) — not the probe —
+    # must decode multiple tokens with no verdict and full LM logits.
+    config = _probe_config(["lora", "probe"])
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+    assert model.model.probe_head is not None  # mixed model has the bank
+
+    # Prefill fires the LoRA (250), never the probe (251).
+    input_ids = torch.tensor([[10, 250, 20, 30, 40]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=True)
+    # No probe fired -> no verdict, full finite vocab row.
+    assert model.model._last_probe_verdict is None
+    assert torch.isfinite(out.logits).all()
+
+    # Cached decode step of the same (LoRA) request yields finite logits.
+    with torch.no_grad():
+        step = model(
+            input_ids=torch.tensor([[60]]),
+            past_key_values=out.past_key_values,
+            use_cache=True,
+        )
+    assert step.logits.shape == (1, 1, config.vocab_size)
+    assert torch.isfinite(step.logits).all()
+    assert model.model._last_probe_verdict is None
+
+
+@pytest.mark.parametrize(
+    "kinds, input_ids",
+    [
+        # Content after the marker.
+        (["lora", "probe"], [[10, 20, 251, 30, 40]]),
+        # Two different probe slots, the second one last.
+        (["probe", "probe"], [[250, 10, 20, 30, 251]]),
+        # The same slot's marker twice.
+        (["lora", "probe"], [[251, 10, 20, 30, 251]]),
+    ],
+    ids=["content-after", "two-slots", "repeated"],
+)
+def test_marker_that_is_not_the_last_token_raises(kinds, input_ids):
+    """The verdict is read at the last token, so any other marker would be
+    ignored silently; it raises instead."""
+    config = _probe_config(kinds, label_token_ids=(100, 200))
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    with pytest.raises(RuntimeError, match="not their last token"):
+        with torch.no_grad():
+            model(input_ids=torch.tensor(input_ids))
+
+
+def test_right_padded_row_rewrites_the_marker_column():
+    """With right padding the marker is the row's last real token, not its last
+    column; the verdict lands on the marker's own logit row."""
+    config = _probe_config(["lora", "probe"], label_token_ids=(100, 200))
+    model = GraniteSwitchForCausalLM(config)
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    model.eval()
+
+    input_ids = torch.tensor([[10, 20, 251, 0, 0], [10, 20, 30, 40, 251]])
+    attention_mask = torch.tensor([[1, 1, 1, 0, 0], [1, 1, 1, 1, 1]])
+    with torch.no_grad():
+        out = model(input_ids=input_ids, attention_mask=attention_mask)
+
+    label_ids = config.probe_label_token_ids[1]
+    non_label = [t for t in range(config.vocab_size) if t not in label_ids]
+    assert torch.isinf(out.logits[0, 2, non_label]).all()
+    assert torch.isfinite(out.logits[0, -1, :]).all()  # padding untouched
+    assert torch.isinf(out.logits[1, -1, non_label]).all()
+
+    # Keeping only the last position drops row 0's marker row: fail loud.
+    with pytest.raises(RuntimeError, match="logits_to_keep"):
+        with torch.no_grad():
+            model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=1)
+
+
+def _randomize_probe_head(model):
+    """The head bank starts at zero; give it weights so the read layer matters."""
+    generator = torch.Generator().manual_seed(0)
+    head = model.model.probe_head
+    with torch.no_grad():
+        head.weight.copy_(torch.randn(head.weight.shape, generator=generator))
+        head.bias.copy_(torch.randn(head.bias.shape, generator=generator))
+
+
+def test_intermediate_layer_probe_scores_that_layers_output():
+    """An intermediate read scores the marker row at the configured layer."""
+    config = _probe_config(["lora", "probe"], label_token_ids=(100, 200))
+    config.probe_read_layers = [None, 0]  # slot 2: an intermediate layer
+    model = GraniteSwitchForCausalLM(config).eval()
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    _randomize_probe_head(model)
+    with torch.no_grad():
+        out = model(
+            input_ids=torch.tensor([[10, 20, 30, 40, 50, 60, 70, 251]]),
+            output_hidden_states=True,
+        )
+
+    assert model.model._last_lora_indices[0, -1].item() == 0
+    assert model.model._last_probe_indices[0, -1].item() == 2
+    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    expected = model.model.probe_head(out.hidden_states[1][rows, pos], slots)
+    final = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
+    torch.testing.assert_close(verdict, expected)
+    assert not torch.allclose(verdict, final)
+    torch.testing.assert_close(out.logits[0, -1, [100, 200]], verdict[0])
+
+
+def test_final_decoder_layer_read_uses_pre_norm_output():
+    """The last decoder layer's residual read precedes the final model norm."""
+    config = _probe_config(["lora", "probe"], label_token_ids=(100, 200))
+    config.probe_read_layers = [None, 1]
+    model = GraniteSwitchForCausalLM(config).eval()
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    _randomize_probe_head(model)
+    captured = []
+    hook = model.model.layers[1].register_forward_hook(
+        lambda _module, _args, output: captured.append(output[0].detach())
+    )
+    try:
+        with torch.no_grad():
+            out = model(
+                input_ids=torch.tensor([[10, 20, 30, 40, 50, 60, 70, 251]]),
+                output_hidden_states=True,
+            )
+    finally:
+        hook.remove()
+
+    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    expected = model.model.probe_head(captured[0][rows, pos], slots)
+    final_norm = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
+    torch.testing.assert_close(verdict, expected)
+    assert not torch.allclose(verdict, final_norm)
+
+
+def test_batch_slots_score_at_their_own_read_layers():
+    config = _probe_config(["probe", "probe"])
+    config.probe_read_layers = [None, 0]
+    model = GraniteSwitchForCausalLM(config).eval()
+    _set_adapter_token_ids(model, config.adapter_token_ids)
+    _randomize_probe_head(model)
+    with torch.no_grad():
+        out = model(
+            input_ids=torch.tensor([[10, 20, 250], [10, 20, 251]]),
+            output_hidden_states=True,
+        )
+
+    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    assert slots.tolist() == [1, 2]
+    final_score = model.model.probe_head(
+        out.hidden_states[-1][rows[:1], pos[:1]], slots[:1]
+    )
+    intermediate_score = model.model.probe_head(
+        out.hidden_states[1][rows[1:], pos[1:]], slots[1:]
+    )
+    torch.testing.assert_close(verdict[:1], final_score)
+    torch.testing.assert_close(verdict[1:], intermediate_score)
