@@ -246,7 +246,9 @@ jobs:
             # a release, and on PRs that bump uv.lock or a model pin. See
             # docs/CICD.md, "Release test tier".
             release)
-              PATHS='-m "release" tests/'
+              # "and not deep": -m replaces addopts, so the deep code-theory
+              # suite would otherwise ride along on a release run.
+              PATHS='-m "release and not deep" tests/'
               SUFFIX="release"
               LEG="$LABEL-release"
               ;;
