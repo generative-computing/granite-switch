@@ -20,7 +20,9 @@ Startup profiling passes a *string* prompt, so on the uncached path the engine
 fails before it can serve anything — booting at all is a large part of the guard.
 
 Assertions here are structural (request completes, marker was replaced), never
-transcript content: ASR output is not deterministic enough to assert on.
+transcript content: ASR output is not deterministic enough to assert on. The
+ASR is the tiny local model from ``tests/shared/tiny_asr.py``, bundled into the
+checkpoint, so nothing is downloaded for it.
 
 Opt in explicitly: `pytest -m "slow and requires_model and gpu"`.
 """
@@ -98,7 +100,10 @@ def audio_checkpoint(tmp_path_factory):
     import subprocess
     import sys
 
+    from tests.shared.tiny_asr import build_tiny_asr
+
     save_dir = tmp_path_factory.mktemp(_BASE_MODEL.rsplit("/", 1)[-1]) / "model"
+    tiny_asr = build_tiny_asr(tmp_path_factory.mktemp("tiny-asr") / "asr")
     cmd = [
         sys.executable,
         "-m",
@@ -107,7 +112,9 @@ def audio_checkpoint(tmp_path_factory):
         _BASE_MODEL,
         "--adapters",
         _ADAPTER_LIBRARY,
-        "--enable-audio",
+        "--bundle-asr",
+        "--asr-model",
+        str(tiny_asr),
         "--output",
         str(save_dir),
     ]

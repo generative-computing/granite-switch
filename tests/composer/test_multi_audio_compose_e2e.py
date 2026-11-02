@@ -275,3 +275,13 @@ def _assert_lut_matches(output_dir, vocab_size):
                 assert f.get_slice(_LUT_KEY).get_shape()[0] == vocab_size
                 return
     pytest.fail(f"{_LUT_KEY} not found in {output_dir}")
+
+
+def test_multi_audio_config_names_the_pinned_asr(audio_multi):
+    # Serving has no fallback ASR, so compose must write the model and revision.
+    from granite_switch.config import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
+
+    config = json.loads((audio_multi / "config.json").read_text())
+    assert config["asr_model_id"] == DEFAULT_ASR_MODEL_ID
+    assert config["asr_model_revision"] == DEFAULT_ASR_MODEL_REVISION
+    assert config.get("asr_bundled_path") is None

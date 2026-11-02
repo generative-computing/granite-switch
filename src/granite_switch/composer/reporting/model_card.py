@@ -413,6 +413,10 @@ def write_build_doc(
             model.config, "adapter_substitute_token_ids", None
         ),
         "target_model": getattr(args, "target_model", None),
+        # Which ASR an audio checkpoint runs, and whether it is on disk.
+        "asr_model_id": getattr(model.config, "asr_model_id", None),
+        "asr_model_revision": getattr(model.config, "asr_model_revision", None),
+        "asr_bundled_path": getattr(model.config, "asr_bundled_path", None),
     }
     # Parameter counts: base is captured during transfer (see
     # weight_transfer.py); composed is summed from the in-memory model.

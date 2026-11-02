@@ -50,13 +50,29 @@ This adds the `<|audio|>` marker token to the tokenizer and writes the audio
 settings into `config.json` so the checkpoint is self-describing:
 
 ```json
-{ "asr_enabled": true, "asr_model_id": null, "asr_device": "cuda" }
+{ "asr_enabled": true,
+  "asr_model_id": "ibm-granite/granite-speech-5.0-470m-turboctc",
+  "asr_model_revision": "947f59af40db9791170a0628cf0f3f4812d720f1",
+  "asr_bundled_path": null,
+  "asr_device": "cuda" }
 ```
 
-- `asr_model_id` — HF id of the speech-to-text model (default:
-  `ibm-granite/granite-speech-5.0-470m-turboctc`, a 470M English conformer CTC
-  encoder). Override with `--asr-model <hf-id>`, e.g. `openai/whisper-small` for
-  multilingual.
+- `asr_model_id` — HF id of the speech-to-text model. Compose always writes it:
+  `ibm-granite/granite-speech-5.0-470m-turboctc` (a 470M English conformer CTC
+  encoder) unless `--asr-model <hf-id>` is given, e.g. `openai/whisper-small` for
+  multilingual. Serving has **no built-in default**: an audio checkpoint without
+  `asr_model_id` is refused at startup, so the config on the Hub always shows
+  which ASR a checkpoint runs.
+- `asr_model_revision` — Hub revision (commit, tag or branch) the ASR model loads
+  at. The default model is pinned to `947f59a`, its English-only release; the
+  repo's `main` moved on 2026-10-21 to a multilingual release that capitalizes and
+  punctuates, which silently changed every unpinned transcript. Set it with
+  `--asr-revision`. A custom `--asr-model` without one composes with a warning and
+  loads the repo's current `main` at serve time. A `revision` in
+  `asr_pipeline_kwargs` overrides it.
+- `asr_bundled_path` — set by `--bundle-asr` (see *Airgapped deployment* below).
+  When set, the ASR loads from that directory inside the checkpoint and
+  `asr_model_id`/`asr_model_revision` only record where the copy came from.
 - `asr_device` — `cuda` (default): the default encoder is small and its speed
   comes from running on GPU. Set `--asr-device cpu` to leave vLLM's whole GPU
   memory budget to the KV cache — transcription is then several times slower
@@ -84,6 +100,59 @@ options configure the cascade; they do not enable it. Passing one without
 `--asr-model openai/whisper-small` on its own gets you no audio. This is
 deliberate: one explicit flag decides, rather than the decision being inferred
 from which options happen to be set.
+
+### Airgapped deployment
+
+A checkpoint normally downloads its ASR model from the Hub on first use. For an
+environment with no internet access, compose with `--bundle-asr` (it implies
+`--enable-audio`):
+
+```bash
+python -m granite_switch.composer.compose_granite_switch \
+  --base-model ibm-granite/granite-4.1-3b \
+  --built-in-adapters core \
+  --bundle-asr \
+  --output ./granite-switch-audio-bundled
+```
+
+This copies the ASR model, at its pinned revision, into `<output>/asr/` (config,
+safetensors weights, tokenizer, feature extractor, README and license; about
+1 GB for the default model) and sets `"asr_bundled_path": "asr"`. Compose then
+loads the bundle with `local_files_only=True`, so a bundle that would need the
+network fails at compose time, not at serve time. Only safetensors models can be
+bundled.
+
+`--asr-model` may also be a local directory, so the bundle can be built inside the
+airgapped network from a copy of the ASR repo brought in by hand.
+
+Serve it with the Hub switched off:
+
+```bash
+HF_HUB_OFFLINE=1 python -m vllm.entrypoints.openai.api_server \
+  --model ./granite-switch-audio-bundled
+```
+
+A bundled checkpoint can also be uploaded to the Hub and served by repo id: only
+its `asr/` folder is fetched for the ASR, through the normal HF cache, so a
+pre-populated cache serves offline too. vLLM does not mistake `asr/*.safetensors`
+for LLM weights: it only reads weight files at the checkpoint's top level.
+
+### Migrating a checkpoint composed before 0.2.0
+
+Older audio checkpoints have `"asr_model_id": null` and relied on a default
+inside the library, which no longer exists. Serving one fails at startup with an
+error naming the fix. Either re-compose, or add these two fields to its
+`config.json`:
+
+```json
+"asr_model_id": "ibm-granite/granite-speech-5.0-470m-turboctc",
+"asr_model_revision": "947f59af40db9791170a0628cf0f3f4812d720f1"
+```
+
+Checkpoints composed with 0.2.0 need granite-switch 0.2.0 or newer to serve
+correctly. An older library ignores `asr_model_revision` and `asr_bundled_path`
+without an error: it loads the ASR unpinned from the Hub, and a bundled
+checkpoint still goes online.
 
 ### Tuning the ASR model
 
@@ -319,8 +388,8 @@ fallback.
   `language` override is inert. For other languages use `--asr-model` with a
   multilingual generative model and set the language via `asr_generate_kwargs` (or
   per request via `mm_processor_kwargs`; see *Tuning the ASR model* above).
-- **Transcripts from the CTC default are lowercase and unpunctuated**
-  (`what is the capital of israel`). They are spliced into the prompt as ordinary
+- **Transcripts from the CTC default (at its pinned revision) are lowercase and
+  unpunctuated** (`what is the capital of israel`). They are spliced into the prompt as ordinary
   text, so the LLM reads them that way. A generative backend such as Whisper
   restores case and punctuation.
 - **HF `pipeline` backends only.** Any `automatic-speech-recognition` pipeline
