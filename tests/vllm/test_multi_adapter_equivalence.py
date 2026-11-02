@@ -118,7 +118,21 @@ CASES_TIMEOUT = 600
 RUN_TIMEOUT = 2400  # vLLM load + one scored generate per case
 COMPARE_TIMEOUT = 300
 
-CASES = [(base, flavor) for base in BASE_MODELS for flavor in FLAVORS]
+# PR runs keep the first default base (role-marker template); the other bases
+# (ChatML 4.2-3b by default) run in the release tier. An explicit
+# MULTI_ADAPTER_BASE_MODELS runs every base it names, unmarked.
+_PR_BASE = BASE_MODELS[0]
+_RELEASE_ONLY = "MULTI_ADAPTER_BASE_MODELS" not in os.environ
+
+CASES = [
+    pytest.param(
+        (base, flavor),
+        marks=pytest.mark.release if _RELEASE_ONLY and base != _PR_BASE else (),
+        id=f"{base.split('/')[-1]}-{flavor}",
+    )
+    for base in BASE_MODELS
+    for flavor in FLAVORS
+]
 
 
 def _run_step(step_name, *cmd_args, timeout):
@@ -139,9 +153,7 @@ def _run_step(step_name, *cmd_args, timeout):
     )
 
 
-@pytest.fixture(
-    scope="module", params=CASES, ids=lambda c: f"{c[0].split('/')[-1]}-{c[1]}"
-)
+@pytest.fixture(scope="module", params=CASES)
 def flavor_run(request):
     """Compose both checkpoints and score all three models once per case.
 

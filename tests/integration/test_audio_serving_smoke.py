@@ -37,9 +37,17 @@ if importlib.util.find_spec("vllm") is None:
 
 
 # E2E model matrix: base model + adapter-library pairs.
+# 4.0-micro on every PR; 4.1-3b adds a second base in the release tier.
 _DEFAULT_BASE_MODEL_PAIRS = [
-    ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
-    ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+    pytest.param(
+        ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
+        id="granite-4.0-micro",
+    ),
+    pytest.param(
+        ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+        marks=pytest.mark.release,
+        id="granite-4.1-3b",
+    ),
 ]
 
 
@@ -59,7 +67,10 @@ def _load_experimental_pairs():
             f"GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS is not valid JSON: {e}\n"
             f'Expected format: \'[{{"base":"/path","adapter":"/path"}}, ...]\''
         )
-    return [(p["base"], p["adapter"]) for p in entries]
+    return [
+        pytest.param((p["base"], p["adapter"]), id=p["base"].rsplit("/", 1)[-1])
+        for p in entries
+    ]
 
 
 BASE_MODEL_PAIRS = _DEFAULT_BASE_MODEL_PAIRS + _load_experimental_pairs()
@@ -71,7 +82,6 @@ _TARGET_SR = 16_000
 @pytest.fixture(
     scope="module",
     params=BASE_MODEL_PAIRS,
-    ids=lambda p: p[0].rsplit("/", 1)[-1],
 )
 def audio_checkpoint(request, tmp_path_factory):
     """Compose one audio-enabled checkpoint per (base, adapter) pair.

@@ -14,6 +14,8 @@ Two test tiers:
 
 Markers: requires_model (all tests need HF model downloads).
          slow (full build tests only).
+         release (all): what is pinned is the published base repo's file set,
+         which changes only when the Hub repo does.
 """
 
 import json
@@ -109,7 +111,7 @@ def built_in_build_output(request, tmp_path_factory):
 # Copy logic tests
 # ---------------------------------------------------------------------------
 
-pytestmark = pytest.mark.requires_model
+pytestmark = [pytest.mark.requires_model, pytest.mark.release]
 
 
 class TestUpstreamFileCopy:

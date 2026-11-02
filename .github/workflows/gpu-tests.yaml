@@ -239,12 +239,12 @@ jobs:
               SUFFIX="audio"
               LEG="$LABEL-audio"
               ;;
-            # The pre-release tier, by MARKER for the same reason as `audio`. Tests
-            # here check real external models (the default ASR at its pinned
-            # revision) against our code: slow, network-bound, and only able to
-            # break when a dependency or a pin moves, so every other scope
-            # excludes them. Run before tagging a release, and on PRs that bump
-            # uv.lock or a model pin.
+            # The pre-release tier, by MARKER for the same reason as `audio`: tests
+            # against real external artifacts (the default ASR, Hub repo layouts,
+            # quantization libraries) plus the non-representative cases of the
+            # breadth matrices. Every other scope excludes them. Run before tagging
+            # a release, and on PRs that bump uv.lock or a model pin. See
+            # docs/CICD.md, "Release test tier".
             release)
               PATHS='-m "release" tests/'
               SUFFIX="release"

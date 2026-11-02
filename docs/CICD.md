@@ -198,17 +198,35 @@ While in pre-1.0, increment `MINOR` for new features and `PATCH` for bug fixes. 
 
 ### Release test tier
 
-Tests marked `release` check real external models against our code — today the
-default ASR (`tests/integration/test_asr_ctc_default_gpu.py`, which downloads it
-at its pinned revision). They can only break when a dependency or a pin moves, so
-they are excluded from every other scope (`addopts` and each `-m` filter carry
-`not release`) and run with the `release` GPU suite (`/gpu-test-release`). Every
-other audio test uses a tiny local ASR (`tests/shared/tiny_asr.py`) and downloads
-nothing.
+Tests marked `release` are excluded from every other scope (`addopts` and each
+`-m` filter carry `not release`) and run with the `release` GPU suite
+(`/gpu-test-release`). Two kinds of test belong here:
 
-Run it before every release, and on any PR that bumps `uv.lock` or a model pin
-(e.g. `DEFAULT_ASR_MODEL_REVISION`). A new test belongs here only if its purpose is
-compatibility with a real external model, not our own logic.
+1. **Compatibility with real external artifacts**, which only a dependency or a
+   Hub change can break:
+   - `tests/integration/test_asr_ctc_default_gpu.py`: the default ASR at its
+     pinned revision. Every other audio test uses a tiny local ASR
+     (`tests/shared/tiny_asr.py`) and downloads none.
+   - `tests/composer/test_upstream_files.py`: the published base repo's files.
+   - `tests/composer/test_selective_download.py::TestRealHubMetadata`: the
+     published adapter repos' layout.
+   - `tests/hf/test_quantization.py`: the quantization libraries on a real
+     checkpoint. Its `GRANITE_SWITCH_E2E_MODELS=1` gate is opened by
+     `tests/conftest.py` whenever `-m` selects `release`.
+2. **The rest of a breadth matrix.** PR runs keep one representative case and the
+   release tier runs the others, via `pytest.param(..., marks=pytest.mark.release)`:
+   - `tests/vllm/test_granite4_mini.py`: vLLM classes on `4.0-micro`; `4.0-1b`
+     and `4.0-350m` in release. The CPU weight-transfer classes run every variant.
+   - `tests/vllm/test_granite4_fullsize.py`: the GPU class is release-only (the
+     mini file covers the same equivalence at small size).
+   - `tests/vllm/test_multi_adapter_equivalence.py`: `granite-4.1-3b` on PRs,
+     `granite-4.2-3b` (the ChatML template) in release.
+   - `tests/integration/test_audio_serving_smoke.py`: `granite-4.0-micro` on PRs,
+     `granite-4.1-3b` in release.
+
+Run it before every release, and on any PR that bumps `uv.lock`, touches a model
+pin (e.g. `DEFAULT_ASR_MODEL_REVISION`), or changes code specific to a variant
+that only the release tier covers (e.g. the ChatML template path).
 
 ### What `publish.yaml` does
 
