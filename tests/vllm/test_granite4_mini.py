@@ -40,6 +40,15 @@ _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 
 _MODEL_NAMES = sorted(GRANITE4_MINI.keys())
 
+# The vLLM equivalence classes cost minutes per variant, so PR runs keep one
+# representative and the release tier runs the rest. The CPU weight-transfer
+# classes stay on every variant: they take seconds.
+_PR_MODEL = "4.0-micro"
+_GPU_MODEL_PARAMS = [
+    pytest.param(name, marks=() if name == _PR_MODEL else pytest.mark.release)
+    for name in _MODEL_NAMES
+]
+
 
 # ── Weight transfer tests (HF-level, no vLLM) ────────────────────
 
@@ -131,20 +140,20 @@ def _run_inner_class(class_name):
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
 class TestGranite4FamilyEquivalence:
-    @pytest.mark.parametrize("model_name", _MODEL_NAMES)
+    @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
     def test_suite(self, model_name):
         _run_inner_class(f"TestGranite4FamilyEquivalence and {model_name}")
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
 class TestZeroAdapterNoHiding:
-    @pytest.mark.parametrize("model_name", _MODEL_NAMES)
+    @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
     def test_suite(self, model_name):
         _run_inner_class(f"TestZeroAdapterNoHiding and {model_name}")
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
 class TestZeroAdapterEquivalence:
-    @pytest.mark.parametrize("model_name", _MODEL_NAMES)
+    @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
     def test_suite(self, model_name):
         _run_inner_class(f"TestZeroAdapterEquivalence and {model_name}")

@@ -5,6 +5,13 @@ Drives text + adapter + audio x1/x2/x3 through one live engine — the serve-tim
 path the low-level tests bypass (CUDA graphs, the ASR processor inside vLLM's
 EngineCore subprocess, the multi-clip splice, generation).
 
+Composed with ``--bundle-asr`` (which implies ``--enable-audio``) from a tiny
+random CTC model built locally (``tests/shared/tiny_asr.py``), so the ASR is
+served from the checkpoint's ``asr/`` folder with no ASR download. This also
+covers the airgapped path (issue #158) and proves vLLM does not take
+``asr/*.safetensors`` for LLM weights. The real default ASR is exercised by
+``test_asr_ctc_default_gpu.py``.
+
 Deliberately does NOT assert transcript content: WER and adapter-routing
 correctness are separate boxes, covered by the eval harness and the MultiSwitch
 serving e2e tests. Synthetic tones keep the test asset-free.
@@ -30,9 +37,17 @@ if importlib.util.find_spec("vllm") is None:
 
 
 # E2E model matrix: base model + adapter-library pairs.
+# 4.0-micro on every PR; 4.1-3b adds a second base in the release tier.
 _DEFAULT_BASE_MODEL_PAIRS = [
-    ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
-    ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+    pytest.param(
+        ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
+        id="granite-4.0-micro",
+    ),
+    pytest.param(
+        ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+        marks=pytest.mark.release,
+        id="granite-4.1-3b",
+    ),
 ]
 
 
@@ -52,7 +67,10 @@ def _load_experimental_pairs():
             f"GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS is not valid JSON: {e}\n"
             f'Expected format: \'[{{"base":"/path","adapter":"/path"}}, ...]\''
         )
-    return [(p["base"], p["adapter"]) for p in entries]
+    return [
+        pytest.param((p["base"], p["adapter"]), id=p["base"].rsplit("/", 1)[-1])
+        for p in entries
+    ]
 
 
 BASE_MODEL_PAIRS = _DEFAULT_BASE_MODEL_PAIRS + _load_experimental_pairs()
@@ -64,7 +82,6 @@ _TARGET_SR = 16_000
 @pytest.fixture(
     scope="module",
     params=BASE_MODEL_PAIRS,
-    ids=lambda p: p[0].rsplit("/", 1)[-1],
 )
 def audio_checkpoint(request, tmp_path_factory):
     """Compose one audio-enabled checkpoint per (base, adapter) pair.
@@ -75,8 +92,11 @@ def audio_checkpoint(request, tmp_path_factory):
     import subprocess
     import sys
 
+    from tests.shared.tiny_asr import build_tiny_asr
+
     base_model, adapter_library = request.param
     save_dir = tmp_path_factory.mktemp(base_model.rsplit("/", 1)[-1]) / "model"
+    tiny_asr = build_tiny_asr(tmp_path_factory.mktemp("tiny-asr") / "asr")
 
     cmd = [
         sys.executable,
@@ -86,7 +106,9 @@ def audio_checkpoint(request, tmp_path_factory):
         base_model,
         "--adapters",
         adapter_library,
-        "--enable-audio",
+        "--bundle-asr",
+        "--asr-model",
+        str(tiny_asr),
         "--output",
         str(save_dir),
     ]
@@ -142,6 +164,13 @@ def _one_completion(outputs):
     completion = outputs[0].outputs[0]
     assert len(completion.token_ids) >= 1
     return completion
+
+
+def test_asr_is_served_from_the_bundle(served):
+    """The bundled ASR is named in the config the engine serves."""
+    config = served["config"]
+    assert config.asr_bundled_path == "asr"
+    assert config.asr_model_id
 
 
 def test_text_only_serving(served):

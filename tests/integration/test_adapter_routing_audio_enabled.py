@@ -4,8 +4,14 @@ on an audio-enabled checkpoint.
 
 Asserts the switch maps ``adapter_token_ids[i]`` to index ``i + 1`` and leaves
 pre-control positions on base (``0``) — enabling audio must not perturb the
-token->index map. For granite-4.1-3b, 12 of the 13 defined adapters resolve
-(context_relevance ships no 4.1-3b flavor).
+token->index map.
+
+Routing reads only the control-token table, never adapter weights, so the
+default case composes empty built-in adapter slots (``--built-in-adapters``) on a
+small base rather than downloading real adapter libraries. Thirteen slots keep
+the sweep as wide as the full granitelib set. The HF model never loads the ASR,
+so no ASR is downloaded either. Real libraries can still be swept through
+``GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS``.
 
 Markers: slow + requires_model + gpu (opt-in via -m).
 """
@@ -27,13 +33,10 @@ if importlib.util.find_spec("granite_switch.hf") is None:
     pytest.skip("requires the HF backend ([hf] extra)", allow_module_level=True)
 
 
-_DEFAULT_ADAPTER_LIBRARIES = [
-    "ibm-granite/granitelib-rag-r1.0",
-    "ibm-granite/granitelib-core-r1.0",
-    "ibm-granite/granitelib-guardian-r1.0",
-]
+_BUILT_IN_ADAPTERS = [f"slot{i}" for i in range(1, 14)]
+# (base, adapter libraries); None means the built-in slots above.
 _DEFAULT_BASE_MODEL_PAIRS = [
-    ("ibm-granite/granite-4.1-3b", _DEFAULT_ADAPTER_LIBRARIES),
+    ("ibm-granite/granite-4.0-micro", None),
 ]
 
 
@@ -82,14 +85,18 @@ def audio_switch_model(request, tmp_path_factory):
     base_model, adapter_libraries = request.param
     save_dir = tmp_path_factory.mktemp(base_model.rsplit("/", 1)[-1]) / "model"
 
+    adapter_args = (
+        ["--built-in-adapters", *_BUILT_IN_ADAPTERS]
+        if adapter_libraries is None
+        else ["--adapters", *adapter_libraries]
+    )
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
         "--base-model",
         base_model,
-        "--adapters",
-        *adapter_libraries,
+        *adapter_args,
         "--enable-audio",
         "--output",
         str(save_dir),

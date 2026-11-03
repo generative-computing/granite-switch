@@ -12,8 +12,10 @@ Transcript text is deliberately not asserted: that is model quality, which these
 tests do not own (the Hub release of this model changed its casing and
 punctuation once already). They check that each path runs without raising.
 
-Downloads the ~1GB checkpoint on first run. Opt in explicitly:
-`pytest -m "audio and requires_model and gpu"`.
+Release tier: the only test that downloads and runs the real default ASR
+(~1GB); every other audio test uses tests/shared/tiny_asr.py. It guards what a
+fake cannot: that the pinned model still loads and runs with our dependency
+versions. Run with `pytest -m release` (`/gpu-test-release`).
 """
 
 import importlib.util
@@ -30,6 +32,7 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.requires_model,
     pytest.mark.gpu,
+    pytest.mark.release,
 ]
 
 torch = pytest.importorskip("torch")

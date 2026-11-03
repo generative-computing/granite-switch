@@ -80,7 +80,7 @@ Two workflows run automatically when a PR is opened against `main` or a commit i
 
 **Jobs:**
 1. `pre-commit` — runs `uvx pre-commit run --all-files`, executing the **exact same hooks** as the local pre-commit stage, pinned to the same versions in `.pre-commit-config.yaml`. This is the single source of truth: CI and local pre-commit can never drift, and any hook added or bumped in the config applies in CI automatically with no workflow edits. It covers ruff-format + ruff, `check-toml` / `check-yaml`, `validate-links` (broken local links / stale labels / broken first-party imports), `check-headers` (SPDX), the hygiene hooks (`end-of-file-fixer`, `trailing-whitespace`, `mixed-line-ending`, `check-merge-conflict`, `check-added-large-files`, `check-case-conflict`), `nbstripout`, and `uv-lock`. All are **blocking**: the tree is clean (see [Ruff rollout](#ruff-rollout-format-first-then-enforce)), so any new violation fails the build. Auto-fixing hooks (ruff, `end-of-file-fixer`, `check-headers`, `uv-lock`) modify files when something is wrong; pre-commit then reports failure and prints the diff (`--show-diff-on-failure`), telling the contributor to run pre-commit locally and re-commit. The DCO hooks (`add-signoff`, `check-dco`) run at the `prepare-commit-msg` / `commit-msg` stages, which `pre-commit run --all-files` does **not** execute — they are covered by `dco.yaml` instead. Hook environments are cached (`~/.cache/pre-commit`, keyed on the config file) so they don't reinstall every run.
-2. `test-cpu` (needs `pre-commit`) — runs `tests/unit/` on Python 3.11 and 3.12 in parallel, filtered with `-m "not requires_model and not gpu and not slow and not deep"`. This is the **CI-safe set**: within `tests/unit/`, tests that download/compose real models (`requires_model`), need CUDA (`gpu`), hit the network or run long (`slow`), or are the expensive code-theory suite (`deep`) are still **excluded** by the marker filter. `tests/composer/` and `tests/hf/` are **not run in CI at all**: even filtered, they are heavy enough to exhaust the GitHub Actions CPU-minutes quota and get killed mid-run. All coverage beyond the unit suite — composer, HF, vLLM, and integration — runs on the GPU cluster instead (see [Manual: GPU Tests](#manual-gpu-tests))
+2. `test-cpu` (needs `pre-commit`) — runs `tests/unit/` on Python 3.11 and 3.12 in parallel, filtered with `-m "not requires_model and not gpu and not slow and not deep and not release"`. This is the **CI-safe set**: within `tests/unit/`, tests that download/compose real models (`requires_model`), need CUDA (`gpu`), hit the network or run long (`slow`), or are the expensive code-theory suite (`deep`) are still **excluded** by the marker filter. `tests/composer/` and `tests/hf/` are **not run in CI at all**: even filtered, they are heavy enough to exhaust the GitHub Actions CPU-minutes quota and get killed mid-run. All coverage beyond the unit suite — composer, HF, vLLM, and integration — runs on the GPU cluster instead (see [Manual: GPU Tests](#manual-gpu-tests))
 
 Coverage is uploaded to [Codecov](https://codecov.io) after each test run (see [Coverage](#coverage) below).
 
@@ -183,14 +183,49 @@ While in pre-1.0, increment `MINOR` for new features and `PATCH` for bug fixes. 
    - Bump `version` in `pyproject.toml`
    - Add a section to `CHANGELOG.md`
 
-2. **Merge to `main`**
+2. **Run the release tier** — comment `/gpu-test-release` on the release PR and
+   get it green. It is the only place real external models are tested (see
+   [Release test tier](#release-test-tier)).
 
-3. **Create a GitHub Release** (`Releases` → `Draft a new release`):
+3. **Merge to `main`**
+
+4. **Create a GitHub Release** (`Releases` → `Draft a new release`):
    - Tag: `vX.Y.Z` (created from `main`)
    - Title: `vX.Y.Z`
    - Body: paste the `CHANGELOG.md` section for this release
 
-4. **Click Publish release** — `publish.yaml` triggers automatically
+5. **Click Publish release** — `publish.yaml` triggers automatically
+
+### Release test tier
+
+Tests marked `release` are excluded from every other scope (`addopts` and each
+`-m` filter carry `not release`) and run with the `release` GPU suite
+(`/gpu-test-release`). Two kinds of test belong here:
+
+1. **Compatibility with real external artifacts**, which only a dependency or a
+   Hub change can break:
+   - `tests/integration/test_asr_ctc_default_gpu.py`: the default ASR at its
+     pinned revision. Every other audio test uses a tiny local ASR
+     (`tests/shared/tiny_asr.py`) and downloads none.
+   - `tests/composer/test_selective_download.py::TestRealHubMetadata`: the
+     published adapter repos' layout.
+   - `tests/hf/test_quantization.py`: the quantization libraries on a real
+     checkpoint. Its `GRANITE_SWITCH_E2E_MODELS=1` gate is opened by
+     `tests/conftest.py` whenever `-m` selects `release`.
+2. **The rest of a breadth matrix.** PR runs keep one representative case and the
+   release tier runs the others, via `pytest.param(..., marks=pytest.mark.release)`:
+   - `tests/vllm/test_granite4_mini.py`: vLLM classes on `4.0-micro`; `4.0-1b`
+     and `4.0-350m` in release. The CPU weight-transfer classes run every variant.
+   - `tests/vllm/test_granite4_fullsize.py`: the GPU class is release-only (the
+     mini file covers the same equivalence at small size).
+   - `tests/vllm/test_multi_adapter_equivalence.py`: `granite-4.1-3b` on PRs,
+     `granite-4.2-3b` (the ChatML template) in release.
+   - `tests/integration/test_audio_serving_smoke.py`: `granite-4.0-micro` on PRs,
+     `granite-4.1-3b` in release.
+
+Run it before every release, and on any PR that bumps `uv.lock`, touches a model
+pin (e.g. `DEFAULT_ASR_MODEL_REVISION`), or changes code specific to a variant
+that only the release tier covers (e.g. the ChatML template path).
 
 ### What `publish.yaml` does
 
