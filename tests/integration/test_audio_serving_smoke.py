@@ -22,31 +22,45 @@ Opt in explicitly: `pytest -m "slow and requires_model and gpu"`.
 import importlib.util
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 pytestmark = [
     pytest.mark.audio,
     pytest.mark.slow,
-    pytest.mark.requires_model,
     pytest.mark.gpu,
 ]
 
 if importlib.util.find_spec("vllm") is None:
     pytest.skip("requires vLLM installed", allow_module_level=True)
 
+from tests.shared import model_sources
 
-# E2E model matrix: base model + adapter-library pairs.
-# 4.0-micro on every PR; 4.1-3b adds a second base in the release tier.
+# E2E model matrix: (base, adapter library). PR runs serve a fake granite-4.0-micro
+# (tests/shared/model_sources.py); the release tier serves the real 4.0-micro and
+# adds the real 4.1-3b as a second base.
+_ADAPTER_LIBRARY = "ibm-granite/granitelib-core-r1.0"
+
+
+def _pair(source, base_name):
+    return (
+        model_sources.base_model(source, base_name),
+        model_sources.adapter_library(source, _ADAPTER_LIBRARY, base_name),
+    )
+
+
 _DEFAULT_BASE_MODEL_PAIRS = [
+    pytest.param(("fake", "granite-4.0-micro"), id="granite-4.0-micro-fake"),
     pytest.param(
-        ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
-        id="granite-4.0-micro",
+        ("real", "granite-4.0-micro"),
+        marks=pytest.mark.release,
+        id="granite-4.0-micro-real",
     ),
     pytest.param(
-        ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+        ("real", "granite-4.1-3b"),
         marks=pytest.mark.release,
-        id="granite-4.1-3b",
+        id="granite-4.1-3b-real",
     ),
 ]
 
@@ -68,7 +82,9 @@ def _load_experimental_pairs():
             f'Expected format: \'[{{"base":"/path","adapter":"/path"}}, ...]\''
         )
     return [
-        pytest.param((p["base"], p["adapter"]), id=p["base"].rsplit("/", 1)[-1])
+        pytest.param(
+            ("path", (p["base"], p["adapter"])), id=p["base"].rsplit("/", 1)[-1]
+        )
         for p in entries
     ]
 
@@ -94,8 +110,9 @@ def audio_checkpoint(request, tmp_path_factory):
 
     from tests.shared.tiny_asr import build_tiny_asr
 
-    base_model, adapter_library = request.param
-    save_dir = tmp_path_factory.mktemp(base_model.rsplit("/", 1)[-1]) / "model"
+    kind, spec = request.param
+    base_model, adapter_library = spec if kind == "path" else _pair(kind, spec)
+    save_dir = tmp_path_factory.mktemp(Path(base_model).name) / "model"
     tiny_asr = build_tiny_asr(tmp_path_factory.mktemp("tiny-asr") / "asr")
 
     cmd = [

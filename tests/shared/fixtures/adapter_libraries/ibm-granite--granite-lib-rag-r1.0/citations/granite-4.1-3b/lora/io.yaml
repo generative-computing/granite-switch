@@ -1,0 +1,98 @@
+name: citations
+# Model name string, or null to use whatever is provided in the chat completion request
+model: ~
+# JSON schema of the model's output
+response_format: |
+  {
+    "$defs": {
+      "_MODEL_OUTPUT_ENTRY": {
+        "properties": {
+          "r": {
+            "minimum": 0,
+            "title": "R",
+            "type": "integer"
+          },
+          "c": {
+            "items": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "title": "C",
+            "type": "array"
+          }
+        },
+        "required": [
+          "r",
+          "c"
+        ],
+        "title": "_MODEL_OUTPUT_ENTRY",
+        "type": "object"
+      }
+    },
+    "items": {
+      "$ref": "#/$defs/_MODEL_OUTPUT_ENTRY"
+    },
+    "title": "_MODEL_OUTPUT",
+    "type": "array"
+  }
+transformations:
+  # Explode the list of document sentences in each citation
+  - type: explode
+    input_path: []  # Zero-length path means match root element
+    target_field: "c"
+  # Model may repeat itself; drop the resulting duplicates.
+  - type: drop_duplicates
+    input_path: []  # Zero-length path means match root element
+    target_fields: ["r", "c"]
+  # Replace sentence number with sentence location and contents.
+  # Do this first for sentences from the last turn, then for sentences from documents.
+  - type: decode_sentences
+    source: "last_message"
+    input_path: [~, "r"]  # Null in path means wildcard
+    # New fields to add for each sentence
+    output_names:
+      begin: "response_begin"
+      end: "response_end"
+      text: "response_text"
+  - type: decode_sentences
+    source: "documents"
+    input_path: [~, "c"]  # Null in path means wildcard
+    # New fields to add for each sentence
+    output_names:
+      document_id: "citation_doc_id"
+      begin: "citation_begin"
+      end: "citation_end"
+      text: "citation_text"
+  # Remove fields that we no longer need
+  - type: project
+    input_path: []
+    retained_fields:
+    - "response_begin"
+    - "response_end"
+    - "response_text"
+    - "citation_doc_id"
+    - "citation_begin"
+    - "citation_end"
+    - "citation_text"
+  # Merge adjacent document spans
+  - type: merge_spans
+    input_path: []
+    group_fields: ["response_begin", "response_end", "response_text", "citation_doc_id"]
+    begin_field: "citation_begin"
+    end_field: "citation_end"
+    text_field: "citation_text"
+
+instruction: >
+  Split the last assistant response into individual sentences. 
+  For each sentence in the response, identify the statement IDs from the below 
+  documents that it references. Ensure that your output includes all response 
+  sentence IDs, and for each response sentence ID, provide the list of corresponding 
+  referring document sentence IDs. The output must be a json structure.
+parameters:
+  temperature: 0.0
+  max_completion_tokens: 4096
+sentence_boundaries:
+  # Mapping from string location to sentence delimiter prefix
+  last_message: "r"  # <r0>, <r1>, etc.
+  documents: "c"
+  

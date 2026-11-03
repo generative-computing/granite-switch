@@ -14,6 +14,11 @@ hardware- and version-specific), so a numeric band would be flaky.
 
 Each budget runs in its own subprocess so only one vLLM engine is resident.
 
+Two sources for the base-model tests (tests/shared/model_sources.py): ``fake`` on
+every PR run, a tiny granite-4.1-3b built from captured copies of the real repo;
+``real``, the published one, in the release tier. ``CLS_TEST_BASE`` overrides the
+real base. The SR tests use their own synthetic base.
+
 Requires GPU + vLLM.
 """
 
@@ -31,7 +36,31 @@ pytestmark = pytest.mark.skipif(
 
 WORKER = os.path.join(os.path.dirname(__file__), "_probe_chunked_prefill_worker.py")
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(WORKER)))
-BASE_MODEL = os.environ.get("CLS_TEST_BASE", "ibm-granite/granite-4.1-3b")
+from tests.shared import model_sources
+
+_BASE_NAME = "granite-4.1-3b"
+_REAL_BASE = os.environ.get("CLS_TEST_BASE", model_sources.BASES[_BASE_NAME])
+
+
+@pytest.fixture(scope="module", params=model_sources.sources())
+def base_model(request):
+    """The base the base-model probe checkpoints compose on, per source."""
+    if request.param == "real":
+        return _REAL_BASE
+    return model_sources.base_model("fake", _BASE_NAME)
+
+
+def _mid_layer(base, fraction):
+    """A decoder layer at ``fraction`` of the base's depth.
+
+    The intermediate-layer tests read a middle layer of the real 40-layer base;
+    the fake base has only a couple, so the layer scales with the base.
+    """
+    from transformers import AutoConfig
+
+    layers = AutoConfig.from_pretrained(base).num_hidden_layers
+    return max(0, min(layers - 1, int(layers * fraction)))
+
 
 # One budget per distinct final-chunk shape: ``None`` disables chunked prefill
 # (single pass); 256 leaves a wide final chunk; 101 a narrow one; 48 splits into many
@@ -47,12 +76,19 @@ def _env():
     return env
 
 
-def _compose(tmp_path_factory, argv, tag):
-    """Compose a probe checkpoint in a CPU subprocess, before any CUDA init."""
+def _compose(tmp_path_factory, argv, tag, base=None):
+    """Compose a probe checkpoint in a CPU subprocess, before any CUDA init.
+
+    ``base`` is the base model for the base-model composes; the SR composes build
+    their own synthetic base and ignore it.
+    """
     outdir = str(tmp_path_factory.mktemp(tag))
+    env = {**_env(), "CLS_OUT": outdir}
+    if base is not None:
+        env["CLS_BASE"] = base
     proc = subprocess.run(
         [sys.executable, WORKER, *argv],
-        env={**_env(), "CLS_BASE": BASE_MODEL, "CLS_OUT": outdir},
+        env=env,
         capture_output=True,
         text=True,
         timeout=1800,
@@ -107,9 +143,11 @@ def _run_worker(outdir, argv, env, timeout=1800):
 
 
 @pytest.fixture(scope="module")
-def composed(tmp_path_factory):
+def composed(base_model, tmp_path_factory):
     """Multi-label probe over a varied prompt."""
-    result = _compose(tmp_path_factory, ["compose-multilabel"], "cls_ckpt")
+    result = _compose(
+        tmp_path_factory, ["compose-multilabel"], "cls_ckpt", base=base_model
+    )
     result["pids_path"] = _write_pids(result)
     return result
 
@@ -447,7 +485,7 @@ def _print_final_layer_activation(name, served, reference_hidden, reference_scor
     print(f"  activation contribution:           {vllm_gap - hf_gap:.4f}")
 
 
-def test_probe_reads_an_intermediate_layer_correctly(tmp_path_factory):
+def test_probe_reads_an_intermediate_layer_correctly(base_model, tmp_path_factory):
     """A layer-20 slot under eager and FULL, against an fp32 HF layer-20 reference.
 
     The fixed seed-0 head's reference margin (about 0.07) is below the score
@@ -455,9 +493,12 @@ def test_probe_reads_an_intermediate_layer_correctly(tmp_path_factory):
     layer 20 against nearby layers; it shows the path serves in both modes with
     a score gap within tolerance of the layer-20 reference.
     """
-    read_layer = 20  # a middle layer of the 40-layer base
+    read_layer = _mid_layer(base_model, 0.5)  # layer 20 of the real 40-layer base
     result = _compose(
-        tmp_path_factory, ["compose-at-layer", str(read_layer)], "cls_layer_ckpt"
+        tmp_path_factory,
+        ["compose-at-layer", str(read_layer)],
+        "cls_layer_ckpt",
+        base=base_model,
     )
     label_token_ids = result["label_token_ids"]
     env = {
@@ -483,7 +524,9 @@ def test_probe_reads_an_intermediate_layer_correctly(tmp_path_factory):
     assert not failures, "\n".join(failures)
 
 
-def test_two_probe_slots_replay_correctly_in_one_captured_shape(tmp_path_factory):
+def test_two_probe_slots_replay_correctly_in_one_captured_shape(
+    base_model, tmp_path_factory
+):
     """Serve a final-layer and a layer-15 slot under eager and FULL.
 
     Probe arithmetic and transport are checked against the head's
@@ -500,9 +543,12 @@ def test_two_probe_slots_replay_correctly_in_one_captured_shape(tmp_path_factory
     reference. Slot 1's HF/vLLM activation difference is printed, with no
     acceptance threshold. The test does not prove which captured graph replayed.
     """
-    read_layer = 15
+    read_layer = _mid_layer(base_model, 0.375)  # layer 15 of the real 40-layer base
     result = _compose(
-        tmp_path_factory, ["compose-two-slot", str(read_layer)], "cls_two_slot_ckpt"
+        tmp_path_factory,
+        ["compose-two-slot", str(read_layer)],
+        "cls_two_slot_ckpt",
+        base=base_model,
     )
     label_token_ids = result["label_token_ids"]
     env = {

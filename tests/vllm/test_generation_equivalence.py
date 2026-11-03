@@ -17,7 +17,11 @@ down between tests (prevents OOM and stale-state issues).
 
 Worker: _generation_equivalence_worker.py (build / run / compare phases).
 
-Markers: requires_model (consistent with test_skinning_equivalence.py).
+Markers: requires_model (consistent with test_skinning_equivalence.py), and
+release: CLAUDE.md calls this the authoritative equivalence test, but it compares
+against upstream on the real weights, with thresholds calibrated on them. On
+random weights the same equivalence runs on every PR in
+tests/vllm/test_granite4_mini.py.
 """
 
 import os
@@ -134,6 +138,7 @@ def _run_generation_test(model_name, timeout):
         )
 
 
+@pytest.mark.release
 @pytest.mark.requires_model
 @pytest.mark.parametrize("model_name", MODELS, ids=_short_name)
 def test_generation_equivalence(model_name):

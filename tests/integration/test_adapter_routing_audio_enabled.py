@@ -7,36 +7,42 @@ pre-control positions on base (``0``) — enabling audio must not perturb the
 token->index map.
 
 Routing reads only the control-token table, never adapter weights, so the
-default case composes empty built-in adapter slots (``--built-in-adapters``) on a
-small base rather than downloading real adapter libraries. Thirteen slots keep
-the sweep as wide as the full granitelib set. The HF model never loads the ASR,
-so no ASR is downloaded either. Real libraries can still be swept through
-``GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS``.
+default case composes empty built-in adapter slots (``--built-in-adapters``)
+rather than real adapter libraries. Thirteen slots keep the sweep as wide as the
+full granitelib set. Two sources (tests/shared/model_sources.py) for the base:
+``fake`` on every PR run, ``real`` granite-4.0-micro in the release tier. The HF
+model never loads the ASR, so no ASR is downloaded either. Real libraries can
+still be swept through ``GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS``.
 
-Markers: slow + requires_model + gpu (opt-in via -m).
+Markers: slow + gpu (opt-in via -m).
 """
 
 import importlib.util
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 pytestmark = [
     pytest.mark.audio,
     pytest.mark.slow,
-    pytest.mark.requires_model,
     pytest.mark.gpu,
 ]
 
 if importlib.util.find_spec("granite_switch.hf") is None:
     pytest.skip("requires the HF backend ([hf] extra)", allow_module_level=True)
 
+from tests.shared import model_sources
 
 _BUILT_IN_ADAPTERS = [f"slot{i}" for i in range(1, 14)]
-# (base, adapter libraries); None means the built-in slots above.
+_BASE_NAME = "granite-4.0-micro"
+# (source, base, adapter libraries); None means the built-in slots above.
 _DEFAULT_BASE_MODEL_PAIRS = [
-    ("ibm-granite/granite-4.0-micro", None),
+    pytest.param(("fake", _BASE_NAME, None), id=f"{_BASE_NAME}-fake"),
+    pytest.param(
+        ("real", _BASE_NAME, None), marks=pytest.mark.release, id=f"{_BASE_NAME}-real"
+    ),
 ]
 
 
@@ -55,8 +61,9 @@ def _load_experimental_pairs():
     pairs = []
     for p in entries:
         adapters = p["adapter"]
+        adapters = adapters if isinstance(adapters, list) else [adapters]
         pairs.append(
-            (p["base"], adapters if isinstance(adapters, list) else [adapters])
+            pytest.param(("path", p["base"], adapters), id=Path(p["base"]).name)
         )
     return pairs
 
@@ -69,11 +76,7 @@ _CTRL_POS = 1
 _FILLER_TOKENS = [791, 5679, 2766, 279, 893, 389, 813, 1450]
 
 
-@pytest.fixture(
-    scope="module",
-    params=BASE_MODEL_PAIRS,
-    ids=lambda p: p[0].rsplit("/", 1)[-1],
-)
+@pytest.fixture(scope="module", params=BASE_MODEL_PAIRS)
 def audio_switch_model(request, tmp_path_factory):
     import subprocess
     import sys
@@ -82,8 +85,9 @@ def audio_switch_model(request, tmp_path_factory):
 
     from granite_switch.hf import GraniteSwitchForCausalLM
 
-    base_model, adapter_libraries = request.param
-    save_dir = tmp_path_factory.mktemp(base_model.rsplit("/", 1)[-1]) / "model"
+    source, base, adapter_libraries = request.param
+    base_model = base if source == "path" else model_sources.base_model(source, base)
+    save_dir = tmp_path_factory.mktemp(Path(base_model).name) / "model"
 
     adapter_args = (
         ["--built-in-adapters", *_BUILT_IN_ADAPTERS]

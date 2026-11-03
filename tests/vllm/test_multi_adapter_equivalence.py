@@ -93,6 +93,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.shared import model_sources
+
 WORKER = Path(__file__).parent / "_multi_adapter_equivalence_worker.py"
 #: One base per Granite chat-template family: 4.1-3b renders the
 #: ``<|start_of_role|>`` role markers, 4.2-3b the ChatML ``<|im_start|>`` form. Both
@@ -118,21 +120,48 @@ CASES_TIMEOUT = 600
 RUN_TIMEOUT = 2400  # vLLM load + one scored generate per case
 COMPARE_TIMEOUT = 300
 
-# PR runs keep the first default base (role-marker template); the other bases
-# (ChatML 4.2-3b by default) run in the release tier. An explicit
-# MULTI_ADAPTER_BASE_MODELS runs every base it names, unmarked.
-_PR_BASE = BASE_MODELS[0]
-_RELEASE_ONLY = "MULTI_ADAPTER_BASE_MODELS" not in os.environ
+# PR runs use a fake of the first default base (role-marker template), built
+# from captured copies of the real repo (tests/shared/model_sources.py); the
+# release tier runs every base for real (ChatML 4.2-3b included). An explicit
+# MULTI_ADAPTER_BASE_MODELS runs exactly the bases it names, unmarked.
+_EXPLICIT = "MULTI_ADAPTER_BASE_MODELS" in os.environ
 
-CASES = [
-    pytest.param(
-        (base, flavor),
-        marks=pytest.mark.release if _RELEASE_ONLY and base != _PR_BASE else (),
-        id=f"{base.split('/')[-1]}-{flavor}",
-    )
-    for base in BASE_MODELS
-    for flavor in FLAVORS
-]
+
+def _cases():
+    if _EXPLICIT:
+        return [
+            pytest.param((base, flavor), id=f"{base.split('/')[-1]}-{flavor}")
+            for base in BASE_MODELS
+            for flavor in FLAVORS
+        ]
+    pr_name = BASE_MODELS[0].split("/")[-1]
+    cases = [
+        pytest.param(("fake", pr_name, flavor), id=f"{pr_name}-{flavor}-fake")
+        for flavor in FLAVORS
+    ]
+    cases += [
+        pytest.param(
+            ("real", base, flavor),
+            marks=pytest.mark.release,
+            id=f"{base.split('/')[-1]}-{flavor}-real",
+        )
+        for base in BASE_MODELS
+        for flavor in FLAVORS
+    ]
+    return cases
+
+
+CASES = _cases()
+
+
+def _resolve_case(case):
+    """``(base path or repo id, flavor)`` for a case."""
+    if len(case) == 2:
+        return case
+    source, base, flavor = case
+    if source == "fake":
+        return model_sources.base_model("fake", base), flavor
+    return base, flavor
 
 
 def _run_step(step_name, *cmd_args, timeout):
@@ -161,7 +190,7 @@ def flavor_run(request):
     four checks read the same captured distributions. Only one parametrization is
     live at a time, so at most two composed checkpoints sit on disk at once.
     """
-    base, flavor = request.param
+    base, flavor = _resolve_case(request.param)
     label = f"{flavor}@{base}"
     with tempfile.TemporaryDirectory(prefix="multi_adapter_") as work_dir:
         _run_step(
@@ -251,13 +280,11 @@ def _check(flavor_run, check):
     )
 
 
-@pytest.mark.requires_model
 def test_no_control_token_equals_upstream(flavor_run):
     """Adapter id 0 is a true no-op even with several trained adapters embedded."""
     _check(flavor_run, "passthrough")
 
 
-@pytest.mark.requires_model
 def test_adapters_are_distinguishable(flavor_run):
     """Every adapter changes the distribution, and no two adapters agree.
 
@@ -266,13 +293,11 @@ def test_adapters_are_distinguishable(flavor_run):
     _check(flavor_run, "distinct")
 
 
-@pytest.mark.requires_model
 def test_output_is_independent_of_adapter_slot(flavor_run):
     """The same adapter at a different slot produces the same distribution."""
     _check(flavor_run, "slots")
 
 
-@pytest.mark.requires_model
 def test_output_is_independent_of_batch_composition(flavor_run):
     """A prompt is unaffected by other adapters sharing its batch.
 

@@ -1,0 +1,73 @@
+name: hallucination_detection
+# Model name string, or null to use whatever is provided in the chat completion request
+model: ~
+# JSON schema of the model's output
+response_format: |
+  {
+    "$defs": {
+      "HallucinationOutputEntry": {
+        "properties": {
+          "r": {
+            "minimum": 0,
+            "title": "Sentence Num",
+            "type": "integer"
+          },
+          "f": {
+            "title": "Is Faithful",
+            "type": "string",
+            "enum": ["faithful", "partial", "unfaithful", "NA"]
+          },
+          "e": {
+            "title": "Reasoning",
+            "type": "string"
+          }
+        },
+        "required": [
+          "r",
+          "e",
+          "f"
+        ],
+        "title": "HallucinationOutputEntry",
+        "type": "object"
+      }
+    },
+    "items": {
+      "$ref": "#/$defs/HallucinationOutputEntry"
+    },
+    "title": "HallucinationOutput",
+    "type": "array"
+  }
+transformations:
+  # Replace sentence number with sentence location and contents
+  - type: decode_sentences
+    source: "last_message"
+    input_path: [~, "r"]  # Null in path means wildcard
+    # New fields to add for each sentence
+    output_names:
+      begin: "response_begin"
+      end: "response_end"
+      text: "response_text"
+  # Remove fields that we no longer need and rename some of the fields.
+  - type: project
+    input_path: []
+    retained_fields:
+      "response_begin": "response_begin"
+      "response_end": "response_end"
+      "response_text": "response_text"
+      "f": "faithfulness"
+      "e": "explanation"
+instruction: >
+  Split the last assistant response into individual sentences.
+  For each sentence in the last assistant response, identify the faithfulness
+  by comparing with the provided documents and generate the faithfulness reasoning
+  and faithfulness decision.
+  Ensure that your output includes all response sentence IDs,
+  and for each response sentence ID, provide the corresponding faithfulness
+  reasoning and faithfulness decision.
+  The output must be a json structure.
+parameters:
+  # Current LoRA can be quite verbose in its explanations.
+  max_completion_tokens: 4096
+  temperature: 0.0
+sentence_boundaries:
+  last_message: "i"

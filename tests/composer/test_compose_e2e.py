@@ -1,30 +1,58 @@
 # SPDX-License-Identifier: Apache-2.0
 """End-to-end compose test for ``python -m granite_switch.composer.compose_granite_switch``.
 
-Runs the exact README command via subprocess, then performs sanity checks on the
-output directory.  The compose is expensive (~2.5 min, ~7 GB output) so a
-module-scoped fixture composes once and shares the output across all test methods.
+Runs the README command via subprocess, then performs sanity checks on the output
+directory. A module-scoped fixture composes once per source and shares the output
+across all test methods.
 
-Markers: slow, requires_model (both defined in pyproject.toml).
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny base
+and adapter library built from captured copies of the real ones; ``real``, the
+published granite-4.0-micro and granite-lib-rag-r1.0, in the release tier. Expected
+sizes are read off the base each source composes, so both run the same checks.
 """
 
 import json
+import math
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Constants (verified against a known-good build of granite-4.0-micro +
-# granite-lib-rag-r1.0)
-# ---------------------------------------------------------------------------
+from granite_switch.config import SWITCH_CACHE_LAYERS
+from tests.shared import model_sources
 
-BASE_MODEL = "ibm-granite/granite-4.0-micro"
+BASE_NAME = "granite-4.0-micro"
 ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
-BASE_VOCAB_SIZE = 100352
-BASE_NUM_LAYERS = 42  # switch model: base 40 + 2 MultiSwitch cache slots
-BASE_PARAM_COUNT = 3_402_836_480
 BUILD_TIMEOUT = 3600  # 60 min (parallel xdist workers compete for downloads)
+
+
+def _base_facts(base):
+    """Vocab, hidden size, layer and parameter counts of the base being composed.
+
+    Read from the base rather than hard-coded, so the fake and real sources run
+    the same checks. Parameter counts come from safetensors headers; no weights
+    are loaded.
+    """
+    from huggingface_hub import get_safetensors_metadata
+    from safetensors import safe_open
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(base)
+    if Path(base).is_dir():
+        params = 0
+        for sf in Path(base).glob("*.safetensors"):
+            with safe_open(str(sf), framework="pt") as f:
+                params += sum(math.prod(f.get_slice(k).get_shape()) for k in f.keys())
+    else:
+        params = sum(get_safetensors_metadata(base).parameter_count.values())
+    return SimpleNamespace(
+        vocab_size=config.vocab_size,
+        hidden_size=config.hidden_size,
+        num_layers=config.num_hidden_layers + SWITCH_CACHE_LAYERS,
+        param_count=params,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -32,21 +60,22 @@ BUILD_TIMEOUT = 3600  # 60 min (parallel xdist workers compete for downloads)
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def build_output(tmp_path_factory):
-    """Run the default build command and return the output directory Path.
-
-    Uses ``tmp_path_factory`` so pytest manages cleanup.  The fixture is
-    module-scoped so the ~2.5 min build happens only once.
-    """
-    output_dir = tmp_path_factory.mktemp("build") / "granite-with-all-aloras"
+@pytest.fixture(scope="module", params=model_sources.sources())
+def build(request, tmp_path_factory):
+    """Run the build once per source; returns the output dir and the base's facts."""
+    source = request.param
+    base = model_sources.base_model(source, BASE_NAME)
+    library = model_sources.adapter_library(source, ADAPTER_LIBRARY, BASE_NAME)
+    output_dir = tmp_path_factory.mktemp(f"build-{source}") / "granite-switch"
 
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        base,
         "--adapters",
-        ADAPTER_LIBRARY,
+        library,
         "--output",
         str(output_dir),
     ]
@@ -70,14 +99,19 @@ def build_output(tmp_path_factory):
         f"STDERR (last 1000 chars):\n{result.stderr[-1000:]}"
     )
 
-    return output_dir
+    return SimpleNamespace(output=output_dir, base=_base_facts(base))
+
+
+@pytest.fixture(scope="module")
+def build_output(build):
+    return build.output
 
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-pytestmark = [pytest.mark.slow, pytest.mark.requires_model]
+pytestmark = [pytest.mark.slow]
 
 
 @pytest.mark.xdist_group("compose_e2e")
@@ -116,22 +150,22 @@ class TestBuildE2E:
             f"Expected at least 1 io.yaml file, found {len(yaml_files)}"
         )
 
-    def test_config_correctness(self, build_output):
+    def test_config_correctness(self, build_output, build):
         """Verify key config.json fields match expected values."""
         config = json.loads((build_output / "config.json").read_text())
 
         assert config["model_type"] == "granite_switch"
         assert config["architectures"] == ["GraniteSwitchForCausalLM"]
         assert config["num_adapters"] >= 1
-        assert config["hidden_size"] == 2560
-        assert config["num_hidden_layers"] == BASE_NUM_LAYERS
+        assert config["hidden_size"] == build.base.hidden_size
+        assert config["num_hidden_layers"] == build.base.num_layers
 
         # Control token ID lists must match num_adapters
         num_adapters = config["num_adapters"]
         assert len(config["adapter_token_ids"]) == num_adapters
 
-    def test_parameter_count_increased(self, build_output):
-        """Verify total parameter count exceeds the base model's 3.4B."""
+    def test_parameter_count_increased(self, build_output, build):
+        """Verify total parameter count exceeds the base model's."""
         from safetensors import safe_open
 
         total_elements = 0
@@ -140,25 +174,27 @@ class TestBuildE2E:
                 for key in f.keys():
                     total_elements += f.get_tensor(key).numel()
 
-        overhead = total_elements - BASE_PARAM_COUNT
-        overhead_pct = (overhead / BASE_PARAM_COUNT) * 100
+        base_params = build.base.param_count
+        overhead = total_elements - base_params
+        overhead_pct = (overhead / base_params) * 100
 
         print(f"\nParameter count: {total_elements:,}")
-        print(f"Base count:      {BASE_PARAM_COUNT:,}")
+        print(f"Base count:      {base_params:,}")
         print(f"Overhead:        {overhead:,} ({overhead_pct:.2f}%)")
 
-        assert total_elements > BASE_PARAM_COUNT, (
-            f"Expected > {BASE_PARAM_COUNT:,} params, got {total_elements:,}"
+        assert total_elements > base_params, (
+            f"Expected > {base_params:,} params, got {total_elements:,}"
         )
 
-    def test_vocabulary_expanded(self, build_output):
+    def test_vocabulary_expanded(self, build_output, build):
         """Verify vocab_size in config reflects the added control tokens."""
         config = json.loads((build_output / "config.json").read_text())
         num_adapters = config["num_adapters"]
-        expected_vocab = BASE_VOCAB_SIZE + num_adapters  # 1 control token per adapter
+        base_vocab = build.base.vocab_size
+        expected_vocab = base_vocab + num_adapters  # 1 control token per adapter
         assert config["vocab_size"] == expected_vocab, (
             f"Expected vocab_size={expected_vocab} "
-            f"(base {BASE_VOCAB_SIZE} + {num_adapters}), "
+            f"(base {base_vocab} + {num_adapters}), "
             f"got {config['vocab_size']}"
         )
 
@@ -197,13 +233,13 @@ class TestBuildE2E:
             assert key in report, f"Missing key '{key}' in compose_report.json"
             assert report[key], f"Empty value for '{key}' in compose_report.json"
 
-    def test_tokenizer_has_control_tokens(self, build_output):
+    def test_tokenizer_has_control_tokens(self, build_output, build):
         """Verify the saved tokenizer recognizes all control tokens."""
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained(str(build_output))
         config = json.loads((build_output / "config.json").read_text())
-        expected_vocab = BASE_VOCAB_SIZE + config["num_adapters"]
+        expected_vocab = build.base.vocab_size + config["num_adapters"]
         assert len(tokenizer) == expected_vocab, (
             f"Expected tokenizer len={expected_vocab}, got {len(tokenizer)}"
         )
@@ -235,7 +271,7 @@ class TestBuildE2E:
             "generation_config.json missing bos_token_id"
         )
 
-    def test_model_loads(self, build_output):
+    def test_model_loads(self, build_output, build):
         """Verify the model loads with device_map='meta' (no memory used)."""
         from transformers import AutoModelForCausalLM
 
@@ -250,4 +286,4 @@ class TestBuildE2E:
         assert model is not None
         assert model.config.model_type == "granite_switch"
         assert model.config.num_adapters >= 1
-        assert model.config.num_hidden_layers == BASE_NUM_LAYERS
+        assert model.config.num_hidden_layers == build.base.num_layers

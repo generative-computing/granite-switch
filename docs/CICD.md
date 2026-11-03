@@ -198,34 +198,72 @@ While in pre-1.0, increment `MINOR` for new features and `PATCH` for bug fixes. 
 
 ### Release test tier
 
-Tests marked `release` are excluded from every other scope (`addopts` and each
-`-m` filter carry `not release`) and run with the `release` GPU suite
-(`/gpu-test-release`). Two kinds of test belong here:
+**PR runs download no real model.** Every test that needs a Granite base or an
+adapter library runs twice: once on a fake on every PR run, and once on the real
+model in the release tier, marked `release`. Release tests are excluded from every
+other scope (`addopts` and each `-m` filter carry `not release`) and run with the
+`release` GPU suite (`/gpu-test-release`).
 
-1. **Compatibility with real external artifacts**, which only a dependency or a
-   Hub change can break:
-   - `tests/integration/test_asr_ctc_default_gpu.py`: the default ASR at its
-     pinned revision. Every other audio test uses a tiny local ASR
-     (`tests/shared/tiny_asr.py`) and downloads none.
-   - `tests/composer/test_selective_download.py::TestRealHubMetadata`: the
-     published adapter repos' layout.
-   - `tests/hf/test_quantization.py`: the quantization libraries on a real
-     checkpoint. Its `GRANITE_SWITCH_E2E_MODELS=1` gate is opened by
-     `tests/conftest.py` whenever `-m` selects `release`.
-2. **The rest of a breadth matrix.** PR runs keep one representative case and the
-   release tier runs the others, via `pytest.param(..., marks=pytest.mark.release)`:
-   - `tests/vllm/test_granite4_mini.py`: vLLM classes on `4.0-micro`; `4.0-1b`
-     and `4.0-350m` in release. The CPU weight-transfer classes run every variant.
-   - `tests/vllm/test_granite4_fullsize.py`: the GPU class is release-only (the
-     mini file covers the same equivalence at small size).
-   - `tests/vllm/test_multi_adapter_equivalence.py`: `granite-4.1-3b` on PRs,
-     `granite-4.2-3b` (the ChatML template) in release.
-   - `tests/integration/test_audio_serving_smoke.py`: `granite-4.0-micro` on PRs,
-     `granite-4.1-3b` in release.
+**The fakes are captured, not invented.** `tests/shared/fixtures/` holds verbatim
+copies of the real repos' small files: each base's config, generation config,
+tokenizer config, special-tokens map and chat template, and each adapter's
+`adapter_config.json` and `io.yaml`. At test time,
+`tests/shared/fake_bases.py` adds tiny random weights (in the real dtype) and a
+tokenizer whose special tokens, and the words tests use as probe labels, keep
+their real ids; `tests/shared/fake_adapter_libraries.py` adds synthetic weights at
+each adapter's real rank and target modules. So the composer sees the real
+template, token ids, configs and repo layout, and the real compose CLI accepts
+the fakes. What the fakes leave out is weights and the BPE vocabulary: ordinary
+words tokenize to one token per byte.
 
-Run it before every release, and on any PR that bumps `uv.lock`, touches a model
-pin (e.g. `DEFAULT_ASR_MODEL_REVISION`), or changes code specific to a variant
-that only the release tier covers (e.g. the ChatML template path).
+**Writing a test that needs a model:** take it from `tests/shared/model_sources.py`
+rather than naming a Hub id, and parametrize over `model_sources.sources()`:
+
+```python
+@pytest.mark.parametrize("source", model_sources.sources())
+def test_something(source):
+    base = model_sources.base_model(source, "granite-4.1-3b")
+    library = model_sources.adapter_library(
+        source, "ibm-granite/granite-lib-rag-r1.0", "granite-4.1-3b"
+    )
+```
+
+**Refreshing the captures:** `python -m tests.shared.fake_bases --capture` and
+`python -m tests.shared.fake_adapter_libraries --capture`. A failing real case in
+the release tier, whose fake case passes, usually means a capture has fallen
+behind its Hub repo.
+
+**Release only, with no fake counterpart**, because the fake cannot stand in:
+
+- `tests/integration/test_asr_ctc_default_gpu.py`: the real default ASR at its
+  pinned revision. Every other audio test uses a tiny local ASR
+  (`tests/shared/tiny_asr.py`).
+- `tests/vllm/test_generation_equivalence.py` and
+  `tests/composer/test_skinning_equivalence.py`: our model against upstream on the
+  real weights, with thresholds calibrated on them. On random weights the same
+  equivalence runs on PRs in `tests/vllm/test_granite4_mini.py`.
+- `tests/composer/test_chat_template.py::TestInvocationFirstCharDropProperty`:
+  how the real BPE vocabulary splits invocation strings.
+- `tests/composer/test_selective_download.py::TestRealHubMetadata`: the published
+  adapter repos' layout, against the live Hub.
+- `tests/hf/test_quantization.py`: the quantization libraries on a real
+  checkpoint. Its `GRANITE_SWITCH_E2E_MODELS=1` gate is opened by
+  `tests/conftest.py` whenever `-m` selects `release`.
+
+**The rest of a breadth matrix** is release-only too: PR runs keep one
+representative case.
+
+- `tests/vllm/test_granite4_mini.py`: vLLM classes on `4.0-micro`; `4.0-1b` and
+  `4.0-350m` in release. The CPU weight-transfer classes run every variant.
+- `tests/vllm/test_granite4_fullsize.py`: the GPU class is release-only.
+- `tests/vllm/test_multi_adapter_equivalence.py`: a fake `granite-4.1-3b` on PRs;
+  the real `4.1-3b` and `4.2-3b` (the ChatML template) in release.
+- `tests/integration/test_audio_serving_smoke.py`: a fake `granite-4.0-micro` on
+  PRs; the real `4.0-micro` and `4.1-3b` in release.
+
+Run the release tier before every release, and on any PR that bumps `uv.lock`,
+touches a model pin (e.g. `DEFAULT_ASR_MODEL_REVISION`) or a capture, or changes
+code that depends on real weights or the BPE vocabulary.
 
 ### What `publish.yaml` does
 

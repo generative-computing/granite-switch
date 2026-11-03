@@ -12,8 +12,11 @@ Two test tiers:
      Tests the full pipeline including ``save_pretrained()`` overwrite
      behavior, model loading, and tokenizer.
 
-Markers: requires_model (all tests need HF model downloads).
-         slow (full build tests only).
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny base
+built from the captured files of the real repo (including the files the copy must
+skip); ``real``, the published granite-4.0-micro, in the release tier.
+
+Markers: slow (full build tests only).
 """
 
 import json
@@ -27,19 +30,30 @@ from granite_switch.composer.compose_granite_switch import (
     _copy_upstream_auxiliary_files,
     _resolve_base_model_path,
 )
+from tests.shared import model_sources
 
 # ---------------------------------------------------------------------------
 # Model lists (Granite only)
 # ---------------------------------------------------------------------------
 
+#: (family, base name in tests/shared/fake_bases.py). Smallest representative.
 FAMILY_MODELS = [
-    ("granitemoehybrid", "ibm-granite/granite-4.0-micro"),
+    ("granitemoehybrid", "granite-4.0-micro"),
 ]
 
-# Smallest representative per family for full build E2E.
-BUILD_MODELS = [
-    ("granitemoehybrid", "ibm-granite/granite-4.0-micro"),
-]
+
+def _cases(models):
+    """Each (family, base) once per source; the real source is release-tier."""
+    return [
+        pytest.param(
+            (family, base, src.values[0]),
+            id=f"{family}-{src.values[0]}",
+            marks=src.marks,
+        )
+        for family, base in models
+        for src in model_sources.sources()
+    ]
+
 
 BUILD_TIMEOUT = 3600  # 60 min (parallel xdist workers compete for downloads)
 
@@ -52,25 +66,27 @@ WEIGHT_EXTENSIONS = {".safetensors", ".bin", ".pt", ".ckpt"}
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module", params=FAMILY_MODELS, ids=[f[0] for f in FAMILY_MODELS])
+@pytest.fixture(scope="module", params=_cases(FAMILY_MODELS))
 def resolved_model(request):
-    """Resolve each family's model to a local path (downloads if needed).
+    """Resolve each base to a local path (downloads the real one if needed).
 
     Returns ``(family, model_id, local_path)``.
     """
-    family, model_id = request.param
+    family, base, source = request.param
+    model_id = model_sources.base_model(source, base)
     local_path = _resolve_base_model_path(model_id)
     return family, model_id, local_path
 
 
-@pytest.fixture(scope="module", params=BUILD_MODELS, ids=[b[0] for b in BUILD_MODELS])
+@pytest.fixture(scope="module", params=_cases(FAMILY_MODELS))
 def built_in_build_output(request, tmp_path_factory):
-    """Run a built-in-only build for each BUILD_MODELS entry.
+    """Run a built-in-only build for each base and source.
 
     Returns ``(family, model_id, output_dir)``.
     """
-    family, model_id = request.param
-    output_dir = tmp_path_factory.mktemp(f"build_{family}") / "output"
+    family, base, source = request.param
+    model_id = model_sources.base_model(source, base)
+    output_dir = tmp_path_factory.mktemp(f"build_{family}_{source}") / "output"
 
     cmd = [
         sys.executable,
@@ -108,8 +124,6 @@ def built_in_build_output(request, tmp_path_factory):
 # ---------------------------------------------------------------------------
 # Copy logic tests
 # ---------------------------------------------------------------------------
-
-pytestmark = pytest.mark.requires_model
 
 
 class TestUpstreamFileCopy:
