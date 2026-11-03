@@ -276,7 +276,20 @@ def compose_for(cfg: EvalConfig) -> Path | None:
 
 
 def prompts() -> list[str]:
-    return json.loads((CASES / "prompts.json").read_text())["prompts"]
+    p = CASES / "prompts.json"
+    if not p.exists():
+        # Raise rather than fall back to a generated set: the prompt set is fixed
+        # so a drift number means distribution movement and nothing else, and an
+        # improvised set would make every baseline comparison structurally
+        # mismatched while still producing numbers.
+        raise FileNotFoundError(
+            f"{p} does not exist. The eval prompt set is not committed to this "
+            "repository -- it is the internal upgrade-vllm skill's, injected onto "
+            "its upgrade branch for the shas it dispatches eval legs at. So "
+            "dispatching suite=eval on main fails here by design; run the eval "
+            "through that skill instead."
+        )
+    return json.loads(p.read_text())["prompts"]
 
 
 def fingerprint(model_dir: Path) -> str:
@@ -632,7 +645,9 @@ def compare(baseline: dict, current: dict) -> tuple[list[str], list[str]]:
     if baseline["prompts"] != current["prompts"]:
         fails.append(
             "prompt set changed since the baseline was recorded -- re-record it "
-            "deliberately (tests/eval/cases/prompts.json is committed for this reason)"
+            "deliberately. The prompt set is a FIXED file (cases/prompts.json, "
+            "injected here by the upgrade-vllm skill) precisely so this cannot "
+            "drift silently"
         )
         return fails, report
     if baseline["adapter"]["name"] != current["adapter"]["name"]:

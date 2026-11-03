@@ -6,8 +6,19 @@ Run on the GPU cluster as its own suite::
     /gpu-test-eval                      # as a maintainer, on a PR
     pytest -m "eval and not deep" tests/eval/ -v -s --tb=short
 
-Each config needs a checkpoint and a baseline in ``tests/eval/baselines/``. The
-checkpoint comes from ``GSW_EVAL_*_DIR`` if staged, and is otherwise COMPOSED from
+Each config needs a checkpoint and a baseline in ``tests/eval/baselines/``.
+
+**The baselines and ``cases/prompts.json`` are not committed to this repository.**
+They are the comparison data for an internal maintainer tool (the ``upgrade-vllm``
+skill), which commits them onto its upgrade branch for the shas it dispatches eval
+legs at, and removes them again before the PR goes ready. The GPU pod does no
+checkout of its own -- it fetches this repo at the dispatched sha as a tarball --
+so that is the only way the data can reach it. Consequence, stated so it is not
+rediscovered as a bug: dispatching ``suite=eval`` on ``main`` ERRORS rather than
+skipping, because the prompt set is read unconditionally. The gate is reachable
+only through an upgrade run.
+
+The checkpoint comes from ``GSW_EVAL_*_DIR`` if staged, and is otherwise COMPOSED from
 public `ibm-granite` repos into the e2e cache (``_eval_core.COMPOSE_RECIPES``) --
 because requiring the env var meant this suite could only ever skip: nothing sets
 it on the GPU pod, and an all-skipped suite exits 0 and reports PASSED.
@@ -63,8 +74,12 @@ def test_adapter_eval(config_name):
         "environment missed by a systematic ~0.004 mean JSD:\n"
         "  gh workflow run gpu-tests.yaml --ref <branch> "
         "-f suite=eval-record -f sha=<sha> -f no_cache=true\n"
-        f"The run prints every baseline into its log; commit the {cfg.name} one "
-        "to tests/eval/baselines/. See tests/eval/baselines/README.md."
+        f"The run prints every baseline into its log. The {cfg.name} baseline is "
+        "NOT committed here: it belongs to the internal upgrade-vllm skill, which "
+        "injects it onto its upgrade branch for the shas it dispatches eval legs "
+        "at and removes it before the PR goes ready. So seeing this on main is "
+        "expected, and the fix is to run the eval through that skill rather than "
+        "to commit a baseline into this repository."
     )
 
     # The baseline's continuations, not freshly generated ones: the measurement is
