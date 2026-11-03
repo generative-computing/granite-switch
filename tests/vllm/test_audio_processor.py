@@ -393,9 +393,7 @@ def _make_processor_transcribing(info, monkeypatch, text, *, ids_for):
     monkeypatch.setattr(
         proc_mod,
         "get_transcriber",
-        lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-            FakeTranscriber()
-        ),
+        lambda **_kwargs: FakeTranscriber(),
     )
     return proc
 
@@ -507,9 +505,7 @@ class TestEmptyAndSilentClip:
         monkeypatch.setattr(
             proc_mod,
             "get_transcriber",
-            lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-                FakeTranscriber()
-            ),
+            lambda **_kwargs: FakeTranscriber(),
         )
 
         bf = proc._call_hf_processor(
