@@ -39,8 +39,31 @@ _spec = importlib.util.spec_from_file_location(
 asr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(asr)
 
-# tests/audio/test1.wav says this, and CTC emits it lowercase and unpunctuated.
+# What tests/audio/test1.wav says. Compared through `_words` below rather than
+# verbatim, because the checkpoint's ORTHOGRAPHY is not ours to pin.
 _EXPECTED = "what is the capital of israel"
+
+
+def _words(text: str) -> list[str]:
+    """``text`` as lowercase words with punctuation stripped.
+
+    The transcript is asserted on its WORDS, not its exact characters. This used
+    to be a `==` against a lowercase, unpunctuated string, which is what
+    `granite-speech-5.0-470m-turboctc` emitted until the checkpoint was
+    re-uploaded on 2026-10-21 ("Upload 13 files" / "Remove legacy custom-code
+    files"). It now truecases and punctuates: "What is the capital of Israel?".
+    `transcribe()` is pinned to no revision, so every runner picked the new
+    weights up at once and all four transcript assertions failed together — on
+    the vllm26 floor leg identically to vllm31 and vllm32, which is what shows
+    this is the checkpoint changing under the test and not the vLLM port.
+
+    Casing and terminal punctuation are the ASR model's editorial choice.
+    Comparing without them keeps what this test is actually for -- that our
+    pipeline routes audio through the CTC backend and returns the right words,
+    with the chunked path not dropping or duplicating any -- while not failing
+    the next time upstream re-renders the same sentence.
+    """
+    return ["".join(c for c in w if c.isalnum()) for w in text.lower().split()]
 
 
 def _test_clip():
@@ -79,7 +102,7 @@ def test_transcribes_correctly_and_ignores_decode_kwargs(transcriber):
     text = transcriber.transcribe(
         samples, sampling_rate=sample_rate, generate_kwargs={"language": "fr"}
     )
-    assert text == _EXPECTED
+    assert _words(text) == _words(_EXPECTED)
 
 
 def test_float16_override_still_transcribes():
@@ -95,7 +118,8 @@ def test_float16_override_still_transcribes():
     half = asr.ASRTranscriber(
         model_id=asr.DEFAULT_ASR_MODEL_ID, device="cuda", dtype="float16"
     )
-    assert half.transcribe(samples, sampling_rate=sample_rate) == _EXPECTED
+    text = half.transcribe(samples, sampling_rate=sample_rate)
+    assert _words(text) == _words(_EXPECTED)
 
 
 def _tile_to_seconds(samples, sample_rate, seconds):
@@ -137,4 +161,4 @@ def test_window_decides_single_pass_vs_chunked(transcriber, seconds, expected_ca
     else:
         assert len(calls) == expected_calls
     # The phrase repeats throughout, so the merge must not collapse it to nothing.
-    assert _EXPECTED.split()[-1] in text
+    assert _words(_EXPECTED)[-1] in _words(text)
