@@ -269,8 +269,15 @@ def _write_repo_extras(dest: Path) -> None:
     (dest / ".gitattributes").write_text("*.safetensors filter=lfs diff=lfs\n")
     (dest / "model.sig").write_bytes(b"fake-signature")
     (dest / "README.md").write_text("# Fake base for granite-switch tests\n")
+    # A real, complete index for the single shard: loaders (vLLM among them)
+    # trust an index when one exists and load only the files it names, so an
+    # empty weight_map would leave no weights to load at all.
+    from safetensors import safe_open
+
+    with safe_open(str(dest / "model.safetensors"), framework="pt") as f:
+        weight_map = {key: "model.safetensors" for key in f.keys()}
     (dest / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {}, "weight_map": {}})
+        json.dumps({"metadata": {}, "weight_map": weight_map}, indent=2)
     )
 
 
