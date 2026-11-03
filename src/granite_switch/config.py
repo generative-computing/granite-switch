@@ -6,6 +6,22 @@ from transformers import GraniteMoeHybridConfig
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 
+# Speech-to-text model the composer writes into an audio checkpoint when
+# --asr-model is not given: Granite Speech 5.0 TurboCTC, a 470M English conformer
+# CTC encoder. Serving has no fallback of its own; the config always names the
+# model, so a checkpoint on the Hub shows which ASR it runs.
+DEFAULT_ASR_MODEL_ID = "ibm-granite/granite-speech-5.0-470m-turboctc"
+
+# Hub commit DEFAULT_ASR_MODEL_ID is pinned to: its English-only release
+# (lowercase, unpunctuated). The repo's main branch moved to a multilingual
+# release on 2026-10-21 that capitalizes and punctuates, which silently changed
+# every transcript of an unpinned checkpoint.
+DEFAULT_ASR_MODEL_REVISION = "947f59af40db9791170a0628cf0f3f4812d720f1"
+
+# Subdirectory of the checkpoint that holds bundled ASR weights (compose
+# --bundle-asr), for airgapped serving with no Hub access.
+ASR_BUNDLE_DIR = "asr"
+
 # Decoder-layer cache slots the switch reserves at the front of the model when
 # adapters are present. MultiSwitch (the only engine) owns two: a counting slot
 # and a memory slot. Single source of truth, mirrored by
@@ -53,9 +69,19 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         Audio (ASR) preprocessing parameters (see docs/AUDIO.md):
             asr_enabled (bool): Register the audio preprocessor that transcribes
                 audio and splices the transcript into the prompt. Default: False.
-            asr_model_id (Optional[str]): HF id of the speech-to-text model. None
-                falls back to the built-in default (Granite Speech 5.0 TurboCTC,
-                a 470M English CTC encoder).
+            asr_model_id (Optional[str]): HF id of the speech-to-text model. The
+                composer always sets it (DEFAULT_ASR_MODEL_ID unless --asr-model
+                is given); serving refuses an audio checkpoint without it. With
+                asr_bundled_path set it records where the bundled copy came from.
+            asr_model_revision (Optional[str]): Hub revision (commit, tag or
+                branch) asr_model_id loads at. The composer pins the default model
+                to DEFAULT_ASR_MODEL_REVISION. None loads the repo's current main.
+                A "revision" in asr_pipeline_kwargs overrides it. Default: None.
+            asr_bundled_path (Optional[str]): Path of bundled ASR weights,
+                relative to the checkpoint directory (ASR_BUNDLE_DIR when composed
+                with --bundle-asr). When set, the ASR loads from there with no
+                network access and asr_model_id/asr_model_revision are not used
+                for loading. Default: None.
             asr_device (str): Device the ASR model runs on. Default "cuda" — the
                 default encoder is small and GPU-bound work is what makes it fast.
                 Set "cpu" to keep vLLM's GPU memory budget entirely for KV cache.
@@ -171,6 +197,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Audio (ASR) preprocessing parameters
         asr_enabled: bool = False,
         asr_model_id: str | None = None,
+        asr_model_revision: str | None = None,
+        asr_bundled_path: str | None = None,
         asr_device: str = "cuda",
         asr_dtype: str | None = None,
         asr_pipeline_kwargs: dict | None = None,
@@ -303,6 +331,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # fields make the checkpoint self-describing about its ASR front-end.
         self.asr_enabled = asr_enabled
         self.asr_model_id = asr_model_id
+        self.asr_model_revision = asr_model_revision
+        self.asr_bundled_path = asr_bundled_path
         self.asr_device = asr_device
         # Validated here so a typo fails at compose time, not in a vLLM worker.
         if asr_dtype is not None and asr_dtype not in ASR_DTYPES:
