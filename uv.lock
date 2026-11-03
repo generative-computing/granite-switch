@@ -1578,6 +1578,7 @@ name = "granite-switch"
 version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "jinja2" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-14-granite-switch-dev' or extra == 'group-14-granite-switch-test' or extra == 'group-14-granite-switch-vllm26' or (extra == 'group-14-granite-switch-dev-latest' and extra == 'group-14-granite-switch-dev-vllm27') or (extra == 'group-14-granite-switch-dev-latest' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-dev-vllm27' and extra == 'group-14-granite-switch-dev-vllm30') or (extra == 'group-14-granite-switch-dev-vllm27' and extra == 'group-14-granite-switch-vllm30') or (extra == 'group-14-granite-switch-dev-vllm30' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-vllm27' and extra == 'group-14-granite-switch-vllm30')" },
     { name = "torch", version = "2.13.0", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'group-14-granite-switch-dev-latest' or extra == 'group-14-granite-switch-dev-vllm27' or extra == 'group-14-granite-switch-dev-vllm30' or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-dev' and extra == 'group-14-granite-switch-vllm30') or (extra == 'group-14-granite-switch-test' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-test' and extra == 'group-14-granite-switch-vllm30') or (extra == 'group-14-granite-switch-vllm26' and extra == 'group-14-granite-switch-vllm27') or (extra == 'group-14-granite-switch-vllm26' and extra == 'group-14-granite-switch-vllm30') or (extra != 'group-14-granite-switch-dev' and extra != 'group-14-granite-switch-test' and extra != 'group-14-granite-switch-vllm26')" },
     { name = "transformers" },
@@ -1682,6 +1683,7 @@ requires-dist = [
     { name = "huggingface-hub", marker = "extra == 'build'" },
     { name = "huggingface-hub", marker = "extra == 'compose'" },
     { name = "ipython", marker = "extra == 'tutorials'", specifier = ">=8.10.0" },
+    { name = "jinja2", specifier = ">=3.1" },
     { name = "mellea", marker = "extra == 'tutorials'", specifier = "==0.6.0" },
     { name = "python-dotenv", marker = "extra == 'tutorials'", specifier = ">=1.0.0" },
     { name = "pyyaml", marker = "extra == 'build'" },

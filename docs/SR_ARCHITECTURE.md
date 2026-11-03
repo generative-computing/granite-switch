@@ -167,7 +167,10 @@ tokenizer.apply_chat_template(messages, add_generation_prompt=True,
 ```
 
 A list of the wrong length, or an entry that is not an SR adapter, raises. No
-effect when the current turn is base.
+effect when the current turn is base. A turn whose render has no assistant header
+(e.g. a 4.2 thinking answer stored without its leading `<think>\n`) is left
+unchanged, with no control token and no error: the base render already differs
+from what was sent there, so no token could make the cache hit.
 
 For the cache to hit, the caller must:
 

@@ -1771,6 +1771,163 @@ class TestShadowResidualHistoryAdapters:
         )
         assert rendered == "a"
 
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "{{ message.content }}"
+            "{%- if message.role == 'user' %}{% continue %}{% endif %}x",
+            "{{ message.content }}"
+            "{%- if message.content == 'b' %}{% break %}{% endif %}x",
+            "{%- for x in [1] %}{% else %}{% continue %}{% endfor %}",
+            "{% generation %}{{ message.content }}{% endgeneration %}",
+            "{%- for x in [1] %}{% generation %}x{% endgeneration %}{% endfor %}",
+            "{{ message.content }}{%- else %}empty",
+        ],
+        ids=[
+            "continue",
+            "break",
+            "in-inner-else",
+            "generation",
+            "nested-generation",
+            "for-else",
+        ],
+    )
+    def test_wrap_rejects_what_the_filter_would_break(self, body):
+        """Inside the per-message filter, continue/break drop the message's
+        output, a ``{% generation %}`` block gets the wrong assistant-mask
+        offsets, and an else block lands inside the filter, so compose refuses
+        each."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) %}"
+            "{%- for message in messages %}" + body + "{%- endfor %}END"
+        )
+        with pytest.raises(ValueError, match="does not support"):
+            _wrap_message_loop_for_history_adapters(template, "messages", "<x>", "<x>")
+
+    def test_wrap_rejects_a_template_that_does_not_parse(self):
+        template = "{%- for message in messages %}{{ message.content }}"
+        with pytest.raises(ValueError, match="does not parse"):
+            _wrap_message_loop_for_history_adapters(template, "messages", "<x>", "<x>")
+
+    def test_wrap_rejects_a_loop_copy_inside_a_comment(self):
+        """A whole loop inside a comment fools the tag scan but still parses
+        once wrapped; the real loop is left unwrapped, so compose refuses it."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) %}"
+            "{# e.g. {% for message in messages %}x{% endfor %} #}"
+            "{%- for message in messages %}{{ message.content }}{%- endfor %}"
+        )
+        with pytest.raises(ValueError, match="not the loop itself"):
+            _wrap_message_loop_for_history_adapters(template, "messages", "<x>", "<x>")
+
+    def test_wrap_parses_generation_blocks_outside_the_loop(self):
+        """HF's ``{% generation %}`` tag parses here, so a template that uses it
+        outside the message loop is still validated and wrapped."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) %}"
+            "{%- for message in messages %}{{ message.content }}{%- endfor %}"
+            "{% generation %}G{% endgeneration %}"
+        )
+        wrapped = _wrap_message_loop_for_history_adapters(
+            template, "messages", "<x>", "<x>"
+        )
+        assert "{% filter " in wrapped
+
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_chatml_answer_without_header_is_left_unchanged(self, enable_thinking):
+        """A 4.2 answer stored mid-thought (no leading ``<think>``) renders no
+        header, so its turn gets no control token and nothing raises: the
+        render matches the one without ``history_adapters``."""
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "R1\n</think>\nA1"},
+            {"role": "user", "content": "Q2"},
+        ]
+        kwargs = {"enable_thinking": enable_thinking, "adapter_name": "sr1"}
+        tokenizer = self._chatml()
+        with_history = self._render(
+            tokenizer, messages, history_adapters=["sr2"], **kwargs
+        )
+        without = self._render(tokenizer, messages, **kwargs)
+        assert with_history == without
+        assert "<|sr2|>" not in with_history
+
+    def test_wrap_allows_loop_controls_in_a_nested_loop(self):
+        """A loop control in an inner loop stays inside that loop."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) %}"
+            "{%- for message in messages %}"
+            "{%- for x in [1, 2] %}{% if x == 2 %}{% break %}{% endif %}"
+            "{{ message.content }}{% endfor %}"
+            "{%- endfor %}"
+        )
+        wrapped = _wrap_message_loop_for_history_adapters(
+            template, "messages", "<x>", "<x>"
+        )
+        env = Environment(extensions=["jinja2.ext.loopcontrols"])
+        messages = [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+        assert env.from_string(wrapped).render(messages=messages) == "ab"
+
+    @pytest.mark.parametrize(
+        "template",
+        [
+            "X {% for message in messages %}{{ message.content }} {% endfor %}END",
+            "X {%- for message in messages %}{{ message.content }}{% endfor %}END",
+            "X {% for message in messages -%} {{ message.content }}{%- endfor %} END",
+            "X {%- for message in messages -%}{{ message.content }}{%- endfor -%} END",
+            "X\n{% for message in messages %}\n{{ message.content }}\n{% endfor %}\nEND",
+            "X\n  {%+ for message in messages %}{{ message.content }}\n  {%+ endfor %}END",
+            "X\n{% for message in messages +%}\n{{ message.content }}{% endfor %}END",
+        ],
+        ids=[
+            "no-dash",
+            "lead-dash",
+            "trail-dash",
+            "all-dash",
+            "newlines",
+            "plus",
+            "trail-plus",
+        ],
+    )
+    @pytest.mark.parametrize("hf_flags", [False, True], ids=["plain", "hf-flags"])
+    def test_wrap_preserves_whitespace_when_unused(self, template, hf_flags):
+        """The inserted tags copy the loop tags' whitespace control, so without
+        ``history_adapters`` the render matches the original for any style."""
+        template = (
+            "{%- set ns = namespace(adapter_type='', assistant_idx=0) -%}" + template
+        )
+        wrapped = _wrap_message_loop_for_history_adapters(
+            template, "messages", "<x>", "<x>"
+        )
+        env = Environment(trim_blocks=hf_flags, lstrip_blocks=hf_flags)
+        messages = [{"role": "user", "content": "a"}, {"role": "user", "content": "b"}]
+        assert env.from_string(wrapped).render(messages=messages) == env.from_string(
+            template
+        ).render(messages=messages)
+
+    @pytest.mark.parametrize("enable_thinking", [False, True])
+    def test_chatml_answer_starting_with_the_site_is_not_rewritten(
+        self, enable_thinking
+    ):
+        """An answer that *starts* with ``<think>`` completes the bare header
+        text, so only matching the full generation-prompt literal leaves it
+        alone. The restored thinking-on form still gets its token
+        (``test_chatml_thinking_prefix_holds_with_think_restored``)."""
+        messages = [
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "<think> is the tag"},
+            {"role": "user", "content": "Q2"},
+        ]
+        result = self._render(
+            self._chatml(),
+            messages,
+            enable_thinking=enable_thinking,
+            adapter_name="sr1",
+            history_adapters=["sr2"],
+        )
+        assert "<|im_start|>assistant\n<think> is the tag<|im_end|>" in result
+        assert "<|sr2|>" not in result
+
 
 class TestShadowResidualHistoryAdaptersTokenIds:
     """The prefix relation on token ids, with the real Granite tokenizers.

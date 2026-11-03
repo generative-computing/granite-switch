@@ -10,6 +10,8 @@ import re
 from dataclasses import dataclass
 
 import jinja2
+import jinja2.ext
+import jinja2.nodes
 
 from .adapter_loader import load_adapter_config
 
@@ -465,7 +467,7 @@ def _resolve_sr_substitution_site(region: str, anchor: str, tokenizer) -> str:
 
 def _replace_anchor_in_generation_prompt(
     template: str, anchor: str, tokenizer
-) -> tuple[str, str, int]:
+) -> tuple[str, str, int, str, list[str]]:
     """Make every generation-prompt branch emit the control token in place of
     one token.
 
@@ -484,9 +486,12 @@ def _replace_anchor_in_generation_prompt(
         tokenizer: Used to check candidate sites are a single token.
 
     Returns:
-        ``(patched_template, site, num_replacements)`` where *site* is the
-        literal actually replaced — the anchor itself unless the branches forced
-        an earlier common token (see :func:`_resolve_sr_substitution_site`).
+        ``(patched_template, site, num_replacements, header, literals)`` where
+        *site* is the literal actually replaced — the anchor itself unless the
+        branches forced an earlier common token (see
+        :func:`_resolve_sr_substitution_site`) — and *header* / *literals* are
+        what the ``history_adapters`` wrap matches (see
+        :func:`_sr_history_header`), taken from the same branches.
 
     Raises:
         ValueError: If there is no ``add_generation_prompt`` block, if the site
@@ -555,12 +560,78 @@ def _replace_anchor_in_generation_prompt(
             f"control token, otherwise the ones that miss it render an adapter "
             f"that never activates."
         )
-    return head + region, site, count
+    header, history_literals = _sr_history_header(
+        [_unescape_literal(body) for body in literals], site
+    )
+    return head + region, site, count, header, history_literals
 
 
 #: A ``for`` / ``endfor`` statement tag, for depth-matching the message loop.
 #: Accepts every whitespace-control spelling: ``{%``, ``{%-`` and ``{%+``.
 _FOR_TAG_RE = re.compile(r"\{%[-+]?\s*(for|endfor)\b")
+
+
+class _GenerationTag(jinja2.ext.Extension):
+    """Parses HF's ``{% generation %}`` block (assistant-token masking) so that
+    templates using it parse here too; the block is marked so the
+    ``history_adapters`` wrap can refuse one inside the message loop."""
+
+    tags = {"generation"}
+
+    def parse(self, parser):
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+        # Jinja forbids custom node types, so the block is an ordinary scope
+        # carrying an extension attribute that marks it.
+        return jinja2.nodes.Scope(
+            [jinja2.nodes.ExtensionAttribute(self.identifier, "generation"), *body],
+            lineno=lineno,
+        )
+
+
+def _is_generation_block(node: "jinja2.nodes.Node") -> bool:
+    return (
+        isinstance(node, jinja2.nodes.Scope)
+        and bool(node.body)
+        and isinstance(node.body[0], jinja2.nodes.ExtensionAttribute)
+        and node.body[0].identifier == _GenerationTag.identifier
+    )
+
+
+#: Parses chat templates the way HF's renderer accepts them.
+_TEMPLATE_PARSE_ENV = jinja2.Environment(
+    extensions=["jinja2.ext.loopcontrols", _GenerationTag]
+)
+
+
+def _message_loop_node(tree: "jinja2.nodes.Template", loop_var_source: str):
+    """The first ``for message in <loop_var_source>`` loop in *tree*, or None."""
+    for node in tree.find_all(jinja2.nodes.For):
+        if (
+            isinstance(node.target, jinja2.nodes.Name)
+            and node.target.name == "message"
+            and isinstance(node.iter, jinja2.nodes.Name)
+            and node.iter.name == loop_var_source
+        ):
+            return node
+    return None
+
+
+def _has_own_loop_control(nodes_: list) -> bool:
+    """Whether *nodes_* hold a ``continue``/``break`` that belongs to their own
+    loop, i.e. one not inside a nested ``for``."""
+    for node in nodes_:
+        if isinstance(node, (jinja2.nodes.Continue, jinja2.nodes.Break)):
+            return True
+        if isinstance(node, jinja2.nodes.For):
+            # Its body's controls are the inner loop's; only its else-block
+            # runs in the outer loop's iteration.
+            if _has_own_loop_control(node.else_):
+                return True
+            continue
+        if _has_own_loop_control(list(node.iter_child_nodes())):
+            return True
+    return False
 
 
 def _jinja_string_literal(text: str) -> str:
@@ -569,21 +640,22 @@ def _jinja_string_literal(text: str) -> str:
     return "'" + escaped + "'"
 
 
-def _sr_history_header(template: str, site: str) -> str:
-    """The rendered assistant header, through *site*, that history turns repeat.
+def _sr_history_header(literals: list[str], site: str) -> tuple[str, list[str]]:
+    """The rendered assistant header, through *site*, that history turns repeat,
+    and the generation prompt's full *literals* (rendered text) that start with it.
 
-    Taken from the base template's generation prompt: every branch opens with
-    the same assistant header, and a history assistant turn renders that same
-    header before its content (``<|start_of_role|>assistant<|end_of_role|>`` on
-    4.1, ``<|im_start|>assistant\\n<think>`` on 4.2, where the history turn
-    continues ``</think>``).
+    Every generation-prompt branch opens with the same assistant header, and a
+    history assistant turn renders that same header before its content
+    (``<|start_of_role|>assistant<|end_of_role|>`` on 4.1,
+    ``<|im_start|>assistant\\n<think>`` on 4.2, where the history turn continues
+    ``</think>``). The full literals (4.2: ``...<think>\\n`` and
+    ``...<think></think>``) are what a history turn renders when the template
+    wrote the header itself, so matching them rather than the bare header keeps
+    an answer that merely starts with *site* untouched.
 
     Raises:
-        ValueError: If the generation prompt's branches share no prefix that
-            contains *site*.
+        ValueError: If the branches share no prefix that contains *site*.
     """
-    _, region = _split_at_generation_prompt(template)
-    literals = [_unescape_literal(body) for body in _generation_prompt_literals(region)]
     prefix = os.path.commonprefix(literals) if literals else ""
     cut = prefix.rfind(site)
     if cut == -1:
@@ -592,11 +664,17 @@ def _sr_history_header(template: str, site: str) -> str:
             f"Shadow Residual substitution site {site!r} ({literals!r}), so the "
             f"history_adapters rewrite has no header to match."
         )
-    return prefix[: cut + len(site)]
+    header = prefix[: cut + len(site)]
+    # Longest first, so a literal that extends another is tried before it.
+    return header, sorted(set(literals), key=len, reverse=True)
 
 
 def _wrap_message_loop_for_history_adapters(
-    template: str, loop_var_source: str, header: str, site: str
+    template: str,
+    loop_var_source: str,
+    header: str,
+    site: str,
+    literals: list[str] | None = None,
 ) -> str:
     """Let ``history_adapters`` put SR control tokens back into history turns.
 
@@ -607,19 +685,32 @@ def _wrap_message_loop_for_history_adapters(
     assistant message; this rewrites that message's header back so its *site*
     is the control token.
 
-    The match is on the whole *header* (e.g. ``<|im_start|>assistant\\n<think>``),
-    which ends in *site*, not on *site* alone. Granite 4.2 writes its own
-    ``<think></think>`` only when the answer has no think tags, so for an answer
-    that mentions ``<think>`` the first bare ``<think>`` is the answer's text; the
-    header text cannot occur there.
+    The match is on each full generation-prompt *literal* (e.g. 4.2's
+    ``<|im_start|>assistant\\n<think></think>`` and ``...<think>\\n``), each of
+    which starts with *header*, not on *site* or *header* alone. Granite 4.2
+    writes its own ``<think></think>`` only when the answer has no think tags,
+    so for an answer that mentions ``<think>`` -- even at its very start -- the
+    first ``<think>`` is the answer's text, and only the full literal tells the
+    two apart. The thinking-on form a caller stores (``"<think>\\n"`` + answer)
+    renders the ``...<think>\\n`` literal, so it still gets its token. Only an
+    answer that itself starts with a full literal's tail (``<think>\\n`` or
+    ``<think></think>``) is indistinguishable from the header. *literals*
+    defaults to ``[header]``.
 
-    The main loop body is wrapped in ``{% filter replace(header, new, 1) %}``,
-    so the replacement applies to the body's rendered text, rather than
-    rewriting each assistant emission in the source: the 4.2 template emits the
-    assistant header from several branches and reads ``<think>`` in its own
+    The replacement applies to each message's rendered text rather than to
+    each assistant emission in the source: the 4.2 template emits the assistant
+    header from several branches and reads ``<think>`` in its own
     history-truncation logic, so a token placed in the source would be seen
     (and stripped, or misread) by that logic. Rendered-text replacement runs
     after it and is indifferent to which branch ran.
+
+    Each message's body is wrapped in a ``{% filter %}`` that does the
+    replacement. A ``{% continue %}`` / ``{% break %}`` would leave that filter
+    before it prints, dropping the message's output, and HF's
+    ``{% generation %}`` would take its assistant-mask offsets from text the
+    filter has not printed yet. A message loop that uses either (a nested
+    loop's own continue/break are fine), or has a ``{% else %}``, is rejected
+    at compose time.
 
     Only applied when the current turn is SR (``ns.adapter_type == 'sr'``): a
     base turn after a kept SR token would generate under SR (latest-wins).
@@ -628,16 +719,49 @@ def _wrap_message_loop_for_history_adapters(
     (``None`` for a turn that had no adapter); any other length raises.
 
     Raises:
-        ValueError: If *header* does not end in *site*, the template has no
-            main message loop with a matching ``endfor``, or the wrapped
-            template no longer parses (e.g. an ``endfor`` inside a comment
-            fooled the tag scan).
+        ValueError: If *header* does not end in *site*, the template does not
+            parse, has no main message loop with a matching ``endfor``, uses
+            ``continue``/``break``, ``{% generation %}`` or ``{% else %}`` in
+            that loop, or the tag scan misread a
+            comment or string as the loop (the result does not parse, or the
+            real loop is left unwrapped).
     """
     if not header.endswith(site):
         raise ValueError(
             f"history_adapters header {header!r} does not end in the Shadow "
             f"Residual substitution site {site!r}."
         )
+    literals = literals or [header]
+    try:
+        tree = _TEMPLATE_PARSE_ENV.parse(template)
+    except jinja2.TemplateSyntaxError as exc:
+        raise ValueError(
+            f"The chat template does not parse ({exc}), so history_adapters "
+            f"cannot be added to it."
+        ) from exc
+    loop = _message_loop_node(tree, loop_var_source)
+    if loop is not None:
+        # Each would misbehave inside the per-message filter: continue/break
+        # leave it before it prints, dropping the message's output; HF's
+        # generation block takes its assistant-mask offsets from text the
+        # filter has not printed yet; an else block would land inside it.
+        if loop.else_:
+            unsupported = "an else block"
+        elif any(
+            _is_generation_block(node)
+            for body_node in loop.body
+            for node in [body_node, *body_node.find_all(jinja2.nodes.Scope)]
+        ):
+            unsupported = "a {% generation %} block"
+        elif _has_own_loop_control(loop.body):
+            unsupported = "continue/break"
+        else:
+            unsupported = None
+        if unsupported is not None:
+            raise ValueError(
+                f"The chat template's message loop uses {unsupported}, which "
+                f"history_adapters does not support (line {loop.lineno})."
+            )
     open_tag = re.search(
         r"\{%[-+]?\s*for message in " + re.escape(loop_var_source) + r"\s*[-+]?%\}",
         template,
@@ -659,52 +783,74 @@ def _wrap_message_loop_for_history_adapters(
             "history_adapters has nothing to wrap."
         )
 
+    # Each inserted tag copies the whitespace control of the loop tag it sits
+    # next to, so the wrap neither strips nor adds whitespace when unused.
+    # ``+`` is copied too: under ``lstrip_blocks`` it keeps the indentation
+    # before the tag, which a plain inserted tag would strip.
+    def _control(char: str) -> str:
+        return char if char in "-+" else ""
+
+    lead = _control(open_tag.group(0)[2])
+    trail = _control(open_tag.group(0)[-3])
+    close_lead = _control(template[close_at + 2])
     # Checked once, before the loop: a list that does not line up one-to-one
     # with the assistant messages is a caller bug, and silently padding or
     # truncating it would put tokens on the wrong turns.
     precheck = (
-        "{%- if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
-        " and history_adapters is defined and history_adapters is not none %}\n"
-        "{%- if history_adapters is string or history_adapters is mapping"
-        " or history_adapters is not iterable %}\n"
-        "{{- raise_exception('history_adapters must be a list of adapter names "
-        "(or none), one per assistant message') }}\n"
-        "{%- endif %}\n"
-        "{%- set _gs_expected = " + loop_var_source + " | selectattr('role', "
-        "'equalto', 'assistant') | list | length %}\n"
-        "{%- if history_adapters | length != _gs_expected %}\n"
-        "{{- raise_exception('history_adapters has ' ~ (history_adapters | length)"
+        "{%" + lead + " if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        " and history_adapters is defined and history_adapters is not none %}"
+        "{% if history_adapters is string or history_adapters is mapping"
+        " or history_adapters is not iterable %}"
+        "{{ raise_exception('history_adapters must be a list of adapter names "
+        "(or none), one per assistant message') }}"
+        "{% endif %}"
+        "{% set _gs_expected = " + loop_var_source + " | selectattr('role', "
+        "'equalto', 'assistant') | list | length %}"
+        "{% if history_adapters | length != _gs_expected %}"
+        "{{ raise_exception('history_adapters has ' ~ (history_adapters | length)"
         " ~ ' entries but the conversation has ' ~ _gs_expected ~ ' assistant "
         "messages; pass exactly one entry (an adapter name or none) per "
-        "assistant message') }}\n"
-        "{%- endif %}\n"
-        "{%- for _gs_entry in history_adapters %}\n"
+        "assistant message') }}"
+        "{% endif %}"
+        "{% for _gs_entry in history_adapters %}"
         # ``is not string`` first: ``or`` short-circuits, so an unhashable entry
         # never reaches the ``in`` lookup and gets this message, not a TypeError.
-        "{%- if _gs_entry is not none and (_gs_entry is not string"
+        "{% if _gs_entry is not none and (_gs_entry is not string"
         " or _gs_entry not in adapter_map"
-        " or adapter_map[_gs_entry]['type'] != '" + ANCHOR_MODE_SR + "') %}\n"
-        "{{- raise_exception('history_adapters names ' ~ _gs_entry ~ ', which is "
-        "not a Shadow Residual adapter of this checkpoint') }}\n"
-        "{%- endif %}\n"
-        "{%- endfor %}\n"
-        "{%- endif %}\n"
+        " or adapter_map[_gs_entry]['type'] != '" + ANCHOR_MODE_SR + "') %}"
+        "{{ raise_exception('history_adapters names ' ~ _gs_entry ~ ', which is "
+        "not a Shadow Residual adapter of this checkpoint') }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% endif %}"
     )
-    # Picks this message's replacement before its body renders; the default
-    # (header -> header) leaves the body untouched.
+    # Every literal gets a replace, but at most one matches the header: the
+    # rest would need the full literal, role marker included, inside the answer.
+    # With ``_gs_tok`` left at *site* every replace is a no-op.
+    head = header[: len(header) - len(site)]
+    replaces = " | ".join(
+        "replace("
+        + _jinja_string_literal(literal)
+        + ", "
+        + _jinja_string_literal(head)
+        + " ~ _gs_tok ~ "
+        + _jinja_string_literal(literal[len(header) :])
+        + ", 1)"
+        for literal in literals
+    )
+    # Picks this message's token before its body renders. The last tag copies
+    # the loop tag's trailing whitespace control, since the body now follows it.
     choose = (
-        "\n{%- set _gs_new = " + _jinja_string_literal(header) + " %}\n"
-        "{%- if message.role == 'assistant' %}\n"
-        "{%- if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        "{% set _gs_tok = " + _jinja_string_literal(site) + " %}"
+        "{% if message.role == 'assistant' %}"
+        "{% if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
         " and history_adapters is defined and history_adapters is not none"
-        " and history_adapters[ns.assistant_idx] is not none %}\n"
-        "{%- set _gs_new = "
-        + _jinja_string_literal(header[: len(header) - len(site)])
-        + " ~ adapter_map[history_adapters[ns.assistant_idx]]['token'] %}\n"
-        "{%- endif %}\n"
-        "{%- set ns.assistant_idx = ns.assistant_idx + 1 %}\n"
-        "{%- endif %}\n"
-        "{%- filter replace(" + _jinja_string_literal(header) + ", _gs_new, 1) %}"
+        " and history_adapters[ns.assistant_idx] is not none %}"
+        "{% set _gs_tok = adapter_map[history_adapters[ns.assistant_idx]]['token'] %}"
+        "{% endif %}"
+        "{% set ns.assistant_idx = ns.assistant_idx + 1 %}"
+        "{% endif %}"
+        "{% filter " + replaces + " " + trail + "%}"
     )
     wrapped = (
         template[: open_tag.start()]
@@ -712,21 +858,18 @@ def _wrap_message_loop_for_history_adapters(
         + template[open_tag.start() : open_tag.end()]
         + choose
         + template[open_tag.end() : close_at]
-        + "{%- endfilter %}\n"
+        + "{%"
+        + close_lead
+        + " endfilter %}"
         + template[close_at:]
     )
 
-    # The tag scan is textual, so a template it misreads composes fine and then
-    # fails at render time. Parse both versions to catch that here instead; a
-    # template that does not parse even before the wrap (an extension tag this
-    # environment lacks) is left for the real renderer to judge.
-    env = jinja2.Environment(extensions=["jinja2.ext.loopcontrols"])
+    # The tag scan is textual, so it can misread a comment or a string as the
+    # loop. Check the parsed result instead: a misread either leaves an inserted
+    # tag unbalanced, or wraps text that is not the real loop, whose body then
+    # has no filter.
     try:
-        env.parse(template)
-    except jinja2.TemplateSyntaxError:
-        return wrapped
-    try:
-        env.parse(wrapped)
+        wrapped_tree = _TEMPLATE_PARSE_ENV.parse(wrapped)
     except jinja2.TemplateSyntaxError as exc:
         raise ValueError(
             f"Wrapping the chat template's message loop for history_adapters "
@@ -734,6 +877,15 @@ def _wrap_message_loop_for_history_adapters(
             f"endfor was probably mis-identified, e.g. one inside a comment or "
             f"a string."
         ) from exc
+    wrapped_loop = _message_loop_node(wrapped_tree, loop_var_source)
+    if wrapped_loop is None or not any(
+        isinstance(node, jinja2.nodes.FilterBlock) for node in wrapped_loop.body
+    ):
+        raise ValueError(
+            "Wrapping the chat template's message loop for history_adapters "
+            "wrapped text that is not the loop itself, e.g. a copy of it inside "
+            "a comment or a string."
+        )
     return wrapped
 
 
@@ -1546,6 +1698,8 @@ def configure_chat_template(
             modified_chat_template,
             sr_site,
             sr_replacements,
+            sr_header,
+            sr_literals,
         ) = _replace_anchor_in_generation_prompt(
             modified_chat_template, next(iter(sr_anchors)), tokenizer
         )
@@ -1560,8 +1714,9 @@ def configure_chat_template(
         modified_chat_template = _wrap_message_loop_for_history_adapters(
             modified_chat_template,
             fmt.loop_var_source,
-            _sr_history_header(base_chat_template, sr_site),
+            sr_header,
             sr_site,
+            sr_literals,
         )
 
     # Skip-once wrapper for every role-open marker emission in the template.
