@@ -94,6 +94,7 @@ from pathlib import Path
 import pytest
 
 from tests.shared import model_sources
+from tests.shared.fake_bases import LIVE_LAYERS
 
 WORKER = Path(__file__).parent / "_multi_adapter_equivalence_worker.py"
 #: One base per Granite chat-template family: 4.1-3b renders the
@@ -160,7 +161,10 @@ def _resolve_case(case):
         return case
     source, base, flavor = case
     if source == "fake":
-        return model_sources.base_model("fake", base), flavor
+        # LIVE_LAYERS: the `distinct` check needs every adapter to move the output,
+        # which the default fake base's barely-reached layers cannot do (see
+        # tests/shared/fake_bases.py).
+        return model_sources.base_model("fake", base, preset=LIVE_LAYERS), flavor
     return base, flavor
 
 

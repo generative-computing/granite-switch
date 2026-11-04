@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 
 import torch
@@ -193,33 +194,52 @@ def _write_tokenizer(dest: Path, tokenizer_config: dict) -> None:
     tokenizer.save(str(dest / "tokenizer.json"))
 
 
-#: Random-weight scales, chosen so the fake behaves like a trained model in the two
-#: ways the tests depend on: every sublayer must matter (an adapter on attention
-#: or the MLP has to reach the output), and the next-token distribution must be
-#: peaked rather than flat (tests compare distributions). Measured on the tiny
-#: geometry with the real Granite multipliers, which a naive init gets badly wrong:
-#:
-#:   body 0.02, head 1.0, final norm 1  -> zeroing every attention or MLP output
-#:       changes nothing (JSD 0.000): the 12x embedding_multiplier swamps layers
-#:       whose output is further shrunk by residual_multiplier 0.22.
-#:   body 1.0, head 1.0, final norm 1   -> layers matter (JSD 0.29 / 0.34) but the
-#:       output is near-uniform (entropy 10.9 of 11.5 nats).
-#:   body 1.0, head 1.0, final norm 4   -> both: dropping attention or the MLP moves
-#:       the output by JSD 0.98 / 0.99, entropy ~4 nats, top-1 ~0.27.
-#:
-#: Larger final-norm gains saturate toward one-hot, as uninformative as flat.
-BODY_SCALE = 1.0
-EMBED_SCALE = 1.0
-FINAL_NORM_GAIN = 4.0
+@dataclass(frozen=True)
+class WeightPreset:
+    """Random-weight scales for a fake base.
+
+    ``body``: std of the decoder-layer projections. ``embed``: std of the token
+    embedding (and the untied head). ``final_norm``: the final RMSNorm's gain,
+    which sets how peaked the next-token distribution is.
+    """
+
+    body: float
+    embed: float
+    final_norm: float
 
 
-def _scale(key: str) -> float:
+#: Two presets, because on a 2-layer, hidden-128 model with the REAL Granite
+#: multipliers (embedding_multiplier 12, residual_multiplier 0.22, logits_scaling
+#: 10) no single set of scales gives both properties a trained 40-layer model has.
+#: Measured on the tiny geometry:
+#:
+#:   ``REALISTIC`` (the default): body 0.02, embed 0.02, final norm 1. Activations
+#:       stay small (hidden-state rms ~0.24), which the tests comparing EXACT
+#:       scores need: test_probe_chunked_prefill checks probe scores to +/- 0.3
+#:       against an fp32 reference, test_tp_integration TP=1 vs TP=2 logprobs.
+#:       But the layers barely reach the output (zeroing every attention or MLP
+#:       output changes it by JSD 0.000) and the output is near-uniform.
+#:   ``LIVE_LAYERS``: body 1.0, embed 1.0, final norm 4. Every sublayer matters
+#:       (dropping attention or the MLP moves the output by JSD 0.98 / 0.99) and
+#:       the output is peaked (entropy ~4 nats), which tests that need an adapter
+#:       to MOVE the output depend on: test_multi_adapter_equivalence's `distinct`
+#:       check. But intermediate hidden states reach rms ~340, where bf16 rounding
+#:       (~+/-16 at a score of ~2000) breaks those exact-score tolerances.
+#:
+#: Between the two, the layers either do not matter or the residual grows: the
+#: 12x embedding has to be matched for a layer to count. The real model gets both
+#: through depth. So a test asks for the one its assertions need.
+REALISTIC = WeightPreset(body=0.02, embed=0.02, final_norm=1.0)
+LIVE_LAYERS = WeightPreset(body=1.0, embed=1.0, final_norm=4.0)
+
+
+def _scale(key: str, preset: WeightPreset) -> float:
     if key in ("model.embed_tokens.weight", "lm_head.weight"):
-        return EMBED_SCALE
-    return BODY_SCALE
+        return preset.embed
+    return preset.body
 
 
-def _write_weights(dest: Path, config: dict, seed: int) -> None:
+def _write_weights(dest: Path, config: dict, seed: int, preset: WeightPreset) -> None:
     """Seeded random weights of the shrunk shape, keyed per tensor name."""
     hidden = config["hidden_size"]
     inter = config["intermediate_size"]
@@ -250,22 +270,25 @@ def _write_weights(dest: Path, config: dict, seed: int) -> None:
     # load round the same way they do on the real checkpoint.
     dtype = getattr(torch, config.get("torch_dtype") or "float32")
     sd = {
-        key: _randn(key, seed, *shape, scale=_scale(key)).to(dtype)
+        key: _randn(key, seed, *shape, scale=_scale(key, preset)).to(dtype)
         for key, shape in shapes.items()
     }
     for layer in range(config["num_hidden_layers"]):
         p = f"model.layers.{layer}"
         sd[f"{p}.input_layernorm.weight"] = torch.ones(hidden, dtype=dtype)
         sd[f"{p}.post_attention_layernorm.weight"] = torch.ones(hidden, dtype=dtype)
-    sd["model.norm.weight"] = torch.full((hidden,), FINAL_NORM_GAIN, dtype=dtype)
+    sd["model.norm.weight"] = torch.full((hidden,), preset.final_norm, dtype=dtype)
     save_file(sd, str(dest / "model.safetensors"))
 
 
-def build_fake_base(name: str, dest, *, seed: int = 0) -> Path:
+def build_fake_base(
+    name: str, dest, *, seed: int = 0, preset: WeightPreset = REALISTIC
+) -> Path:
     """Write a loadable tiny ``name`` base to ``dest`` and return its path.
 
     ``name`` is a key of :data:`BASES`. Composes with the real CLI and loads with
     ``from_pretrained``; see the module docstring for what is real and what is not.
+    ``preset`` picks the random-weight scales (see :data:`REALISTIC`).
     """
     src = FIXTURES / name
     if not src.is_dir():
@@ -280,7 +303,7 @@ def build_fake_base(name: str, dest, *, seed: int = 0) -> Path:
     (dest / "config.json").write_text(json.dumps(config, indent=2))
     tokenizer_config = json.loads((src / "tokenizer_config.json").read_text())
     _write_tokenizer(dest, tokenizer_config)
-    _write_weights(dest, config, seed)
+    _write_weights(dest, config, seed, preset)
     _write_repo_extras(dest)
     return dest
 
@@ -322,4 +345,11 @@ if __name__ == "__main__":
     main()
 
 
-__all__ = ["BASES", "build_fake_base", "capture"]
+__all__ = [
+    "BASES",
+    "LIVE_LAYERS",
+    "REALISTIC",
+    "WeightPreset",
+    "build_fake_base",
+    "capture",
+]
