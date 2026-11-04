@@ -257,12 +257,24 @@ jobs:
               LEG="$LABEL-multi"
               GPU_COUNT="2"
               ;;
-            # The adapter evals: tier-1 drift checks that compare this commit's
-            # adapter output against the committed baselines in
-            # tests/eval/baselines/. Selected by MARKER and restricted to
-            # tests/eval/ -- every other scope excludes them, because `eval` is
-            # not in pyproject's default `-m "not deep"` selection and the files
-            # need adapter checkpoints staged on the pod.
+            # The adapter evals: tier-1 drift checks comparing this commit's
+            # adapter output against recorded baselines. Selected by MARKER and
+            # restricted to tests/eval/ -- every other scope excludes them,
+            # because `eval` is not in pyproject's default `-m "not deep"`
+            # selection and the files need adapter checkpoints staged on the pod.
+            #
+            # BOTH EVAL ARMS FAIL ON main, WHERE tests/eval/ IS EMPTY. The suite
+            # and its baselines are not part of this repository: they belong to
+            # the internal upgrade-vllm skill, which commits them to an upgrade
+            # branch for the shas it dispatches and removes them before the PR
+            # goes ready. The pod does no checkout of its own -- submit_and_poll.sh
+            # fetches THIS repo at the dispatched sha as a tarball -- so that is
+            # the only route by which the suite can reach it.
+            #
+            # These arms are kept rather than deleted because they are what the
+            # skill dispatches against, on a branch where the files are present.
+            # `suite=eval` on main gives a collection error: that is the files
+            # being absent, not a broken workflow.
             #
             # "and not deep" for the same reason as `audio`: -m on the command
             # line REPLACES addopts' `-m "not deep"` instead of intersecting with
@@ -273,8 +285,8 @@ jobs:
               LEG="$LABEL-eval"
               ;;
             # RECORDS the baselines the `eval` scope checks against, printing each
-            # into the log for a human to extract and commit. Writes nothing to the
-            # repo -- see tests/eval/test_record_baselines.py.
+            # into the log for a human to extract and commit TO THE SKILL. Writes
+            # nothing to the repo -- see the injected test_record_baselines.py.
             #
             # Recording happens HERE, on the runner that does the checking, because
             # a baseline recorded elsewhere was not reproducible here: a Vela-
