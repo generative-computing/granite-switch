@@ -123,7 +123,10 @@ network fails at compose time, not at serve time. Only safetensors models can be
 bundled.
 
 `--asr-model` may also be a local directory, so the bundle can be built inside the
-airgapped network from a copy of the ASR repo brought in by hand.
+airgapped network from a copy of the ASR repo brought in by hand. A local
+directory needs `--bundle-asr` (a plain `--enable-audio` checkpoint would point at
+a path that exists on the build machine only), and the config records it by its
+directory name, not its full path.
 
 Serve it with the Hub switched off:
 

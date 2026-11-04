@@ -72,7 +72,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             asr_model_id (Optional[str]): HF id of the speech-to-text model. The
                 composer always sets it (DEFAULT_ASR_MODEL_ID unless --asr-model
                 is given); serving refuses an audio checkpoint without it. With
-                asr_bundled_path set it records where the bundled copy came from.
+                asr_bundled_path set it records where the bundled copy came from
+                (a local source by its directory name only).
             asr_model_revision (Optional[str]): Hub revision (commit, tag or
                 branch) asr_model_id loads at. The composer pins the default model
                 to DEFAULT_ASR_MODEL_REVISION. None loads the repo's current main.

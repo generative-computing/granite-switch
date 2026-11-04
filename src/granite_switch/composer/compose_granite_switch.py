@@ -628,12 +628,26 @@ def _resolve_asr_model(args) -> tuple[str, str | None]:
     The default model is pinned to DEFAULT_ASR_MODEL_REVISION. A custom model
     takes --asr-revision as given; without one it loads the repo's current main
     at serve time, which can change under the checkpoint, so that is warned.
+
+    A local directory is only a bundle source: without --bundle-asr serving
+    would load a path that exists on this machine alone, so it is refused. With
+    --bundle-asr the config records the directory's name, not its path, which
+    would leak the builder's filesystem into a published checkpoint.
     """
     model_id = args.asr_model or DEFAULT_ASR_MODEL_ID
+    if os.path.isdir(model_id):
+        if not args.bundle_asr:
+            raise ValueError(
+                f"--asr-model {model_id} is a local directory, which only "
+                f"--bundle-asr can use: serving loads asr_model_id from the Hub, "
+                f"and this path exists on this machine alone. Add --bundle-asr, "
+                f"or pass a Hub repo id."
+            )
+        return os.path.basename(os.path.normpath(model_id)), args.asr_revision
     revision = args.asr_revision
     if revision is None and model_id == DEFAULT_ASR_MODEL_ID:
         revision = DEFAULT_ASR_MODEL_REVISION
-    if revision is None and not os.path.isdir(model_id):
+    if revision is None:
         print(
             f"  WARNING: --asr-model {model_id} has no --asr-revision; it will "
             f"load the repo's current main at serve time, so its transcripts can "
@@ -955,7 +969,8 @@ Examples:
         default=None,
         help="HF id of the speech-to-text model the audio preprocessor loads, "
         "written to asr_model_id. With --bundle-asr it may also be a local "
-        f"directory. Requires --enable-audio; ignored without it. Defaults to "
+        "directory, recorded in the config by its name only. Requires "
+        "--enable-audio; ignored without it. Defaults to "
         f"{DEFAULT_ASR_MODEL_ID} (470M English CTC) when unset.",
     )
     parser.add_argument(
@@ -1315,6 +1330,10 @@ def build():
     # checkpoint with no diagnostic. A single explicit flag has no such gap, and
     # nothing to keep in step when an --asr-* option is added.
     audio_enabled = args.enable_audio or args.bundle_asr
+    # Resolved before the model is built, so a refused --asr-model fails fast.
+    asr_model_id, asr_revision = (
+        _resolve_asr_model(args) if audio_enabled else (None, None)
+    )
     # The control tokens are re-passed so this call doesn't drop them from the
     # tokenizer's additional-special-tokens list (add_special_tokens replaces
     # that list rather than extending it).
@@ -1474,7 +1493,6 @@ def build():
         model.config.asr_enabled = True
         # Always named in the config (serving has no default), so a checkpoint
         # on the Hub shows which ASR it runs and at which revision.
-        asr_model_id, asr_revision = _resolve_asr_model(args)
         model.config.asr_model_id = asr_model_id
         model.config.asr_model_revision = asr_revision
         if args.bundle_asr:
@@ -1662,8 +1680,10 @@ def save_and_validate_model_artifacts(
     # bundle, so a bundle that fails to download or validate must fail the
     # compose before that config exists.
     if getattr(model.config, "asr_bundled_path", None):
+        # args.asr_model, not asr_model_id: for a local source the config
+        # records only the directory's name (see _resolve_asr_model).
         bundle_asr_model(
-            model.config.asr_model_id,
+            args.asr_model or model.config.asr_model_id,
             model.config.asr_model_revision,
             os.path.join(args.output, model.config.asr_bundled_path),
         )

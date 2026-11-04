@@ -49,6 +49,19 @@ class TestResolveAsrModel:
         assert _resolve_asr_model(args) == ("openai/whisper-small", "r")
         assert "WARNING" not in capsys.readouterr().out
 
+    def test_local_dir_without_bundle_is_refused(self, tmp_path):
+        args = _args("--enable-audio", "--asr-model", str(tmp_path))
+        with pytest.raises(ValueError, match="--bundle-asr"):
+            _resolve_asr_model(args)
+
+    def test_local_dir_with_bundle_records_only_its_name(self, tmp_path, capsys):
+        src = tmp_path / "home" / "alice" / "my-asr"
+        src.mkdir(parents=True)
+        args = _args("--bundle-asr", "--asr-model", f"{src}/")
+        assert _resolve_asr_model(args) == ("my-asr", None)
+        # A bundle never loads from the Hub, so there is no unpinned warning.
+        assert "WARNING" not in capsys.readouterr().out
+
     def test_bundle_asr_is_opt_in(self):
         assert _args("--enable-audio").bundle_asr is False
         assert _args("--bundle-asr").bundle_asr is True
@@ -163,6 +176,7 @@ def test_failed_bundle_fails_the_compose_before_the_config_is_saved(
         create_ioyaml=False,
         debug_fields=False,
         base_model="base",
+        asr_model=None,
     )
     base = tmp_path / "base"
     base.mkdir()
