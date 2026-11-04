@@ -112,13 +112,15 @@ class TestZeroAdapterWeightTransfer:
         gc.collect()
 
 
-# ── GPU test class wrappers (subprocess) ──────────────────────────
+# ── GPU tests (subprocess) ────────────────────────────────────────
 
 _INNER = Path(__file__).parent / "_granite4_mini_tests.py"
-_TIMEOUT = 1200
+# One subprocess now runs all three classes for a variant (three engine boots in
+# all), where each class used to get its own subprocess and its own two engines.
+_TIMEOUT = 1800
 
 
-def _run_inner_class(class_name):
+def _run_inner(selector):
     cmd = [
         sys.executable,
         "-m",
@@ -128,32 +130,27 @@ def _run_inner_class(class_name):
         "-s",
         "--tb=short",
         "-k",
-        class_name,
+        selector,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=_TIMEOUT)
     if result.stdout:
-        print(result.stdout[-4000:])
+        print(result.stdout[-6000:])
     if result.stderr:
         print("STDERR:", result.stderr[-2000:])
     assert result.returncode == 0, f"Inner tests failed (exit {result.returncode})"
 
 
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
-class TestGranite4FamilyEquivalence:
+class TestGranite4VllmEquivalence:
+    """All vLLM equivalence classes for one variant, in ONE pytest process.
+
+    TestGranite4FamilyEquivalence, TestZeroAdapterNoHiding and
+    TestZeroAdapterEquivalence in _granite4_mini_tests.py share a module fixture
+    that boots each of the variant's three models once. Running them in a single
+    process is what lets them share it: per-class processes would rebuild it,
+    and the boots, three times.
+    """
+
     @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
     def test_suite(self, model_name):
-        _run_inner_class(f"TestGranite4FamilyEquivalence and {model_name}")
-
-
-@pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
-class TestZeroAdapterNoHiding:
-    @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
-    def test_suite(self, model_name):
-        _run_inner_class(f"TestZeroAdapterNoHiding and {model_name}")
-
-
-@pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
-class TestZeroAdapterEquivalence:
-    @pytest.mark.parametrize("model_name", _GPU_MODEL_PARAMS)
-    def test_suite(self, model_name):
-        _run_inner_class(f"TestZeroAdapterEquivalence and {model_name}")
+        _run_inner(model_name)
