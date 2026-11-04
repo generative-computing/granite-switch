@@ -149,6 +149,10 @@ class EvalConfig:
 #:   as dense. The genuinely sparse bases are `granite-4.0-h-small` (72 experts)
 #:   and `-h-tiny` (64), and neither has published adapters either. Adding that
 #:   leg needs an adapter published against a sparse base.
+#: - **LoRA placement only; no aLoRA drift coverage.** Every config here composes
+#:   with `--technology-filter lora` and measures a head-placed control token. The
+#:   two are one decision, explained at `compose_for`. aLoRA routing is covered
+#:   end to end in the GPU `full` suite, so only *drift* is uncovered.
 EVAL_CONFIGS: dict[str, EvalConfig] = {
     "granite41_vllm": EvalConfig(
         "granite41_vllm",
@@ -265,6 +269,33 @@ def compose_for(cfg: EvalConfig) -> Path | None:
         return out_dir
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    # `--technology-filter lora` is load-bearing, not leftover. This tier measures
+    # drift for LoRA-placed adapters ONLY, and the filter is what keeps the
+    # checkpoint matching the one placement `capture()` can measure: it builds
+    # `[ctrl, *prompt]`, control token at the sequence head, which is the LoRA
+    # placement. aLoRA's semantics ARE its placement -- the token goes immediately
+    # before the invocation sequence, giving base-before / adapter-after routing
+    # (see tests/hf/test_multi_switch_alora.py's module docstring, which draws both
+    # routing shapes side by side). Composing aLoRA here would evaluate
+    # that adapter active across the whole prompt, a configuration it was never
+    # trained for and is never served in, and would report a plausible JSD rather
+    # than an error. The filter and the head placement are one decision.
+    #
+    # Nor would dropping the argument give "both": `_resolve_technology`
+    # (composer/adapter_discovery.py) prefers alora when both variants exist,
+    # so removing it flips the whole tier to aLoRA instead of widening it. Both
+    # granitelib recipes below publish alora/ and lora/ per base, so this filter
+    # is choosing, not just permitting.
+    #
+    # The resulting gap, stated: aLoRA has no DRIFT coverage. Its placement and
+    # routing are covered end to end on a real checkpoint by
+    # tests/hf/test_multi_switch_alora.py and tests/integration/
+    # test_multi_switch_alora_cache.py in the GPU `full` suite, so a change that
+    # breaks aLoRA routing still fails CI. What nothing catches is a change that
+    # keeps routing correct and moves the distribution. Closing it needs a fifth
+    # config composing with `--technology-filter alora` and building adapter_seqs
+    # from `resolve_activation_anchor()` rather than head-prepending, plus its own
+    # baseline recorded at the then-current ceiling.
     result = subprocess.run(
         [
             sys.executable,
@@ -555,6 +586,11 @@ def capture(
     # Control token at the sequence head -- the LoRA placement, and what
     # tests/integration/test_audio_serving_smoke.py does. Index i of
     # adapter_token_ids activates adapter i+1; 0 is base.
+    #
+    # This is the other half of `compose_for`'s `--technology-filter lora`: that
+    # filter exists because this line can only measure head placement. Generalize
+    # one and you must generalize the other, or the gate measures an aLoRA adapter
+    # in a configuration it is never served in and reports a plausible number.
     adapter_seqs = [[ctrl, *s] for s in base_seqs]
 
     run = _run_vllm if cfg.backend == "vllm" else _run_hf
