@@ -664,11 +664,15 @@ def bundle_asr_model(model_id: str, revision: str | None, dest: str) -> None:
     directory (copied, so the bundle can be built inside an airgapped network).
     """
     print(f"\nBundling ASR model {model_id} (revision {revision}) into {dest}")
+    if os.path.isdir(model_id) and os.path.realpath(model_id) == os.path.realpath(dest):
+        raise ValueError(f"--asr-model {model_id} is the bundle destination itself")
+    # Start from an empty dest: a re-compose into the same --output must not
+    # leave the previous ASR's shards or tokenizer files beside the new ones.
+    shutil.rmtree(dest, ignore_errors=True)
     if os.path.isdir(model_id):
         shutil.copytree(
             model_id,
             dest,
-            dirs_exist_ok=True,
             ignore=lambda d, names: [
                 n
                 for n in names

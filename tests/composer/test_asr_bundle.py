@@ -92,3 +92,20 @@ class TestBundleAsrModel:
         monkeypatch.setattr(cgs, "snapshot_download", fake_snapshot_download)
         bundle_asr_model("org/asr", "abc", str(tmp_path / "asr"))
         assert calls == {"repo_id": "org/asr", "revision": "abc"}
+
+    def test_rebundle_replaces_the_previous_bundle(self, tmp_path):
+        dest = tmp_path / "ckpt" / "asr"
+        dest.mkdir(parents=True)
+        # Left over from an earlier compose with another ASR model.
+        (dest / "model-00001-of-00002.safetensors").write_bytes(b"old")
+        (dest / "tokenizer.json").write_text("{}")
+        bundle_asr_model(str(_tiny_asr_dir(tmp_path / "src")), None, str(dest))
+        assert not (dest / "model-00001-of-00002.safetensors").exists()
+        assert not (dest / "tokenizer.json").exists()
+        assert (dest / "model.safetensors").is_file()
+
+    def test_source_that_is_the_destination_is_refused(self, tmp_path):
+        dest = _tiny_asr_dir(tmp_path / "asr")
+        with pytest.raises(ValueError, match="bundle destination"):
+            bundle_asr_model(str(dest), None, str(dest))
+        assert (dest / "model.safetensors").is_file()
