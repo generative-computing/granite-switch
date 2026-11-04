@@ -684,21 +684,30 @@ def bundle_asr_model(model_id: str, revision: str | None, dest: str) -> None:
     print(f"\nBundling ASR model {model_id} (revision {revision}) into {dest}")
     if os.path.isdir(model_id) and os.path.realpath(model_id) == os.path.realpath(dest):
         raise ValueError(f"--asr-model {model_id} is the bundle destination itself")
-    # Start from an empty dest: a re-compose into the same --output must not
-    # leave the previous ASR's shards or tokenizer files beside the new ones.
+    # Built and validated in a staging directory, then swapped in, so a failed
+    # download or validation leaves any existing bundle at dest untouched.
+    # Starting from an empty staging dir and replacing dest whole means a
+    # re-compose never leaves the previous ASR's files beside the new ones.
+    staging = f"{dest}.partial"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        if os.path.isdir(model_id):
+            _copy_asr_bundle_files(model_id, staging)
+        else:
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                local_dir=staging,
+                allow_patterns=_ASR_BUNDLE_PATTERNS,
+            )
+        # snapshot_download(local_dir=...) leaves its download cache metadata here.
+        shutil.rmtree(os.path.join(staging, ".cache"), ignore_errors=True)
+        _validate_asr_bundle(staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     shutil.rmtree(dest, ignore_errors=True)
-    if os.path.isdir(model_id):
-        _copy_asr_bundle_files(model_id, dest)
-    else:
-        snapshot_download(
-            repo_id=model_id,
-            revision=revision,
-            local_dir=dest,
-            allow_patterns=_ASR_BUNDLE_PATTERNS,
-        )
-    # snapshot_download(local_dir=...) leaves its download cache metadata here.
-    shutil.rmtree(os.path.join(dest, ".cache"), ignore_errors=True)
-    _validate_asr_bundle(dest)
+    os.replace(staging, dest)
     size_gb, _ = _get_directory_size(dest)
     if size_gb is not None:
         print(f"  ASR bundle size: {size_gb:.2f} GB")
@@ -1649,17 +1658,20 @@ def save_and_validate_model_artifacts(
     # Snapshot directory state before save_pretrained
     before_snapshot = _snapshot_directory(args.output)
 
-    model.save_pretrained(args.output, max_shard_size="5GB")
-    print("Model saved")
-    tokenizer.save_pretrained(args.output)
-    print("Tokenizer saved")
-
+    # Bundle before save_pretrained: the config written below points at the
+    # bundle, so a bundle that fails to download or validate must fail the
+    # compose before that config exists.
     if getattr(model.config, "asr_bundled_path", None):
         bundle_asr_model(
             model.config.asr_model_id,
             model.config.asr_model_revision,
             os.path.join(args.output, model.config.asr_bundled_path),
         )
+
+    model.save_pretrained(args.output, max_shard_size="5GB")
+    print("Model saved")
+    tokenizer.save_pretrained(args.output)
+    print("Tokenizer saved")
 
     # Validate what save_pretrained wrote/overwrote
     after_snapshot = _snapshot_directory(args.output)

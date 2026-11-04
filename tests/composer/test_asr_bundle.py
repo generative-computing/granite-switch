@@ -128,3 +128,51 @@ class TestBundleAsrModel:
         assert not (dest / "pt").exists()
         # A nested file a pattern matches is kept, as snapshot_download keeps it.
         assert (dest / "onnx" / "config.json").is_file()
+
+    def test_failed_bundle_leaves_the_previous_bundle_in_place(self, tmp_path):
+        dest = tmp_path / "ckpt" / "asr"
+        bundle_asr_model(str(_tiny_asr_dir(tmp_path / "good")), None, str(dest))
+        bad = _tiny_asr_dir(tmp_path / "bad")
+        (bad / "model.safetensors").unlink()
+        with pytest.raises(FileNotFoundError, match="safetensors"):
+            bundle_asr_model(str(bad), None, str(dest))
+        assert (dest / "model.safetensors").is_file()
+        assert not (tmp_path / "ckpt" / "asr.partial").exists()
+
+
+def test_failed_bundle_fails_the_compose_before_the_config_is_saved(
+    tmp_path, monkeypatch
+):
+    """config.json points at the bundle, so it must not exist if bundling fails."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from granite_switch.composer import compose_granite_switch as cgs
+
+    monkeypatch.setattr(cgs, "_copy_io_configs", lambda *a, **k: {})
+    monkeypatch.setattr(cgs, "_create_adapter_index", lambda *a, **k: {})
+
+    def failing_bundle(*args):
+        raise FileNotFoundError("no safetensors")
+
+    monkeypatch.setattr(cgs, "bundle_asr_model", failing_bundle)
+    model = mock.MagicMock()
+    model.config.asr_bundled_path = "asr"
+    args = SimpleNamespace(
+        output=str(tmp_path / "out"),
+        create_ioyaml=False,
+        debug_fields=False,
+        base_model="base",
+    )
+    base = tmp_path / "base"
+    base.mkdir()
+    with pytest.raises(FileNotFoundError):
+        cgs.save_and_validate_model_artifacts(
+            model=model,
+            tokenizer=mock.MagicMock(),
+            args=args,
+            base_model_local_path=str(base),
+            all_discovered=[],
+            adapter_token_ids=[],
+        )
+    model.save_pretrained.assert_not_called()
