@@ -340,6 +340,30 @@ class TestResolveAsrSource:
         with pytest.raises(ValueError, match="checkpoint location"):
             asr.resolve_asr_source("org/m", "abc", "asr", None)
 
+    @pytest.mark.parametrize("spelling", ["asr/", "./asr", "asr//", "x/../asr"])
+    def test_bundle_path_spellings_resolve_to_the_same_subfolder(
+        self, tmp_path, spelling
+    ):
+        root = self._bundle(tmp_path)
+        with mock.patch(
+            "huggingface_hub.snapshot_download", return_value=str(root)
+        ) as fetch:
+            model, _ = asr.resolve_asr_source("org/m", None, spelling, "org/ckpt")
+        assert model == str(root / "asr")
+        assert fetch.call_args.kwargs["allow_patterns"] == ["asr/*"]
+
+    @pytest.mark.parametrize("bad", ["/asr", "../asr", "asr/../../x", ".", ""])
+    def test_bundle_path_outside_the_checkpoint_is_refused(self, tmp_path, bad):
+        if not bad:
+            # Empty means "no bundle": it falls through to the Hub id.
+            assert asr.resolve_asr_source("org/m", None, bad, str(tmp_path)) == (
+                "org/m",
+                None,
+            )
+            return
+        with pytest.raises(ValueError, match="subdirectory of the checkpoint"):
+            asr.resolve_asr_source("org/m", None, bad, str(tmp_path))
+
 
 class TestSinglePassCeiling:
     """The default 120s window is the boundary between 'backend handles it whole'

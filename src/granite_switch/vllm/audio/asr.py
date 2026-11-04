@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import functools
 import os
+import posixpath
 import subprocess
 import threading
 from collections.abc import Mapping
@@ -168,6 +169,22 @@ def _unsupported_architecture_error(model_id: str, exc: Exception) -> Exception:
     )
 
 
+def _bundle_subdir(asr_bundled_path: str) -> str:
+    """``asr_bundled_path`` as a normalized subdirectory of the checkpoint.
+
+    One spelling serves both the Hub fetch pattern and the on-disk path, and
+    the value comes from a config that may have been downloaded, so it must
+    not reach outside the checkpoint: absolute paths and ``..`` are refused.
+    """
+    subdir = posixpath.normpath(asr_bundled_path.replace("\\", "/"))
+    if posixpath.isabs(subdir) or subdir == "." or subdir.split("/")[0] == "..":
+        raise ValueError(
+            f"asr_bundled_path={asr_bundled_path!r} must be a subdirectory of "
+            f"the checkpoint (compose with --bundle-asr writes 'asr')."
+        )
+    return subdir
+
+
 @functools.cache
 def resolve_asr_source(
     asr_model_id: str | None,
@@ -194,6 +211,7 @@ def resolve_asr_source(
                 f"asr_bundled_path={asr_bundled_path!r} is set but the checkpoint "
                 f"location is unknown, so the bundled ASR cannot be found."
             )
+        subdir = _bundle_subdir(asr_bundled_path)
         if os.path.isdir(checkpoint):
             root = checkpoint
         else:
@@ -202,9 +220,9 @@ def resolve_asr_source(
             root = snapshot_download(
                 checkpoint,
                 revision=checkpoint_revision,
-                allow_patterns=[f"{asr_bundled_path.strip('/')}/*"],
+                allow_patterns=[f"{subdir}/*"],
             )
-        path = os.path.join(root, asr_bundled_path)
+        path = os.path.join(root, subdir)
         if not os.path.isfile(os.path.join(path, "config.json")):
             raise FileNotFoundError(
                 f"Bundled ASR not found at {path!r} (asr_bundled_path="
