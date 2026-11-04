@@ -193,6 +193,32 @@ def _write_tokenizer(dest: Path, tokenizer_config: dict) -> None:
     tokenizer.save(str(dest / "tokenizer.json"))
 
 
+#: Random-weight scales, chosen so the fake behaves like a trained model in the two
+#: ways the tests depend on: every sublayer must matter (an adapter on attention
+#: or the MLP has to reach the output), and the next-token distribution must be
+#: peaked rather than flat (tests compare distributions). Measured on the tiny
+#: geometry with the real Granite multipliers, which a naive init gets badly wrong:
+#:
+#:   body 0.02, head 1.0, final norm 1  -> zeroing every attention or MLP output
+#:       changes nothing (JSD 0.000): the 12x embedding_multiplier swamps layers
+#:       whose output is further shrunk by residual_multiplier 0.22.
+#:   body 1.0, head 1.0, final norm 1   -> layers matter (JSD 0.29 / 0.34) but the
+#:       output is near-uniform (entropy 10.9 of 11.5 nats).
+#:   body 1.0, head 1.0, final norm 4   -> both: dropping attention or the MLP moves
+#:       the output by JSD 0.98 / 0.99, entropy ~4 nats, top-1 ~0.27.
+#:
+#: Larger final-norm gains saturate toward one-hot, as uninformative as flat.
+BODY_SCALE = 1.0
+EMBED_SCALE = 1.0
+FINAL_NORM_GAIN = 4.0
+
+
+def _scale(key: str) -> float:
+    if key in ("model.embed_tokens.weight", "lm_head.weight"):
+        return EMBED_SCALE
+    return BODY_SCALE
+
+
 def _write_weights(dest: Path, config: dict, seed: int) -> None:
     """Seeded random weights of the shrunk shape, keyed per tensor name."""
     hidden = config["hidden_size"]
@@ -224,14 +250,14 @@ def _write_weights(dest: Path, config: dict, seed: int) -> None:
     # load round the same way they do on the real checkpoint.
     dtype = getattr(torch, config.get("torch_dtype") or "float32")
     sd = {
-        key: _randn(key, seed, *shape, scale=0.02).to(dtype)
+        key: _randn(key, seed, *shape, scale=_scale(key)).to(dtype)
         for key, shape in shapes.items()
     }
     for layer in range(config["num_hidden_layers"]):
         p = f"model.layers.{layer}"
         sd[f"{p}.input_layernorm.weight"] = torch.ones(hidden, dtype=dtype)
         sd[f"{p}.post_attention_layernorm.weight"] = torch.ones(hidden, dtype=dtype)
-    sd["model.norm.weight"] = torch.ones(hidden, dtype=dtype)
+    sd["model.norm.weight"] = torch.full((hidden,), FINAL_NORM_GAIN, dtype=dtype)
     save_file(sd, str(dest / "model.safetensors"))
 
 
