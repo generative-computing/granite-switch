@@ -216,9 +216,11 @@ This directory can be loaded directly:
 ```python
 # HuggingFace
 from granite_switch.hf import GraniteSwitchForCausalLM
+
 model = GraniteSwitchForCausalLM.from_pretrained("./granite-with-all-aloras")
 
 # vLLM
 from vllm import LLM
+
 llm = LLM(model="./granite-with-all-aloras")
 ```

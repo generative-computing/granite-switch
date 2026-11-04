@@ -45,7 +45,6 @@ Examples:
 """
 
 import argparse
-import fnmatch
 import json
 import os
 import shutil
@@ -54,6 +53,7 @@ from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from huggingface_hub.utils import filter_repo_objects
 from transformers import AutoTokenizer
 
 from granite_switch.composer.adapter_discovery import (
@@ -657,6 +657,24 @@ _ASR_BUNDLE_PATTERNS = [
 ]
 
 
+def _copy_asr_bundle_files(src: str, dest: str) -> None:
+    """Copy the files of a local ASR directory that a Hub bundle would get.
+
+    Matches each file's path relative to ``src`` against _ASR_BUNDLE_PATTERNS
+    with the filter snapshot_download applies, so a local source and a Hub
+    source give the same bundle. Hidden directories (.git, .cache) are not
+    walked: a git-lfs clone would otherwise bring its object store along.
+    """
+    rel_paths = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        rel_dir = os.path.relpath(dirpath, src)
+        rel_paths += [os.path.normpath(os.path.join(rel_dir, f)) for f in filenames]
+    for rel in filter_repo_objects(rel_paths, allow_patterns=_ASR_BUNDLE_PATTERNS):
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(src, rel), os.path.join(dest, rel))
+
+
 def bundle_asr_model(model_id: str, revision: str | None, dest: str) -> None:
     """Copy the ASR model into ``dest`` and check it loads with no network.
 
@@ -670,16 +688,7 @@ def bundle_asr_model(model_id: str, revision: str | None, dest: str) -> None:
     # leave the previous ASR's shards or tokenizer files beside the new ones.
     shutil.rmtree(dest, ignore_errors=True)
     if os.path.isdir(model_id):
-        shutil.copytree(
-            model_id,
-            dest,
-            ignore=lambda d, names: [
-                n
-                for n in names
-                if os.path.isfile(os.path.join(d, n))
-                and not any(fnmatch.fnmatch(n, p) for p in _ASR_BUNDLE_PATTERNS)
-            ],
-        )
+        _copy_asr_bundle_files(model_id, dest)
     else:
         snapshot_download(
             repo_id=model_id,

@@ -109,3 +109,22 @@ class TestBundleAsrModel:
         with pytest.raises(ValueError, match="bundle destination"):
             bundle_asr_model(str(dest), None, str(dest))
         assert (dest / "model.safetensors").is_file()
+
+    def test_local_source_subdirectories_are_filtered_like_the_hub(self, tmp_path):
+        src = _tiny_asr_dir(tmp_path / "src")
+        # A git-lfs clone's object store, an ONNX export and a nested legacy
+        # weight file: none of them is in a Hub bundle.
+        (src / ".git" / "lfs").mkdir(parents=True)
+        (src / ".git" / "lfs" / "blob.json").write_text("{}")
+        (src / "onnx").mkdir()
+        (src / "onnx" / "model.onnx").write_bytes(b"onnx")
+        (src / "onnx" / "config.json").write_text("{}")
+        (src / "pt").mkdir()
+        (src / "pt" / "pytorch_model.bin").write_bytes(b"legacy")
+        dest = tmp_path / "asr"
+        bundle_asr_model(str(src), None, str(dest))
+        assert not (dest / ".git").exists()
+        assert not (dest / "onnx" / "model.onnx").exists()
+        assert not (dest / "pt").exists()
+        # A nested file a pattern matches is kept, as snapshot_download keeps it.
+        assert (dest / "onnx" / "config.json").is_file()
