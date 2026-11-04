@@ -23,7 +23,6 @@ pytestmark = [
 if _VLLM_AVAILABLE:
     from granite_switch.vllm.audio import asr as asr_mod
     from granite_switch.vllm.audio import processor as proc_mod
-    from granite_switch.vllm.audio.asr import DEFAULT_ASR_MODEL_ID
     from granite_switch.vllm.audio.processor import (
         GraniteSwitchASRMultiModalProcessor,
         GraniteSwitchASRProcessingInfo,
@@ -33,9 +32,12 @@ if _VLLM_AVAILABLE:
 def _make_info(*, max_model_len=131072, **cfg_attrs):
     """A ProcessingInfo whose get_hf_config() returns a stub config.
 
-    Bypasses __init__, which needs a full vLLM InputProcessingContext.
+    Bypasses __init__, which needs a full vLLM InputProcessingContext. An ASR
+    model id is filled in unless given (the composer always writes one); pass
+    ``asr_model_id=None`` to model a checkpoint without it.
     """
     info = object.__new__(GraniteSwitchASRProcessingInfo)
+    cfg_attrs.setdefault("asr_model_id", "w")
     cfg = SimpleNamespace(**cfg_attrs)
     info.get_hf_config = lambda: cfg
     info.ctx = SimpleNamespace(
@@ -74,13 +76,37 @@ class TestProcessingInfoGating:
 
 
 class TestProcessingInfoAsrAccessors:
-    def test_model_id_defaults_when_none(self):
+    def test_missing_model_id_fails_at_startup(self):
+        # No built-in fallback: get_supported_mm_limits runs at engine startup,
+        # so a pre-0.2.0 checkpoint is refused before it serves.
         info = _make_info(asr_enabled=True, asr_model_id=None)
-        assert info._asr_model_id() == DEFAULT_ASR_MODEL_ID
+        with pytest.raises(ValueError, match="asr_model_id"):
+            info.get_supported_mm_limits()
 
-    def test_model_id_explicit(self):
-        info = _make_info(asr_enabled=True, asr_model_id="openai/whisper-small")
-        assert info._asr_model_id() == "openai/whisper-small"
+    def test_missing_model_id_is_fine_when_audio_disabled(self):
+        info = _make_info(asr_enabled=False, asr_model_id=None)
+        assert info.get_supported_mm_limits() == {}
+
+    def test_source_is_model_id_and_revision(self):
+        info = _make_info(
+            asr_enabled=True,
+            asr_model_id="openai/whisper-small",
+            asr_model_revision="abc",
+        )
+        assert info._asr_source() == ("openai/whisper-small", "abc")
+
+    def test_source_is_bundle_under_checkpoint(self, tmp_path):
+        (tmp_path / "asr").mkdir()
+        (tmp_path / "asr" / "config.json").write_text("{}")
+        info = _make_info(
+            asr_enabled=True,
+            asr_model_id="org/m",
+            asr_model_revision="abc",
+            asr_bundled_path="asr",
+        )
+        info.ctx.model_config.model = str(tmp_path)
+        info.ctx.model_config.revision = None
+        assert info._asr_source() == (str(tmp_path / "asr"), None)
 
     def test_device_default_cuda(self, monkeypatch):
         # The config default is "cuda". _asr_device() downgrades it to "cpu" when
@@ -174,9 +200,10 @@ def _make_processor(info, monkeypatch, capture):
             return "hello world"
 
     def fake_get_transcriber(
-        model_id=None, device="cpu", pipeline_kwargs=None, dtype=None
+        model_id=None, device="cpu", pipeline_kwargs=None, dtype=None, revision=None
     ):
         capture["model_id"] = model_id
+        capture["revision"] = revision
         capture["device"] = device
         capture["pipeline_kwargs"] = pipeline_kwargs
         capture["dtype"] = dtype
@@ -192,6 +219,7 @@ class TestTranscribeWiring:
         info = _make_info(
             asr_enabled=True,
             asr_model_id="whisper-x",
+            asr_model_revision="rev-x",
             asr_device="cpu",
             asr_pipeline_kwargs={"chunk_length_s": 15},
             asr_generate_kwargs={},
@@ -201,6 +229,7 @@ class TestTranscribeWiring:
         ids = proc._transcribe(np.zeros(1600, dtype=np.float32), {"language": "fr"})
         assert ids == [1, 2, 3]
         assert capture["model_id"] == "whisper-x"
+        assert capture["revision"] == "rev-x"
         assert capture["pipeline_kwargs"] == {"chunk_length_s": 15}
         assert capture["generate_kwargs"] == {"language": "fr"}
         assert capture["sampling_rate"] == proc_mod._TARGET_SR
@@ -364,9 +393,7 @@ def _make_processor_transcribing(info, monkeypatch, text, *, ids_for):
     monkeypatch.setattr(
         proc_mod,
         "get_transcriber",
-        lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-            FakeTranscriber()
-        ),
+        lambda **_kwargs: FakeTranscriber(),
     )
     return proc
 
@@ -478,9 +505,7 @@ class TestEmptyAndSilentClip:
         monkeypatch.setattr(
             proc_mod,
             "get_transcriber",
-            lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-                FakeTranscriber()
-            ),
+            lambda **_kwargs: FakeTranscriber(),
         )
 
         bf = proc._call_hf_processor(

@@ -36,8 +36,8 @@ from vllm.multimodal.processing import (
 
 from .asr import (
     DEFAULT_ALLOWED_REQUEST_GENERATE_KEYS,
-    DEFAULT_ASR_MODEL_ID,
     get_transcriber,
+    resolve_asr_source,
     resolve_driver_device,
     resolve_generate_kwargs,
 )
@@ -63,6 +63,10 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
         # No modalities on a non-audio checkpoint, so vLLM never loads ASR.
         if not self._asr_enabled():
             return {}
+        # Called at engine startup: resolving here makes a checkpoint with no
+        # ASR model, or a missing bundle, fail before serving, not on the first
+        # audio request.
+        self._asr_source()
         # Finite so vLLM can size KV for the worst case. --limit-mm-per-prompt
         # may lower this ceiling, not raise it.
         return {"audio": self._asr_max_audio_clips()}
@@ -85,9 +89,17 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
 
     # --- ASR config resolved from the model's GraniteSwitchConfig ---
 
-    def _asr_model_id(self) -> str:
+    def _asr_source(self) -> tuple[str, str | None]:
+        """``(model, revision)`` the ASR pipeline loads: bundled path or Hub id."""
         cfg = self.get_hf_config()
-        return getattr(cfg, "asr_model_id", None) or DEFAULT_ASR_MODEL_ID
+        model_config = getattr(self.ctx, "model_config", None)
+        return resolve_asr_source(
+            asr_model_id=getattr(cfg, "asr_model_id", None),
+            asr_model_revision=getattr(cfg, "asr_model_revision", None),
+            asr_bundled_path=getattr(cfg, "asr_bundled_path", None),
+            checkpoint=getattr(model_config, "model", None),
+            checkpoint_revision=getattr(model_config, "revision", None),
+        )
 
     def _asr_device(self) -> str:
         cfg = self.get_hf_config()
@@ -271,8 +283,10 @@ class GraniteSwitchASRMultiModalProcessor(
         get :data:`_EMPTY_TRANSCRIPT_TEXT` instead, so the model sees an audio
         turn that simply said nothing.
         """
+        model, revision = self.info._asr_source()
         transcriber = get_transcriber(
-            model_id=self.info._asr_model_id(),
+            model_id=model,
+            revision=revision,
             device=self.info._asr_device(),
             pipeline_kwargs=self.info._asr_pipeline_kwargs(),
             dtype=self.info._asr_dtype(),
