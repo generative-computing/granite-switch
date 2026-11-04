@@ -21,7 +21,7 @@ identical prefix. Only recording generates; the check never lets the model
 condition on its own output.
 
 Why: the first version of this gate compared position-aligned distributions
-across a self-conditioning greedy rollout, and `granite42_vllm` failed its own
+across a self-conditioning greedy rollout, and `granite41_vllm` failed its own
 recording line (vLLM 0.30) with mean JSD 0.95 on prompt 3. The cause was ONE
 near-tie argmax flip at position 1 -- `527` vs `16` -- after which the two runs
 were generating different sentences and the metric was comparing unrelated
@@ -128,21 +128,39 @@ class EvalConfig:
     fallback_env: str | None = None
 
 
-#: The four evaluation configs. A dense and a MoE base with LoRA/aLoRA adapters
-#: on vLLM, an SR (dual-stream) adapter on vLLM, and one adapter on the HF backend
-#: -- so a break that lives in the HF path cannot hide behind a green vLLM leg.
+#: The four evaluation configs, named after the base each one actually composes
+#: from. Two vLLM configs on different Granite architectures, an SR (dual-stream)
+#: adapter on vLLM, and one adapter on the HF backend -- so a break that lives in
+#: the HF path cannot hide behind a green vLLM leg.
+#:
+#: The names state the base because this gate's whole output is a per-config ✅ in
+#: a PR table, and a name that implies untested coverage is read as coverage. Two
+#: gaps are therefore visible here rather than hidden behind a flattering key:
+#:
+#: - **No Granite 4.2 coverage.** `ibm-granite/granite-4.2-3b` is published, but
+#:   no granitelib adapter is published against it (checked across the guardian,
+#:   core and rag r1.0 repos: all three carry 4.0-micro, 4.1-3b, 4.1-8b, 4.1-30b
+#:   and nothing else). This gate composes real published adapters, so it cannot
+#:   reach 4.2. `tests/vllm/test_multi_adapter_equivalence.py` can, because it
+#:   generates synthetic adapters and needs no published ones.
+#: - **No pure-sparse-MoE coverage.** `granite-4.0-micro` carries model_type
+#:   `granitemoehybrid` but `num_local_experts: 0` -- a mamba+attention hybrid
+#:   with a shared MLP and no expert bank, which docs/SUPPORTED_MODELS.md lists
+#:   as dense. The genuinely sparse bases are `granite-4.0-h-small` (72 experts)
+#:   and `-h-tiny` (64), and neither has published adapters either. Adding that
+#:   leg needs an adapter published against a sparse base.
 EVAL_CONFIGS: dict[str, EvalConfig] = {
-    "granite42_vllm": EvalConfig(
-        "granite42_vllm",
-        "GSW_EVAL_G42_DIR",
+    "granite41_vllm": EvalConfig(
+        "granite41_vllm",
+        "GSW_EVAL_G41_DIR",
         "vllm",
-        "Granite 4.2 + LoRA/aLoRA adapter, vLLM backend",
+        "Granite 4.1 3B dense + LoRA adapter, vLLM backend",
     ),
-    "granite_moe_vllm": EvalConfig(
-        "granite_moe_vllm",
-        "GSW_EVAL_GMOE_DIR",
+    "granite40_micro_vllm": EvalConfig(
+        "granite40_micro_vllm",
+        "GSW_EVAL_G40M_DIR",
         "vllm",
-        "MoE base + LoRA/aLoRA adapter, vLLM backend",
+        "Granite 4.0 Micro hybrid (mamba+attention) + LoRA adapter, vLLM backend",
     ),
     "sr_vllm": EvalConfig(
         "sr_vllm",
@@ -150,12 +168,12 @@ EVAL_CONFIGS: dict[str, EvalConfig] = {
         "vllm",
         "Shadow-Residual dual-stream adapter, vLLM backend",
     ),
-    "granite42_hf": EvalConfig(
-        "granite42_hf",
+    "granite41_hf": EvalConfig(
+        "granite41_hf",
         "GSW_EVAL_HF_DIR",
         "hf",
-        "One adapter on the HuggingFace backend",
-        fallback_env="GSW_EVAL_G42_DIR",
+        "Granite 4.1 3B dense + LoRA adapter, HuggingFace backend",
+        fallback_env="GSW_EVAL_G41_DIR",
     ),
 }
 
@@ -167,18 +185,18 @@ EVAL_CONFIGS: dict[str, EvalConfig] = {
 #: so that config keeps skipping rather than quietly evaluating a non-SR model
 #: and reporting it as SR coverage.
 COMPOSE_RECIPES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "granite42_vllm": (
+    "granite41_vllm": (
         "ibm-granite/granite-4.1-3b",
         ("ibm-granite/granitelib-guardian-r1.0", "ibm-granite/granitelib-core-r1.0"),
     ),
-    "granite_moe_vllm": (
+    "granite40_micro_vllm": (
         "ibm-granite/granite-4.0-micro",
         ("ibm-granite/granitelib-rag-r1.0",),
     ),
 }
-#: The HF-backend eval evaluates the same checkpoint as granite42_vllm, on the
+#: The HF-backend eval evaluates the same checkpoint as granite41_vllm, on the
 #: other backend -- mirroring its `fallback_env`.
-COMPOSE_RECIPES["granite42_hf"] = COMPOSE_RECIPES["granite42_vllm"]
+COMPOSE_RECIPES["granite41_hf"] = COMPOSE_RECIPES["granite41_vllm"]
 
 #: Shared with tests/hf/test_multi_switch_e2e.py ON PURPOSE -- the same cache
 #: root, so a checkpoint composed by either side is warm-reused by the other
@@ -316,14 +334,14 @@ def fingerprint(model_dir: Path) -> str:
 #: dict from `root_path.rglob(...)` and returns `list(...values())` without
 #: sorting (unlike its sibling `list_available_adapters`, which does sort). So
 #: "adapter 0" of the same recipe is not the same adapter on two machines: run
-#: 39569446055 composed granite42 with `factuality-correction` first on one GPU
+#: 39569446055 composed granite41 with `factuality-correction` first on one GPU
 #: leg and `factuality-detection` first on the other, and the index-0 default
 #: made the eval compare two different adapters and report it as a regression.
 #: Pinning the name makes the eval independent of that ordering.
 EVAL_ADAPTERS: dict[str, str] = {
-    "granite42_vllm": "factuality-correction",
-    "granite42_hf": "factuality-correction",
-    "granite_moe_vllm": "answerability",
+    "granite41_vllm": "factuality-correction",
+    "granite41_hf": "factuality-correction",
+    "granite40_micro_vllm": "answerability",
 }
 
 
@@ -413,8 +431,8 @@ def _run_vllm(
         # recomputed or served from a cached block depends on what ran earlier in
         # the same engine. That made the capture depend on pass order: prompt 0,
         # the longest, was the only one whose numbers moved between two runs of
-        # the same vLLM line (granite42_vllm 0.000000 -> 0.001857,
-        # granite_moe_vllm 0.001914 -> 0.003221 across the 0.26 and 0.30 legs
+        # the same vLLM line (granite41_vllm 0.000000 -> 0.001857,
+        # granite40_micro_vllm 0.001914 -> 0.003221 across the 0.26 and 0.30 legs
         # of run 39556314476), while the shorter prompts reproduced
         # byte-identically.
         "enable_prefix_caching": False,
@@ -574,11 +592,11 @@ def capture(
 #: other, and `jsd_bits` renormalizes over the union, so that token contributes
 #: roughly its entire mass in bits however small the underlying logit difference
 #: was. Measured on the two `eval-record` recordings of run 39578693370
-#: (granite_moe_vllm prompt 0): ~3 such tokens per position holding 0.0157 mass
+#: (granite40_micro_vllm prompt 0): ~3 such tokens per position holding 0.0157 mass
 #: gave mean JSD 0.016248 at k=20, versus 0.000378 at k<=10 over the same
 #: positions -- a 43x artifact that is pure truncation, not distribution
-#: movement. That is what made granite_moe_vllm fail at 0.003472 > 0.003 on the
-#: 0.26 leg of run 39587132597 while granite42_vllm read exactly 0.000000 on the
+#: movement. That is what made granite40_micro_vllm fail at 0.003472 > 0.003 on the
+#: 0.26 leg of run 39587132597 while granite41_vllm read exactly 0.000000 on the
 #: same leg: the ordering was backwards for a version regression, because it was
 #: never about the version.
 #: Keeping k < TOP_K means every compared token was ranked well inside both
