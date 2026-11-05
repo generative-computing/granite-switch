@@ -190,6 +190,23 @@ class TestBuildAllowPatterns:
             "query_rewrite/granite-4.1-3b/lora/**",
         ]
 
+    def test_probe_dir_is_downloaded(self):
+        tree = _tree_response(
+            {
+                "": ["answerability", "safety"],
+                "answerability/granite-4.1-3b": ["lora"],
+                "safety/granite-4.1-3b": ["probe"],
+            }
+        )
+        with patch("huggingface_hub.list_repo_tree", side_effect=tree):
+            patterns = _build_allow_patterns(
+                "org/repo", target_model_name="granite-4.1-3b"
+            )
+        assert patterns == [
+            "answerability/granite-4.1-3b/lora/**",
+            "safety/granite-4.1-3b/**",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # resolve_repo_path — integration with snapshot_download

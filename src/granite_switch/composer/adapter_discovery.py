@@ -60,19 +60,23 @@ def discover_adapters(
         adapter_dir = io_yaml_path.parent
         tech = adapter_dir.name
 
-        if tech not in ("alora", "lora"):
+        if tech not in ("alora", "lora", "probe"):
             tech = technology_fallback
         if not tech or (technology_filter and tech != technology_filter):
             continue
 
         model_name = adapter_dir.parent.name
         adapter_name = adapter_dir.parent.parent.name
+        if tech == "probe":
+            adapter_name += "_probe"
 
         if model_name == target_model_name:
-            adapter_model = adapter_dir / "adapter_model.safetensors"
-            adapter_config_file = adapter_dir / "adapter_config.json"
+            if tech == "probe":
+                artifacts = ("probe_head.safetensors", "probe_config.json")
+            else:
+                artifacts = ("adapter_model.safetensors", "adapter_config.json")
 
-            if adapter_model.exists() and adapter_config_file.exists():
+            if all((adapter_dir / f).exists() for f in artifacts):
                 if adapter_name in discovered_by_name:
                     existing_tech = discovered_by_name[adapter_name][2]
                     if tech == "alora" and existing_tech == "lora":
@@ -101,7 +105,7 @@ def discover_adapters(
     print(f"\nDiscovery complete: {len(discovered)} adapter(s) found")
 
     # Report per-adapter module contributions
-    _report_module_contributions(discovered, arch)
+    _report_module_contributions([d for d in discovered if d[2] != "probe"], arch)
 
     return discovered
 

@@ -513,3 +513,84 @@ def test_probe_substitute_is_the_bases_role_open_marker(base, role_open):
     )
 
     assert substitutes == [tokenizer.convert_tokens_to_ids(role_open)]
+
+
+def _compose_cli(base, library, output):
+    import subprocess
+    import sys
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        base,
+        "--adapters",
+        str(library),
+        "--output",
+        str(output),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1800)
+    assert result.returncode == 0, result.stdout[-3000:] + result.stderr[-3000:]
+    with open(output / "config.json") as f:
+        return json.load(f)
+
+
+def _write_library_probe(library, name, target, labels, layer, hidden):
+    probe_dir = library / name / target / "probe"
+    _write_synthetic_head(
+        str(probe_dir), *_winning_head(len(labels), hidden, 0), labels
+    )
+    (probe_dir / "probe_config.json").write_text(
+        json.dumps({"labels": labels, "layer": layer})
+    )
+    (probe_dir / "io.yaml").write_text(f"name: {name}\nmodel: ~\n")
+
+
+def test_probe_only_library_compose_cli(tmp_path):
+    """`--adapters <library>` composes `<name>/<model>/probe/` slots alone."""
+    tokenizer = _tokenizer()
+    labels, label_ids = _single_token_labels(
+        tokenizer, ["safe", "unsafe", "yes", "no", "true", "false"]
+    )
+    library = tmp_path / "lib"
+    _write_library_probe(
+        library, "detect", "granite-4.0-micro", labels, 12, _hidden_size()
+    )
+
+    cfg = _compose_cli(BASE_MODEL, library, tmp_path / "out")
+
+    assert cfg["adapter_names"] == ["detect_probe"]
+    assert cfg["adapter_kinds"] == ["probe"]
+    assert cfg["probe_label_token_ids"] == [label_ids]
+    assert cfg["probe_read_layers"] == [12]
+    assert (tmp_path / "out" / "io_configs" / "detect_probe" / "io.yaml").is_file()
+
+
+def test_library_with_lora_and_probe_compose_cli(tmp_path):
+    """A LoRA and a probe under one name compose as two slots, LoRA first."""
+    import shutil
+
+    tokenizer = _tokenizer(MIXED_BASE)
+    labels, label_ids = _single_token_labels(
+        tokenizer, ["safe", "unsafe", "yes", "no", "true", "false"]
+    )
+    library = tmp_path / "lib"
+    shutil.copytree(
+        _find_rag_lora_dir(), library / "answerability" / MIXED_LORA_TARGET / "lora"
+    )
+    _write_library_probe(
+        library,
+        "answerability",
+        MIXED_LORA_TARGET,
+        labels,
+        None,
+        _hidden_size(MIXED_BASE),
+    )
+
+    cfg = _compose_cli(MIXED_BASE, library, tmp_path / "out")
+
+    assert cfg["adapter_names"] == ["answerability", "answerability_probe"]
+    assert cfg["adapter_kinds"] == ["lora", "probe"]
+    assert cfg["probe_label_token_ids"] == [None, label_ids]
+    assert cfg["probe_read_layers"] == [None, None]
