@@ -1,0 +1,192 @@
+# SPDX-License-Identifier: Apache-2.0
+"""Compose-side ASR selection and bundling (--asr-model/--asr-revision/--bundle-asr).
+
+No network: bundling is exercised from a tiny local ASR directory built here,
+the same path an airgapped compose takes.
+"""
+
+import pytest
+
+from granite_switch.composer.compose_granite_switch import (
+    _compose_argparser,
+    _resolve_asr_model,
+    bundle_asr_model,
+)
+from granite_switch.config import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
+from tests.shared.tiny_asr import build_tiny_asr
+
+pytestmark = pytest.mark.audio
+
+
+def _args(*extra):
+    return _compose_argparser().parse_args(["--adapters", "x", *extra])
+
+
+class TestResolveAsrModel:
+    def test_default_model_is_pinned(self):
+        assert _resolve_asr_model(_args("--enable-audio")) == (
+            DEFAULT_ASR_MODEL_ID,
+            DEFAULT_ASR_MODEL_REVISION,
+        )
+
+    def test_explicit_revision_wins_on_default_model(self):
+        args = _args("--enable-audio", "--asr-revision", "abc")
+        assert _resolve_asr_model(args) == (DEFAULT_ASR_MODEL_ID, "abc")
+
+    def test_custom_model_without_revision_warns_and_is_unpinned(self, capsys):
+        args = _args("--enable-audio", "--asr-model", "openai/whisper-small")
+        assert _resolve_asr_model(args) == ("openai/whisper-small", None)
+        assert "no --asr-revision" in capsys.readouterr().out
+
+    def test_custom_model_with_revision(self, capsys):
+        args = _args(
+            "--enable-audio",
+            "--asr-model",
+            "openai/whisper-small",
+            "--asr-revision",
+            "r",
+        )
+        assert _resolve_asr_model(args) == ("openai/whisper-small", "r")
+        assert "WARNING" not in capsys.readouterr().out
+
+    def test_local_dir_without_bundle_is_refused(self, tmp_path):
+        args = _args("--enable-audio", "--asr-model", str(tmp_path))
+        with pytest.raises(ValueError, match="--bundle-asr"):
+            _resolve_asr_model(args)
+
+    def test_local_dir_with_bundle_records_only_its_name(self, tmp_path, capsys):
+        src = tmp_path / "home" / "alice" / "my-asr"
+        src.mkdir(parents=True)
+        args = _args("--bundle-asr", "--asr-model", f"{src}/")
+        assert _resolve_asr_model(args) == ("my-asr", None)
+        # A bundle never loads from the Hub, so there is no unpinned warning.
+        assert "WARNING" not in capsys.readouterr().out
+
+    def test_bundle_asr_is_opt_in(self):
+        assert _args("--enable-audio").bundle_asr is False
+        assert _args("--bundle-asr").bundle_asr is True
+
+
+def _tiny_asr_dir(root):
+    """The shared tiny CTC model, plus a legacy weight file to be filtered."""
+    build_tiny_asr(root)
+    (root / "pytorch_model.bin").write_bytes(b"legacy")
+    return root
+
+
+class TestBundleAsrModel:
+    def test_local_source_is_copied_and_validated(self, tmp_path):
+        src = _tiny_asr_dir(tmp_path / "src")
+        dest = tmp_path / "ckpt" / "asr"
+        bundle_asr_model(str(src), None, str(dest))
+        assert (dest / "config.json").is_file()
+        assert (dest / "model.safetensors").is_file()
+        # Legacy weights are not bundled.
+        assert not (dest / "pytorch_model.bin").exists()
+
+    def test_source_without_safetensors_is_refused(self, tmp_path):
+        src = _tiny_asr_dir(tmp_path / "src")
+        (src / "model.safetensors").unlink()
+        with pytest.raises(FileNotFoundError, match="safetensors"):
+            bundle_asr_model(str(src), None, str(tmp_path / "asr"))
+
+    def test_hub_source_downloads_at_the_revision(self, tmp_path, monkeypatch):
+        from granite_switch.composer import compose_granite_switch as cgs
+
+        src = _tiny_asr_dir(tmp_path / "src")
+        calls = {}
+
+        def fake_snapshot_download(repo_id, revision, local_dir, allow_patterns):
+            calls.update(repo_id=repo_id, revision=revision)
+            import shutil
+
+            shutil.copytree(src, local_dir, dirs_exist_ok=True)
+
+        monkeypatch.setattr(cgs, "snapshot_download", fake_snapshot_download)
+        bundle_asr_model("org/asr", "abc", str(tmp_path / "asr"))
+        assert calls == {"repo_id": "org/asr", "revision": "abc"}
+
+    def test_rebundle_replaces_the_previous_bundle(self, tmp_path):
+        dest = tmp_path / "ckpt" / "asr"
+        dest.mkdir(parents=True)
+        # Left over from an earlier compose with another ASR model.
+        (dest / "model-00001-of-00002.safetensors").write_bytes(b"old")
+        (dest / "tokenizer.json").write_text("{}")
+        bundle_asr_model(str(_tiny_asr_dir(tmp_path / "src")), None, str(dest))
+        assert not (dest / "model-00001-of-00002.safetensors").exists()
+        assert not (dest / "tokenizer.json").exists()
+        assert (dest / "model.safetensors").is_file()
+
+    def test_source_that_is_the_destination_is_refused(self, tmp_path):
+        dest = _tiny_asr_dir(tmp_path / "asr")
+        with pytest.raises(ValueError, match="bundle destination"):
+            bundle_asr_model(str(dest), None, str(dest))
+        assert (dest / "model.safetensors").is_file()
+
+    def test_local_source_subdirectories_are_filtered_like_the_hub(self, tmp_path):
+        src = _tiny_asr_dir(tmp_path / "src")
+        # A git-lfs clone's object store, an ONNX export and a nested legacy
+        # weight file: none of them is in a Hub bundle.
+        (src / ".git" / "lfs").mkdir(parents=True)
+        (src / ".git" / "lfs" / "blob.json").write_text("{}")
+        (src / "onnx").mkdir()
+        (src / "onnx" / "model.onnx").write_bytes(b"onnx")
+        (src / "onnx" / "config.json").write_text("{}")
+        (src / "pt").mkdir()
+        (src / "pt" / "pytorch_model.bin").write_bytes(b"legacy")
+        dest = tmp_path / "asr"
+        bundle_asr_model(str(src), None, str(dest))
+        assert not (dest / ".git").exists()
+        assert not (dest / "onnx" / "model.onnx").exists()
+        assert not (dest / "pt").exists()
+        # A nested file a pattern matches is kept, as snapshot_download keeps it.
+        assert (dest / "onnx" / "config.json").is_file()
+
+    def test_failed_bundle_leaves_the_previous_bundle_in_place(self, tmp_path):
+        dest = tmp_path / "ckpt" / "asr"
+        bundle_asr_model(str(_tiny_asr_dir(tmp_path / "good")), None, str(dest))
+        bad = _tiny_asr_dir(tmp_path / "bad")
+        (bad / "model.safetensors").unlink()
+        with pytest.raises(FileNotFoundError, match="safetensors"):
+            bundle_asr_model(str(bad), None, str(dest))
+        assert (dest / "model.safetensors").is_file()
+        assert not (tmp_path / "ckpt" / "asr.partial").exists()
+
+
+def test_failed_bundle_fails_the_compose_before_the_config_is_saved(
+    tmp_path, monkeypatch
+):
+    """config.json points at the bundle, so it must not exist if bundling fails."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from granite_switch.composer import compose_granite_switch as cgs
+
+    monkeypatch.setattr(cgs, "_copy_io_configs", lambda *a, **k: {})
+    monkeypatch.setattr(cgs, "_create_adapter_index", lambda *a, **k: {})
+
+    def failing_bundle(*args):
+        raise FileNotFoundError("no safetensors")
+
+    monkeypatch.setattr(cgs, "bundle_asr_model", failing_bundle)
+    model = mock.MagicMock()
+    model.config.asr_bundled_path = "asr"
+    args = SimpleNamespace(
+        output=str(tmp_path / "out"),
+        create_ioyaml=False,
+        debug_fields=False,
+        base_model="base",
+        asr_model=None,
+    )
+    base = tmp_path / "base"
+    base.mkdir()
+    with pytest.raises(FileNotFoundError):
+        cgs.save_and_validate_model_artifacts(
+            model=model,
+            tokenizer=mock.MagicMock(),
+            args=args,
+            base_model_local_path=str(base),
+            all_discovered=[],
+            adapter_token_ids=[],
+        )
+    model.save_pretrained.assert_not_called()

@@ -2,8 +2,12 @@
 """Speech-to-text backend for the audio cascade.
 
 Wraps a HuggingFace ASR pipeline. Free of any vLLM import so it unit-tests on
-CPU. The model loads lazily and is cached per (model_id, device, dtype,
-pipeline_kwargs), so a process loads each ASR model at most once.
+CPU. The model loads lazily and is cached per (model_id, revision, device,
+dtype, pipeline_kwargs), so a process loads each ASR model at most once.
+
+There is no default model here: the checkpoint config names it (the composer
+writes config.DEFAULT_ASR_MODEL_ID and its pinned revision), and ``model_id``
+may be a Hub id or a local directory (bundled weights).
 
 Device defaults to CUDA (the default CTC encoder is small and GPU-bound work is
 what makes it fast); dtype follows the device unless a checkpoint sets
@@ -12,7 +16,9 @@ what makes it fast); dtype follows the device unless a checkpoint sets
 
 from __future__ import annotations
 
+import functools
 import os
+import posixpath
 import subprocess
 import threading
 from collections.abc import Mapping
@@ -20,13 +26,7 @@ from typing import Any, Union
 
 import numpy as np
 
-# Default speech-to-text model: Granite Speech 5.0 TurboCTC, a 470M conformer
-# CTC encoder. Used when the checkpoint does not name its own
-# (config.asr_model_id is None). Non-autoregressive (one forward pass + greedy
-# CTC collapse), so it cannot loop or hallucinate, but it also has no decoder to
-# steer: output is lowercase and unpunctuated and language/task decode kwargs do
-# not apply. English only.
-DEFAULT_ASR_MODEL_ID = "ibm-granite/granite-speech-5.0-470m-turboctc"
+from granite_switch.config import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
 
 # Call-time chunk window handed to a *generative* (seq2seq) pipeline, which has a
 # fixed input window and stitches its own chunks from timestamps. Never handed to
@@ -169,6 +169,79 @@ def _unsupported_architecture_error(model_id: str, exc: Exception) -> Exception:
     )
 
 
+def _bundle_subdir(asr_bundled_path: str) -> str:
+    """``asr_bundled_path`` as a normalized subdirectory of the checkpoint.
+
+    One spelling serves both the Hub fetch pattern and the on-disk path, and
+    the value comes from a config that may have been downloaded, so it must
+    not reach outside the checkpoint: absolute paths and ``..`` are refused.
+    """
+    subdir = posixpath.normpath(asr_bundled_path.replace("\\", "/"))
+    if posixpath.isabs(subdir) or subdir == "." or subdir.split("/")[0] == "..":
+        raise ValueError(
+            f"asr_bundled_path={asr_bundled_path!r} must be a subdirectory of "
+            f"the checkpoint (compose with --bundle-asr writes 'asr')."
+        )
+    return subdir
+
+
+@functools.cache
+def resolve_asr_source(
+    asr_model_id: str | None,
+    asr_model_revision: str | None,
+    asr_bundled_path: str | None,
+    checkpoint: str | None,
+    checkpoint_revision: str | None = None,
+) -> tuple[str, str | None]:
+    """Return ``(model, revision)`` for the ASR pipeline from checkpoint config.
+
+    Bundled weights win: ``asr_bundled_path`` (relative to the checkpoint) loads
+    from disk with no revision. ``checkpoint`` is the served model, a local
+    directory or a Hub repo id; for a repo id only the bundle subfolder is
+    fetched, which honours ``HF_HUB_OFFLINE`` and so resolves from the cache in
+    an airgapped deployment. Otherwise ``asr_model_id`` loads at
+    ``asr_model_revision``. There is no default: an audio checkpoint that names
+    neither is rejected, so the config always shows which ASR it runs.
+
+    Memoized (every transcription resolves it); a failure is not cached.
+    """
+    if asr_bundled_path:
+        if not checkpoint:
+            raise ValueError(
+                f"asr_bundled_path={asr_bundled_path!r} is set but the checkpoint "
+                f"location is unknown, so the bundled ASR cannot be found."
+            )
+        subdir = _bundle_subdir(asr_bundled_path)
+        if os.path.isdir(checkpoint):
+            root = checkpoint
+        else:
+            from huggingface_hub import snapshot_download
+
+            root = snapshot_download(
+                checkpoint,
+                revision=checkpoint_revision,
+                allow_patterns=[f"{subdir}/*"],
+            )
+        path = os.path.join(root, subdir)
+        if not os.path.isfile(os.path.join(path, "config.json")):
+            raise FileNotFoundError(
+                f"Bundled ASR not found at {path!r} (asr_bundled_path="
+                f"{asr_bundled_path!r}). Re-compose with --bundle-asr, or unset "
+                f"asr_bundled_path to load asr_model_id from the Hub."
+            )
+        return path, None
+    if not asr_model_id:
+        raise ValueError(
+            "This checkpoint has asr_enabled but no asr_model_id. Serving no "
+            "longer falls back to a built-in ASR model; the config must name it. "
+            "Re-compose with --enable-audio, or add to the checkpoint's "
+            f'config.json: "asr_model_id": "{DEFAULT_ASR_MODEL_ID}", '
+            f'"asr_model_revision": "{DEFAULT_ASR_MODEL_REVISION}". Checkpoints composed before granite-switch 0.2.0 '
+            "need this. See docs/AUDIO.md."
+        )
+    return asr_model_id, asr_model_revision
+
+
 _CHUNKING = None
 
 
@@ -214,12 +287,14 @@ class ASRTranscriber:
 
     def __init__(
         self,
-        model_id: str = DEFAULT_ASR_MODEL_ID,
+        model_id: str,
         device: str = "cuda",
         pipeline_kwargs: Mapping[str, Any] | None = None,
         dtype: str | None = None,
+        revision: str | None = None,
     ) -> None:
         self.model_id = model_id
+        self.revision = revision
         self.device = device
         self.dtype = dtype
         self.pipeline_kwargs: dict[str, Any] = dict(pipeline_kwargs or {})
@@ -245,6 +320,8 @@ class ASRTranscriber:
                 "device": self.device,
                 "torch_dtype": _resolve_torch_dtype(self.dtype, self.device),
             }
+            if self.revision is not None:
+                kwargs["revision"] = self.revision
             # pipeline_kwargs last: a checkpoint may override any default above.
             kwargs.update(self.pipeline_kwargs)
             try:
@@ -368,28 +445,30 @@ def _freeze(value: Any) -> Any:
 
 
 def get_transcriber(
-    model_id: str | None = None,
+    model_id: str,
     device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
+    revision: str | None = None,
 ) -> ASRTranscriber:
     """Return a process-wide cached :class:`ASRTranscriber`.
 
-    Cached per ``(model_id, device, dtype, pipeline_kwargs)``. ``model_id`` of
-    None resolves to :data:`DEFAULT_ASR_MODEL_ID`.
+    Cached per ``(model_id, revision, device, dtype, pipeline_kwargs)``.
     """
-    resolved = model_id or DEFAULT_ASR_MODEL_ID
-    key = (resolved, device, dtype, _freeze(pipeline_kwargs or {}))
+    if not model_id:
+        raise ValueError("get_transcriber requires a model_id")
+    key = (model_id, revision, device, dtype, _freeze(pipeline_kwargs or {}))
     transcriber = _TRANSCRIBERS.get(key)
     if transcriber is None:
         with _CACHE_LOCK:
             transcriber = _TRANSCRIBERS.get(key)
             if transcriber is None:
                 transcriber = ASRTranscriber(
-                    model_id=resolved,
+                    model_id=model_id,
                     device=device,
                     pipeline_kwargs=pipeline_kwargs,
                     dtype=dtype,
+                    revision=revision,
                 )
                 _TRANSCRIBERS[key] = transcriber
     return transcriber
@@ -399,7 +478,8 @@ def transcribe(
     audio: AudioInput,
     sampling_rate: int | None = None,
     *,
-    model_id: str | None = None,
+    model_id: str,
+    revision: str | None = None,
     device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
@@ -414,6 +494,7 @@ def transcribe(
         device=device,
         pipeline_kwargs=pipeline_kwargs,
         dtype=dtype,
+        revision=revision,
     ).transcribe(
         audio,
         sampling_rate,

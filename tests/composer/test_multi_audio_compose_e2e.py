@@ -13,13 +13,15 @@ and control ids are appended, so after N control tokens it already equals
 one past the last control id, which makes the table stale and sends compose into
 the rebuild that used to be missing on ``MultiSwitch``.
 
-Markers are ``slow`` + ``requires_model`` + ``audio``, matching
-``test_compose_e2e.py`` and deliberately NOT env-gated: gating is what hid the
-bug. ``tests/composer/test_control_lut_refresh.py`` covers the same call site in
-seconds on a tiny model; this is the end-to-end proof that a real compose of the
+Markers are ``slow`` + ``audio``, matching ``test_compose_e2e.py`` and
+deliberately NOT env-gated: gating is what hid the bug.
+``tests/composer/test_control_lut_refresh.py`` covers the same call site in
+seconds on a tiny model; this is the end-to-end proof that a compose of the
 combination completes and ships a loadable checkpoint.
 
-Cost: one compose of the default base model (module-scoped).
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny
+granite-4.1-3b and adapter library built from captured copies of the real ones;
+``real``, the published ones, in the release tier.
 """
 
 import json
@@ -28,22 +30,27 @@ import sys
 
 import pytest
 
-pytestmark = [pytest.mark.slow, pytest.mark.requires_model, pytest.mark.audio]
+from tests.shared import model_sources
 
-# Same adapter library as test_compose_e2e.py, with the default base model.
+pytestmark = [pytest.mark.slow, pytest.mark.audio]
+
+# Same adapter library as test_compose_e2e.py, on the CLI's default base.
 # --technology-filter lora keeps the build to the cheapest useful shape.
+BASE_NAME = "granite-4.1-3b"
 ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
 BUILD_TIMEOUT = 3600
 _LUT_KEY = "model.switch.control_to_substitute_lut"
 
 
-def _compose(output_dir):
+def _compose(source, output_dir):
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
+        "--base-model",
+        model_sources.base_model(source, BASE_NAME),
         "--adapters",
-        ADAPTER_LIBRARY,
+        model_sources.adapter_library(source, ADAPTER_LIBRARY, BASE_NAME),
         "--technology-filter",
         "lora",
         "--enable-audio",
@@ -66,9 +73,10 @@ def _compose(output_dir):
     return output_dir
 
 
-@pytest.fixture(scope="module")
-def audio_multi(tmp_path_factory):
-    return _compose(tmp_path_factory.mktemp("audio-multi") / "model")
+@pytest.fixture(scope="module", params=model_sources.sources())
+def audio_multi(request, tmp_path_factory):
+    source = request.param
+    return _compose(source, tmp_path_factory.mktemp(f"audio-multi-{source}") / "model")
 
 
 def _lut_numel(output_dir):
@@ -161,19 +169,22 @@ def test_multi_audio_checkpoint_loads_without_size_overrides(audio_multi):
 # marker to its head. The audio marker grows the vocabulary past the control
 # ids, so this also checks the saved control LUT matches the shipped config.
 # --------------------------------------------------------------------------- #
-_PROBE_BASE = "ibm-granite/granite-4.1-3b"
 _PROBE_LABELS = ["safe", "unsafe"]
+#: The LoRA the manifest pairs with the probe head.
+_PROBE_LORA = "citations"
 
 
-def _write_probe_manifest(root):
-    """A real LoRA plus a synthetic bias-only head (label 1 always wins)."""
+def _write_probe_manifest(source, root):
+    """A LoRA plus a synthetic bias-only head (label 1 always wins)."""
     import torch
     from safetensors.torch import save_file
     from transformers import AutoConfig
 
-    from .test_probe_compose import _find_rag_lora_dir
-
-    hidden = AutoConfig.from_pretrained(_PROBE_BASE).hidden_size
+    base = model_sources.base_model(source, BASE_NAME)
+    lora_dir = model_sources.lora_adapter_dir(
+        source, ADAPTER_LIBRARY, BASE_NAME, _PROBE_LORA
+    )
+    hidden = AutoConfig.from_pretrained(base).hidden_size
     head_dir = root / "safety" / "safety" / "granite-4.1-3b" / "lora"
     head_dir.mkdir(parents=True)
     bias = torch.tensor([-10.0, 10.0])
@@ -185,7 +196,7 @@ def _write_probe_manifest(root):
     manifest = root / "adapters.yaml"
     manifest.write_text(
         "rag:\n"
-        f"  path: {_find_rag_lora_dir()}\n"
+        f"  path: {lora_dir}\n"
         "  type: lora\n"
         "safety:\n"
         f"  path: {head_dir}\n"
@@ -196,15 +207,15 @@ def _write_probe_manifest(root):
     return manifest
 
 
-def _compose_probe(root, enable_audio):
-    manifest = _write_probe_manifest(root)
+def _compose_probe(source, root, enable_audio):
+    manifest = _write_probe_manifest(source, root)
     output_dir = root / "model"
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
         "--base-model",
-        _PROBE_BASE,
+        model_sources.base_model(source, BASE_NAME),
         "--adapters",
         str(manifest),
         "--output",
@@ -221,10 +232,18 @@ def _compose_probe(root, enable_audio):
     return output_dir
 
 
-@pytest.fixture(scope="module", params=[True, False], ids=["audio", "text"])
+@pytest.fixture(
+    scope="module",
+    params=[
+        pytest.param((audio, src.values[0]), id=f"{name}-{src.id}", marks=src.marks)
+        for audio, name in ((True, "audio"), (False, "text"))
+        for src in model_sources.sources()
+    ],
+)
 def probe_checkpoint(request, tmp_path_factory):
-    root = tmp_path_factory.mktemp("probe-audio" if request.param else "probe")
-    return request.param, _compose_probe(root, enable_audio=request.param)
+    enable_audio, source = request.param
+    root = tmp_path_factory.mktemp(f"probe-{source}{'-audio' if enable_audio else ''}")
+    return enable_audio, _compose_probe(source, root, enable_audio=enable_audio)
 
 
 @pytest.mark.xdist_group("multi_audio_compose_e2e")
@@ -275,3 +294,13 @@ def _assert_lut_matches(output_dir, vocab_size):
                 assert f.get_slice(_LUT_KEY).get_shape()[0] == vocab_size
                 return
     pytest.fail(f"{_LUT_KEY} not found in {output_dir}")
+
+
+def test_multi_audio_config_names_the_pinned_asr(audio_multi):
+    # Serving has no fallback ASR, so compose must write the model and revision.
+    from granite_switch.config import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
+
+    config = json.loads((audio_multi / "config.json").read_text())
+    assert config["asr_model_id"] == DEFAULT_ASR_MODEL_ID
+    assert config["asr_model_revision"] == DEFAULT_ASR_MODEL_REVISION
+    assert config.get("asr_bundled_path") is None

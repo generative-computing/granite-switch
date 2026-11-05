@@ -314,6 +314,7 @@ class TestResolveRepoPathSelectiveDownload:
 
 
 @pytest.mark.slow
+@pytest.mark.release  # pins the published repo's layout, which only the Hub changes
 class TestRealHubMetadata:
     REPO = "ibm-granite/granitelib-core-r1.0"
     TARGET_MODEL = "granite-4.1-3b"

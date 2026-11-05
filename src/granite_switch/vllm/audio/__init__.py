@@ -5,10 +5,9 @@ Speech-to-text cascade: audio is transcribed and the transcript tokens are
 spliced into the prompt, so the decoder only ever sees text. See docs/AUDIO.md.
 """
 
-from .asr import DEFAULT_ASR_MODEL_ID, ASRTranscriber, transcribe
+from .asr import ASRTranscriber, transcribe
 
 __all__ = [
-    "DEFAULT_ASR_MODEL_ID",
     "ASRTranscriber",
     "transcribe",
 ]

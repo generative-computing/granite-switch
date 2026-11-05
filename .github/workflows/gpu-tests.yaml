@@ -60,11 +60,11 @@ on:
       # family is added HERE and nowhere else -- this entry plus its arm in the
       # Resolve test scope step below.
       suite:
-        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs)."
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), release (the pre-release tier: real external models)."
         required: false
         default: full
         type: choice
-        options: [full, short, dev, audio, multi]
+        options: [full, short, dev, audio, multi, release]
       # RESULT CACHE OPT-OUT. Default off, i.e. cache on: the expensive thing here is
       # a GPU run, and re-running one for a commit+scope that was already tested buys
       # nothing in the common case (a reviewer re-reading a PR, a second maintainer
@@ -225,18 +225,32 @@ jobs:
             # so a path list would be long and would drift silently every time a
             # marked test is added. A marker cannot drift.
             #
-            # "and not deep" is not optional. pytest's -m is single-valued and the
-            # command line REPLACES pyproject's addopts `-m "not deep"` rather than
-            # adding to it, so a bare `-m audio` would quietly start running the
-            # expensive deep audio tests that every other scope excludes.
+            # "and not deep and not release" is not optional. pytest's -m is
+            # single-valued and the command line REPLACES pyproject's addopts
+            # `-m "not deep and not release"` rather than adding to it, so a bare
+            # `-m audio` would quietly start running the expensive deep and
+            # release-tier audio tests that every other scope excludes.
             #
             # The quotes survive sed -> YAML -> helm -> the pod's shell; the
             # neighbouring `python -c "..."` lines in the job template rely on the
             # same thing. The one forbidden character is #, the sed delimiter.
             audio)
-              PATHS='-m "audio and not deep" tests/'
+              PATHS='-m "audio and not deep and not release" tests/'
               SUFFIX="audio"
               LEG="$LABEL-audio"
+              ;;
+            # The pre-release tier, by MARKER for the same reason as `audio`: tests
+            # against real external artifacts (the default ASR, Hub repo layouts,
+            # quantization libraries) plus the non-representative cases of the
+            # breadth matrices. Every other scope excludes them. Run before tagging
+            # a release, and on PRs that bump uv.lock or a model pin. See
+            # docs/CICD.md, "Release test tier".
+            release)
+              # "and not deep": -m replaces addopts, so the deep code-theory
+              # suite would otherwise ride along on a release run.
+              PATHS='-m "release and not deep" tests/'
+              SUFFIX="release"
+              LEG="$LABEL-release"
               ;;
             # Everything `full` runs, but on TWO GPUs. Not a different test
             # selection -- a different SHAPE of pod.

@@ -5,6 +5,13 @@ Drives text + adapter + audio x1/x2/x3 through one live engine — the serve-tim
 path the low-level tests bypass (CUDA graphs, the ASR processor inside vLLM's
 EngineCore subprocess, the multi-clip splice, generation).
 
+Composed with ``--bundle-asr`` (which implies ``--enable-audio``) from a tiny
+random CTC model built locally (``tests/shared/tiny_asr.py``), so the ASR is
+served from the checkpoint's ``asr/`` folder with no ASR download. This also
+covers the airgapped path (issue #158) and proves vLLM does not take
+``asr/*.safetensors`` for LLM weights. The real default ASR is exercised by
+``test_asr_ctc_default_gpu.py``.
+
 Deliberately does NOT assert transcript content: WER and adapter-routing
 correctness are separate boxes, covered by the eval harness and the MultiSwitch
 serving e2e tests. Synthetic tones keep the test asset-free.
@@ -15,24 +22,46 @@ Opt in explicitly: `pytest -m "slow and requires_model and gpu"`.
 import importlib.util
 import json
 import os
+from pathlib import Path
 
 import pytest
 
 pytestmark = [
     pytest.mark.audio,
     pytest.mark.slow,
-    pytest.mark.requires_model,
     pytest.mark.gpu,
 ]
 
 if importlib.util.find_spec("vllm") is None:
     pytest.skip("requires vLLM installed", allow_module_level=True)
 
+from tests.shared import model_sources
 
-# E2E model matrix: base model + adapter-library pairs.
+# E2E model matrix: (base, adapter library). PR runs serve a fake granite-4.0-micro
+# (tests/shared/model_sources.py); the release tier serves the real 4.0-micro and
+# adds the real 4.1-3b as a second base.
+_ADAPTER_LIBRARY = "ibm-granite/granitelib-core-r1.0"
+
+
+def _pair(source, base_name):
+    return (
+        model_sources.base_model(source, base_name),
+        model_sources.adapter_library(source, _ADAPTER_LIBRARY, base_name),
+    )
+
+
 _DEFAULT_BASE_MODEL_PAIRS = [
-    ("ibm-granite/granite-4.0-micro", "ibm-granite/granitelib-core-r1.0"),
-    ("ibm-granite/granite-4.1-3b", "ibm-granite/granitelib-core-r1.0"),
+    pytest.param(("fake", "granite-4.0-micro"), id="granite-4.0-micro-fake"),
+    pytest.param(
+        ("real", "granite-4.0-micro"),
+        marks=pytest.mark.release,
+        id="granite-4.0-micro-real",
+    ),
+    pytest.param(
+        ("real", "granite-4.1-3b"),
+        marks=pytest.mark.release,
+        id="granite-4.1-3b-real",
+    ),
 ]
 
 
@@ -52,7 +81,12 @@ def _load_experimental_pairs():
             f"GRANITE_SWITCH_EXPERIMENTAL_MODEL_PAIRS is not valid JSON: {e}\n"
             f'Expected format: \'[{{"base":"/path","adapter":"/path"}}, ...]\''
         )
-    return [(p["base"], p["adapter"]) for p in entries]
+    return [
+        pytest.param(
+            ("path", (p["base"], p["adapter"])), id=p["base"].rsplit("/", 1)[-1]
+        )
+        for p in entries
+    ]
 
 
 BASE_MODEL_PAIRS = _DEFAULT_BASE_MODEL_PAIRS + _load_experimental_pairs()
@@ -64,7 +98,6 @@ _TARGET_SR = 16_000
 @pytest.fixture(
     scope="module",
     params=BASE_MODEL_PAIRS,
-    ids=lambda p: p[0].rsplit("/", 1)[-1],
 )
 def audio_checkpoint(request, tmp_path_factory):
     """Compose one audio-enabled checkpoint per (base, adapter) pair.
@@ -75,8 +108,12 @@ def audio_checkpoint(request, tmp_path_factory):
     import subprocess
     import sys
 
-    base_model, adapter_library = request.param
-    save_dir = tmp_path_factory.mktemp(base_model.rsplit("/", 1)[-1]) / "model"
+    from tests.shared.tiny_asr import build_tiny_asr
+
+    kind, spec = request.param
+    base_model, adapter_library = spec if kind == "path" else _pair(kind, spec)
+    save_dir = tmp_path_factory.mktemp(Path(base_model).name) / "model"
+    tiny_asr = build_tiny_asr(tmp_path_factory.mktemp("tiny-asr") / "asr")
 
     cmd = [
         sys.executable,
@@ -86,7 +123,9 @@ def audio_checkpoint(request, tmp_path_factory):
         base_model,
         "--adapters",
         adapter_library,
-        "--enable-audio",
+        "--bundle-asr",
+        "--asr-model",
+        str(tiny_asr),
         "--output",
         str(save_dir),
     ]
@@ -142,6 +181,13 @@ def _one_completion(outputs):
     completion = outputs[0].outputs[0]
     assert len(completion.token_ids) >= 1
     return completion
+
+
+def test_asr_is_served_from_the_bundle(served):
+    """The bundled ASR is named in the config the engine serves."""
+    config = served["config"]
+    assert config.asr_bundled_path == "asr"
+    assert config.asr_model_id
 
 
 def test_text_only_serving(served):

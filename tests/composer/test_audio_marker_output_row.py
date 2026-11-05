@@ -35,6 +35,7 @@ from granite_switch.composer.tokenizer_setup import (
 )
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.hf import GraniteSwitchForCausalLM
+from tests.shared import model_sources
 
 # Ids inside _tiny_config's 300-token vocabulary.
 _AUDIO_ID = 252
@@ -109,13 +110,16 @@ class TestFindReservedNeverEmittedTokenId:
         )
         assert find_reserved_never_emitted_token_id(tok) is None
 
-    def test_finds_reserved_token_on_real_granite_tokenizer(self):
+    @pytest.mark.parametrize("source", model_sources.sources())
+    @pytest.mark.parametrize(
+        "base_name", ["granite-4.0-micro", "granite-4.1-3b", "granite-4.2-3b"]
+    )
+    def test_finds_reserved_token_on_granite_tokenizer(self, source, base_name):
+        # fake: the captured tokenizer config (real added tokens on their real
+        # ids); real (release tier): the published tokenizer.
         from transformers import AutoTokenizer
 
-        try:
-            tok = AutoTokenizer.from_pretrained("ibm-granite/granite-4.1-3b")
-        except Exception as e:
-            pytest.skip(f"could not fetch Granite tokenizer: {e}")
+        tok = AutoTokenizer.from_pretrained(model_sources.base_model(source, base_name))
         token_id = find_reserved_never_emitted_token_id(tok)
         assert token_id is not None
         assert tok.convert_ids_to_tokens(token_id).startswith("<|unused_")

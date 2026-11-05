@@ -1,0 +1,24 @@
+name: query_rewrite
+# Model name string, or null to use whatever is provided in the chat completion request
+model: ~
+# JSON schema of the model's output
+response_format: |
+  {
+    "properties": {
+      "rewritten_question": {
+        "title": "Rewritten Question",
+        "type": "string"
+      }
+    },
+    "required": [
+      "rewritten_question"
+    ],
+    "title": "QueryRewriteOutput",
+    "type": "object"
+  }
+transformations: ~
+instruction: ~
+parameters:
+  max_completion_tokens: 1024
+  temperature: 0.0
+sentence_boundaries: false

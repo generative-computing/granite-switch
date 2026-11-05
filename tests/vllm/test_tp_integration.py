@@ -29,6 +29,8 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.shared import model_sources
+
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 _NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
 
@@ -202,17 +204,12 @@ class TestTPRealAdapters:
     sharding too. TP=1 and TP=2 logprobs must agree.
     """
 
-    def test_tp_logprobs_agree(self, tmp_path):
+    @pytest.mark.parametrize("source", model_sources.sources())
+    def test_tp_logprobs_agree(self, tmp_path, source):
         _build_and_compare(
             str(tmp_path),
-            build_args=[
-                "build-compose",
-                "--base-model",
-                "ibm-granite/granite-4.0-micro",
-                "--adapter-repos",
-                "ibm-granite/granitelib-rag-r1.0",
-            ],
-            label="granite-4.0-micro-rag",
+            build_args=_rag_build_args(source),
+            label=f"granite-4.0-micro-rag-{source}",
             intrinsic_name="answerability",
         )
 
@@ -232,19 +229,34 @@ class TestTPMultiSwitch:
     control-token placement is exercised under sharding too.
     """
 
-    def test_tp_logprobs_agree_multi(self, tmp_path):
+    @pytest.mark.parametrize("source", model_sources.sources())
+    def test_tp_logprobs_agree_multi(self, tmp_path, source):
         _build_and_compare(
             str(tmp_path),
-            build_args=[
-                "build-compose",
-                "--base-model",
-                "ibm-granite/granite-4.0-micro",
-                "--adapter-repos",
-                "ibm-granite/granitelib-rag-r1.0",
-            ],
-            label="granite-4.0-micro-rag-multi",
+            build_args=_rag_build_args(source),
+            label=f"granite-4.0-micro-rag-multi-{source}",
             intrinsic_name="answerability",
         )
+
+
+_BASE_NAME = "granite-4.0-micro"
+_RAG_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
+
+
+def _rag_build_args(source):
+    """Compose args for 4.0-micro + the RAG library, per source.
+
+    ``fake`` (every PR run) is a tiny base and library built from captured copies
+    of the real ones (tests/shared/model_sources.py); its geometry (4 query, 2 KV
+    heads) shards evenly at TP=2. ``real`` runs in the release tier.
+    """
+    return [
+        "build-compose",
+        "--base-model",
+        model_sources.base_model(source, _BASE_NAME),
+        "--adapter-repos",
+        model_sources.adapter_library(source, _RAG_LIBRARY, _BASE_NAME),
+    ]
 
 
 class TestTPGraniteMoe:

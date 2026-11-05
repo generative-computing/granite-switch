@@ -15,7 +15,10 @@ Two phases, each with full validation (inference, config, weights, files):
     Load from Phase 1 output → save to second dir → load again.
     Compare the two loaded models AND the two directory contents.
 
-Requires base model + RAG adapters download.  Marked slow + requires_model.
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny base
+and adapter library built from captured copies of the real ones; ``real``, the
+published granite-4.1-3b and granite-lib-rag-r1.0, in the release tier. Every check
+compares a model with itself across a save/load, so both run the same assertions.
 """
 
 import filecmp
@@ -31,10 +34,14 @@ import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import granite_switch.hf  # noqa: F401 — registers AutoModel
+from tests.shared import model_sources
 
-# Whole module downloads a base model + RAG adapters and composes a checkpoint —
-# far too heavy for GitHub-hosted CPU runners; runs on the GPU cluster only.
-pytestmark = [pytest.mark.slow, pytest.mark.requires_model]
+# Composes and serializes a checkpoint twice: too heavy for GitHub-hosted CPU
+# runners even on the fake source; runs on the GPU cluster only.
+pytestmark = [pytest.mark.slow]
+
+BASE_NAME = "granite-4.1-3b"
+ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
 
 SEED = 42
 
@@ -93,14 +100,16 @@ def _forward_logits(model, input_ids):
         return model(input_ids=input_ids, use_cache=False).logits.cpu()
 
 
-def _call_build(output_dir, extra_args=None):
+def _call_build(source, output_dir, extra_args=None):
     """Call compose_granite_switch.build() with mocked sys.argv."""
     from granite_switch.composer.compose_granite_switch import build
 
     fake_argv = [
         "compose_granite_switch",
+        "--base-model",
+        model_sources.base_model(source, BASE_NAME),
         "--adapters",
-        "ibm-granite/granite-lib-rag-r1.0",
+        model_sources.adapter_library(source, ADAPTER_LIBRARY, BASE_NAME),
         "--output",
         str(output_dir),
     ]
@@ -203,8 +212,13 @@ def _make_golden_set(adapter_name: str) -> list[str]:
 # ════════════════════════════════════════════════════════════════════
 
 
+@pytest.fixture(scope="module", params=model_sources.sources())
+def source(request):
+    return request.param
+
+
 @pytest.fixture(scope="module")
-def phase1(tmp_path_factory):
+def phase1(source, tmp_path_factory):
     """build() → save_and_validate_model_artifacts() → from_pretrained().
 
     Returns everything needed to compare built vs loaded:
@@ -213,7 +227,7 @@ def phase1(tmp_path_factory):
     save_dir = str(tmp_path_factory.mktemp("phase1") / "model")
 
     # ── build() ──
-    build_result = _call_build(save_dir)
+    build_result = _call_build(source, save_dir)
     (
         model,
         tokenizer,
@@ -332,14 +346,14 @@ def phase1(tmp_path_factory):
 
 
 @pytest.fixture(scope="module")
-def phase2(tmp_path_factory):
+def phase2(source, tmp_path_factory):
     """build()+save → load → save to second dir → load again.
 
     Returns everything needed to compare the two loads and two directories.
     """
     # ── First save: build() + save ──
     save_dir_1 = str(tmp_path_factory.mktemp("phase2a") / "model")
-    build_result = _call_build(save_dir_1)
+    build_result = _call_build(source, save_dir_1)
     adapter_token_ids = build_result[7]  # index 7 = adapter_token_ids
     _call_save(build_result)
     del build_result

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "granite-switch"
-version = "0.1.1"
+version = "0.2.0"
 description = "Granite Switch: Composable model building"
 readme = "README.md"
 license = "Apache-2.0"
@@ -48,7 +48,7 @@ register_granite_switch = "granite_switch.vllm:register"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = ["--ignore=tests/_legacy", "-m", "not deep"]
+addopts = ["--ignore=tests/_legacy", "-m", "not deep and not release"]
 markers = [
     "gpu: requires CUDA GPU",
     "vllm: requires vLLM installed",
@@ -56,6 +56,7 @@ markers = [
     "deep: expensive code-theory tests (m=8 / 256-dim); run with: pytest -m deep",
     "requires_model: needs a real model checkpoint",
     "audio: exercises the audio/ASR path; run with: pytest -m audio",
+    "release: pre-release tier, real external models (e.g. the default ASR) checked against our code; run with: pytest -m release",
 ]
 
 [dependency-groups]

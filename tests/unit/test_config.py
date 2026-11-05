@@ -106,6 +106,8 @@ class TestAudioConfig:
         cfg = GraniteSwitchConfig(num_adapters=0)
         assert cfg.asr_enabled is False
         assert cfg.asr_model_id is None
+        assert cfg.asr_model_revision is None
+        assert cfg.asr_bundled_path is None
         assert cfg.asr_device == "cuda"
         assert cfg.asr_dtype is None
         assert cfg.asr_pipeline_kwargs is None
@@ -117,6 +119,20 @@ class TestAudioConfig:
         )
         cfg.save_pretrained(tmp_path)
         assert GraniteSwitchConfig.from_pretrained(tmp_path).asr_dtype == "float32"
+
+    def test_asr_source_round_trip(self, tmp_path):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_model_id="org/asr",
+            asr_model_revision="abc123",
+            asr_bundled_path="asr",
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_model_id == "org/asr"
+        assert loaded.asr_model_revision == "abc123"
+        assert loaded.asr_bundled_path == "asr"
 
     def test_invalid_asr_dtype_raises(self):
         with pytest.raises(ValueError, match="asr_dtype"):
