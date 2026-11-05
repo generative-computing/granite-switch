@@ -199,6 +199,7 @@ def _load_chunking():
 
 # Sample rate every supported ASR front-end expects.
 _TARGET_SAMPLE_RATE = 16_000
+_NO_SPEECH_TEXT = "<|nospeech|>"
 
 # Audio item shapes vLLM may pass to a multimodal processor.
 AudioInput = Union[
@@ -320,7 +321,11 @@ class ASRTranscriber:
             **call_kwargs,
         )
         text = result["text"] if isinstance(result, dict) else str(result)
-        return text.strip()
+        text = text.strip()
+        # Some multilingual CTC checkpoints emit this control token for
+        # silence or non-speech. Treat it as an empty transcript so it cannot
+        # be inserted into the LLM prompt as if it were user speech.
+        return "" if text == _NO_SPEECH_TEXT else text
 
 
 # ── Module-level cache + convenience function ────────────────────────────────

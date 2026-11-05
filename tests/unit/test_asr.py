@@ -113,6 +113,14 @@ class TestTranscriber:
         passed = fake_pipe.call_args_list[-1][0][0]
         assert passed["sampling_rate"] == 16000
 
+    def test_transcribe_drops_no_speech_control_token(self):
+        t = asr.ASRTranscriber(model_id="x", device="cpu")
+        t._pipeline = mock.Mock(return_value={"text": "  <|nospeech|>  "})
+
+        out = t.transcribe(np.zeros(1600, dtype=np.float32), sampling_rate=16000)
+
+        assert out == ""
+
     def test_load_is_idempotent_when_pipeline_set(self):
         # Once the pipeline is loaded, load() must early-return (no rebuild).
         t = asr.ASRTranscriber(model_id="x", device="cpu")
