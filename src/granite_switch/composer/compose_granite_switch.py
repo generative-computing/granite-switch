@@ -1035,6 +1035,15 @@ def build():
                     include=args.include_adapters,
                     exclude=args.exclude_adapters,
                 )
+                for path, name, tech, _source in found:
+                    if tech == "probe":
+                        with open(Path(path) / "probe_config.json") as f:
+                            cfg = json.load(f)
+                        probe_meta[name] = {
+                            "kind": "probe",
+                            "labels": cfg.get("labels"),
+                            "layer": cfg.get("layer"),
+                        }
                 if not found:
                     msg = (
                         f"  WARNING: No adapters found for target '{args.target_model}'"
@@ -1379,12 +1388,13 @@ def build():
     print("Generating compose report...")
     print("=" * 80)
     if hasattr(model, "_build_mappings"):
+        has_lora = any(t[0] and t[2] != ANCHOR_MODE_PROBE for t in all_discovered)
         generate_compose_report(
             base_mapping=model._build_mappings["base"],
             adapter_mapping=model._build_mappings["adapter"],
             output_path=args.output,
             model=model,
-            adapter_paths=adapter_paths,
+            adapter_paths=adapter_paths if has_lora else None,
             adapter_names=adapter_names,
             arch=arch,
             source_analysis=model._build_mappings.get("source_analysis"),
