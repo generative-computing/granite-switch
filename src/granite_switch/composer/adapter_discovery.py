@@ -342,11 +342,11 @@ def _resolve_technology(
     repo_id: str,
     adapter_name: str,
     target_model_name: str,
-) -> str | None:
-    """Resolve preferred technology for an adapter via Hub metadata.
+) -> list[str]:
+    """Resolve the technologies to download for an adapter via Hub metadata.
 
-    Prefers ``alora`` over ``lora``. Returns ``None`` if neither exists
-    for this adapter/model combination.
+    Prefers ``alora`` over ``lora``, plus ``probe`` when present. Returns an
+    empty list if none exists for this adapter/model combination.
     """
     from huggingface_hub import list_repo_tree
     from huggingface_hub.errors import EntryNotFoundError
@@ -362,16 +362,15 @@ def _resolve_technology(
             item.path.split("/")[-1]
             for item in subtree
             if isinstance(item, RepoFolder)
-            and item.path.split("/")[-1] in ("alora", "lora")
+            and item.path.split("/")[-1] in ("alora", "lora", "probe")
         }
     except EntryNotFoundError:
-        return None
+        return []
 
-    if "alora" in technologies:
-        return "alora"
-    elif "lora" in technologies:
-        return "lora"
-    return None
+    resolved = [t for t in ("alora", "lora") if t in technologies][:1]
+    if "probe" in technologies:
+        resolved.append("probe")
+    return resolved
 
 
 def _build_allow_patterns(
@@ -422,10 +421,10 @@ def _build_allow_patterns(
                 # only that variant so discovery doesn't later skip the adapter.
                 patterns.append(f"{name}/{target_model_name}/{technology_filter}/**")
                 continue
-            tech = _resolve_technology(repo_id, name, target_model_name)
-            if tech:
+            techs = _resolve_technology(repo_id, name, target_model_name)
+            for tech in techs:
                 patterns.append(f"{name}/{target_model_name}/{tech}/**")
-            else:
+            if not techs:
                 # Model not found for this adapter — include anyway so
                 # discover_adapters can report it as missing downstream
                 patterns.append(f"{name}/{target_model_name}/**")

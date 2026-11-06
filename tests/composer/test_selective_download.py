@@ -127,10 +127,9 @@ class TestResolveTechnology:
             }
         )
         with patch("huggingface_hub.list_repo_tree", side_effect=tree):
-            assert (
-                _resolve_technology("org/repo", "answerability", "granite-4.1-3b")
-                == "alora"
-            )
+            assert _resolve_technology(
+                "org/repo", "answerability", "granite-4.1-3b"
+            ) == ["alora"]
 
     def test_returns_none_when_target_model_missing(self):
         # Adapter exists, but only for a different model size.
@@ -141,8 +140,7 @@ class TestResolveTechnology:
         )
         with patch("huggingface_hub.list_repo_tree", side_effect=tree):
             assert (
-                _resolve_technology("org/repo", "answerability", "granite-4.1-3b")
-                is None
+                _resolve_technology("org/repo", "answerability", "granite-4.1-3b") == []
             )
 
 
@@ -204,7 +202,23 @@ class TestBuildAllowPatterns:
             )
         assert patterns == [
             "answerability/granite-4.1-3b/lora/**",
-            "safety/granite-4.1-3b/**",
+            "safety/granite-4.1-3b/probe/**",
+        ]
+
+    def test_probe_next_to_lora_of_same_name_is_downloaded(self):
+        tree = _tree_response(
+            {
+                "": ["answerability"],
+                "answerability/granite-4.1-3b": ["alora", "lora", "probe"],
+            }
+        )
+        with patch("huggingface_hub.list_repo_tree", side_effect=tree):
+            patterns = _build_allow_patterns(
+                "org/repo", target_model_name="granite-4.1-3b"
+            )
+        assert patterns == [
+            "answerability/granite-4.1-3b/alora/**",
+            "answerability/granite-4.1-3b/probe/**",
         ]
 
 
@@ -338,22 +352,16 @@ class TestRealHubMetadata:
     def test_resolve_technology_matches_published_build(self):
         # context-attribution is documented as 'lora' in the published BUILD.md;
         # requirement-check as 'alora'.
-        assert (
-            _resolve_technology(
-                self.REPO,
-                "context-attribution",
-                self.TARGET_MODEL,
-            )
-            == "lora"
-        )
-        assert (
-            _resolve_technology(
-                self.REPO,
-                "requirement-check",
-                self.TARGET_MODEL,
-            )
-            == "alora"
-        )
+        assert _resolve_technology(
+            self.REPO,
+            "context-attribution",
+            self.TARGET_MODEL,
+        ) == ["lora"]
+        assert _resolve_technology(
+            self.REPO,
+            "requirement-check",
+            self.TARGET_MODEL,
+        ) == ["alora"]
 
     def test_list_repo_adapters_remote_includes_known_adapters(self):
         known = {"context-attribution", "requirement-check", "uncertainty"}
