@@ -145,7 +145,7 @@ def evaluate(model, prompt, boards, sols, batch_size, digit_ids, device):
     rank, world = (dist.get_rank(), dist.get_world_size()) if ddp else (0, 1)
     n = len(boards)
     lo, hi = rank * n // world, (rank + 1) * n // world
-    cells = exact = valid = 0
+    cells = exact = valid = blank_right = blanks = 0
     iters = []
     for i in range(lo, hi, batch_size):
         j = min(hi, i + batch_size)
@@ -158,6 +158,9 @@ def evaluate(model, prompt, boards, sols, batch_size, digit_ids, device):
         ) + 1  # token -> digit
         pred = pred.cpu().numpy()
         cells += int((pred == ba).sum())
+        given = bq.cpu().numpy() > 0
+        blank_right += int(((pred == ba) & ~given).sum())
+        blanks += int((~given).sum())
         exact += int((pred == ba).all(axis=1).sum())
         valid += sum(check(bq[k].cpu().numpy(), pred[k]) for k in range(len(pred)))
         it = getattr(model.model, "_last_loop_iters", None)
@@ -172,20 +175,24 @@ def evaluate(model, prompt, boards, sols, batch_size, digit_ids, device):
             float(it.sum()),
             float(it.numel()),
             float(it.max()) if it.numel() else 0.0,
+            blank_right,
+            blanks,
         ],
         dtype=torch.float64,
         device=device,
     )
     if ddp:
-        top = stats[5:].clone()
+        top = stats[5:6].clone()
         dist.all_reduce(stats, op=dist.ReduceOp.SUM)
         dist.all_reduce(top, op=dist.ReduceOp.MAX)
         stats[5] = top[0]
-    cells, exact, valid, it_sum, it_n, it_max = stats.tolist()
+    cells, exact, valid, it_sum, it_n, it_max, blank_right, blanks = stats.tolist()
     return {
         "solver_iters_mean": it_sum / max(1.0, it_n),
         "solver_iters_max": it_max,
         "cell_acc": cells / (81 * n),
+        # Only the cells the puzzle leaves blank (the givens come back as given).
+        "blank_cell_acc": blank_right / max(1.0, blanks),
         "exact_acc": exact / n,
         "valid_acc": valid / n,
         "n": n,

@@ -3,7 +3,7 @@
 # Score saved loop heads on the test split through the served HF path, for
 # several solver budgets, from the repo root. Env: RUN_DIR (results), HEADS
 # (space-separated head files, or "composed"), BUDGETS ("max:min ..."), EVAL_N,
-# EVAL_START, GPUS, BASE_MODEL. COMPOSE_HEAD: a head to compose into the
+# EVAL_START, GPUS, BASE_MODEL, READ_LAYER, SAMPLES (answers kept per head). COMPOSE_HEAD: a head to compose into the
 # checkpoint itself (then HEADS defaults to "composed": the checkpoint as served).
 set -euo pipefail
 WORK=/tmp/work
@@ -28,6 +28,8 @@ if [ -n "${COMPOSE_HEAD:-}" ]; then
 else
   slot_args=(); compose_args=(--untrained-loop-heads)
 fi
+# READ_LAYER: the layer the heads were trained to read (default: the final state).
+[ -n "${READ_LAYER:-}" ] && slot_args+=(--read-layer "$READ_LAYER")
 py tutorials/scripts/loop_sudoku/make_slot.py --base "$BASE_MODEL" --out "$WORK/slot" "${slot_args[@]}"
 py -m granite_switch.composer.compose_granite_switch \
   --adapters "$WORK/slot/manifest.yaml" --base-model "$BASE_MODEL" \
@@ -49,7 +51,7 @@ for b in $BUDGETS; do
   for v in ${VARIANTS:-_}; do
     [ "$v" = _ ] && v=
     run_py tutorials/scripts/loop_sudoku/eval_head.py "$WORK/ckpt" "$WORK/data" $HEADS --count "$EVAL_N" --first "${EVAL_START:-0}" \
-      --max-iter "${b%%:*}" --min-iter "${b##*:}" $v | tee -a "$RUN_DIR/head_eval.log"
+      --max-iter "${b%%:*}" --min-iter "${b##*:}" --samples "${SAMPLES:-0}" $v | tee -a "$RUN_DIR/head_eval.log"
   done
 done
 log "done"
