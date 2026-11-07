@@ -45,10 +45,21 @@ ADAPTER_REPOS = ["ibm-granite/granitelib-rag-r1.0"]
 DEFAULT_PORT = 8137
 MAX_TOKENS = 24
 
-_ADAPTER_MAP_RE = re.compile(
-    r"'(?P<name>[^']+)':\s*\{'token':\s*'(?P<token>[^']+)',\s*"
-    r"'type':\s*'(?P<type>[^']+)'(?:,\s*'invocation_text':\s*'(?P<inv>[^']*)')?\}"
-)
+# Match an entry by its BRACES, then pull keys out of the body, rather than
+# pinning the exact key sequence.
+#
+# The previous pattern spelled out `{'token': .., 'type': ..[, 'invocation_text':
+# ..]}` and required the `}` right after. That silently stopped matching every
+# aLoRA entry once the composer began emitting a fourth key
+# ('invocation_drop_chars', tokenizer_setup.py:986-992): LoRA entries still parsed
+# (3 keys, unchanged) but aLoRA ones did not, so an all-aLoRA checkpoint produced
+# an EMPTY map and the workers reported "need >=2 alora adapters, got []" against a
+# perfectly good 3-adapter model. Nothing was wrong with the checkpoint, and the
+# error pointed at the adapters rather than at the parser.
+#
+# `[^{}]*` for the body is safe because these entries never nest.
+_ADAPTER_ENTRY_RE = re.compile(r"'(?P<name>[^']+)':\s*\{(?P<body>[^{}]*)\}")
+_ADAPTER_KEY_RE = re.compile(r"'(?P<key>\w+)':\s*'(?P<val>[^']*)'")
 
 
 def _parse_adapter_map(chat_template):
@@ -57,11 +68,25 @@ def _parse_adapter_map(chat_template):
     The composer bakes this map into the template, so it is the checkpoint's own
     account of where each adapter's control token belongs -- no second source of
     truth to drift.
+
+    Tolerant of extra keys by design: the map is the composer's to extend, and a
+    reader that must be edited in lockstep turns a new key into a confusing
+    failure somewhere else. ``invocation_text`` is None when absent (LoRA, SR).
     """
-    return {
-        m.group("name"): (m.group("token"), m.group("type"), m.group("inv"))
-        for m in _ADAPTER_MAP_RE.finditer(chat_template)
-    }
+    out = {}
+    for m in _ADAPTER_ENTRY_RE.finditer(chat_template):
+        keys = {
+            k.group("key"): k.group("val")
+            for k in _ADAPTER_KEY_RE.finditer(m.group("body"))
+        }
+        if "token" not in keys or "type" not in keys:
+            continue  # not an adapter entry
+        out[m.group("name")] = (
+            keys["token"],
+            keys["type"],
+            keys.get("invocation_text"),
+        )
+    return out
 
 
 def cmd_build(args):

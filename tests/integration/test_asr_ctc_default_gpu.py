@@ -39,8 +39,30 @@ _spec = importlib.util.spec_from_file_location(
 asr = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(asr)
 
-# tests/audio/test1.wav says this, and CTC emits it lowercase and unpunctuated.
+# tests/audio/test1.wav says this.
+#
+# Compared through _normalize, NOT with ==. The old assertions were literal
+# against a lowercase, unpunctuated string on the theory that "CTC emits it
+# lowercase and unpunctuated". That is a property of a particular decoder
+# revision, not of the audio: measured on the Vela A100 image 2026-10-25, this
+# same checkpoint emits "What is the capital of Israel?" -- so all four of this
+# module's transcript assertions failed on casing and a trailing "?" while the
+# transcription itself was perfect.
+#
+# What these tests are for is the dtype/backend/chunking plumbing around the
+# decoder (bfloat16 default, float16 override, window-vs-chunk call counts), and
+# none of that cares how the decoder capitalizes. Gating them on orthography made
+# them fail for a reason unrelated to what they cover, so the comparison is
+# normalized instead of the expectation being re-pinned to today's spelling --
+# which would just move the same breakage to the next decoder revision.
 _EXPECTED = "what is the capital of israel"
+
+
+def _normalize(text):
+    """Casefold and strip punctuation/extra whitespace for transcript compares."""
+    return " ".join(
+        "".join(c for c in text if c.isalnum() or c.isspace()).casefold().split()
+    )
 
 
 def _test_clip():
@@ -79,7 +101,7 @@ def test_transcribes_correctly_and_ignores_decode_kwargs(transcriber):
     text = transcriber.transcribe(
         samples, sampling_rate=sample_rate, generate_kwargs={"language": "fr"}
     )
-    assert text == _EXPECTED
+    assert _normalize(text) == _normalize(_EXPECTED), f"got {text!r}"
 
 
 def test_float16_override_still_transcribes():
@@ -95,7 +117,8 @@ def test_float16_override_still_transcribes():
     half = asr.ASRTranscriber(
         model_id=asr.DEFAULT_ASR_MODEL_ID, device="cuda", dtype="float16"
     )
-    assert half.transcribe(samples, sampling_rate=sample_rate) == _EXPECTED
+    text = half.transcribe(samples, sampling_rate=sample_rate)
+    assert _normalize(text) == _normalize(_EXPECTED), f"got {text!r}"
 
 
 def _tile_to_seconds(samples, sample_rate, seconds):
@@ -137,4 +160,4 @@ def test_window_decides_single_pass_vs_chunked(transcriber, seconds, expected_ca
     else:
         assert len(calls) == expected_calls
     # The phrase repeats throughout, so the merge must not collapse it to nothing.
-    assert _EXPECTED.split()[-1] in text
+    assert _normalize(_EXPECTED).split()[-1] in _normalize(text), f"got {text!r}"

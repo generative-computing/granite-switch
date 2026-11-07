@@ -245,7 +245,7 @@ def decode_indices_by_seqlen(records, prompt_len, max_new):
 
 
 # ── shared server plumbing ────────────────────────────────────────────────────
-def _launch(model_path, port, workdir, extra):
+def _launch(model_path, port, workdir, extra, max_model_len=4096):
     from granite_switch.tutorials.vllm_server import (
         kill_stale_vllm_processes,
         launch_vllm,
@@ -264,7 +264,7 @@ def _launch(model_path, port, workdir, extra):
         log_file=log_file,
         max_num_seqs=8,
         enforce_eager=True,
-        max_model_len=4096,
+        max_model_len=max_model_len,
         extra_args=_supported_flags(
             ["--enable-prefix-caching", "--return-tokens-as-token-ids", *extra]
         ),
@@ -446,7 +446,7 @@ def cmd_evict(args):
     from granite_switch import Conversation, KVHistoryPolicy
 
     tok, config, amap, aloras, expected = _setup(args.model_path)
-    result = {"blocks": args.blocks, "turns": []}
+    result = {"blocks": args.blocks, "max_model_len": args.blocks * 16, "turns": []}
     if len(aloras) < 2:
         result["error"] = f"need >=2 alora adapters, got {aloras}"
         Path(args.output_path).write_text(json.dumps(result))
@@ -455,62 +455,104 @@ def cmd_evict(args):
 
     a_name, b_name = aloras[0], aloras[1]
     workdir = tempfile.mkdtemp(prefix="gs_evict_")
-    # A cache far too small to keep the conversation resident, so early blocks are
-    # evicted between turns. The point is that correctness must not follow the hit
-    # rate down.
+    # ── Why TWO conversations, and why max_model_len tracks the cache ─────────
+    #
+    # A single growing conversation cannot be made to evict itself, and the
+    # arithmetic says so. vLLM refuses to start unless the KV cache can hold one
+    # whole max_model_len request (measured: --num-gpu-blocks-override 16 gives a
+    # 256-token cache, and against the previous hardcoded max_model_len=4096 the
+    # engine died at init with "estimated maximum model length is 256"). So
+    #     capacity >= max_model_len >= prompt_N + MAX_TOKENS
+    # must hold for turn N to be servable at all. But under PRESERVE turn N's
+    # prompt *contains* turn N-1's transcript as its own prefix -- they are the
+    # same blocks -- so any turn the server can serve is a turn whose history
+    # fits entirely in cache. Nothing is ever evicted, and the anti-vacuity
+    # shortfall assert can never fire. The one turn that would overflow the cache
+    # (measured turn 5: 245 + 16 = 261 > 256) is also the one the server cannot
+    # serve. That is an empty solution set, not a tuning problem, which is why
+    # this does not simply retune --blocks.
+    #
+    # Eviction therefore has to come from pressure the request does not create
+    # itself: a SECOND conversation with a different filler, hence a disjoint
+    # token prefix and its own blocks. Measured at turn 3 the two prompts are
+    # ~173 and ~148 tokens; each alone needs 189 <= 256 so both stay servable,
+    # while together they need ~321 > 256 and so evict each other's blocks. That
+    # window is non-empty, which is the property the old configuration lacked.
+    #
+    # max_model_len is pinned to the cache size for the same reason: leaving it
+    # at 4096 is what made the constraint unsatisfiable.
+    capacity = args.blocks * 16
     proc, trace, log_file = _launch(
         args.model_path,
         args.port,
         workdir,
         ["--num-gpu-blocks-override", str(args.blocks)],
+        max_model_len=capacity,
     )
     try:
         _wait_ready(args.port, proc, log_file)
         offset = os.path.getsize(trace) if os.path.exists(trace) else 0
-        conv = Conversation(
-            tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
-        )
+        # Distinct fillers => distinct prefixes => each conversation owns its own
+        # blocks, so a hit shortfall on one is attributable to the other's
+        # pressure rather than to a shared prefix being counted twice.
+        convs = {
+            label: Conversation(
+                tok, policy=KVHistoryPolicy.PRESERVE_MIXED_HISTORY, config=config
+            )
+            for label in ("A", "B")
+        }
         for turn in range(args.turns):
             adapter = a_name if turn % 2 == 0 else b_name
-            question = (
-                f"{FILLERS['B']}Turn {turn}: which techniques apply?"
-                if turn == 0
-                else f"Turn {turn}: restate that as JSON."
-            )
-            conv.user(_user_text(question, amap[adapter][2]))
-            sent_before = len(conv.sent_token_ids)
-            before = _metrics(args.port)
-            prompt, src = _run_turn(
-                args.port, args.model_path, conv, None, adapter, f"evict{turn}"
-            )
-            after = _metrics(args.port)
-            records, offset = _read_trace(trace, offset)
-            result["turns"].append(
-                {
-                    "turn": turn,
-                    "adapter": adapter,
-                    "expected_index": expected(adapter),
-                    "prompt_len": len(prompt),
-                    "answer_ids_source": src,
-                    # What the block arithmetic makes available for THIS turn: the
-                    # transcript as it stood before the turn, rounded down to whole
-                    # 16-token blocks. Hits below it mean blocks that should have been
-                    # resident were not -- direct evidence of eviction, rather than an
-                    # inference from cache size.
-                    "reusable_ceiling": (sent_before // 16) * 16,
-                    "sent_len": len(conv.sent_token_ids),
-                    "hits_delta": (
-                        after.get("vllm:prefix_cache_hits_total", 0.0)
-                        - before.get("vllm:prefix_cache_hits_total", 0.0)
-                    ),
-                    "decode_indices": decode_indices_by_seqlen(
-                        records, len(prompt), MAX_TOKENS
-                    ),
-                    "history_routing": sorted(
-                        set(attribute_spans(records, list(prompt)).values())
-                    ),
-                }
-            )
+            # Both conversations take their turn before either takes the next, so
+            # each one's blocks sit in cache across the other's turn -- that is
+            # when they get evicted.
+            for label in ("A", "B"):
+                conv = convs[label]
+                question = (
+                    f"{FILLERS[label]}Turn {turn}: which techniques apply?"
+                    if turn == 0
+                    else f"Turn {turn}: restate that as JSON."
+                )
+                conv.user(_user_text(question, amap[adapter][2]))
+                sent_before = len(conv.sent_token_ids)
+                before = _metrics(args.port)
+                prompt, src = _run_turn(
+                    args.port,
+                    args.model_path,
+                    conv,
+                    None,
+                    adapter,
+                    f"evict{label}{turn}",
+                )
+                after = _metrics(args.port)
+                records, offset = _read_trace(trace, offset)
+                result["turns"].append(
+                    {
+                        "turn": turn,
+                        "label": label,
+                        "adapter": adapter,
+                        "expected_index": expected(adapter),
+                        "prompt_len": len(prompt),
+                        "answer_ids_source": src,
+                        # What the block arithmetic makes available for THIS turn:
+                        # the transcript as it stood before the turn, rounded down
+                        # to whole 16-token blocks. Hits below it mean blocks that
+                        # should have been resident were not -- direct evidence of
+                        # eviction, rather than an inference from cache size.
+                        "reusable_ceiling": (sent_before // 16) * 16,
+                        "sent_len": len(conv.sent_token_ids),
+                        "hits_delta": (
+                            after.get("vllm:prefix_cache_hits_total", 0.0)
+                            - before.get("vllm:prefix_cache_hits_total", 0.0)
+                        ),
+                        "decode_indices": decode_indices_by_seqlen(
+                            records, len(prompt), MAX_TOKENS
+                        ),
+                        "history_routing": sorted(
+                            set(attribute_spans(records, list(prompt)).values())
+                        ),
+                    }
+                )
     finally:
         _shutdown(proc, log_file)
 
