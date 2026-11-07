@@ -29,6 +29,7 @@ from transformers.utils import logging
 
 from granite_switch.config import GraniteSwitchConfig
 
+from .core.loop import SwitchedLoopHeads
 from .core.lora import (
     GraniteLoRAEmbeddedAttention,
     SwitchedLoRALinear,
@@ -340,6 +341,35 @@ class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
         return outputs
 
 
+def _locate_last_token_markers(input_ids, marker_token_ids, attention_mask, what):
+    """``(rows, pos)`` of each row's control token from ``marker_token_ids``.
+
+    Probe and loop slots both read the conversation at a marker that must be
+    its row's last real token (its logits are rewritten). ``None`` when no row
+    carries one; raises when a marker is not last.
+    """
+    marker_ids = torch.tensor(
+        marker_token_ids, device=input_ids.device, dtype=input_ids.dtype
+    )
+    rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
+    if rows.numel() == 0:
+        return None
+    batch_size, seq_length = input_ids.shape
+    if attention_mask is not None and attention_mask.dim() == 2:
+        real = attention_mask[:, -seq_length:].long()
+        cols = torch.arange(seq_length, device=real.device)
+        last = (real * cols).max(dim=1).values
+    else:
+        last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
+    misplaced = pos != last[rows]
+    if bool(misplaced.any()):
+        bad = sorted(set(rows[misplaced].tolist()))
+        raise RuntimeError(
+            f"{what} request(s) {bad}: control token is not their last token."
+        )
+    return rows, pos
+
+
 class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
     """PreTrainedModel base class for GraniteSwitch.
 
@@ -354,6 +384,17 @@ class GraniteSwitchPreTrainedModel(GraniteMoeHybridPreTrainedModel):
         "SRSwitchDecoderLayer",
     ]
     _is_stateful = True
+    # Loop heads are small and iterate hundreds of times; they keep fp32 weights
+    # when the base model loads in bf16/fp16 (LoopHead.inject casts the read).
+    _keep_in_fp32_modules_strict = ["loop_heads"]
+
+    def _init_weights(self, module):
+        # A loop head initializes itself (FPRM's scheme, in LoopHead.reset_parameters).
+        # The base model's generic init would redraw its linears at the base
+        # model's initializer_range when the outer causal-LM wrapper runs post_init.
+        if getattr(module, "_owns_init", False):
+            return
+        super()._init_weights(module)
 
 
 class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
@@ -435,6 +476,15 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         else:
             self.probe_head = None
 
+        # Loop heads: a small looped transformer per loop slot, reading the
+        # configured layer at a fixed-size grid of positions and solving to a
+        # fixed point (see core/loop.py). Each head initializes itself
+        # (_init_weights skips it); from_pretrained then loads its weights.
+        if "loop" in getattr(config, "adapter_kinds", []):
+            self.loop_heads = SwitchedLoopHeads(config)
+        else:
+            self.loop_heads = None
+
         # Decoder layers
         if config.num_adapters > 0:
             layer_offset = self.switch.num_cache_layers
@@ -493,28 +543,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             if bool((probe_indices > 0).any()):
                 raise RuntimeError("Probe requests need input_ids, not inputs_embeds.")
             return None
-        marker_ids = torch.tensor(
-            self.config.probe_control_token_ids,
-            device=input_ids.device,
-            dtype=input_ids.dtype,
+        found = _locate_last_token_markers(
+            input_ids, self.config.probe_control_token_ids, attention_mask, "Probe"
         )
-        rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
-        if rows.numel() == 0:
+        if found is None:
             return None
-
-        batch_size, seq_length = input_ids.shape
-        if attention_mask is not None and attention_mask.dim() == 2:
-            real = attention_mask[:, -seq_length:].long()
-            cols = torch.arange(seq_length, device=real.device)
-            last = (real * cols).max(dim=1).values
-        else:
-            last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
-        misplaced = pos != last[rows]
-        if bool(misplaced.any()):
-            bad = sorted(set(rows[misplaced].tolist()))
-            raise RuntimeError(
-                f"Probe request(s) {bad}: control token is not their last token."
-            )
+        rows, pos = found
 
         slots = probe_indices[rows, pos]
         read_layers = self.config.probe_read_layers or [None] * len(
@@ -529,6 +563,63 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             for layer, indices in by_layer.items()
         }
         return rows, pos, slots, markers_by_layer
+
+    def _locate_loop_grids(self, input_ids, head_indices, attention_mask):
+        """``{slot: (rows, cols [n, grid])}`` for this forward's loop requests.
+
+        A loop request ends with its slot's control token, placed like a probe
+        marker (it must be the row's last real token). The head solves the
+        ``grid_size`` tokens that end ``end_offset`` tokens before the marker
+        (the template's turn close sits between them) and replaces those rows'
+        logits. ``None`` when there is no loop request.
+        """
+        if self.loop_heads is None or input_ids is None:
+            return None
+        found = _locate_last_token_markers(
+            input_ids, self.config.loop_control_token_ids, attention_mask, "Loop"
+        )
+        if found is None:
+            return None
+        rows, pos = found
+        slots = head_indices[rows, pos]
+        by_slot: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
+        for slot in slots.unique().tolist():
+            spec = self.config.loop_specs[slot - 1]
+            sel = slots == slot
+            ends = pos[sel] - spec.get("end_offset", 0)
+            if bool((ends < spec["grid_size"]).any()):
+                raise RuntimeError(
+                    f"Loop request(s): fewer than {spec['grid_size']} grid tokens "
+                    "before the control token."
+                )
+            offsets = torch.arange(spec["grid_size"], device=input_ids.device)
+            by_slot[slot] = (
+                rows[sel],
+                (ends - spec["grid_size"]).unsqueeze(1) + offsets,
+            )
+        return by_slot
+
+    def solve_loops(self, grids, hidden_by_layer):
+        """Run each loop slot's head on its read layer; ``{slot: logits}``."""
+        out = {}
+        for slot, (rows, cols) in grids.items():
+            spec = self.config.loop_specs[slot - 1]
+            hidden = hidden_by_layer[spec["read_layer"]]
+            # The head keeps fp32 weights; "solve_dtype": "bfloat16" runs its
+            # solve under bf16 autocast, as the head was trained.
+            amp = spec.get("solve_dtype") == "bfloat16"
+            with torch.autocast(hidden.device.type, dtype=torch.bfloat16, enabled=amp):
+                logits, state = self.loop_heads.head(slot).solve(
+                    hidden[rows.unsqueeze(1), cols],  # [n, grid, H]
+                    max_iter=spec["max_iter"],
+                    fp_thresh=spec["fp_thresh"],
+                    decay=spec["stepsize_decay"],
+                    patience=spec["decay_patience"],
+                    min_iter=spec.get("min_iter", 0),
+                )
+            out[slot] = logits
+            self._last_loop_iters = state["iters"]
+        return out
 
     def forward(
         self,
@@ -702,6 +793,16 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # layer scores only its marker rows as it produces them.
         markers = self._locate_probe_markers(input_ids, probe_indices, attention_mask)
         self._last_probe_verdict = None
+
+        # Loop requests: keep each loop slot's read layer as the decoder runs.
+        loop_grids = self._locate_loop_grids(input_ids, probe_indices, attention_mask)
+        self._last_loop_logits = None
+        loop_reads: dict[int | None, torch.Tensor] = {}
+        loop_layers = (
+            {self.config.loop_specs[s - 1]["read_layer"] for s in loop_grids}
+            if loop_grids
+            else set()
+        )
         if markers is not None:
             probe_rows, probe_pos, probe_slots, markers_by_layer = markers
             probe_verdict = inputs_embeds.new_zeros(
@@ -741,6 +842,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 hidden_states = layer_outputs[0]
 
             score_markers(layer_idx, hidden_states)
+            if layer_idx in loop_layers:
+                loop_reads[layer_idx] = hidden_states
 
             if output_attentions:
                 if layer_outputs[1] is not None:
@@ -750,6 +853,14 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
+
+        if loop_grids:
+            loop_reads[None] = hidden_states
+            self._last_loop_logits = (
+                loop_grids,
+                self.solve_loops(loop_grids, loop_reads),
+                seq_length,
+            )
 
         if markers is not None:
             score_markers(None, hidden_states)
@@ -882,6 +993,8 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
         # Probe exit: a probe request reports its verdict as a
         # generated label word (like a guardian LoRA).
         logits = self._apply_probe_verdict(logits)
+        # Loop exit: each grid cell's row is replaced by the head's scores.
+        logits = self._apply_loop_logits(logits)
 
         loss = None
         if labels is not None:
@@ -899,6 +1012,44 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+
+    def _apply_loop_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """Replace each loop grid cell's logit row with the head's scores.
+
+        The row is blanked to ``-inf`` and the head's per-output scores are placed
+        on that slot's ``output_token_ids``, so argmax reads the answer token.
+        Scores are shifted so each cell's best is 0 (softmax and argmax are
+        unchanged): bf16 logits then keep the head's argmax exactly, where raw
+        scores a few thousandths apart could round to a tie.
+        """
+        pending = getattr(self.model, "_last_loop_logits", None)
+        if pending is None:
+            return logits
+        grids, head_logits, seq_length = pending
+        offset = seq_length - logits.shape[1]
+        for slot, (rows, cols) in grids.items():
+            cols = cols - offset
+            if bool((cols < 0).any()):
+                raise RuntimeError(
+                    "A loop grid's logits were not kept (logits_to_keep)."
+                )
+            ids = torch.tensor(
+                self.config.loop_specs[slot - 1]["output_token_ids"],
+                dtype=torch.long,
+                device=logits.device,
+            )
+            r = rows.unsqueeze(1).expand_as(cols)
+            block = torch.full(
+                (*cols.shape, logits.shape[-1]),
+                float("-inf"),
+                dtype=logits.dtype,
+                device=logits.device,
+            )
+            scores = head_logits[slot].float()
+            scores = scores - scores.amax(dim=-1, keepdim=True)
+            block[..., ids] = scores.to(logits.dtype)
+            logits[r, cols] = block
+        return logits
 
     def _apply_probe_verdict(self, logits: torch.Tensor) -> torch.Tensor:
         """Rewrite each probe marker's logit row to emit its label word.
