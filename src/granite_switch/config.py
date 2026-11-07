@@ -548,14 +548,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                         f"token ids; got {spec['output_token_ids']}."
                     )
                 layer = spec["read_layer"]
+                # -1 reads the base model's input embeddings (each grid token's
+                # own embedding, before any decoder layer mixes the prompt in).
                 if layer is not None and (
                     not isinstance(layer, int)
                     or isinstance(layer, bool)
-                    or not 0 <= layer < num_decoder_layers
+                    or not -1 <= layer < num_decoder_layers
                 ):
                     raise ValueError(
                         f"loop slot {i} read_layer = {layer!r} must be an int in "
-                        f"0..{num_decoder_layers - 1}, or None for the final state."
+                        f"-1..{num_decoder_layers - 1} (-1: the input embeddings), "
+                        "or None for the final state."
                     )
         elif "loop" in adapter_kinds:
             raise ValueError(

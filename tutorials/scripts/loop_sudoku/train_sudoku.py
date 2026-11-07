@@ -124,7 +124,8 @@ def base_read(model, input_ids, grid_start, read_layer):
     if read_layer is None:
         hidden = out.last_hidden_state
     else:
-        # hidden_states[i] is the input to decoder layer i; layer L's output is i = L + 1.
+        # hidden_states[i] is the input to decoder layer i; layer L's output is
+        # i = L + 1, and read_layer -1 (the input embeddings) is i = 0.
         hidden = out.hidden_states[read_layer + 1]
     return hidden[:, grid_start : grid_start + 81]
 
