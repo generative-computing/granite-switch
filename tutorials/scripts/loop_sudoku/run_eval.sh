@@ -3,7 +3,8 @@
 # Score saved loop heads on the test split through the served HF path, for
 # several solver budgets, from the repo root. Env: RUN_DIR (results), HEADS
 # (space-separated head files, or "composed"), BUDGETS ("max:min ..."), EVAL_N,
-# EVAL_START, GPUS, BASE_MODEL, READ_LAYER, SAMPLES (answers kept per head). COMPOSE_HEAD: a head to compose into the
+# EVAL_START, GPUS, BASE_MODEL, READ_LAYER, SAMPLES (answers kept per head),
+# DUMP_INDEX (one test puzzle's full output, from the composed checkpoint). COMPOSE_HEAD: a head to compose into the
 # checkpoint itself (then HEADS defaults to "composed": the checkpoint as served).
 set -euo pipefail
 WORK=/tmp/work
@@ -54,4 +55,9 @@ for b in $BUDGETS; do
       --max-iter "${b%%:*}" --min-iter "${b##*:}" --samples "${SAMPLES:-0}" $v | tee -a "$RUN_DIR/head_eval.log"
   done
 done
+if [ -n "${DUMP_INDEX:-}" ]; then
+  # One request's full output (the 81 x 9 score matrix), for the report.
+  py tutorials/scripts/loop_sudoku/dump_output.py "$WORK/ckpt" "$WORK/data" \
+    --index "$DUMP_INDEX" --out "$RUN_DIR/output_example.json"
+fi
 log "done"
