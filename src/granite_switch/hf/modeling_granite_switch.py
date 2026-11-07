@@ -803,6 +803,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             if loop_grids
             else set()
         )
+        if -1 in loop_layers:
+            # read_layer -1: the embeddings the decoder starts from.
+            loop_reads[-1] = hidden_states
         if markers is not None:
             probe_rows, probe_pos, probe_slots, markers_by_layer = markers
             probe_verdict = inputs_embeds.new_zeros(

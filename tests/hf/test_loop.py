@@ -195,9 +195,10 @@ def test_mixed_batch_rewrites_only_the_loop_row():
     assert torch.isinf(out.logits[1, start, 0])
 
 
-@pytest.mark.parametrize("read_layer, state_index", [(0, 1), (None, -1)])
+@pytest.mark.parametrize("read_layer, state_index", [(0, 1), (None, -1), (-1, 0)])
 def test_read_layer_selects_the_state_the_head_solves(read_layer, state_index):
-    """The head solves the configured layer's grid states (None: the final norm)."""
+    """The head solves the configured layer's grid states (None: the final norm,
+    -1: the input embeddings, which hidden_states[0] holds)."""
     model = _model(_loop_config(read_layer=read_layer))
     head = model.model.loop_heads.head(3)
     seen = []
@@ -275,6 +276,7 @@ def test_head_trains_only_its_own_parameters():
     "bad, match",
     [
         ({"read_layer": 5}, "read_layer"),
+        ({"read_layer": -2}, "read_layer"),
         ({"output_token_ids": []}, "output_token_ids"),
     ],
 )
