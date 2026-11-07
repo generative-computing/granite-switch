@@ -11,6 +11,7 @@ from collections import defaultdict
 
 import torch
 
+from ..config import HEAD_SLOT_KINDS
 from .arch import ArchDescriptor
 
 
@@ -85,7 +86,7 @@ def validate_cross_stream_population(model):
         # slots in a freshly built model, but lora_B decides whether the branch
         # contributes anything.
         for adapter_idx in range(param.shape[0]):
-            if model.config.adapter_kinds[adapter_idx] == "probe":
+            if model.config.adapter_kinds[adapter_idx] in HEAD_SLOT_KINDS:
                 continue
             if bool(torch.all(param[adapter_idx] == 0)):
                 empty.append(f"{name}[{adapter_idx}]")

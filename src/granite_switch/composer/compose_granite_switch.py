@@ -69,6 +69,7 @@ from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
+    ANCHOR_MODE_LOOP,
     ANCHOR_MODE_PROBE,
     ANCHOR_MODE_SR,
     add_audio_token,
@@ -82,8 +83,11 @@ from granite_switch.composer.tokenizer_setup import (
     resolve_label_token_ids,
 )
 from granite_switch.composer.validator import validate_control_lut
-from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
-from granite_switch.config import ASR_DTYPES
+from granite_switch.composer.weight_transfer import (
+    build_loop_specs,
+    validate_untied_lm_head_saved,
+)
+from granite_switch.config import ASR_DTYPES, HEAD_SLOT_KINDS
 from granite_switch.token_exchange import rebuild_control_to_substitute_lut
 
 # ---------------------------------------------------------------------------
@@ -815,6 +819,16 @@ Examples:
         help="Include debug fields (original_path) in adapter_index.json",
     )
     parser.add_argument(
+        "--untrained-loop-heads",
+        action="store_true",
+        default=False,
+        help=(
+            "Allow a loop slot whose folder has no loop_head.safetensors yet: its "
+            "head keeps a fresh initialization. Used to compose the checkpoint a "
+            "loop head is trained in."
+        ),
+    )
+    parser.add_argument(
         "--create-ioyaml",
         action="store_true",
         default=False,
@@ -1100,6 +1114,8 @@ def build():
             if path and is_shadow_residual_adapter(path)
             else ANCHOR_MODE_PROBE
             if probe_meta.get(name, {}).get("kind") == "probe"
+            else ANCHOR_MODE_LOOP
+            if probe_meta.get(name, {}).get("kind") == "loop"
             else tech,
             source,
         )
@@ -1110,9 +1126,9 @@ def build():
     ]
     all_discovered = external_discovered + built_in_discovered
 
-    # Order LoRA slots first, probe slots last (Python sorts False before True)
+    # Order LoRA slots first, head slots (probe, loop) last (False sorts first)
     all_discovered.sort(
-        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") == "probe"
+        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") in HEAD_SLOT_KINDS
     )
 
     has_external = len(external_discovered) > 0
@@ -1318,6 +1334,30 @@ def build():
                     where = "final norm" if layer is None else f"layer {layer}"
                     print(f"  {name} → labels {words} → token ids {ids} @ {where}")
 
+    # Loop slots: each slot's folder carries loop_spec.json (written by its
+    # trainer). Compose checks its output tokens against this tokenizer.
+    if any(m.get("kind") == "loop" for m in probe_meta.values()):
+        optional_kwargs.setdefault(
+            "adapter_kinds",
+            [probe_meta.get(name, {}).get("kind", "lora") for name in adapter_names],
+        )
+        optional_kwargs["loop_specs"] = build_loop_specs(
+            all_discovered, probe_meta, tokenizer
+        )
+        print("\nLoop slots:")
+        for name, spec in zip(adapter_names, optional_kwargs["loop_specs"]):
+            if spec is not None:
+                where = (
+                    "final norm"
+                    if spec["read_layer"] is None
+                    else f"layer {spec['read_layer']}"
+                )
+                print(
+                    f"  {name} → {spec['grid_size']} positions x "
+                    f"{len(spec['output_token_ids'])} outputs @ {where}, "
+                    f"{spec['num_layers']} layers x width {spec['width']}"
+                )
+
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
         adapter_paths=adapter_paths,
@@ -1329,6 +1369,7 @@ def build():
         built_in_lora_alpha=args.lora_alpha
         if args.lora_alpha is not None
         else float(args.lora_rank),
+        require_loop_heads=not args.untrained_loop_heads,
         **optional_kwargs,
     )
 
@@ -1379,15 +1420,22 @@ def build():
     print("Generating compose report...")
     print("=" * 80)
     if hasattr(model, "_build_mappings"):
+        # The report analyzes LoRA weights, so it gets the LoRA slots only: a
+        # probe or loop folder carries a head, not adapter_model.safetensors.
+        lora_report = [
+            (path, name)
+            for path, name, tech, _src in all_discovered
+            if path is not None and tech not in HEAD_SLOT_KINDS
+        ]
         generate_compose_report(
             base_mapping=model._build_mappings["base"],
             adapter_mapping=model._build_mappings["adapter"],
             output_path=args.output,
             model=model,
-            adapter_paths=adapter_paths,
-            adapter_names=adapter_names,
+            adapter_paths=[path for path, _ in lora_report],
+            adapter_names=[name for _, name in lora_report],
             arch=arch,
-            source_analysis=model._build_mappings.get("source_analysis"),
+            source_analysis=model._build_mappings.get("source_analysis") or None,
         )
         print(f"Compose report saved to {args.output}/compose_report.json")
 

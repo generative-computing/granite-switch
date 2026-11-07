@@ -939,3 +939,96 @@ def transfer_probe_weights(
             print(f"  Probe: {path} -> probe_head[{slot}, :{n_labels}]")
 
     print(f"Loaded {len(probe_paths)} probe head(s)")
+
+
+# ---------------------------------------------------------------------------
+# Loop heads
+# ---------------------------------------------------------------------------
+
+# Files of a loop slot's folder: the trained head and the spec it was built from.
+LOOP_HEAD_FILE = "loop_head.safetensors"
+LOOP_SPEC_FILE = "loop_spec.json"
+
+
+def build_loop_specs(all_discovered, slot_meta, tokenizer) -> list[dict | None]:
+    """One spec per slot (``None`` on non-loop slots), read from each loop folder.
+
+    A loop folder holds ``loop_spec.json`` (the head's shape and solver
+    settings, see ``config.LOOP_SPEC_KEYS``) and, once trained,
+    ``loop_head.safetensors``. A manifest ``layer:`` overrides the read layer.
+    The spec's ``output_token_ids`` must decode to its ``output_tokens``
+    with this tokenizer, so a head trained against one vocabulary cannot be
+    composed onto another.
+    """
+    from ..config import LOOP_SPEC_KEYS
+
+    specs: list[dict | None] = []
+    for path, name, *_ in all_discovered:
+        meta = slot_meta.get(name, {})
+        if meta.get("kind") != "loop":
+            specs.append(None)
+            continue
+        spec_file = Path(path) / LOOP_SPEC_FILE
+        if not spec_file.exists():
+            raise FileNotFoundError(
+                f"Loop slot '{name}' is missing {spec_file}. A loop folder must "
+                f"hold {LOOP_SPEC_FILE} (and {LOOP_HEAD_FILE} once trained)."
+            )
+        spec = json.loads(spec_file.read_text())
+        tokens = spec.pop("output_tokens", None)
+        if meta.get("layer") is not None:
+            spec["read_layer"] = meta["layer"]
+        missing = [k for k in LOOP_SPEC_KEYS if k not in spec]
+        if missing:
+            raise ValueError(f"{spec_file} is missing {missing}.")
+        if tokens is not None:
+            ids = [tokenizer.convert_tokens_to_ids(t) for t in tokens]
+            if ids != list(spec["output_token_ids"]):
+                raise ValueError(
+                    f"{spec_file}: output_tokens {tokens} map to {ids} with this "
+                    f"tokenizer, not {spec['output_token_ids']}."
+                )
+        optional = ("min_iter", "end_offset", "solve_dtype")
+        specs.append({k: spec[k] for k in (*LOOP_SPEC_KEYS, *optional) if k in spec})
+    return specs
+
+
+def transfer_loop_weights(loop_paths, slot_indices, model, required=True) -> None:
+    """Load each trained loop head into ``model.model.loop_heads``.
+
+    ``required=False`` keeps the freshly initialized head for a folder with no
+    ``loop_head.safetensors`` yet: that is how the training checkpoint is
+    composed, before any head exists.
+    """
+    from safetensors.torch import load_file
+
+    heads = getattr(model.model, "loop_heads", None)
+    if heads is None:
+        raise ValueError(
+            f"transfer_loop_weights was given loop paths {loop_paths} but the "
+            "model built no loop_heads (no slot is kind=loop)."
+        )
+    for path, slot in zip(loop_paths, slot_indices):
+        head = heads.head(slot + 1)
+        head_file = Path(path) / LOOP_HEAD_FILE
+        if not head_file.exists():
+            if required:
+                raise FileNotFoundError(f"Loop slot '{path}' has no {LOOP_HEAD_FILE}.")
+            print(
+                f"  Loop: {path} has no {LOOP_HEAD_FILE}; head left at its initialization"
+            )
+            continue
+        sd = load_file(str(head_file))
+        own = head.state_dict()
+        if set(sd) != set(own):
+            raise ValueError(
+                f"{head_file} keys do not match the head built from its spec: "
+                f"missing {sorted(set(own) - set(sd))}, extra {sorted(set(sd) - set(own))}."
+            )
+        bad = [k for k in sd if tuple(sd[k].shape) != tuple(own[k].shape)]
+        if bad:
+            raise ValueError(f"{head_file} has wrong shapes for {bad}.")
+        with torch.no_grad():
+            for k, v in sd.items():
+                own[k].copy_(v.to(dtype=own[k].dtype, device=own[k].device))
+        print(f"  Loop: {path} -> loop_heads[{slot}]")

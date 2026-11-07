@@ -6,6 +6,36 @@ from transformers import GraniteMoeHybridConfig
 # Accepted asr_dtype values. Keep in sync with vllm.audio.asr._ASR_DTYPE_NAMES.
 ASR_DTYPES = ("auto", "float16", "bfloat16", "float32")
 
+# Slot kinds. "lora" slots hold LoRA adapters; "probe" and "loop" slots hold a
+# head that reads the frozen base model instead (see probe_routing.py).
+SLOT_KINDS = ("lora", "probe", "loop")
+HEAD_SLOT_KINDS = ("probe", "loop")
+
+# Keys every loop slot's entry in ``loop_specs`` must carry.
+LOOP_SPEC_KEYS = (
+    "width",
+    "num_layers",
+    "num_heads",
+    "expansion",
+    "grid_size",
+    "prefix_len",
+    "conv_kernel_size",
+    "alpha_1_init",
+    "alpha_2_init",
+    "rope_theta",
+    "init_std",
+    "output_token_ids",
+    "read_layer",
+    "max_iter",
+    "fp_thresh",
+    "stepsize_decay",
+    "decay_patience",
+)
+# Optional loop spec keys: "min_iter" (solver updates before a row may stop;
+# default 0), "end_offset" (tokens between the grid's end and the marker;
+# default 0) and "solve_dtype" ("bfloat16" runs the head's solve under bf16
+# autocast, the precision FPRM trains and evaluates in; default: fp32).
+
 # Decoder-layer cache slots the switch reserves at the front of the model when
 # adapters are present. MultiSwitch (the only engine) owns two: a counting slot
 # and a memory slot. Single source of truth, mirrored by
@@ -186,6 +216,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         adapter_kinds: list[str] | None = None,
         probe_label_token_ids: list[list[int] | None] | None = None,
         probe_read_layers: list[int | None] | None = None,
+        # Loop slots: one spec dict per loop slot, None elsewhere
+        loop_specs: list[dict | None] | None = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -386,11 +418,11 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.max_lora_rank = max_lora_rank
         self.adapter_ranks = adapter_ranks
 
-        # Each adapter slot is either a LoRA adapter ("lora", the default) or
-        # a probe head ("probe"). A probe slot still uses a
-        # control token and adapter index; the switch's adapter_kind_lut routes
-        # its positions out of the LoRA stream and into the probe head.
-        _VALID_KINDS = ("lora", "probe")
+        # Each adapter slot is a LoRA adapter ("lora", the default), a probe
+        # head ("probe") or a loop head ("loop"). Probe and loop slots still use
+        # a control token and adapter index; the switch's adapter_kind_lut routes
+        # their positions out of the LoRA stream and into the head stream.
+        _VALID_KINDS = SLOT_KINDS
         if adapter_kinds is None:
             adapter_kinds = ["lora"] * num_adapters
         else:
@@ -483,6 +515,58 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             (adapter_token_ids or [])[i + probe_token_offset]
             for i, kind in enumerate(adapter_kinds)
             if kind == "probe" and adapter_token_ids is not None
+        ]
+
+        # Loop slots: a small looped transformer over a fixed grid of answer
+        # positions (see hf/core/loop.py). Each loop slot's spec is a dict with
+        # LOOP_SPEC_KEYS; every other slot is None.
+        if loop_specs is not None:
+            if len(loop_specs) != num_adapters:
+                raise ValueError(
+                    f"loop_specs length ({len(loop_specs)}) must equal "
+                    f"num_adapters ({num_adapters}); it is indexed by "
+                    f"adapter_index - 1, with None on non-loop slots."
+                )
+            num_decoder_layers = self.num_hidden_layers - SWITCH_CACHE_LAYERS
+            for i, (kind, spec) in enumerate(zip(adapter_kinds, loop_specs)):
+                if kind != "loop":
+                    if spec is not None:
+                        raise ValueError(
+                            f"non-loop slot {i} must have no loop spec; got {spec!r}."
+                        )
+                    continue
+                if not isinstance(spec, dict):
+                    raise ValueError(f"loop slot {i} needs a spec dict; got {spec!r}.")
+                missing = [k for k in LOOP_SPEC_KEYS if k not in spec]
+                if missing:
+                    raise ValueError(f"loop slot {i} spec is missing {missing}.")
+                if not spec["output_token_ids"] or any(
+                    t < 0 for t in spec["output_token_ids"]
+                ):
+                    raise ValueError(
+                        f"loop slot {i} output_token_ids must be non-empty real "
+                        f"token ids; got {spec['output_token_ids']}."
+                    )
+                layer = spec["read_layer"]
+                if layer is not None and (
+                    not isinstance(layer, int)
+                    or isinstance(layer, bool)
+                    or not 0 <= layer < num_decoder_layers
+                ):
+                    raise ValueError(
+                        f"loop slot {i} read_layer = {layer!r} must be an int in "
+                        f"0..{num_decoder_layers - 1}, or None for the final state."
+                    )
+        elif "loop" in adapter_kinds:
+            raise ValueError(
+                "adapter_kinds declares a loop slot but loop_specs is unset. "
+                "Re-compose so config.json carries loop_specs."
+            )
+        self.loop_specs = loop_specs
+        self.loop_control_token_ids = [
+            (adapter_token_ids or [])[i + probe_token_offset]
+            for i, kind in enumerate(adapter_kinds)
+            if kind == "loop" and adapter_token_ids is not None
         ]
 
         # Default LoRA target module groups.

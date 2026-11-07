@@ -153,6 +153,14 @@ ANCHOR_MODE_SR = "sr"
 #: after the last turn's close (probe slot, manifest ``kind``).
 ANCHOR_MODE_PROBE = "probe"
 
+#: Placement mode of a loop slot. Like a probe's, its control token is the very
+#: last token, after the last turn's close; the loop head solves the grid that
+#: ends the conversation (see ``hf/core/loop.py``).
+ANCHOR_MODE_LOOP = "loop"
+
+#: Placement modes whose control token is the last token of the render.
+END_MARKER_MODES = (ANCHOR_MODE_PROBE, ANCHOR_MODE_LOOP)
+
 
 def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
     """Load alora_invocation_tokens from adapter_config.json.
@@ -1308,7 +1316,8 @@ def build_substitute_token_ids(
       * base-reset: ``lora_substitute_id`` as well. The token is placed at a turn
         boundary, where the role-open marker is exactly what the decoder expects
         at that position.
-      * probe: ``probe_slot_substitute_id``, the base's role-open marker.
+      * probe and loop: ``probe_slot_substitute_id``, the base's role-open
+        marker (both control tokens follow the last turn's close).
 
     Args:
         discovered_adapters: ``(adapter_path, adapter_name, technology, source)`` tuples.
@@ -1324,7 +1333,7 @@ def build_substitute_token_ids(
     for adapter_path, _name, technology, _source in discovered_adapters:
         if technology == "alora":
             substitute_ids.append(get_alora_first_invocation_token_id(adapter_path))
-        elif technology == "probe":
+        elif technology in END_MARKER_MODES:
             if probe_slot_substitute_id is None:
                 raise ValueError("A probe slot needs probe_slot_substitute_id.")
             substitute_ids.append(probe_slot_substitute_id)
@@ -1512,9 +1521,9 @@ def configure_chat_template(
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
-{#- A probe reads its verdict at the marker, so nothing may follow it:
-    drop the generation prompt even when the caller asks for one. -#}
-{%- set probe_mode = adapter_type == 'probe' %}
+{#- A probe or loop slot reads the conversation at its marker, so nothing may
+    follow it: drop the generation prompt even when the caller asks for one. -#}
+{%- set probe_mode = adapter_type in ('probe', 'loop') %}
 {%- if probe_mode %}
 {%- set add_generation_prompt = false %}
 {%- endif %}
@@ -1808,9 +1817,9 @@ def configure_chat_template(
                 + modified_chat_template[insertion_point:]
             )
 
-    # Probe placement: the marker is the very last token, after the last
-    # turn's close.
-    if any(i["type"] == ANCHOR_MODE_PROBE for i in adapter_mapping.values()):
+    # Probe and loop placement: the marker is the very last token, after the
+    # last turn's close.
+    if any(i["type"] in END_MARKER_MODES for i in adapter_mapping.values()):
         modified_chat_template += (
             "\n{%- if probe_mode %}{{- adapter_token }}{%- endif %}"
         )
@@ -1929,6 +1938,10 @@ def configure_chat_template(
     for adapter_name, info in adapter_mapping.items():
         if info["type"] == ANCHOR_MODE_PROBE:
             placement = "after the last turn's close (last token; read point = marker)"
+        elif info["type"] == ANCHOR_MODE_LOOP:
+            placement = (
+                "after the last turn's close (last token; solves the grid before it)"
+            )
         elif info["type"] == ANCHOR_MODE_SR:
             placement = f"replacing '{sr_site}' in the generation prompt"
             anchor = next(iter(sr_anchors))
