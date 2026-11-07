@@ -50,6 +50,12 @@ def main():
     p.add_argument("--json", default=None, help="write the last head's result here")
     p.add_argument("--tag", default="HEAD_EVAL", help="prefix of each result line")
     p.add_argument(
+        "--samples",
+        type=int,
+        default=0,
+        help="also record the answers to the slice's first N puzzles (81 digits each)",
+    )
+    p.add_argument(
         "--solve-dtype",
         choices=["spec", "float32", "bfloat16"],
         default="spec",
@@ -104,6 +110,14 @@ def main():
             res = evaluate(
                 m, pr, test["x"][lo:hi], test["y"][lo:hi], a.batch, ids, device
             )
+        if a.samples and is_main:
+            # The first puzzles' answers, decoded as evaluate() decodes them.
+            with torch.no_grad():
+                bq = torch.as_tensor(test["x"][lo : lo + a.samples], device=device)
+                out = m(input_ids=pr.batch(bq), use_cache=False)
+                rows = out.logits[:, pr.grid_start : pr.grid_start + 81]
+                pred = (rows.argmax(-1).unsqueeze(-1) == ids).float().argmax(-1) + 1
+            res["sample_answers"] = ["".join(map(str, r)) for r in pred.tolist()]
         res.update(
             head=h,
             test_slice=[lo, hi],

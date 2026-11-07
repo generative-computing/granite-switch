@@ -84,7 +84,8 @@ def main():
         prompts, SamplingParams(temperature=0.0, max_tokens=a.max_tokens)
     )
 
-    cells = exact = valid = parsed = 0
+    cells = exact = valid = parsed = blank_right = 0
+    blanks = int((boards == 0).sum())
     sample = []
     for k, (o, b, s) in enumerate(zip(outs, boards, sols)):
         text = o.outputs[0].text
@@ -96,12 +97,15 @@ def main():
         parsed += 1
         pred = np.array(grid)
         cells += int((pred == s).sum())
+        blank_right += int(((pred == s) & (b == 0)).sum())
         exact += int((pred == s).all())
         valid += int(check(b, pred))
     n = len(boards)
     res = {
         "adapter": a.adapter,
         "cell_acc": cells / (81 * n),
+        # Only the cells the puzzle leaves blank: the givens are copied.
+        "blank_cell_acc": blank_right / blanks,
         "exact_acc": exact / n,
         "valid_acc": valid / n,
         "parsed": parsed / n,
