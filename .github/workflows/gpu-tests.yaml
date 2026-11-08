@@ -60,7 +60,7 @@ on:
       # family is added HERE and nowhere else -- this entry plus its arm in the
       # Resolve test scope step below.
       suite:
-        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), release (the pre-release tier: real external models)."
+        description: "Which tests to run: full (all five suites), short (vllm + integration), dev (one fast GPU file), audio (the audio/ASR marker), multi (all five on 2 GPUs), release (the pre-release tier: real external models, on 2 GPUs)."
         required: false
         default: full
         type: choice
@@ -251,6 +251,12 @@ jobs:
               PATHS='-m "release and not deep" tests/'
               SUFFIX="release"
               LEG="$LABEL-release"
+              # TWO GPUs: the real-model TP=2 cases (test_tp_integration.py
+              # [real]) skip below 2 GPUs, and `multi` deselects them as release
+              # tests -- so on a 1-GPU pod no suite would run them and a release
+              # run would pass without them. `multi` still covers TP/PP on the
+              # fakes and synthetic models on every PR.
+              GPU_COUNT="2"
               ;;
             # Everything `full` runs, but on TWO GPUs. Not a different test
             # selection -- a different SHAPE of pod.

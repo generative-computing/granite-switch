@@ -202,7 +202,9 @@ While in pre-1.0, increment `MINOR` for new features and `PATCH` for bug fixes. 
 adapter library runs twice: once on a fake on every PR run, and once on the real
 model in the release tier, marked `release`. Release tests are excluded from every
 other scope (`addopts` and each `-m` filter carry `not release`) and run with the
-`release` GPU suite (`/gpu-test-release`).
+`release` GPU suite (`/gpu-test-release`), on a 2-GPU pod like `multi`: the
+real-model TP=2 cases in `tests/vllm/test_tp_integration.py` skip below 2 GPUs,
+and `multi` excludes them as release tests, so no other suite would run them.
 
 **The fakes are captured, not invented.** `tests/shared/fixtures/` holds verbatim
 copies of the real repos' small files: each base's config, generation config,
