@@ -58,6 +58,6 @@ done
 if [ -n "${DUMP_INDEX:-}" ]; then
   # One request's full output (the 81 x 9 score matrix), for the report.
   py tutorials/scripts/loop_sudoku/dump_output.py "$WORK/ckpt" "$WORK/data" \
-    --index "$DUMP_INDEX" --out "$RUN_DIR/output_example.json"
+    --index "$DUMP_INDEX" --out "$RUN_DIR/output_example.json" --seeds "${DUMP_SEEDS:-1}"
 fi
 log "done"
