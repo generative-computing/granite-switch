@@ -31,6 +31,12 @@ def main():
     p.add_argument("data")
     p.add_argument("--index", type=int, default=2000)
     p.add_argument("--out", required=True)
+    p.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help="repeat the request with this many random solver starts (FPRM draws one per solve)",
+    )
     a = p.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -46,6 +52,27 @@ def main():
     board, solution = test["x"][a.index], test["y"][a.index]
     ids = pr.batch(torch.as_tensor(board[None], device=device))
 
+    # The solver starts from a random state (FPRM's), so one request can land on
+    # a different fixed point than another: record how often each seed solves it.
+    seeds = []
+    for seed in range(1, a.seeds):
+        torch.manual_seed(seed)
+        with torch.no_grad():
+            lg = m(input_ids=ids, use_cache=False).logits[0].float()
+        ans = (
+            lg[pr.grid_start : pr.grid_start + 81][:, spec["output_token_ids"]].argmax(
+                -1
+            )
+            + 1
+        )
+        seeds.append(
+            {
+                "seed": seed,
+                "cells_right": int((ans.cpu().numpy() == solution).sum()),
+                "iters": int(m.model._last_loop_iters[0]),
+            }
+        )
+    torch.manual_seed(0)
     with torch.no_grad():
         logits = m(input_ids=ids, use_cache=False).logits[0].float()
     rows = logits[pr.grid_start : pr.grid_start + 81]  # [81, vocab]
@@ -70,6 +97,7 @@ def main():
         "grid_rows": [pr.grid_start, pr.grid_start + 81],
         "row0_finite_ids": finite,
         "row0_vocab": rows.shape[1],
+        "other_seeds": seeds,
     }
     Path(a.out).write_text(json.dumps(out, indent=1))
     print(
