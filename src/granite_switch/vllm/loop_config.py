@@ -10,13 +10,14 @@ model-runner internals.
 """
 
 from vllm.logger import init_logger
+from vllm.model_executor.models.config import VerifyAndUpdateConfig
 
 logger = init_logger(__name__)
 
 LOOP_SCHEDULER = "granite_switch.vllm.loop.make_loop_scheduler"
 
 
-class GraniteSwitchConfigHook:
+class GraniteSwitchConfigHook(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config) -> None:
         hf_config = vllm_config.model_config.hf_config

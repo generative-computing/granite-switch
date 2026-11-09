@@ -289,3 +289,38 @@ def test_the_host_check_interval_does_not_change_the_answer():
     b, sb = head.solve_rows(reads, seeds=[1, 2], check_every=32, **SOLVE)
     torch.testing.assert_close(a, b, atol=0, rtol=0)
     assert sa["iters"].tolist() == sb["iters"].tolist()
+
+
+# --------------------------------------------------------------------------- #
+# The vLLM config hook (runs for every Granite Switch checkpoint)
+# --------------------------------------------------------------------------- #
+
+
+def test_config_hook_only_touches_checkpoints_with_a_loop_slot():
+    """vLLM calls both hook methods on every Granite Switch checkpoint; only a
+    loop slot gets the loop scheduler, and a set scheduler is kept."""
+    loop_config = pytest.importorskip("granite_switch.vllm.loop_config")
+    from types import SimpleNamespace
+
+    hook = loop_config.GraniteSwitchConfigHook
+
+    def vllm_config(kinds, scheduler_cls=None):
+        return SimpleNamespace(
+            model_config=SimpleNamespace(
+                hf_config=SimpleNamespace(adapter_kinds=kinds)
+            ),
+            scheduler_config=SimpleNamespace(scheduler_cls=scheduler_cls),
+        )
+
+    plain = vllm_config(["lora", "probe"])
+    hook.verify_and_update_config(plain)
+    hook.verify_and_update_model_config(plain.model_config)
+    assert plain.scheduler_config.scheduler_cls is None
+
+    loop = vllm_config(["lora", "loop"])
+    hook.verify_and_update_config(loop)
+    assert loop.scheduler_config.scheduler_cls == loop_config.LOOP_SCHEDULER
+
+    custom = vllm_config(["loop"], scheduler_cls="my.Scheduler")
+    hook.verify_and_update_config(custom)
+    assert custom.scheduler_config.scheduler_cls == "my.Scheduler"

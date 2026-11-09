@@ -12,6 +12,9 @@ log() { echo "[$(date -u +%H:%M:%S)] $*"; }
 py() { uv run --no-sync python "$@"; }
 BASE_MODEL=${BASE_MODEL:-ibm-granite/granite-4.1-3b}
 
+log "0/3 CPU unit tests (loop serving)"
+(uv run --no-sync python -m pytest tests/unit/test_loop_serving.py -q 2>&1 || true) | tail -n 3
+
 log "1/3 test split"
 py - <<PYEOF
 from huggingface_hub import hf_hub_download
