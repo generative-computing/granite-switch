@@ -115,12 +115,36 @@ def register():
     #     SR model auto-dispatches with no hf_overrides.
     #   - ShadowResidualForCausalLM : explicit alias for callers that force the arch.
     target = "granite_switch.vllm.granite_switch_model:GraniteSwitchForCausalLM"
-    supported = ModelRegistry.get_supported_archs()
-    for arch in (
+    archs = (
         "GraniteSwitchForCausalLM",
         "SRSwitchForCausalLM",
         "ShadowResidualForCausalLM",
-    ):
+    )
+    supported = ModelRegistry.get_supported_archs()
+    for arch in archs:
         if arch not in supported:
             ModelRegistry.register_model(arch, target)
             print(f"✓ {arch} registered with vLLM")
+
+    # Loop slots emit a request's whole answer in one step, which needs a few
+    # engine settings (V2 runner, no async scheduling, no chunked prefill, no
+    # prefix caching). vLLM applies per-architecture config hooks while it
+    # builds the engine config; this one is a no-op for checkpoints without a
+    # loop slot. See loop_burst.configure_engine_for_loop_slots.
+    try:
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+            VerifyAndUpdateConfig,
+        )
+
+        from .loop_burst import configure_engine_for_loop_slots
+
+        class _GraniteSwitchConfigHook(VerifyAndUpdateConfig):
+            @staticmethod
+            def verify_and_update_config(vllm_config) -> None:
+                configure_engine_for_loop_slots(vllm_config)
+
+        for arch in archs:
+            MODELS_CONFIG_MAP.setdefault(arch, _GraniteSwitchConfigHook)
+    except ImportError:
+        pass

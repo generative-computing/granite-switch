@@ -303,3 +303,70 @@ def test_config_requires_specs_for_loop_slots():
             adapter_ranks=[4],
             switch_head_dim=16,
         )
+
+
+# --------------------------------------------------------------------------- #
+# solve_each: the serving solve (vLLM), one row per request
+# --------------------------------------------------------------------------- #
+def _head_and_read(rows=3, **spec_overrides):
+    model = _model(_loop_config(**spec_overrides))
+    head = model.model.loop_heads.head(3)
+    torch.manual_seed(7)
+    return head, torch.randn(rows, GRID, model.config.hidden_size)
+
+
+def _solve_each(head, read, **kw):
+    args = dict(max_iter=60, fp_thresh=0.1, decay=0.9, patience=5)
+    args.update(kw)
+    return head.solve_each(read, head.fixed_start(), **args)
+
+
+def test_fixed_start_is_reproducible_and_shaped_like_the_state():
+    head, _ = _head_and_read()
+    z0 = head.fixed_start()
+    assert z0.shape == (head.prefix_len + GRID, head.width)
+    torch.testing.assert_close(z0, head.fixed_start(), atol=0, rtol=0)
+    assert not torch.equal(z0, head.fixed_start(seed=1))
+
+
+def test_solve_each_answer_does_not_depend_on_the_batch():
+    """A converged request's answer is the same alone and next to others.
+
+    Its iterates are the same up to float rounding, and it stops on its own
+    residual. (A row that never converges keeps bouncing until max_iter, and
+    rounding grows there, as in any batched kernel; only converged rows are
+    compared.)
+    """
+    head, read = _head_and_read(rows=3)
+    together, state = _solve_each(head, read)
+    converged = (state["residual"] < 0.1).nonzero().flatten().tolist()
+    assert len(converged) >= 2
+    for r in converged:
+        alone, alone_state = _solve_each(head, read[r : r + 1])
+        assert alone_state["iters"].item() == state["iters"][r].item()
+        torch.testing.assert_close(alone[0], together[r], atol=1e-5, rtol=1e-5)
+
+
+def test_solve_each_stops_each_row_at_its_own_convergence():
+    """A converged row stops updating while another keeps going."""
+    head, read = _head_and_read(rows=2)
+    _, state = _solve_each(head, read, fp_thresh=float("inf"), max_iter=40)
+    # fp_thresh inf: every row has converged after its first update.
+    assert state["iters"].tolist() == [1, 1]
+    _, state = _solve_each(head, read, fp_thresh=0.0, max_iter=40)
+    assert state["iters"].tolist() == [40, 40]
+
+
+def test_solve_each_matches_solve_from_the_same_start():
+    """With one row and no early stop, solve_each is the HF solve from z0."""
+    head, read = _head_and_read(rows=1)
+    z0 = head.fixed_start()
+    ours, _ = head.solve_each(
+        read, z0, max_iter=30, fp_thresh=0.0, decay=0.9, patience=5
+    )
+    x = head.inject(read)
+    state = head.init_state(x)
+    state["z"] = z0.expand_as(x).clone()
+    for _ in range(30):
+        state = head.step(state, x, 0.9, 5, 0.0)
+    torch.testing.assert_close(ours, head.logits(state["z"]))

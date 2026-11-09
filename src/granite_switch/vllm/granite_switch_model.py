@@ -227,6 +227,13 @@ class GraniteSwitchModel(nn.Module):
             self._probe_final_layer_group = None
             self._probe_layer_groups = {}
 
+        # Loop heads: a small looped transformer per loop slot (the HF module,
+        # kept in fp32). The forward only copies each read layer into a
+        # persistent buffer; the head solves after the forward, in the loop
+        # sampler (see loop_burst.py), and the request's whole answer is
+        # emitted in that step.
+        self._init_loop_slots(vllm_config, config)
+
         # 3. Base transformer layers with custom LoRA
         #
         # When adapters are present, config.num_hidden_layers includes placeholder
@@ -267,6 +274,95 @@ class GraniteSwitchModel(nn.Module):
 
         # 4. RMS Layer norm
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+
+    def _init_loop_slots(self, vllm_config: VllmConfig, config) -> None:
+        """Build the loop heads and one read buffer per distinct read layer."""
+        self.loop_heads = None
+        self._loop_read_buffers: dict[int | None, str] = {}
+        if "loop" not in getattr(config, "adapter_kinds", []):
+            return
+        from granite_switch.hf.core.loop import SwitchedLoopHeads
+
+        if vllm_config.parallel_config.pipeline_parallel_size > 1:
+            raise ValueError("Loop slots do not support pipeline parallelism yet.")
+        if vllm_config.speculative_config is not None:
+            raise ValueError("Loop slots do not support speculative decoding.")
+        # vLLM builds the model under the target device and its dtype as the
+        # default; the heads keep fp32 weights, as on the HF backend
+        # (_keep_in_fp32_modules_strict), and a spec's "solve_dtype" runs the
+        # solve under bf16 autocast. Their parameters are named as in the HF
+        # checkpoint (model.loop_heads.heads.<slot>.*), so the strategy's
+        # loader fills them like any other weight.
+        prev = torch.get_default_dtype()
+        torch.set_default_dtype(torch.float32)
+        try:
+            self.loop_heads = SwitchedLoopHeads(config)
+        finally:
+            torch.set_default_dtype(prev)
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        dtype = vllm_config.model_config.dtype
+        layers = {spec["read_layer"] for spec in config.loop_specs if spec is not None}
+        for layer in sorted(layers, key=lambda v: -2 if v is None else v):
+            tag = "final" if layer is None else "emb" if layer == -1 else str(layer)
+            name = f"_loop_read_{tag}"
+            # A stable address that the compiled forward (and its CUDA graph)
+            # writes with copy_, and the loop sampler reads after the forward.
+            self.register_buffer(
+                name,
+                torch.zeros(max_tokens, config.hidden_size, dtype=dtype),
+                persistent=False,
+            )
+            self._loop_read_buffers[layer] = name
+        # The solver's fixed start, one per slot: every request starts from the
+        # same state, so its answer depends on nothing but its own grid.
+        for key, head in self.loop_heads.heads.items():
+            self.register_buffer(
+                f"_loop_start_{key}", head.fixed_start(), persistent=False
+            )
+
+    def _keep_loop_read(self, layer: int | None, hidden: torch.Tensor) -> None:
+        """Copy one read layer of this forward's tokens into its buffer."""
+        name = self._loop_read_buffers.get(layer)
+        if name is not None:
+            getattr(self, name)[: hidden.shape[0]].copy_(hidden)
+
+    def loop_marker_to_slot(self) -> dict[int, int]:
+        """``{control token id: 1-based loop slot}`` for this checkpoint's loop slots."""
+        cfg = self.config
+        offset = len(cfg.adapter_token_ids or []) - cfg.num_adapters
+        return {
+            cfg.adapter_token_ids[i + offset]: i + 1
+            for i, kind in enumerate(cfg.adapter_kinds)
+            if kind == "loop"
+        }
+
+    def solve_loop_requests(self, slot: int, markers: list[int]) -> list[torch.Tensor]:
+        """Solve the loop requests of one slot whose markers are flat tokens ``markers``.
+
+        Reads each grid's rows from this step's read buffer (the
+        ``grid_size`` tokens ending ``end_offset`` before the marker), solves
+        them together, each row stopping at its own convergence, and returns
+        each answer as token ids, one per grid cell.
+        """
+        spec = self.config.loop_specs[slot - 1]
+        grid, offset = spec["grid_size"], spec.get("end_offset", 0)
+        read = getattr(self, self._loop_read_buffers[spec["read_layer"]])
+        ends = torch.tensor(markers, device=read.device) - offset
+        rows = read[(ends - grid).unsqueeze(1) + torch.arange(grid, device=read.device)]
+        head = self.loop_heads.head(slot)
+        amp = spec.get("solve_dtype") == "bfloat16"
+        with torch.autocast(rows.device.type, dtype=torch.bfloat16, enabled=amp):
+            logits, _ = head.solve_each(
+                rows,
+                getattr(self, f"_loop_start_{slot - 1}"),
+                max_iter=spec["max_iter"],
+                fp_thresh=spec["fp_thresh"],
+                decay=spec["stepsize_decay"],
+                patience=spec["decay_patience"],
+                min_iter=spec.get("min_iter", 0),
+            )
+        ids = torch.tensor(spec["output_token_ids"], device=logits.device)
+        return list(ids[logits.float().argmax(-1)])
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -432,6 +528,7 @@ class GraniteSwitchModel(nn.Module):
 
             hidden_states *= self.config.embedding_multiplier
             residual = None
+            self._keep_loop_read(-1, hidden_states)
         else:
             # Non-first rank: get hidden states from intermediate_tensors
             assert intermediate_tensors is not None
@@ -466,6 +563,10 @@ class GraniteSwitchModel(nn.Module):
                     probe_indices,
                     probe_scores,
                 )
+            if i in self._loop_read_buffers:
+                self._keep_loop_read(
+                    i, self.decoder_interface.layer_output(state, lora_indices)
+                )
 
         if get_pp_group().is_last_rank:
             # Adaptation-specific finalize: LoRA folds the last residual via
@@ -476,6 +577,7 @@ class GraniteSwitchModel(nn.Module):
             hidden_states = self.decoder_interface.exit_decoder_stack(
                 state, lora_indices, self.norm, self.config
             )
+            self._keep_loop_read(None, hidden_states)
 
             # Pack scores and slot ids onto the hidden states so vLLM's own
             # logits_indices gather selects them; compute_logits unpacks them.
@@ -657,6 +759,14 @@ class GraniteSwitchForCausalLM(
         )
         self.sampler = None  # Will be set by vLLM
 
+        # A loop checkpoint brings its own V2 model state, whose sampler emits
+        # each loop request's whole answer in one step (see loop_burst.py).
+        # vLLM looks the hook up with hasattr, so it exists only here.
+        if self.model.loop_heads is not None:
+            from .loop_burst import LoopSlotModelState
+
+            self.get_model_state_cls = lambda: LoopSlotModelState
+
     def embed_multimodal(self, **kwargs) -> list:
         """Embeddings for the audio placeholder positions (one tensor per item).
 
@@ -818,5 +928,9 @@ class GraniteSwitchForCausalLM(
         SR does the unfused->fused fuse-at-load mapping and marks the absent
         shared-KV LoRA slices loaded. Each ends by finalizing the fused kernel
         state + registering per-module remap tables (was ``_finalize_fused_lora``).
+
+        Loop heads (``model.loop_heads.*``) share the HF parameter names, so the
+        strategy loads them like any other weight, and its audit raises if one
+        is missing.
         """
         return self.model.decoder_interface.load_weights(self, weights)
