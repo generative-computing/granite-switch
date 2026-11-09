@@ -47,6 +47,11 @@ class _Model(torch.nn.Module):
         self.config = type("Cfg", (), {"max_probe_labels": 2})()
         self.probe_head = _StubProbeHead()
         self.probe_slot_mask_t = torch.tensor([False, *is_probe])
+        # The legacy layout: every slot's row is its slot position, in the
+        # LoRA tensors and the probe bank alike, so both tables are identities
+        # and the stub head still sees each marker's slot id.
+        self.lora_row_lut_t = torch.arange(num_slots + 1)
+        self.probe_row_lut_t = torch.arange(num_slots + 1)
         slots_by_layer = {}
         for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
             if is_clf:
