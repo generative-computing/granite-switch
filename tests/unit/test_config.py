@@ -320,3 +320,98 @@ class TestProbeReadLayers:
 
     def test_dual_stream_with_final_layer_is_accepted(self):
         GraniteSwitchConfig(**_probe_kwargs(dual_stream=True, cross_stream_rank=8))
+
+
+# ════════════════════════════════════════════════════════════════════
+# N. streams: per-kind weight rows
+# ════════════════════════════════════════════════════════════════════
+
+
+def _stream_kwargs(kinds, streams, **overrides):
+    """Slots of ``kinds`` (lora/probe), with explicit ``streams`` rows."""
+    n = len(kinds)
+    return _valid_kwargs(
+        num_adapters=n,
+        adapter_kinds=list(kinds),
+        probe_label_token_ids=[[10, 11] if k == "probe" else None for k in kinds],
+        streams=streams,
+        **overrides,
+    )
+
+
+def _row(lora=None, head=None):
+    return {"lora_row": lora, "head_row": head}
+
+
+class TestStreams:
+    def test_legacy_layout_when_absent(self):
+        """A pre-streams config: every slot's row is its position, in every bank."""
+        cfg = GraniteSwitchConfig(
+            **_valid_kwargs(
+                num_adapters=3,
+                adapter_kinds=["lora", "probe", "lora"],
+                probe_label_token_ids=[None, [10, 11], None],
+            )
+        )
+        # A legacy probe slot keeps a LoRA row too (its old zero row), so its
+        # stream names both; only the probe table routes to it.
+        assert cfg.streams == [_row(0), _row(1, 1), _row(2)]
+        assert cfg.num_lora_rows == 3
+        assert cfg.num_probe_rows == 3
+        assert cfg.lora_row_lut == [0, 1, 0, 3]
+        assert cfg.probe_row_lut == [0, 0, 2, 0]
+
+    def test_legacy_layout_writes_no_streams_key(self):
+        cfg = GraniteSwitchConfig(**_valid_kwargs())
+        saved = cfg.to_dict()
+        assert "streams" not in saved
+        for derived in (
+            "num_lora_rows",
+            "lora_row_lut",
+            "probe_row_lut",
+            "lora_row_ranks",
+        ):
+            assert derived not in saved
+
+    def test_compact_rows_any_slot_order(self):
+        cfg = GraniteSwitchConfig(
+            **_stream_kwargs(
+                ["probe", "lora", "lora"],
+                [_row(head=0), _row(lora=0), _row(lora=1)],
+                adapter_ranks=[8, 8, 4],
+            )
+        )
+        assert cfg.num_lora_rows == 2
+        assert cfg.num_probe_rows == 1
+        assert cfg.lora_row_lut == [0, 0, 1, 2]
+        assert cfg.probe_row_lut == [0, 1, 0, 0]
+        assert cfg.lora_row_ranks == [8, 4]
+        assert cfg.probe_num_labels_per_row == [2]
+
+    def test_compact_rows_round_trip(self):
+        cfg = GraniteSwitchConfig(
+            **_stream_kwargs(["lora", "probe"], [_row(lora=0), _row(head=0)])
+        )
+        restored = GraniteSwitchConfig.from_dict(cfg.to_dict())
+        assert restored.streams == cfg.streams
+        assert restored.lora_row_lut == cfg.lora_row_lut
+
+    def test_head_only_checkpoint_has_no_lora_targets(self):
+        cfg = GraniteSwitchConfig(**_stream_kwargs(["probe"], [_row(head=0)]))
+        assert cfg.num_lora_rows == 0
+        assert cfg.lora_target_modules == []
+
+    @pytest.mark.parametrize(
+        "streams, match",
+        [
+            ([_row(lora=0)], "streams length"),
+            ([_row(lora=0, head=0), _row(head=0)], "LoRA slot"),
+            ([_row(lora=0), _row(lora=0)], "probe slot"),
+            ([_row(lora=1), _row(head=0)], r"lora rows must be 0\.\.0"),
+            ([{"lora_row": 0}, _row(head=0)], "keys lora_row and head_row"),
+            ([_row(lora=-1), _row(head=0)], "non-negative int"),
+        ],
+    )
+    def test_invalid_streams_raise(self, streams, match):
+        with pytest.raises(ValueError, match=match):
+            GraniteSwitchConfig(**_stream_kwargs(["lora", "probe"], streams))

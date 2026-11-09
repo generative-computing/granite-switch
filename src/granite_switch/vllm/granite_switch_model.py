@@ -155,6 +155,14 @@ class GraniteSwitchModel(nn.Module):
                     torch.zeros(num_adapters, dtype=torch.long),
                 )
 
+            # Slot -> 1 + LoRA row (0 = base). Built from config, like the
+            # buffers above; a buffer built once keeps forward graph-safe.
+            self.register_buffer(
+                "lora_row_lut_t",
+                torch.tensor(config.lora_row_lut, dtype=torch.long),
+                persistent=False,
+            )
+
             # Fused kernel metadata (bitmask-based). The strategy builds the
             # adaptation's (kernel-meta, ctx) pair: LoRA -> (FusedLoRAKernelMeta,
             # LoRAContext); SR -> (SRFusedLoRAKernelMeta, SRLoRAContext).
@@ -179,8 +187,15 @@ class GraniteSwitchModel(nn.Module):
 
             self.probe_head = SwitchedProbeHead(
                 hidden_size=config.hidden_size,
-                num_probe_slots=config.num_adapters,
+                num_probe_slots=config.num_probe_rows,
                 max_num_labels=config.max_probe_labels,
+            )
+            # Slot -> 1 + probe row (0 = not a probe): the head's bank is
+            # indexed by row, and a compact bank holds probe slots only.
+            self.register_buffer(
+                "probe_row_lut_t",
+                torch.tensor(config.probe_row_lut, dtype=torch.long),
+                persistent=False,
             )
 
             # Packed verdicts assume the ordinary sampler's row selection.
@@ -394,6 +409,12 @@ class GraniteSwitchModel(nn.Module):
         # the LoRA path no-ops there).
         if self.switch is not None:
             lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+            # The LoRA tensors are indexed by row, not by slot (config.streams):
+            # a compact checkpoint keeps rows for LoRA slots only. Everything
+            # downstream (kernel metadata, layer reads, the SR merge) only tells
+            # "no LoRA" (0) from "a LoRA" (> 0) apart from the kernel's own
+            # remap, so it runs on rows from here on.
+            lora_indices = self.lora_row_lut_t[lora_indices]
         else:
             lora_indices = adapter_indices
             probe_indices = torch.zeros_like(adapter_indices)
@@ -513,7 +534,7 @@ class GraniteSwitchModel(nn.Module):
     ) -> torch.Tensor:
         """Write the scores of the slots in buffer ``group``, read from ``hidden``."""
         in_group = torch.isin(probe_indices, getattr(self, group))
-        slot_logits = self.probe_head(hidden, probe_indices)
+        slot_logits = self.probe_head(hidden, self.probe_row_lut_t[probe_indices])
         return torch.where(in_group.unsqueeze(-1), slot_logits, probe_scores)
 
     def _compute_probe_outputs(

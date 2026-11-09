@@ -412,23 +412,32 @@ class LoopHead(nn.Module):
 
 
 class SwitchedLoopHeads(nn.Module):
-    """The loop heads of a checkpoint, one per loop slot, keyed by adapter index.
+    """The loop heads of a checkpoint, one per loop slot, keyed by its row.
 
     Unlike the probe bank, loop heads are not stacked into one tensor: each head
     is a small transformer, and a request selects one slot. Heads are kept in a
-    ``ModuleDict`` whose keys are the 0-based slot numbers as strings, so the
-    checkpoint names are ``loop_heads.heads.<slot>.*``.
+    ``ModuleDict`` whose keys are the slots' loop rows (``config.streams``) as
+    strings, so the checkpoint names are ``loop_heads.heads.<row>.*``. A
+    checkpoint from before streams keyed each head by its 0-based slot number,
+    which its reconstructed streams give as the row, so it loads unchanged.
     """
 
     def __init__(self, config):
         super().__init__()
         self.heads = nn.ModuleDict()
-        for slot, (kind, spec) in enumerate(
-            zip(config.adapter_kinds, config.loop_specs or [None] * config.num_adapters)
+        self._row_of_slot: dict[int, int] = {}
+        for slot, (kind, spec, stream) in enumerate(
+            zip(
+                config.adapter_kinds,
+                config.loop_specs or [None] * config.num_adapters,
+                config.streams,
+            )
         ):
             if kind != "loop":
                 continue
-            self.heads[str(slot)] = LoopHead(
+            row = stream["head_row"]
+            self._row_of_slot[slot + 1] = row
+            self.heads[str(row)] = LoopHead(
                 hidden_size=config.hidden_size,
                 width=spec["width"],
                 num_layers=spec["num_layers"],
@@ -450,4 +459,8 @@ class SwitchedLoopHeads(nn.Module):
 
     def head(self, slot: int) -> LoopHead:
         """The head serving 1-based adapter index ``slot``."""
-        return self.heads[str(slot - 1)]
+        return self.heads[str(self._row_of_slot[slot])]
+
+    def row(self, slot: int) -> int:
+        """The loop row (checkpoint key) of 1-based adapter index ``slot``."""
+        return self._row_of_slot[slot]

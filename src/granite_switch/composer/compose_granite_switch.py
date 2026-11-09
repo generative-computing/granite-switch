@@ -1124,12 +1124,9 @@ def build():
     built_in_discovered = [
         (None, name, "builtin", None) for name in (args.built_in_adapters or [])
     ]
+    # Slots keep manifest order: each kind's weights get their own rows (the
+    # config's streams), so heads need not follow the LoRA slots.
     all_discovered = external_discovered + built_in_discovered
-
-    # Order LoRA slots first, head slots (probe, loop) last (False sorts first)
-    all_discovered.sort(
-        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") in HEAD_SLOT_KINDS
-    )
 
     has_external = len(external_discovered) > 0
     has_built_in = len(built_in_discovered) > 0

@@ -357,7 +357,11 @@ def main():
     # The head trains in fp32; the frozen base runs in bf16.
     head.float()
     for name, param in model.named_parameters():
-        param.requires_grad_(name.startswith(f"model.loop_heads.heads.{slot - 1}."))
+        param.requires_grad_(
+            name.startswith(
+                f"model.loop_heads.heads.{model.model.loop_heads.row(slot)}."
+            )
+        )
     trainable = [p_ for p_ in head.parameters()]
     n_params = sum(p_.numel() for p_ in trainable)
     prompt = Prompt(tok, args.slot_name, spec.get("end_offset", 0))

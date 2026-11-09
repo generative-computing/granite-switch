@@ -22,9 +22,9 @@ deterministically, and assert:
 2. A probe control-token forward emits the winning label's token id (the HF
    verdict exit scatters the head's argmax onto that slot's
    ``probe_label_token_ids``).
-3. In a mixed ``[lora, probe]`` compose the LoRA slot's bank row is populated
-   while the probe slot's LoRA row stays zero (compose orders LoRAs first, so
-   slot numbering is stable), and the probe row lands in its slot.
+3. In a mixed ``[lora, probe]`` compose each bank holds its own kind only: the
+   LoRA tensors have one row (the LoRA slot's) and the probe bank one row (the
+   probe slot's), as ``config.streams`` records.
 4. Two probe slots with DIFFERENT label counts (2 and 3) each land padded
    correctly and each emit a token id from their own label set.
 
@@ -228,8 +228,8 @@ def test_probe_only_compose_loads_trained_head(tmp_path):
     )
 
 
-def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
-    """[lora, probe]: LoRA slot 0 populated, probe slot 1 loaded."""
+def test_mixed_lora_and_probe_compact_banks(tmp_path):
+    """[lora, probe]: each kind gets its own bank row 0, and nothing else."""
     tokenizer = _tokenizer(MIXED_BASE)
     hidden = _hidden_size(MIXED_BASE)
     lora_dir = _find_rag_lora_dir()
@@ -259,34 +259,29 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     )
     model.eval()
 
+    assert model.config.streams == [
+        {"lora_row": 0, "head_row": None},
+        {"lora_row": None, "head_row": 0},
+    ]
+
+    # The probe bank holds the probe slot only: one row, its head.
     head = model.model.probe_head
     assert head is not None
-
-    # Probe slot is index 1 -> bank row 1; slot 0 (the LoRA slot) is never
-    # touched by the probe transfer, so it stays at the bank's zero init.
+    assert head.weight.shape[0] == 1
     torch.testing.assert_close(
-        head.weight[1, :num_labels].float(), weight.to(head.weight.dtype).float()
+        head.weight[0, :num_labels].float(), weight.to(head.weight.dtype).float()
     )
     torch.testing.assert_close(
-        head.bias[1, :num_labels].float(), bias.to(head.bias.dtype).float()
+        head.bias[0, :num_labels].float(), bias.to(head.bias.dtype).float()
     )
-    # Slot 0's probe row must stay all-zero (never loaded) — a stronger check
-    # than "not equal to the synthetic head" now that the bank is zero-init.
-    assert head.weight[0].abs().sum() == 0, "the LoRA slot's probe row was overwritten"
-    assert head.bias[0].abs().sum() == 0, "the LoRA slot's probe bias was overwritten"
 
-    # The LoRA bank row for slot 0 must be populated, while the probe
-    # slot's LoRA row (slot 1) must stay unloaded. lora_B is the discriminator:
-    # it is ZERO-initialized and only becomes nonzero when an adapter is loaded
-    # (lora_A is kaiming-initialized, so an unloaded row is nonzero there too and
-    # can't distinguish loaded from unloaded). So: slot 0 lora_B nonzero (loaded),
-    # slot 1 lora_B all-zero (probe slot, never received LoRA weights).
+    # The LoRA tensors hold the LoRA slot only: one row, populated. lora_B is
+    # the discriminator: it is ZERO-initialized and only becomes nonzero when an
+    # adapter is loaded (lora_A is kaiming-initialized).
     lora_B = _first_lora_b_tensor(model)
     assert lora_B is not None, "no stacked LoRA B tensor found on the model"
-    assert lora_B[0].abs().sum() > 0, "LoRA slot 0 bank row is unexpectedly all-zero"
-    assert lora_B[1].abs().sum() == 0, (
-        "probe slot 1 LoRA row is not zero — slot numbering leaked"
-    )
+    assert lora_B.shape[0] == 1, "the probe slot was given a LoRA row"
+    assert lora_B[0].abs().sum() > 0, "the LoRA slot's row is unexpectedly all-zero"
 
     # A detect forward on the probe control token emits the winning label.
     device = next(model.parameters()).device
@@ -307,6 +302,65 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     assert model.model._last_lora_indices[0, -1].item() == 1
     assert model.model._last_probe_verdict is None
     assert torch.isfinite(out.logits[0, -1]).all()
+
+
+def test_probe_before_lora_keeps_slot_order(tmp_path):
+    """[probe, lora]: slots keep their order; each bank still holds its own kind.
+
+    Before streams, head slots had to follow every LoRA slot, because a slot's
+    row in every bank was its position. With per-kind rows a probe may come
+    first, and both slots fire exactly as in the [lora, probe] order.
+    """
+    tokenizer = _tokenizer(MIXED_BASE)
+    hidden = _hidden_size(MIXED_BASE)
+    lora_dir = _find_rag_lora_dir()
+
+    label_names, label_ids = _single_token_labels(
+        tokenizer, ["safe", "unsafe", "yes", "no", "true", "false"]
+    )
+    winner = 1
+    weight, bias = _winning_head(len(label_names), hidden, winner)
+    clf_dir = str(tmp_path / "detect")
+    _write_synthetic_head(clf_dir, weight, bias, label_names)
+
+    clf_ctrl = tokenizer.vocab_size - 6
+    lora_ctrl = tokenizer.vocab_size - 5
+
+    model = GraniteSwitchComposer.from_base_and_adapters(
+        base_model_name_or_path=MIXED_BASE,
+        adapter_paths=[clf_dir, lora_dir],
+        adapter_token_ids=[clf_ctrl, lora_ctrl],
+        adapter_substitute_token_ids=[clf_ctrl, lora_ctrl],
+        adapter_names=["detect", "rag_lora"],
+        adapter_kinds=["probe", "lora"],
+        probe_label_token_ids=[label_ids, None],
+    )
+    model.eval()
+
+    assert model.config.streams == [
+        {"lora_row": None, "head_row": 0},
+        {"lora_row": 0, "head_row": None},
+    ]
+    assert _first_lora_b_tensor(model).shape[0] == 1
+    assert model.model.probe_head.weight.shape[0] == 1
+
+    device = next(model.parameters()).device
+    input_ids = _probe_prompt_ids(tokenizer, clf_ctrl).to(device)
+    with torch.no_grad():
+        out = model(input_ids=input_ids, use_cache=False)
+    assert int(out.logits[0, -1].argmax().item()) == label_ids[winner]
+    assert model.model._last_probe_indices[0, -1].item() == 1
+
+    # The LoRA slot (index 2) routes to LoRA row 0 and changes the logits.
+    lora_ids = torch.cat(
+        [torch.tensor([[lora_ctrl]]), input_ids[:, :-1].cpu()], dim=1
+    ).to(device)
+    base_ids = input_ids[:, :-1]
+    with torch.no_grad():
+        with_lora = model(input_ids=lora_ids, use_cache=False).logits[0, -1]
+        base = model(input_ids=base_ids, use_cache=False).logits[0, -1]
+    assert model.model._last_lora_indices[0, -1].item() == 0  # the base request
+    assert not torch.equal(with_lora, base), "the LoRA slot had no effect"
 
 
 def test_ragged_label_counts_pad_and_fire_per_slot(tmp_path):

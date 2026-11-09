@@ -253,7 +253,7 @@ class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
         self.cross_stream = SwitchedLoRALinear(
             in_features=config.hidden_size,
             out_features=config.hidden_size,
-            num_adapters=config.num_adapters,
+            num_adapters=config.num_lora_rows,
             max_lora_rank=config.cross_stream_rank,
             bias=False,
         )
@@ -470,11 +470,14 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         if "probe" in getattr(config, "adapter_kinds", []):
             self.probe_head = SwitchedProbeHead(
                 hidden_size=config.hidden_size,
-                num_probe_slots=config.num_adapters,
+                num_probe_slots=config.num_probe_rows,
                 max_num_labels=config.max_probe_labels,
             )
         else:
             self.probe_head = None
+
+        # Slot -> 1 + row tables (0 = base), read from config (see _row_lut).
+        self._row_luts: dict = {}
 
         # Loop heads: a small looped transformer per loop slot, reading the
         # configured layer at a fixed-size grid of positions and solving to a
@@ -528,6 +531,29 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         if config.dual_stream:
             for layer in self.layers:
                 nn.init.zeros_(layer.cross_stream.base_layer.weight)
+
+    def _row_lut(self, name: str, device) -> torch.Tensor:
+        """The config's slot -> 1 + row table ``name``, as a tensor on ``device``.
+
+        Kept off the state dict on purpose: a buffer would be one more tensor
+        for an old checkpoint to lack, and a non-persistent one comes back as
+        zeros from from_pretrained's meta-device load (see adapter_token_ids
+        above). The config is the source of truth; this caches it per device.
+        """
+        key = (name, device)
+        lut = self._row_luts.get(key)
+        if lut is None:
+            lut = torch.tensor(
+                getattr(self.config, name), dtype=torch.long, device=device
+            )
+            self._row_luts[key] = lut
+        return lut
+
+    def _lora_rows(self, lora_indices):
+        """Per-token LoRA row + 1 (0 = no LoRA) for per-token slot indices."""
+        if self.config.num_adapters == 0:
+            return lora_indices
+        return self._row_lut("lora_row_lut", lora_indices.device)[lora_indices]
 
     def _locate_probe_markers(self, input_ids, probe_indices, attention_mask):
         """``(rows, pos, slots, markers_by_layer)`` for this forward's markers.
@@ -771,6 +797,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         self._last_lora_indices = lora_indices
         self._last_probe_indices = probe_indices
 
+        # The LoRA layers index their tensors by row, not by slot: a compact
+        # checkpoint keeps rows for LoRA slots only (config.streams).
+        lora_rows = self._lora_rows(lora_indices)
+
         position_embeddings = None
         if self.rotary_emb is not None:
             position_embeddings = self.rotary_emb(
@@ -819,7 +849,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             idx = markers_by_layer[layer]
             probe_verdict[idx] = self.probe_head(
                 hidden[probe_rows[idx], probe_pos[idx]],
-                probe_slots[idx],
+                self._row_lut("probe_row_lut", probe_slots.device)[probe_slots[idx]],
             )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -835,7 +865,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
-                adapter_indices=lora_indices,
+                adapter_indices=lora_rows,
                 **kwargs,
             )
 

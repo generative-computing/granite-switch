@@ -100,15 +100,19 @@ class GraniteSwitchComposer:
         probe_slots = [i for i in head_slots if ext_kinds[i] == "probe"]
         loop_slots = [i for i in head_slots if ext_kinds[i] == "loop"]
 
-        # Compose orders LoRAs first, heads (probe, loop) last, so head slots
-        # must form a contiguous suffix (LoRAs occupy 0..k-1, heads k..).
-        if head_slots and head_slots != list(
-            range(lora_slots[-1] + 1 if lora_slots else 0, num_external)
-        ):
-            raise ValueError(
-                "Probe and loop slots must form a contiguous suffix (all LoRA "
-                f"slots first, then heads); got kinds {ext_kinds}. Order the "
-                "adapters LoRAs-first (compose does this automatically)."
+        # Streams: each slot's rows. Slots keep any order; each bank numbers
+        # its own kind's slots 0, 1, ... in slot order, so the LoRA tensors
+        # hold LoRA slots only and each head bank only its own kind. Built-in
+        # slots are LoRA slots after the external ones.
+        streams = []
+        bank_size = {"lora": 0, "probe": 0, "loop": 0}
+        for kind in ext_kinds + ["lora"] * num_built_in:
+            row = bank_size[kind]
+            bank_size[kind] += 1
+            streams.append(
+                {"lora_row": row, "head_row": None}
+                if kind == "lora"
+                else {"lora_row": None, "head_row": row}
             )
         lora_adapter_paths = [adapter_paths[i] for i in lora_slots]
         probe_adapter_paths = [adapter_paths[i] for i in probe_slots]
@@ -178,9 +182,10 @@ class GraniteSwitchComposer:
                 f"(cross_stream_rank={cross_stream_rank})"
             )
 
-        # adapter_ranks/adapter_alphas stay full external width (one entry per
-        # slot, probes included) so config.adapter_ranks is length
-        # num_adapters. A probe slot itself has no LoRA weights.
+        # adapter_ranks stays full external width (one entry per slot, heads
+        # included) so config.adapter_ranks is length num_adapters. A head slot
+        # has no LoRA row; its entry is a placeholder the LoRA layers never read
+        # (config.lora_row_ranks keeps LoRA rows only).
         if lora_adapter_paths:
             lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths
@@ -191,13 +196,13 @@ class GraniteSwitchComposer:
                 adapter_names=lora_adapter_names,
             )
 
-            # LoRAs lead, probes follow, so the full lists are a concat:
-            # detected LoRA values, then a placeholder per probe slot. The
-            # placeholder is the detected max rank, keeping max(adapter_ranks) ==
-            # max_lora_rank.
-            num_ext_probe = num_external - len(lora_slots)  # probe + loop slots
-            adapter_ranks = list(lora_ranks) + [lora_rank] * num_ext_probe
-            adapter_alphas = list(lora_alphas) + [float(lora_rank)] * num_ext_probe
+            # Scatter the detected values back to slot positions. The
+            # placeholder is the detected max rank, keeping max(adapter_ranks)
+            # == max_lora_rank.
+            adapter_ranks = [lora_rank] * num_external
+            for slot, rank in zip(lora_slots, lora_ranks):
+                adapter_ranks[slot] = rank
+            adapter_alphas = list(lora_alphas)
 
             # Extend adapter_ranks with built-in entries
             if num_built_in > 0:
@@ -272,6 +277,7 @@ class GraniteSwitchComposer:
                 "max_lora_rank": lora_rank,
                 "adapter_ranks": adapter_ranks,
                 "lora_target_modules": lora_target_modules,
+                "streams": streams if num_total > 0 else None,
             }
         )
 
@@ -313,15 +319,14 @@ class GraniteSwitchComposer:
 
         if lora_adapter_paths:
             # --- Step 7: Transfer LoRA adapter weights ---
-            # LoRAs are the contiguous leading slots, so the leading k entries of
-            # adapter_ranks/adapter_alphas are exactly the LoRA slots' values and
-            # each path's list position is its bank row (no slot remapping).
-            n_lora = len(lora_adapter_paths)
+            # External LoRA slots take LoRA rows 0..k-1 in slot order (see
+            # streams above), so each path's list position is its row.
             adapter_mapping = transfer_adapter_weights(
                 lora_adapter_paths,
                 model,
-                list(adapter_alphas)[:n_lora],
+                list(adapter_alphas),
                 arch,
+                adapter_ranks=[adapter_ranks[slot] for slot in lora_slots],
             )
 
             # --- Step 8: Validate ---
@@ -345,9 +350,9 @@ class GraniteSwitchComposer:
             # copied into the top rows of the padded bank.
             transfer_probe_weights(
                 probe_adapter_paths,
-                probe_slots,
+                [streams[slot]["head_row"] for slot in probe_slots],
                 model,
-                num_labels_per_slot=switch_config.probe_num_labels_per_slot,
+                num_labels_per_row=switch_config.probe_num_labels_per_row,
                 hidden_size=switch_config.hidden_size,
             )
 

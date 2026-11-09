@@ -123,6 +123,14 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 CTC chunking mis-trims seams for it (it needs the model to publish
                 inputs_to_logits_ratio, which this checkpoint does not).
 
+        streams (List[dict]): One entry per slot (``adapter_index - 1``), naming
+            where its weights live: ``{"lora_row": r | None, "head_row": h | None}``.
+            ``lora_row`` is the slot's row in every LoRA tensor; ``head_row`` its
+            row in its head kind's bank (probe or loop). A composer writes compact
+            rows, so the LoRA tensors hold only adapter slots and each head bank
+            only its own kind. ``None`` (every checkpoint before streams) keeps
+            the old layout, where every slot's rows equal its slot position.
+
         Shadow Residual (SR) parameters:
             dual_stream (bool): Whole-checkpoint decoder mode. ``False`` (default) =
                 ordinary LoRA/aLoRA, one stream. ``True`` = Shadow Residual, every
@@ -218,6 +226,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         probe_read_layers: list[int | None] | None = None,
         # Loop slots: one spec dict per loop slot, None elsewhere
         loop_specs: list[dict | None] | None = None,
+        # Streams: one entry per slot, naming the rows its weights occupy
+        streams: list[dict] | None = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -572,6 +582,72 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             if kind == "loop" and adapter_token_ids is not None
         ]
 
+        # Streams: where each slot's weights live. A LoRA slot has a row in every
+        # LoRA tensor; a head slot has a row in its kind's bank. Every checkpoint
+        # composed before streams gave each slot the row equal to its position,
+        # in the LoRA tensors and in every head bank alike, so that is the
+        # layout reconstructed when the field is absent.
+        if streams is None:
+            if num_adapters > 0:
+                streams = [
+                    {
+                        "lora_row": slot,
+                        "head_row": None if kind == "lora" else slot,
+                    }
+                    for slot, kind in enumerate(adapter_kinds)
+                ]
+            self._legacy_rows = True
+        else:
+            self._check_streams(streams, adapter_kinds)
+            self._legacy_rows = False
+        self.streams = streams
+
+        # Derived: bank sizes. The legacy layout sized every bank by the slot
+        # count; a compact one holds exactly the slots of its own kind.
+        rows = streams or []
+        if self._legacy_rows:
+            self.num_lora_rows = num_adapters
+            self.num_probe_rows = num_adapters if "probe" in adapter_kinds else 0
+        else:
+            self.num_lora_rows = sum(1 for k in adapter_kinds if k == "lora")
+            self.num_probe_rows = sum(1 for k in adapter_kinds if k == "probe")
+
+        # Derived: slot index -> 1 + row, per bank (0 = base, or another kind's
+        # slot). The LoRA layers index their tensors by the first; the probe
+        # head its bank by the second.
+        self.lora_row_lut = [0] + [
+            s["lora_row"] + 1 if kind == "lora" else 0
+            for s, kind in zip(rows, adapter_kinds)
+        ]
+        self.probe_row_lut = [0] + [
+            s["head_row"] + 1 if kind == "probe" else 0
+            for s, kind in zip(rows, adapter_kinds)
+        ]
+
+        # Derived, per LoRA row: its rank (the kernel's per-adapter tiers).
+        self.lora_row_ranks = None
+        if adapter_ranks is not None:
+            self.lora_row_ranks = [0] * self.num_lora_rows
+            for slot, (s, kind) in enumerate(zip(rows, adapter_kinds)):
+                if s["lora_row"] is not None and (kind == "lora" or self._legacy_rows):
+                    self.lora_row_ranks[s["lora_row"]] = adapter_ranks[slot]
+
+        # Derived, per probe row: its label count (the bank pads to
+        # max_probe_labels).
+        self.probe_num_labels_per_row = [0] * self.num_probe_rows
+        for s, kind, n in zip(rows, adapter_kinds, self.probe_num_labels_per_slot):
+            if kind == "probe":
+                self.probe_num_labels_per_row[s["head_row"]] = n
+
+        # A compact checkpoint with heads only has no LoRA rows, so it gets no
+        # LoRA wrappers either: its layers are the base model's plain linears.
+        if (
+            not self._legacy_rows
+            and self.num_lora_rows == 0
+            and lora_target_modules is None
+        ):
+            lora_target_modules = []
+
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.
         # Empty when num_adapters == 0 (no LoRA to apply).
@@ -600,3 +676,74 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     )
 
         self.lora_target_modules = lora_target_modules
+
+    def to_dict(self):
+        """Serialize; a legacy layout keeps no ``streams`` key, as it was read.
+
+        ``streams`` is reconstructed for a pre-streams checkpoint so the code can
+        read rows uniformly, but writing it back would change the checkpoint's
+        config.json for no reason; the derived row tables are never written.
+        """
+        out = super().to_dict()
+        if out.pop("_legacy_rows", False):
+            out.pop("streams", None)
+        for key in (
+            "num_lora_rows",
+            "num_probe_rows",
+            "lora_row_lut",
+            "probe_row_lut",
+            "lora_row_ranks",
+            "probe_num_labels_per_row",
+        ):
+            out.pop(key, None)
+        return out
+
+    @staticmethod
+    def _check_streams(streams, adapter_kinds) -> None:
+        """Validate stream rows: one entry per slot, each kind on its own bank.
+
+        A LoRA slot needs a LoRA row and no head row; a head slot needs a head
+        row and no LoRA row. Rows within a bank must be distinct and contiguous
+        from 0, so every row of a bank serves a slot.
+        """
+        if len(streams) != len(adapter_kinds):
+            raise ValueError(
+                f"streams length ({len(streams)}) must equal num_adapters "
+                f"({len(adapter_kinds)}): one entry per slot."
+            )
+        banks: dict[str, list[int]] = {}
+        for slot, (s, kind) in enumerate(zip(streams, adapter_kinds)):
+            if not isinstance(s, dict) or set(s) != {"lora_row", "head_row"}:
+                raise ValueError(
+                    f"streams[{slot}] must be a dict with keys lora_row and "
+                    f"head_row; got {s!r}."
+                )
+            lora_row, head_row = s["lora_row"], s["head_row"]
+            for name, row in (("lora_row", lora_row), ("head_row", head_row)):
+                if row is not None and (
+                    not isinstance(row, int) or isinstance(row, bool) or row < 0
+                ):
+                    raise ValueError(
+                        f"streams[{slot}].{name} must be a non-negative int or "
+                        f"None; got {row!r}."
+                    )
+            if kind == "lora":
+                if lora_row is None or head_row is not None:
+                    raise ValueError(
+                        f"streams[{slot}] is a LoRA slot: it needs a lora_row and "
+                        f"no head_row; got {s!r}."
+                    )
+                banks.setdefault("lora", []).append(lora_row)
+            else:
+                if head_row is None or lora_row is not None:
+                    raise ValueError(
+                        f"streams[{slot}] is a {kind} slot: it needs a head_row and "
+                        f"no lora_row; got {s!r}."
+                    )
+                banks.setdefault(kind, []).append(head_row)
+        for bank, used in banks.items():
+            if sorted(used) != list(range(len(used))):
+                raise ValueError(
+                    f"streams' {bank} rows must be 0..{len(used) - 1}, each used "
+                    f"once; got {used}."
+                )

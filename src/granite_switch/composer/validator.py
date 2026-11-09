@@ -85,11 +85,18 @@ def validate_cross_stream_population(model):
         # lora_B is the gate: lora_A is kaiming-initialized even for unpopulated
         # slots in a freshly built model, but lora_B decides whether the branch
         # contributes anything.
-        for adapter_idx in range(param.shape[0]):
-            if model.config.adapter_kinds[adapter_idx] in HEAD_SLOT_KINDS:
+        # Rows of the LoRA tensors; a legacy layout also holds head slots'
+        # rows, which never receive LoRA weights.
+        lora_rows = {
+            s["lora_row"]
+            for s, kind in zip(model.config.streams, model.config.adapter_kinds)
+            if kind not in HEAD_SLOT_KINDS
+        }
+        for row in range(param.shape[0]):
+            if row not in lora_rows:
                 continue
-            if bool(torch.all(param[adapter_idx] == 0)):
-                empty.append(f"{name}[{adapter_idx}]")
+            if bool(torch.all(param[row] == 0)):
+                empty.append(f"{name}[{row}]")
 
     if empty:
         # Not fatal — an SR adapter may legitimately skip cross_stream on some

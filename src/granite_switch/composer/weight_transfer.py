@@ -628,6 +628,7 @@ def transfer_adapter_weights(
     adapter_alphas: list[float],
     arch: ArchDescriptor,
     return_mapping: bool = True,
+    adapter_ranks: list[int] | None = None,
 ) -> dict | None:
     """Load adapter weights, stack them, and transfer to switch model.
 
@@ -635,11 +636,14 @@ def transfer_adapter_weights(
     :meth:`AdapterRemapper.remap_adapter_name` for name remapping.
 
     Args:
-        adapter_paths: List of paths to adapter directories.
+        adapter_paths: List of paths to adapter directories, in LoRA-row order
+            (path ``i`` fills row ``i`` of every LoRA tensor).
         model: GraniteSwitch model to load adapters into.
         adapter_alphas: Per-adapter alpha values.
         arch: Architecture descriptor.
         return_mapping: If True, return detailed mapping information.
+        adapter_ranks: Per-adapter ranks, aligned with *adapter_paths*. Defaults
+            to the leading entries of ``config.adapter_ranks``.
 
     Returns:
         Mapping record dict, or None if *return_mapping* is False.
@@ -680,9 +684,11 @@ def transfer_adapter_weights(
     stacked_adapters, adapter_mappings = stack_adapters(
         adapter_state_dicts=adapter_state_dicts,
         remapper=adapter_remapper,
-        num_adapters=model.config.num_adapters,
+        num_adapters=model.config.num_lora_rows,
         max_lora_rank=model.config.max_lora_rank,
-        adapter_ranks=model.config.adapter_ranks[: len(adapter_paths)],
+        adapter_ranks=adapter_ranks
+        if adapter_ranks is not None
+        else model.config.adapter_ranks[: len(adapter_paths)],
         adapter_alphas=adapter_alphas,
         verbose=True,
         cross_stream_rank=cs_rank,
@@ -840,27 +846,25 @@ def transfer_probe_weights(
     probe_paths: list[str],
     slot_indices: list[int],
     model,
-    num_labels_per_slot: list[int],
+    num_labels_per_row: list[int],
     hidden_size: int,
 ) -> None:
     """Load trained probe heads and transfer them into the switch model.
 
-    A probe slot is the probe-head analog of a LoRA adapter: it shares
-    the same control-token / adapter-index space, so its head lives in bank row
-    ``slot = adapter_index - 1`` of ``model.model.probe_head``. Each
-    probe directory holds a ``probe_head.safetensors`` with a
-    ``weight`` ``[n_i, hidden]`` and a ``bias`` ``[n_i]`` where ``n_i`` is this
-    slot's own label count. The head bank is padded to ``max_probe_labels``.
+    A probe slot is the probe-head analog of a LoRA adapter: it shares the
+    same control-token / adapter-index space, and its head lives in its probe
+    row (``config.streams[slot]["head_row"]``) of ``model.model.probe_head``.
+    Each probe directory holds a ``probe_head.safetensors`` with a ``weight``
+    ``[n_i, hidden]`` and a ``bias`` ``[n_i]`` where ``n_i`` is this slot's own
+    label count. The head bank is padded to ``max_probe_labels``.
 
     Args:
         probe_paths: Directories of the probe slots (probe-only).
-        slot_indices: Global bank row for each path (``adapter_index - 1``),
-            aligned with *probe_paths*. Probes are the non-zero-based
-            ``k+1..n`` suffix, so these are not ``range(len)`` and must be passed.
+        slot_indices: The probe bank row of each path, aligned with
+            *probe_paths*.
         model: GraniteSwitch model whose ``probe_head`` is filled in place.
-        num_labels_per_slot: Full-width per-slot label counts
-            (``config.probe_num_labels_per_slot``, indexed by
-            ``adapter_index - 1``).
+        num_labels_per_row: Per-row label counts
+            (``config.probe_num_labels_per_row``).
         hidden_size: Expected hidden size (``config.hidden_size``).
     """
     from safetensors.torch import load_file
@@ -887,13 +891,13 @@ def transfer_probe_weights(
         if not (0 <= slot < num_rows):
             raise ValueError(
                 f"Probe slot {slot} is out of range for a probe bank "
-                f"of {num_rows} rows (num_adapters)."
+                f"of {num_rows} rows (config.num_probe_rows)."
             )
 
     print(f"Loading {len(probe_paths)} trained probe head(s)...")
     with torch.no_grad():
         for path, slot in zip(probe_paths, slot_indices):
-            n_labels = num_labels_per_slot[slot]
+            n_labels = num_labels_per_row[slot]
             head_file = Path(path) / PROBE_HEAD_FILE
             if not head_file.exists():
                 raise FileNotFoundError(
@@ -918,7 +922,7 @@ def transfer_probe_weights(
                     f"{head_file}: weight shape {tuple(weight.shape)} does not "
                     f"match this slot's expected (n_labels, hidden) = "
                     f"({n_labels}, {hidden_size}). Check the head's label count "
-                    f"against probe_num_labels_per_slot[{slot}]={n_labels}."
+                    f"against probe_num_labels_per_row[{slot}]={n_labels}."
                 )
             if tuple(bias.shape) != (n_labels,):
                 raise ValueError(
@@ -1008,6 +1012,8 @@ def transfer_loop_weights(loop_paths, slot_indices, model, required=True) -> Non
             f"transfer_loop_weights was given loop paths {loop_paths} but the "
             "model built no loop_heads (no slot is kind=loop)."
         )
+    # slot_indices are 0-based slot positions; heads.head() maps each slot to
+    # its loop row, the head's checkpoint key.
     for path, slot in zip(loop_paths, slot_indices):
         head = heads.head(slot + 1)
         head_file = Path(path) / LOOP_HEAD_FILE
@@ -1031,4 +1037,4 @@ def transfer_loop_weights(loop_paths, slot_indices, model, required=True) -> Non
         with torch.no_grad():
             for k, v in sd.items():
                 own[k].copy_(v.to(dtype=own[k].dtype, device=own[k].device))
-        print(f"  Loop: {path} -> loop_heads[{slot}]")
+        print(f"  Loop: {path} -> loop_heads[{heads.row(slot + 1)}]")
