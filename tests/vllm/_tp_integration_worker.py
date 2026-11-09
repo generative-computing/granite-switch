@@ -6,6 +6,11 @@ Commands:
   build-compose    — Compose via the CLI compose script with adapter repos (CPU)
   build-granitemoe — Compose a tiny synthetic pure-sparse MoE checkpoint (CPU)
   run              — Load model in vLLM with given TP size, generate, save output (GPU)
+
+``run --fault <name>`` injects a sharding bug (see :data:`FAULTS`) so the test can
+prove a TP comparison is able to fail. Each fault lives only under tensor
+parallelism -- it acts on one rank's shard -- so a TP=1 run is unaffected and only
+the sharded path breaks, as with a real slicing or reduce bug.
 """
 
 import argparse
@@ -41,6 +46,150 @@ TOKEN_PROMPTS = [
     [10, 11, _CONTROL_TOKEN_ID, 12, 13, 14, 15, 16],
     [10, 11, 30, 12, 13, 14, 15, 16],
 ]
+
+
+# ── Sharding fault injection ──────────────────────────────────────────
+
+#: Sharding bugs the sensitivity guard injects at TP=2. Each patches OUR code
+#: (src/granite_switch/vllm), never vLLM's, so it does not depend on vLLM
+#: internals that move between the supported lines.
+FAULTS = {
+    # Column-parallel LoRA-B: a rank loads the other rank's output rows, the
+    # shape of an off-by-one slice offset in slice_lora_b_weight.
+    "lora_b_wrong_shard": "SwitchedLoRALinear.slice_lora_b_weight takes rank r+1's rows",
+    # Row-parallel LoRA-A: a rank loads the other rank's input columns.
+    "lora_a_wrong_shard": "SwitchedLoRALinear.slice_lora_a_weight takes rank r+1's columns",
+    # Row-parallel layers return their rank-local partial sum, unreduced.
+    "skip_row_reduce": "SwitchedLoRALinear skips the row-parallel all-reduce",
+    # A base (non-LoRA) row-parallel weight: rank 0's o_proj shard is negated
+    # after load. Unlike the LoRA faults this bites with no adapter active, so it
+    # checks the sharded layers reach the output at all.
+    "base_o_proj_shard": "rank 0's o_proj base weight shard is negated after load",
+}
+
+#: Written to a directory put on PYTHONPATH, so it runs at interpreter start in
+#: every process -- vLLM's TP worker processes are spawned, not forked, and
+#: would not inherit a patch applied here. Mirrors the trace hooks in
+#: tests/integration/_conversation_concurrency_worker.py.
+_FAULT_SITECUSTOMIZE = r"""
+import os
+
+_FAULT = os.environ.get("GS_TP_FAULT")
+
+
+def _install():
+    from granite_switch.vllm.core import lora as _lora
+
+    cls = _lora.SwitchedLoRALinear
+
+    def _other_rank_slice(orig, dim):
+        def patched(self, full_weight, slice_idx=0):
+            if self.tp_size <= 1:
+                return orig(self, full_weight, slice_idx)
+            # Only touch the dimension this slicer actually shards.
+            if dim == "a" and not self._is_row_parallel:
+                return orig(self, full_weight, slice_idx)
+            if dim == "b" and not self._is_column_parallel:
+                return orig(self, full_weight, slice_idx)
+            saved = self.tp_rank
+            self.tp_rank = (saved + 1) % self.tp_size
+            try:
+                return orig(self, full_weight, slice_idx)
+            finally:
+                self.tp_rank = saved
+
+        return patched
+
+    if _FAULT == "lora_b_wrong_shard":
+        cls.slice_lora_b_weight = _other_rank_slice(cls.slice_lora_b_weight, "b")
+    elif _FAULT == "lora_a_wrong_shard":
+        cls.slice_lora_a_weight = _other_rank_slice(cls.slice_lora_a_weight, "a")
+    elif _FAULT in ("skip_row_reduce", "base_o_proj_shard"):
+        import torch
+
+        from granite_switch.vllm import granite_switch_model as _gsm
+
+        orig_load = _gsm.GraniteSwitchForCausalLM.load_weights
+
+        def load_weights(self, weights):
+            loaded = orig_load(self, weights)
+            hit = 0
+            for name, mod in self.named_modules():
+                if _FAULT == "skip_row_reduce":
+                    if isinstance(mod, cls) and mod._row_parallel_reduce:
+                        mod._row_parallel_reduce = False
+                        hit += 1
+                elif name.endswith(".o_proj"):
+                    base = getattr(mod, "base_layer", mod)
+                    rank = getattr(mod, "tp_rank", None)
+                    if rank is None:
+                        from vllm.distributed import get_tensor_model_parallel_rank
+
+                        rank = get_tensor_model_parallel_rank()
+                    if rank == 0 and getattr(base, "weight", None) is not None:
+                        with torch.no_grad():
+                            base.weight.neg_()
+                        # A SwitchedLoRALinear has already fused the base weight
+                        # into w_ext at finalize; corrupt that copy as well.
+                        w_ext = getattr(mod, "w_ext", None)
+                        n = getattr(mod, "_N_total", None)
+                        if w_ext is not None and n is not None:
+                            with torch.no_grad():
+                                w_ext[:n].neg_()
+                        hit += 1
+            print(f"GS_TP_FAULT {_FAULT}: applied to {hit} module(s)", flush=True)
+            return loaded
+
+        _gsm.GraniteSwitchForCausalLM.load_weights = load_weights
+    print(f"GS_TP_FAULT {_FAULT}: installed in pid {os.getpid()}", flush=True)
+
+
+if _FAULT:
+    # Install once granite_switch's vLLM model module is imported, not now:
+    # sitecustomize runs at interpreter start, before the package is
+    # importable in every process, and importing it eagerly here would also
+    # load vLLM into processes that never use it.
+    import importlib.abc
+    import sys
+
+    _TRIGGER = "granite_switch.vllm.granite_switch_model"
+
+    class _Hook(importlib.abc.MetaPathFinder):
+        def find_spec(self, name, path=None, target=None):
+            if name != _TRIGGER:
+                return None
+            sys.meta_path.remove(self)
+            import importlib.util
+
+            spec = importlib.util.find_spec(name)
+            loader = spec.loader
+            orig_exec = loader.exec_module
+
+            def exec_module(module):
+                orig_exec(module)
+                _install()
+
+            loader.exec_module = exec_module
+            return spec
+
+    sys.meta_path.insert(0, _Hook())
+"""
+
+
+def _fault_env(fault, work_dir):
+    """Env for a run with ``fault`` injected via sitecustomize, or {} for none."""
+    if not fault:
+        return {}
+    if fault not in FAULTS:
+        raise SystemExit(f"unknown --fault {fault!r}; known: {sorted(FAULTS)}")
+    hook_dir = Path(work_dir) / "fault_hook"
+    hook_dir.mkdir(parents=True, exist_ok=True)
+    (hook_dir / "sitecustomize.py").write_text(_FAULT_SITECUSTOMIZE)
+    path = os.environ.get("PYTHONPATH", "")
+    return {
+        "GS_TP_FAULT": fault,
+        "PYTHONPATH": f"{hook_dir}{os.pathsep}{path}" if path else str(hook_dir),
+    }
 
 
 def cmd_build(args):
@@ -163,6 +312,12 @@ def cmd_build_granitemoe(args):
 
 def cmd_run(args):
     """Load model in vLLM and generate."""
+    if args.fault and os.environ.get("GS_TP_FAULT") != args.fault:
+        # The fault must be in place in vLLM's spawned TP worker processes, which
+        # only inherit it through the environment at interpreter start: re-run
+        # this command with the sitecustomize hook on PYTHONPATH.
+        env = {**os.environ, **_fault_env(args.fault, Path(args.output_path).parent)}
+        return subprocess.run([sys.executable, *sys.argv], env=env).returncode
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
 
     from vllm import LLM, SamplingParams
@@ -304,6 +459,12 @@ def main():
         "--token-prompts",
         action="store_true",
         help="Feed raw token ids instead of strings (checkpoint has no tokenizer)",
+    )
+    p_run.add_argument(
+        "--fault",
+        choices=sorted(FAULTS),
+        default=None,
+        help="Inject a sharding bug (only bites at TP>1); see FAULTS",
     )
 
     args = parser.parse_args()

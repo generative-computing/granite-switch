@@ -71,6 +71,18 @@ TINY_DIMS = {
     "num_key_value_heads": 2,
 }
 
+#: For the tensor-parallel tests. TINY_DIMS at TP=2 leaves each rank 2 query and
+#: ONE KV head, which cannot show a GQA sharding bug (KV heads split vs
+#: replicated, the per-rank query-to-KV mapping). 8 query / 4 KV heads at the
+#: same head_dim 32 gives each rank 4 / 2.
+TP_DIMS = {
+    "hidden_size": 256,
+    "intermediate_size": 512,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 8,
+    "num_key_value_heads": 4,
+}
+
 
 def capture(names=None, revision=None) -> None:
     """Refresh the captured files from the Hub. Needs network; not run in tests."""
@@ -90,25 +102,23 @@ def capture(names=None, revision=None) -> None:
         print(f"captured {name} from {BASES[name]}")
 
 
-def _tiny_config(captured: dict) -> dict:
+def _tiny_config(captured: dict, dims: dict) -> dict:
     config = dict(captured)
-    config.update(TINY_DIMS)
-    layers = TINY_DIMS["num_hidden_layers"]
-    config["head_dim"] = TINY_DIMS["hidden_size"] // TINY_DIMS["num_attention_heads"]
+    config.update(dims)
+    layers = dims["num_hidden_layers"]
+    config["head_dim"] = dims["hidden_size"] // dims["num_attention_heads"]
     if "layer_types" in config:
         config["layer_types"] = config["layer_types"][:layers]
     if "shared_intermediate_size" in config:
-        config["shared_intermediate_size"] = TINY_DIMS["intermediate_size"]
+        config["shared_intermediate_size"] = dims["intermediate_size"]
     if "mamba_d_head" in config:
         # Unused on an all-attention base, but transformers validates
         # mamba_n_heads * mamba_d_head == mamba_expand * hidden_size.
         expand = config.get("mamba_expand", 2)
-        config["mamba_d_head"] = (
-            expand * TINY_DIMS["hidden_size"] // config["mamba_n_heads"]
-        )
+        config["mamba_d_head"] = expand * dims["hidden_size"] // config["mamba_n_heads"]
         if config["mamba_d_head"] == 0:
             config["mamba_n_heads"] = 1
-            config["mamba_d_head"] = expand * TINY_DIMS["hidden_size"]
+            config["mamba_d_head"] = expand * dims["hidden_size"]
     config["max_position_embeddings"] = 4096
     return config
 
@@ -282,14 +292,21 @@ def _write_weights(dest: Path, config: dict, seed: int, preset: WeightPreset) ->
 
 
 def build_fake_base(
-    name: str, dest, *, seed: int = 0, preset: WeightPreset = REALISTIC
+    name: str,
+    dest,
+    *,
+    seed: int = 0,
+    preset: WeightPreset = REALISTIC,
+    dims: dict | None = None,
 ) -> Path:
     """Write a loadable tiny ``name`` base to ``dest`` and return its path.
 
     ``name`` is a key of :data:`BASES`. Composes with the real CLI and loads with
     ``from_pretrained``; see the module docstring for what is real and what is not.
-    ``preset`` picks the random-weight scales (see :data:`REALISTIC`).
+    ``preset`` picks the random-weight scales (see :data:`REALISTIC`); ``dims``
+    the shrunk size fields (default :data:`TINY_DIMS`, see :data:`TP_DIMS`).
     """
+    dims = dict(TINY_DIMS if dims is None else dims)
     src = FIXTURES / name
     if not src.is_dir():
         raise FileNotFoundError(f"no captured base {name!r} under {FIXTURES}")
@@ -299,7 +316,7 @@ def build_fake_base(
         if (src / filename).exists() and filename != "config.json":
             shutil.copyfile(src / filename, dest / filename)
 
-    config = _tiny_config(json.loads((src / "config.json").read_text()))
+    config = _tiny_config(json.loads((src / "config.json").read_text()), dims)
     (dest / "config.json").write_text(json.dumps(config, indent=2))
     tokenizer_config = json.loads((src / "tokenizer_config.json").read_text())
     _write_tokenizer(dest, tokenizer_config)
@@ -349,6 +366,8 @@ __all__ = [
     "BASES",
     "LIVE_LAYERS",
     "REALISTIC",
+    "TINY_DIMS",
+    "TP_DIMS",
     "WeightPreset",
     "build_fake_base",
     "capture",

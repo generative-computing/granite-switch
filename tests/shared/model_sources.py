@@ -25,7 +25,13 @@ from pathlib import Path
 import pytest
 
 from tests.shared.fake_adapter_libraries import build_fake_library
-from tests.shared.fake_bases import BASES, REALISTIC, WeightPreset, build_fake_base
+from tests.shared.fake_bases import (
+    BASES,
+    REALISTIC,
+    TINY_DIMS,
+    WeightPreset,
+    build_fake_base,
+)
 
 SOURCES = ("fake", "real")
 
@@ -44,28 +50,40 @@ def sources(*, real_marks=()):
     ]
 
 
-def _preset_tag(preset: WeightPreset) -> str:
-    return f"b{preset.body:g}-e{preset.embed:g}-n{preset.final_norm:g}"
+def _preset_tag(preset: WeightPreset, dims: tuple) -> str:
+    d = dict(dims)
+    shape = (
+        f"h{d['hidden_size']}-q{d['num_attention_heads']}-kv{d['num_key_value_heads']}"
+    )
+    return f"b{preset.body:g}-e{preset.embed:g}-n{preset.final_norm:g}-{shape}"
+
+
+def _dims_key(dims: dict | None) -> tuple:
+    return tuple(sorted((TINY_DIMS if dims is None else dims).items()))
 
 
 @cache
-def _fake_base(name: str, preset: WeightPreset) -> str:
+def _fake_base(name: str, preset: WeightPreset, dims: tuple) -> str:
     # The directory is named after the model, as a Hub id's last component is:
     # the composer derives --target-model from it, which picks the base flavour
-    # inside an adapter library. So the preset goes in the parent.
-    dest = _ROOT / "bases" / _preset_tag(preset) / name
-    return str(build_fake_base(name, dest, preset=preset))
+    # inside an adapter library. So the preset and shape go in the parent.
+    dest = _ROOT / "bases" / _preset_tag(preset, dims) / name
+    return str(build_fake_base(name, dest, preset=preset, dims=dict(dims)))
 
 
 @cache
 def _fake_library(
-    repo: str, base_name: str, include: tuple[str, ...] | None, preset: WeightPreset
+    repo: str,
+    base_name: str,
+    include: tuple[str, ...] | None,
+    preset: WeightPreset,
+    dims: tuple,
 ) -> str:
     tag = "-".join(include) if include else "all"
     dest = (
         _ROOT
         / "libraries"
-        / _preset_tag(preset)
+        / _preset_tag(preset, dims)
         / base_name
         / repo.replace("/", "--")
         / tag
@@ -74,22 +92,29 @@ def _fake_library(
         build_fake_library(
             repo,
             base_name,
-            _fake_base(base_name, preset),
+            _fake_base(base_name, preset, dims),
             dest,
             include=list(include) if include else None,
         )
     )
 
 
-def base_model(source: str, name: str, *, preset: WeightPreset = REALISTIC) -> str:
+def base_model(
+    source: str,
+    name: str,
+    *,
+    preset: WeightPreset = REALISTIC,
+    dims: dict | None = None,
+) -> str:
     """A path or Hub id for base ``name`` (a key of ``fake_bases.BASES``).
 
     ``preset`` picks the fake's random-weight scales (``fake_bases.REALISTIC`` or
-    ``LIVE_LAYERS``); the real source ignores it.
+    ``LIVE_LAYERS``) and ``dims`` its size (``fake_bases.TINY_DIMS`` by default,
+    ``TP_DIMS`` for the tensor-parallel tests); the real source ignores both.
     """
     if source == "real":
         return BASES[name]
-    return _fake_base(name, preset)
+    return _fake_base(name, preset, _dims_key(dims))
 
 
 def adapter_library(
@@ -99,6 +124,7 @@ def adapter_library(
     *,
     include=None,
     preset: WeightPreset = REALISTIC,
+    dims: dict | None = None,
 ) -> str:
     """A path or Hub id for adapter library ``repo``, built for ``base_name``.
 
@@ -108,7 +134,9 @@ def adapter_library(
     """
     if source == "real":
         return repo
-    return _fake_library(repo, base_name, tuple(include) if include else None, preset)
+    return _fake_library(
+        repo, base_name, tuple(include) if include else None, preset, _dims_key(dims)
+    )
 
 
 def lora_adapter_dir(source: str, repo: str, base_name: str, adapter: str) -> str:
