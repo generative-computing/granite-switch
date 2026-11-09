@@ -165,10 +165,17 @@ class GraniteSwitchModel(nn.Module):
 
             # Fused kernel metadata (bitmask-based). The strategy builds the
             # adaptation's (kernel-meta, ctx) pair: LoRA -> (FusedLoRAKernelMeta,
-            # LoRAContext); SR -> (SRFusedLoRAKernelMeta, SRLoRAContext).
-            self.lora_meta, self.lora_ctx = self.decoder_interface.make_kernel_meta(
-                vllm_config.device_config.device,
-            )
+            # LoRAContext); SR -> (SRFusedLoRAKernelMeta, SRLoRAContext). A
+            # checkpoint whose slots are all heads has no LoRA rows and so no
+            # LoRA layers: it runs the plain base projections, with no kernel
+            # metadata to build.
+            if config.num_lora_rows > 0:
+                self.lora_meta, self.lora_ctx = self.decoder_interface.make_kernel_meta(
+                    vllm_config.device_config.device,
+                )
+            else:
+                self.lora_meta = None
+                self.lora_ctx = None
 
         else:
             self.switch = None
