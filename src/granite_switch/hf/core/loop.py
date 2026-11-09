@@ -317,15 +317,18 @@ class LoopHead(nn.Module):
         """The halt head's logit per row: ``[B, prefix + grid, W] -> [B]``."""
         return self.q_head(z[:, 0]).squeeze(-1).float()
 
-    def init_state(self, x: torch.Tensor, generator=None) -> dict:
+    def init_state(self, x: torch.Tensor, generator=None, z=None) -> dict:
         """A fresh solver state for a batch whose injection is ``x``.
 
         The starting point is random: a truncated normal with std ``init_std``,
-        as in FPRM. Pass a seeded ``generator`` for a reproducible solve.
+        as in FPRM. Pass a seeded ``generator`` for a reproducible solve, or the
+        starting point itself as ``z`` (fp32, shaped like ``x``).
         """
         b = x.shape[0]
-        z = torch.empty(x.shape, device=x.device, dtype=torch.float32)
-        z = trunc_normal_(z, std=self.init_std, generator=generator).to(x.dtype)
+        if z is None:
+            z = torch.empty(x.shape, device=x.device, dtype=torch.float32)
+            z = trunc_normal_(z, std=self.init_std, generator=generator)
+        z = z.to(x.dtype)
         return {
             "z": z,
             "stepsize": x.new_ones(b, 1, 1, dtype=torch.float32),
@@ -408,6 +411,61 @@ class LoopHead(nn.Module):
             ):
                 break
             state = self.step(state, x, decay, patience, fp_thresh)
+        return self.logits(state["z"]), state
+
+    @torch.no_grad()
+    def solve_rows(
+        self,
+        read: torch.Tensor,
+        seeds,
+        max_iter: int,
+        fp_thresh: float,
+        decay: float,
+        patience: int,
+        min_iter: int = 0,
+        check_every: int = 32,
+    ) -> tuple[torch.Tensor, dict]:
+        """Solve each row on its own; returns ``(logits [B, grid, outputs], state)``.
+
+        For serving, where a row's answer must not depend on which other
+        requests share its batch and must come out the same when the request
+        runs again. Two things differ from :meth:`solve`:
+
+        * Row ``r`` starts from the truncated normal a generator seeded
+          ``seeds[r]`` draws, so a row of a batch starts where :meth:`solve`
+          starts that row alone with the same seed.
+        * Each row stops by itself: once it has made ``min_iter`` updates and
+          its residual is below ``fp_thresh`` (or its step size has decayed
+          below :data:`MIN_STEPSIZE`), it is frozen. :meth:`solve` keeps every
+          row going until the whole batch has converged.
+
+        A batch of one row therefore gives :meth:`solve`'s answer. The host
+        checks for "all rows stopped" every ``check_every`` updates rather than
+        after each one; frozen rows do not change in between, so the answer is
+        the same either way.
+        """
+        x = self.inject(read)
+        z = torch.empty(x.shape, device=x.device, dtype=torch.float32)
+        for row, seed in enumerate(seeds):
+            gen = torch.Generator(device=x.device).manual_seed(int(seed))
+            trunc_normal_(z[row], std=self.init_std, generator=gen)
+        state = self.init_state(x, z=z)
+
+        def running(s):
+            stopped = (s["residual"] < fp_thresh) | (
+                s["stepsize"].view(-1) < MIN_STEPSIZE
+            )
+            return (s["iters"] < min_iter) | ~stopped
+
+        done = 0
+        while done < max_iter:
+            for _ in range(min(check_every, max_iter - done)):
+                state = self.step(
+                    state, x, decay, patience, fp_thresh, active=running(state)
+                )
+                done += 1
+            if not bool(running(state).any()):
+                break
         return self.logits(state["z"]), state
 
 

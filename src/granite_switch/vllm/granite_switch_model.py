@@ -227,6 +227,29 @@ class GraniteSwitchModel(nn.Module):
             self._probe_final_layer_group = None
             self._probe_layer_groups = {}
 
+        # Loop slots (see granite_switch.vllm.loop): the head and a buffer the
+        # forward copies the grid tokens' read-layer state into. The solve runs
+        # in the sampler, which emits the answer as one block of tokens.
+        self.loop_heads = None
+        self.loop_reads = None
+        self._loop_read_layer = None
+        if "loop" in getattr(config, "adapter_kinds", []):
+            from granite_switch.hf.core.loop import SwitchedLoopHeads
+
+            from .loop import LoopGridReads, check_loop_serving, loop_read_layers
+
+            check_loop_serving(config, vllm_config)
+            self.loop_heads = SwitchedLoopHeads(config).float()
+            (self._loop_read_layer,) = loop_read_layers(config)
+            grid = next(s["grid_size"] for s in config.loop_specs if s is not None)
+            self.loop_reads = LoopGridReads(
+                max_num_reqs=vllm_config.scheduler_config.max_num_seqs,
+                grid_size=grid,
+                hidden_size=config.hidden_size,
+                max_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                dtype=vllm_config.model_config.dtype,
+            )
+
         # 3. Base transformer layers with custom LoRA
         #
         # When adapters are present, config.num_hidden_layers includes placeholder
@@ -432,6 +455,8 @@ class GraniteSwitchModel(nn.Module):
 
             hidden_states *= self.config.embedding_multiplier
             residual = None
+            if self.loop_reads is not None and self._loop_read_layer == -1:
+                self.loop_reads(hidden_states)
         else:
             # Non-first rank: get hidden states from intermediate_tensors
             assert intermediate_tensors is not None
@@ -458,6 +483,10 @@ class GraniteSwitchModel(nn.Module):
         state = self.decoder_interface.enter_decoder_stack(hidden_states, residual)
         for i in range(self.start_layer, self.end_layer):
             state = self.decoder_interface.run_layer(self.layers[i], positions, state)
+            if self.loop_reads is not None and self._loop_read_layer == i:
+                self.loop_reads(
+                    self.decoder_interface.layer_output(state, lora_indices)
+                )
             group = self._probe_layer_groups.get(i)
             if group is not None:
                 probe_scores = self._score_group(
@@ -476,6 +505,8 @@ class GraniteSwitchModel(nn.Module):
             hidden_states = self.decoder_interface.exit_decoder_stack(
                 state, lora_indices, self.norm, self.config
             )
+            if self.loop_reads is not None and self._loop_read_layer is None:
+                self.loop_reads(hidden_states)
 
             # Pack scores and slot ids onto the hidden states so vLLM's own
             # logits_indices gather selects them; compute_logits unpacks them.
@@ -657,6 +688,14 @@ class GraniteSwitchForCausalLM(
         )
         self.sampler = None  # Will be set by vLLM
 
+        # Model Runner V2 asks a model for its own state with
+        # ``hasattr(model, "get_model_state_cls")``, so a checkpoint without a
+        # loop slot must not have the method at all: it keeps vLLM's defaults.
+        if self.model.loop_heads is not None:
+            from .loop import LoopModelState
+
+            self.get_model_state_cls = lambda: LoopModelState
+
     def embed_multimodal(self, **kwargs) -> list:
         """Embeddings for the audio placeholder positions (one tensor per item).
 
@@ -819,4 +858,8 @@ class GraniteSwitchForCausalLM(
         shared-KV LoRA slices loaded. Each ends by finalizing the fused kernel
         state + registering per-module remap tables (was ``_finalize_fused_lora``).
         """
+        # Loop heads (``model.loop_heads.heads.<slot>.*``) load by name like
+        # every other parameter; the loaders' audit refuses a checkpoint that
+        # lacks them. They stay fp32 (built so in GraniteSwitchModel), as the HF
+        # backend keeps them, since the solve iterates thousands of times.
         return self.model.decoder_interface.load_weights(self, weights)

@@ -114,6 +114,24 @@ def register():
     #     checkpoint's config.architectures (mirrors the HF SR arch name), so an
     #     SR model auto-dispatches with no hf_overrides.
     #   - ShadowResidualForCausalLM : explicit alias for callers that force the arch.
+    # Loop slots: vLLM runs each architecture's config hook while building the
+    # engine config. For a checkpoint with a loop slot ours selects the
+    # scheduler that books a loop request's one-step answer (see .loop); for
+    # any other checkpoint it does nothing. The hook map exists in 0.26 and 0.30.
+    try:
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+
+        from .loop_config import GraniteSwitchConfigHook
+
+        for arch in (
+            "GraniteSwitchForCausalLM",
+            "SRSwitchForCausalLM",
+            "ShadowResidualForCausalLM",
+        ):
+            MODELS_CONFIG_MAP.setdefault(arch, GraniteSwitchConfigHook)
+    except ImportError:
+        pass
+
     target = "granite_switch.vllm.granite_switch_model:GraniteSwitchForCausalLM"
     supported = ModelRegistry.get_supported_archs()
     for arch in (

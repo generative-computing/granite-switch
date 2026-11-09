@@ -600,23 +600,37 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         return by_slot
 
     def solve_loops(self, grids, hidden_by_layer):
-        """Run each loop slot's head on its read layer; ``{slot: logits}``."""
+        """Run each loop slot's head on its read layer; ``{slot: logits}``.
+
+        By default the batch is solved together from one random start, as
+        FPRM evaluates. With ``self.loop_seeds`` set (one int per batch row)
+        each row is solved on its own from that seeded start, as the vLLM
+        backend serves a request (``LoopHead.solve_rows``).
+        """
         out = {}
+        seeds = getattr(self, "loop_seeds", None)
         for slot, (rows, cols) in grids.items():
             spec = self.config.loop_specs[slot - 1]
             hidden = hidden_by_layer[spec["read_layer"]]
+            head = self.loop_heads.head(slot)
+            solver = dict(
+                max_iter=spec["max_iter"],
+                fp_thresh=spec["fp_thresh"],
+                decay=spec["stepsize_decay"],
+                patience=spec["decay_patience"],
+                min_iter=spec.get("min_iter", 0),
+            )
             # The head keeps fp32 weights; "solve_dtype": "bfloat16" runs its
             # solve under bf16 autocast, as the head was trained.
             amp = spec.get("solve_dtype") == "bfloat16"
             with torch.autocast(hidden.device.type, dtype=torch.bfloat16, enabled=amp):
-                logits, state = self.loop_heads.head(slot).solve(
-                    hidden[rows.unsqueeze(1), cols],  # [n, grid, H]
-                    max_iter=spec["max_iter"],
-                    fp_thresh=spec["fp_thresh"],
-                    decay=spec["stepsize_decay"],
-                    patience=spec["decay_patience"],
-                    min_iter=spec.get("min_iter", 0),
-                )
+                read = hidden[rows.unsqueeze(1), cols]  # [n, grid, H]
+                if seeds is None:
+                    logits, state = head.solve(read, **solver)
+                else:
+                    logits, state = head.solve_rows(
+                        read, seeds=[seeds[r] for r in rows.tolist()], **solver
+                    )
             out[slot] = logits
             self._last_loop_iters = state["iters"]
         return out
