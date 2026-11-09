@@ -1,6 +1,6 @@
 # Loop Slot on vLLM: Emitting the Whole Answer in One Step
 
-Status: implemented and served on vLLM 0.26.0 (A100), branch
+Status: implemented and served on vLLM (A100), branch
 `feature/loop-vllm-multi-token-emission-investigation`. Results are in section 8.
 vLLM sources read: 0.26.0, checked against 0.30.0 (the two ends of the supported range).
 
@@ -85,175 +85,97 @@ Two things do assume one token per step, and the design handles both
 
 ## 3. The solution: "answer burst" sampling
 
-In the step whose input holds the loop marker, the compiled forward keeps
-the grid's read-layer rows. The custom sampler then solves the grid on the
-GPU and commits the whole answer for that request in the same step: 81
-digits, then EOS.
+The sampler that answers a loop request is supplied by the model, and it
+returns the request's whole answer, 81 digits then EOS, in the step that
+finishes the prompt. One engine step; no draft or verify step.
 
 ```
-step 0 (prefill, marker is the last prompt token)
+each prefill step (the prompt may be split across several):
+  model state (host):   which scheduled tokens are this request's grid cells
+                        -> a fixed-size copy plan for the step
   forward (compiled, CUDA graph):
-    decoder runs; the read layer's rows are copied to a GPU buffer
-  sampler (custom, GPU):
-    no loop request in this step -> ordinary sampling (known on the host)
-    otherwise: gather each loop request's 81 grid rows from the buffer,
-               loop head solves them -> 81 digits + EOS per request
-    loop rows:  sampled[r, :82] = answer, num_sampled = 82
-    other rows: ordinary sampling,        num_sampled = 1
-  scheduler: appends 82 tokens, stops at EOS   ->  request done, 1 step
+    at the read layer, a custom op copies the planned rows into the
+    request's grid buffer (81 x hidden, kept across steps)
+the step that finishes the prompt:
+  sampler: ordinary rows -> vLLM's sampler, 1 token
+           loop rows     -> loop head solves the buffered grid
+                            -> 81 digits + EOS, num_sampled = 82
+  scheduler: appends 82 tokens, stops at EOS  -> request done
 ```
 
-Only one engine step is needed. There is no draft step, no verify step and
-no copy of the answer to the CPU before output. The usual output copy takes
-the tokens to the scheduler, as it does for every sampled token.
+### 3.1 Reading the grid
 
-### 3.1 Where the answer comes from
+* **Finding a loop request (host).** When the worker adds a request, the
+  model state checks that the prompt ends with a loop slot's control token.
+  The grid's position follows from `grid_size` and `end_offset`.
+* **The grid buffer.** `max_num_seqs × 81` rows of hidden size, in the model
+  dtype, plus one sink row. Row `slot·81 + i` holds cell `i` of the request
+  in runner slot `slot`. The buffer persists across steps.
+* **The plan (host).** Before each forward, the model state intersects each
+  loop request's scheduled tokens with its grid range. It writes two index
+  vectors of fixed length into persistent device buffers: source token and
+  destination row. Unused entries point at the sink.
+* **The copy (device).** A registered custom op, `index_copy_` from the read
+  layer into the buffer, runs inside the compiled forward at the configured
+  read layer: embeddings (−1), a decoder layer, or the final norm.
+  * It has fixed shapes and no branch, so it is safe under CUDA graphs.
+  * Entries past the step's real tokens also land in the sink.
+* **Chunked prefill.** Each chunk copies the grid cells it holds. The grid is
+  complete when the prompt is, wherever the chunk boundaries fall.
+* **Prefix caching** stays on for the engine. A prefix-cache hit would skip
+  the grid's forward, so loop requests alone skip prefix-cache reads.
 
-The compiled forward does one thing for the loop slot: it keeps the read
-layer. Everything else runs after the forward, eagerly, in the sampler.
+### 3.2 Solving and answering (the sampler)
 
-* **In the forward: copy the read layer.** At the configured read layer
-  (embeddings −1, a decoder layer, or the final norm), the forward copies
-  the rows of every scheduled token into a persistent buffer:
-  `loop_read[:T].copy_(h)`.
-  * This uses the same hooks as the probe groups
-    (`layer_output(state, lora_indices)`).
-  * It is one copy, the size of the batch's hidden states. It has static
-    shapes and no branch, so it is safe under CUDA graphs.
-  * Buffer: `max_num_batched_tokens × hidden_size` (8,192 × 2,560 in bf16
-    is 42 MB), one per distinct read layer, only in loop checkpoints.
-* **On the host: which rows are loop requests.**
-  * When a request is added, the model state records whether its prompt
-    ends with a loop marker.
-  * The batch says which requests are prefilling in this step
-    (`is_prefilling_np`).
-  * So the sampler knows the loop rows without reading anything back from
-    the GPU.
-* **Grid rows.** A loop request's last scheduled token is its marker, so
-  its logits row `logits_indices[r]` is the marker's flat position `m`.
-  * The grid is the 81 tokens that end `end_offset` tokens before it, at
-    flat positions `m − end_offset − 81 .. m − end_offset − 1`.
-  * They are valid only if they were scheduled in the **same forward**:
-    `m − end_offset − 81 ≥ query_start_loc[r]`. Section 3.4 guarantees it.
-* **Hand-off buffer.** `loop_read` has a stable address outside the graph
-  pool and is written with `copy_`. This is the pattern DeepSeek-V4 uses
-  (`_mtp_hidden_buffer`) to hand per-token state from the compiled forward
-  to the code after it.
-  * Packing the rows into extra hidden-state columns, as the probe does,
-    would not work here: vLLM keeps only the last row per request.
-  * There is no fixed limit on loop requests per step: the sampler gathers
-    as many as the step holds.
-* **Per-request solve.** The sampler solves the loop requests' grids as one
-  batch, and each row stops at its own convergence. The HF rule waits for
-  the whole batch.
-  * The freeze is on the GPU: a converged row's state stops changing (the
-    head's `step` already takes an `active` mask). One request's answer
-    then does not depend on the others, except for bf16 batch-size
-    numerics, which vLLM has everywhere.
-  * The loop stops when no row is active. It checks every 50 iterations,
-    which keeps host syncs few.
-  * `max_iter` stays as configured (35,000). HF iteration counts: puzzle
-    #2000 took 74–2,177 iterations over 8 seeds.
-  * Per-request halting may score slightly differently from the HF batch
-    rule; the GPU test measures it.
-* **Deterministic start.** FPRM starts from a random truncated normal. In
-  vLLM that would make an answer depend on the batch, the step and the
-  preemption history. We draw the start once at load time from a fixed
-  seed: a buffer `z0 [prefix+81, W]` that every request shares. One seed is
-  as accurate as another: the held-out eval used fresh random starts and
-  gave 77.5%.
-* **Answer.** `argmax(head_logits)` mapped through `output_token_ids` gives
-  81 token ids. The request's EOS id, recorded when the request was added,
-  makes 82.
+`LoopSampler` wraps vLLM's V2 sampler and delegates everything else to it.
 
-### 3.2 The sampler (outside the graph, on the GPU)
+1. Run vLLM's sampler for every row, as usual.
+2. If no loop request finishes its prompt in this step, return its output.
+3. Otherwise solve those requests' buffered grids, one call per slot.
+   * `LoopHead.solve_rows`: each row starts from a truncated normal drawn
+     from its own seed. The seed is the request's `seed`, 0 when unset.
+   * Each row stops on its own once it has converged, after `min_iter`
+     updates.
+   * So a request's answer does not depend on its batch, and it repeats
+     when the request runs again.
+4. Each cell's best output token, then EOS, capped at `max_tokens` and at
+   `max_model_len − prompt_len`, becomes the row's sampled tokens.
+   * `num_sampled` is the answer length, and `num_rejected` stays 0.
+5. **Logprobs** are supported: each cell carries the log-softmax over the
+   digit tokens, as the HF logit rows give, and EOS carries 0.
+6. The answer is the head's argmax; sampling temperature does not apply to
+   it.
 
-`LoopBurstSampler` wraps the default V2 `Sampler`. It delegates every other
-attribute to the wrapped sampler: the runner also calls `add_request`,
-`apply_staged_writes` and the penalties state.
+### 3.3 Wiring
 
-1. Run the default sampler: one token per request, as usual. This keeps
-   temperature, top-p, logprobs and penalties for every other request.
-2. If no row is a loop request in its prefill (known on the host), return
-   that output unchanged.
-3. Otherwise gather the loop rows' grids from `loop_read`, solve them with
-   the loop head, and map each answer to tokens.
-4. Build `sampled_token_ids [num_reqs, W]`:
-   * Loop rows get the 81 digits plus EOS, and `num_sampled = 82`.
-   * Other rows get the default token in column 0, and `num_sampled = 1`
-     (0 for chunked-prefill rows, as before).
-   * `num_rejected` stays 0 on every row. The runner advances a request's
-     computed-token count by `query_len − num_rejected`, which is the
-     prefill length here, so the counter stays right.
-     * Computing `num_rejected` as `num_logits − num_sampled`, as the
-       rejection sampler does, would give −81 on a loop row. That would
-       count 81 tokens as computed that have no K/V.
-     * It does not matter for a loop request, which ends in this step. It
-       would matter if a burst were ever truncated without EOS.
-   * The burst tokens never get K/V: the request finishes at EOS before any
-     forward would read them. That is fine, because KV cache is the lower
-     priority.
-5. Logprobs: the loop rows' logprob tensors keep their single row. The
-   scheduler slices `len(new_token_ids)` rows per request, so loop requests
-   that ask for logprobs must be rejected or padded. The plan rejects them
-   when the request is added (section 5).
-
-Apart from the solve, everything here is a few `torch.where`/`gather` ops
-on GPU tensors. The answer never goes to the CPU before the usual output
-copy.
-
-### 3.3 Wiring: the model brings its own state
-
-* `GraniteSwitchForCausalLM.get_model_state_cls()` returns
-  `LoopSlotModelState`. That is a subclass of vLLM's `DefaultModelState`
-  with two changes:
-  * `custom_sampler()` returns `(LoopBurstSampler(sampler, model), None)`;
-  * `add_request()` checks loop-request preconditions (section 5).
-* The class is chosen only when the checkpoint has a loop slot. Otherwise
-  the model keeps the default state.
-* **No speculative or diffusion config.** It is tempting to widen V2's
-  output through `num_speculative_tokens` (or `diffusion_config`). That is
-  wrong: the scheduler reads the same number and would schedule up to 81
-  placeholder "draft" tokens on every decode step. Our sampler never needs
-  them.
-* **Nothing in the output path is width-limited**, so we leave the number
-  alone:
-  * the output copy moves the sampler's `[num_reqs, W]` matrix whatever its
-    width;
+* **Model state.** `GraniteSwitchForCausalLM.get_model_state_cls()` returns
+  `LoopModelState`, a subclass of vLLM's `DefaultModelState`, but only for a
+  checkpoint with a loop slot. vLLM looks the hook up with `hasattr`.
+* **Config hook.** A `VerifyAndUpdateConfig` subclass is registered for the
+  Granite Switch architectures. For a loop checkpoint it sets the scheduler
+  class to `make_loop_scheduler`; any other checkpoint is untouched.
+* **Scheduler.** `make_loop_scheduler` returns a subclass of vLLM's sync or
+  async scheduler, following the engine's `async_scheduling` setting.
+  * Loop requests skip prefix-cache reads.
+  * On a loop request's multi-token output, the async variant first books
+    the extra placeholders, and the request then finishes as stopped.
+  * Answer tokens therefore never need K/V.
+* **No speculative or diffusion width.** Widening V2's output through
+  `num_speculative_tokens` would make the scheduler pad every decode step
+  with draft placeholders. The output path is not width-limited:
+  * the output copy moves any width;
   * `post_update` loops over `num_sampled`;
-  * the scheduler appends each request's list token by token.
-* **The one width-limited buffer** is the PP broadcast
-  (`num_speculative_steps + 1`), and PP is out of scope (section 5).
-* **Runner and scheduling mode.**
-  * The V2 runner is already the default for dense Granite Switch
-    checkpoints; the Vela vLLM logs say "Using V2 Model Runner".
-  * Some settings select V1 instead: stock torch.compile, ngram
-    speculation, and MoE bases, which default to V1 (vLLM's env override
-    `VLLM_USE_V2_MODEL_RUNNER=1` selects V2; untested here). On V1 the hook
-    is never called and the loop slot would quietly emit ordinary tokens.
-  * So the config hook below checks `vllm_config.use_v2_model_runner` for
-    loop checkpoints and raises a clear error otherwise.
-* **Async scheduling** (on by default) is not compatible as is.
-  * The async scheduler adds one output placeholder per request per step,
-    then subtracts `len(new_tokens)` when the step's output arrives.
-  * A burst of 82 would go below zero and trip an assert. Every loop burst
-    ends in EOS, but the subtraction happens before the request is freed.
-  * So the first version turns async scheduling off for loop checkpoints,
-    through a `VerifyAndUpdateConfig` hook for `GraniteSwitchForCausalLM`.
-    vLLM's own per-architecture hook runs before vLLM settles async mode.
-  * A later version could keep async on by adding the burst width to the
-    placeholder count.
+  * the scheduler appends token by token.
 
-### 3.4 Making the read valid: the whole grid in one forward
+### 3.4 What stays valid
 
-The answer needs the 81 grid rows and the marker in the same forward.
-
-| Hazard | Effect | Handling |
-|---|---|---|
-| Chunked prefill splits the prompt | grid rows are in an earlier step | Loop checkpoints set `enable_chunked_prefill = False` (scheduler config, in the same hook). The prompt (~110 tokens) is then always scheduled whole. vLLM then needs `max_num_batched_tokens ≥ max_model_len`, or longer prompts never schedule, so the hook raises the budget to match. |
-| Prefix-cache hit on the grid | grid rows are not recomputed, only their K/V exists | Prefix caching off for loop checkpoints (same hook). Lighter alternative: vLLM's per-request `skip_reading_prefix_cache`. It defaults on only for prompt-logprob requests, so a loop request would have to set it, and the first version does not rely on that. |
-| Preemption (recompute) | the prompt plus earlier output is prefilled again; the marker is no longer last | The answer is committed in step 0, together with EOS, so a loop request never decodes and is never preempted mid-answer. A request preempted **before** its step 0 is simply re-run; the fixed start makes the answer the same. |
-| Grid fewer than 81 tokens | gather would cross into another request | Checked on the host when the request is added: a loop request needs `end_offset + 81` tokens before its marker, or it is rejected. |
+| Hazard | Handling |
+|---|---|
+| Chunked prefill splits the grid | each chunk copies its own cells; the plan covers each cell once |
+| Prefix-cache hit on the grid | loop requests skip prefix-cache reads; other requests keep the cache |
+| Preemption | the request is found again when re-added, its slot state is cleared, and the grid is read again |
+| vLLM's dummy and warmup batches | matched by request id, so they never trigger a solve |
+| The V1 runner, PP, speculative decoding | refused when the model is built |
 
 ### 3.5 Why this is novel
 
@@ -296,136 +218,102 @@ converged canvas.
 3. **Logits processor with per-request state.** Rejected: host-side Python
    state, plus a GPU→CPU copy per request, and still 81 steps.
 
-## 5. Limits and guards
+Alternatives 1 and 2 together were built and measured separately, on
+`feature/loop-vllm-extra-kv-layer` (local, not continued).
 
-* **Greedy-only answer.** Temperature or top-p do not apply to the 81
-  digits; the head's argmax is the answer. Other requests in the same batch
-  sample normally.
-* **Logprobs** for loop requests: rejected at `add_request` in the first
-  version.
-* **Structured output and grammars** for loop requests: rejected; the
-  scheduler would feed 82 tokens to a grammar.
-* **`max_tokens < 82`**: `check_stop` cuts the burst and the answer is
-  truncated, which is correct behavior. `max_tokens` is the only way a
-  burst can end before EOS. A request cut that way is also finished, so the
-  burst never leaves a running request whose last 81 tokens lack K/V.
-* **Room for the burst.** The scheduler reserves room for one sampled
-  token, not 82.
-  * `post_update` writes every committed token into a per-request history
-    of `max_model_len` slots, with no bounds mask.
-  * So the sampler clamps each burst to
-    `min(82, prompt_len + max_tokens − total_len)`. `max_tokens` already
-    fits within `max_model_len`.
-  * This keeps that write in bounds and makes the GPU history agree with
-    what the scheduler keeps.
-* **`ignore_eos` or `min_tokens > 82`** would let a loop request keep
-  decoding after the burst, on tokens without K/V. Rejected at
-  `add_request`.
-* **Pipeline parallelism**: the PP broadcast sends
-  `[num_reqs, num_speculative_steps + 1]`, which is 1 column here, too
-  narrow for a burst. The read layer would also have to be on the last
-  rank. The first version supports PP = 1 only and raises otherwise.
-* **Tensor parallelism**: the head is small (width 512) and runs replicated
-  on every rank on identical inputs. The answer is identical, and only the
-  last rank's sampler uses it.
-* **One loop request = one answer.** A loop request is a single-turn "solve
-  this grid" call. Multi-turn loop chats are out of scope.
+* **How it works.** The answer is kept in an extra KV-cache attention layer,
+  and a custom drafter proposes it.
+* **Result.** 2 engine steps per answer, all 1,620,000 drafts accepted, and
+  75.36% exact on the same 20,000 puzzles.
+* **Costs.** It needs the V1 runner and a drafter config passed by the
+  caller. It turns chunked prefill and prefix caching off for the engine.
+
+## 5. Limits
+
+* **The solve runs on the engine's critical path.** While a step's loop
+  requests solve (up to 35,000 iterations for a hard puzzle), the other
+  requests wait.
+* **Not supported with loop slots:**
+  * pipeline parallelism;
+  * speculative decoding;
+  * the V1 model runner;
+  * loop slots that read different layers or have different grids.
+* **No handling or tests** for tensor parallelism or structured outputs.
+* **`ignore_eos`:** the request is finished anyway.
+* **Scheduler interface.** It is subclassed for the loop rules, and vLLM
+  marks it non-public, so a vLLM upgrade may need changes.
 
 ## 6. Cost
 
-* The solve runs once per loop request, in the step that prefills it.
-  * Each iteration is a 2-layer, width-512 block over 97 tokens (16 prefix
-    + 81 grid), on all of the step's loop requests at once.
-  * Iterations until convergence: typically hundreds to a few thousand
-    (puzzle #2000: 74–2,177).
-* The time per iteration on an A100 is still to be measured. It is the
-  number that decides the prefill latency of a loop request.
-* **Steps without a loop request do not pay for the solve.**
-  * A captured CUDA graph cannot branch, so the solve cannot sit inside the
-    graph.
-  * Instead the compiled forward only copies the read layer into a
-    persistent buffer, which is cheap and safe to capture.
-  * The solve runs after the forward, in the sampler, and only on steps
-    that hold a loop prefill. The host already knows which steps those
-    are.
-  * Every step pays for the copy, one hidden-state-sized `copy_`, but only
-    in checkpoints with a loop slot.
-* Decoding is 1 step instead of 82.
+* **The solve.** It runs once per loop request, in the step that finishes
+  its prompt.
+  * Each iteration is a 2-layer, width-512 block over 97 tokens (16 prefix +
+    81 grid).
+  * Iterations to convergence: typically tens to a few thousand (puzzle
+    #2000: 74–2,177).
+* **The read.** Each forward of a loop checkpoint pays for one small
+  fixed-size `index_copy_`.
+* **Decoding.** A loop answer takes 1 engine step instead of 82.
 
-## 7. Plan
+## 7. Code
 
-1. **vLLM loop head.** Reuse the HF `LoopHead` module as is. It is plain
-   PyTorch and runs eagerly in the sampler, so no port is needed.
-   * Weights: `loop_heads.heads.<slot>.*`.
-   * Keep the head in fp32 with bf16 autocast for the solve, as HF does
-     (`_keep_in_fp32_modules_strict`). vLLM would otherwise cast it to the
-     model dtype.
-   * Add a fixed start buffer and a per-request convergence exit.
-2. **Model wiring** (`vllm/granite_switch_model.py`):
-   * copy the read layer into the hand-off buffer inside the compiled
-     forward;
-   * load the head weights (today they are silently skipped).
-3. **Burst sampler + model state** (`vllm/loop_burst.py`):
-   * `LoopSlotModelState`: records which requests are loop requests, and
-     each one's EOS id;
-   * `LoopBurstSampler`: grid gather, solve, burst;
-   * the request guards.
-4. **Config hook** (`vllm/__init__.py`): register `VerifyAndUpdateConfig`
-   for loop checkpoints. It:
-   * checks that the V2 runner is selected;
-   * turns off async scheduling (first version);
-   * turns off chunked prefill, with a token budget of at least
-     `max_model_len`;
-   * turns off prefix caching.
+| Piece | File |
+|---|---|
+| Grid buffer, copy op, model state, sampler, scheduler subclasses | `src/granite_switch/vllm/loop.py` |
+| Config hook | `src/granite_switch/vllm/loop_config.py`, registered in `vllm/__init__.py` |
+| Request finding, copy plan, answer tokens and logprobs (no vLLM import) | `src/granite_switch/loop_serving.py` |
+| Per-row seeded solve | `LoopHead.solve_rows` in `hf/core/loop.py`; HF solves the same way with `model.loop_seeds` |
+| Read-layer copy in the forward | `vllm/granite_switch_model.py` |
+| Serving eval | `tutorials/scripts/loop_sudoku/serve_vllm.py`, `run_serve_eval.sh` |
+| CPU tests | `tests/unit/test_loop_serving.py` |
 
-   It does **not** set any speculative or diffusion width.
-5. **Tests**:
-   * CPU: the sampler-merge logic (`num_sampled`/`num_rejected` per row);
-     the per-request solve vs the HF solve with the same start.
-   * GPU on Vela: a composed Sudoku checkpoint in `vllm.LLM`, eager and
-     CUDA-graph, mixed batches (loop + ordinary prompts). Check that the
-     answer equals the HF answer with the same start, comes out in one
-     step, and that the held-out accuracy matches.
-6. **Benchmark on Vela**: throughput and latency, burst vs 82-step
-   decoding.
+## 8. Results
 
-## 8. Results (vLLM 0.26.0, one A100 80 GB)
+The trained Sudoku head was composed onto `granite-4.1-3b` and served with
+`vllm.LLM`. It is the head that scores 77.5% exact on the HF evaluation.
 
-The trained Sudoku head (the 77.5% head of the HF evaluation) was composed
-onto `granite-4.1-3b` and served with `vllm.LLM`
-(`tutorials/scripts/loop_sudoku/serve_vllm.py`, `run_vllm_eval.sh`).
+### This implementation (vLLM 0.30.0, one A100)
 
-| Run | Puzzles | Answer as one burst | Exact | Cells right | Blank cells right |
-|---|---|---|---|---|---|
-| Held-out test, CUDA graphs | 20,000 | **100%** | **75.27%** | 90.5% | 86.3% |
-| Smoke, CUDA graphs | 64 | 100% | 76.6% | 92.0% | 88.3% |
-| Smoke, eager | 64 | 100% | 79.7% | 92.6% | 89.2% |
-| HF backend, same head (random starts) | 20,000 | (81 logit rows) | 77.5% | 91.2% | |
+| Check | Result |
+|---|---|
+| Exact, 20,000 held-out puzzles `[2000, 22000)` | **75.28%** (HF evaluation: 77.5%) |
+| Cells right / blank cells right | 90.5% / 86.2% |
+| Answer | 82 tokens on every puzzle: 81 digits, then EOS |
+| Tokens per engine step, engine driven step by step | loop request: **82 in one step**; ordinary request: 1 per step |
+| Ordinary prompts, with vs without loop requests in the engine | 3 of 4 identical; the 4th is a near-tie ("Hola" vs "Hola.") |
+| Same answer as HF, same seeded start | 24 of 32 puzzles (79.1 of 81 cells on average) |
+| Chunked prefill (budget 48) vs whole prompts, 64 puzzles | grids equal up to bf16 rounding (median 2.7% relative); 47 of 64 answers identical |
+| Time for 20,000 puzzles | 4.2 h (0.76 s per puzzle) |
 
-* **One burst.** Every loop request finished in its prefill step with 82
-  tokens: the 81 digits, then EOS, finish reason `stop`.
-* **Other requests are unaffected.** Two ordinary chat prompts in the same
-  batch decoded normally ("The capital of France is Paris.").
-* **The engine settings applied as designed**: V2 model runner, async
-  scheduling off, chunked prefill off, prefix caching off.
-* **Agreement with HF.** 14 of 16 answers equal the HF backend's answer
-  from the same fixed start (15 of 16 eager). The difference is in the
-  base model's hidden states, not in the burst:
+### The first version (vLLM 0.26.0, one A100)
+
+The first version on this branch (commit `4a8f921`, reverted in favour of
+this one) used the same hook. It read the whole read layer instead of only
+the grid, and turned chunked prefill, prefix caching and async scheduling
+off for the engine.
+
+* **Accuracy.** 20,000 held-out puzzles: 75.27% exact, 90.5% of cells.
+  Every answer came out in one step.
+* **Agreement with HF.** 14 of 16 answers equal HF's from the same fixed
+  start.
   * vLLM's read layer differs from HF's by about 2% (relative, bf16), from
-    different attention and matmul kernels;
-  * the head solves vLLM's read exactly as the server does: 16 of 16
-    answers match when HF's head is given the rows vLLM read;
-  * the puzzles that differ are the hard ones, with hundreds of solver
-    iterations. They are also sensitive within HF: reading the same
-    hidden states in fp32 instead of bf16 flips 2 of 16 HF answers.
-  * Either way can be right. On these 16 the server solved 15 and HF 14
-    (CUDA graphs).
-* **Accuracy.** 75.3% served on vLLM vs 77.5% on the HF backend. The gap
-  is within what a different solver start gives.
-* **Speed.** 1.47 puzzles/s at `max_num_seqs=64`. The solve dominates:
-  hundreds to thousands of head iterations per puzzle.
-  * One request at a time, the median loop request took 0.19 s (prefill,
-    solve and all 82 tokens). An ordinary 82-token decode took 0.67 s.
-  * Hard puzzles take 1–3 s, all in the solver loop.
-* **Tests.** 43 tests passed on the GPU pod, including the burst tests and
-  the HF `solve_each` tests.
+    different kernels.
+  * HF's head, given the rows vLLM read, reproduced all 16 server answers.
+* **Speed, one request at a time.** A loop request took 0.19 s median, vs
+  0.67 s for an ordinary 82-token decode.
+
+### What the results show
+
+* **Both versions: 75.3% vs 77.5%.** The 2.2-point gap comes from the
+  serving solve rules, not from vLLM.
+  * A third, separate implementation (answer kept in a KV-cache layer)
+    measured it: HF scores 75.05% when it solves with the serving rules
+    (fixed start, each puzzle stopping on its own).
+  * The HF evaluation stops only when the whole batch has converged, so
+    every puzzle ran the full 35,000 iterations.
+  * Stopping each puzzle once it converges is the likely cause. It is not
+    yet tested on its own (raise `min_iter` and serve again).
+* **Answers are not bit-for-bit repeatable.** The solver iterates hundreds
+  to thousands of times and magnifies rounding differences: vLLM vs HF
+  kernels, chunked vs whole prompts, batch composition. Accuracy over many
+  puzzles is the stable number; identical 64-puzzle runs scored 73.4–78.1%.
