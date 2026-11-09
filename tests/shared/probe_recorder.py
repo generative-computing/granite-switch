@@ -30,11 +30,15 @@ def install_probe_recorder(model):
                 "packed_scores": hidden_states[row, h : h + n].float().cpu(),
                 "rewritten_label_logits": logits[row, labels].float().cpu(),
             }
-            # Only a final-layer head reads the packed hidden-state prefix.
-            if config.probe_read_layers[slot - 1] is None:
+            # Only a final-layer head reads the packed hidden-state prefix. The
+            # probe bank is indexed by the slot's probe row (config.streams).
+            if (config.probe_read_layers or [None] * len(config.adapter_kinds))[
+                slot - 1
+            ] is None:
+                probe_row = config.probe_row_lut[slot] - 1
                 record["served_hidden"] = hidden_states[row, :h].float().cpu()
-                record["loaded_weight"] = head.weight[slot - 1, :n].float().cpu()
-                record["loaded_bias"] = head.bias[slot - 1, :n].float().cpu()
+                record["loaded_weight"] = head.weight[probe_row, :n].float().cpu()
+                record["loaded_bias"] = head.bias[probe_row, :n].float().cpu()
             records.append(record)
         return logits
 
