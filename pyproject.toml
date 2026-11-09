@@ -60,47 +60,34 @@ markers = [
     "deep: expensive code-theory tests (m=8 / 256-dim); run with: pytest -m deep",
     "requires_model: needs a real model checkpoint",
     "audio: exercises the audio/ASR path; run with: pytest -m audio",
-    "eval: adapter-output eval against a committed baseline; run with: pytest -m eval",
-    # Also marked `deep`, so the default `-m "not deep"` hides it: this one RECORDS
-    # the baselines the `eval` marker checks against, and must only ever run when
-    # asked for by name.
-    "eval_record: records eval baselines on the GPU runner; run with: pytest -m eval_record",
 ]
 
 [dependency-groups]
-# vllm26 AND whatever `dev-latest` points at ARE THE TWO CI LEGS -- the ends of
-# the supported range, which is why these and not two others. The `vllm` extra
-# above claims 0.26-0.32, and the two bounds are where a break actually lands: a
-# deleted API shows up at the ceiling and an API that does not exist yet shows up
-# at the floor. The intermediate lines sit strictly between two tested lines, so
-# per-run they would add install time without adding a failure mode the ends
-# would miss -- but they are NOT taken on trust: each added line gets its own
-# commit that repoints `dev-latest`, dispatched at that commit's sha, because
-# derive_legs.py reads the tested commit and emits at most two legs. The walk
-# itself is automated by the `upgrade-vllm` skill, which lives in the internal
-# repo (generative-computing/granite-switch-internal, .claude/skills/upgrade-vllm/).
+# TWO LINES ARE DECLARED AND THEY ARE THE TWO CI LEGS: `dev` pins the floor and
+# `dev-latest` the ceiling, which is what /opt/gsw/derive_legs.py reads out of
+# the tested commit. The `vllm` extra above claims the whole 0.26-0.32 range; the
+# two bounds are where a break actually lands, since a deleted API shows up at
+# the ceiling and an API that does not exist yet shows up at the floor.
+#
+# The intermediate lines have no groups here, and that is deliberate rather than
+# an omission. They are not taken on trust either: an upgrade adds a group per
+# line temporarily, so that each line can be `dev-latest` at one commit and be
+# dispatched at that commit's own sha -- the only way to get per-line evidence
+# when derive_legs.py emits at most two legs. Once the evidence exists the group
+# has no remaining job, and leaving it would pin a line that nothing resolves and
+# nothing tests. So the upgrade prunes them before merging.
+#
+# Both halves of that are automated by the `upgrade-vllm` skill in the internal
+# repo (generative-computing/granite-switch-internal, .claude/skills/upgrade-vllm/):
+# `plumb_pyproject.py --add` / `--point-latest` walk the lines, `--prune` removes
+# the scaffolding, and `--check --final` refuses a tree where either step was
+# skipped. Changing a supported bound means repointing `dev` or `dev-latest`.
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
-vllm30     = ["vllm>=0.30.0,<0.31.0"]
-# vllm27 IS NOT A CI LEG -- it exists so the GPU workflow stays dispatchable
-# during this transition. `workflow_dispatch` always executes the workflow file
-# from the DEFAULT BRANCH, so until the 0.26/0.30 matrix lands on main, a
-# `/gpu-test` run uses main's matrix (legs vllm26 -> dev and vllm27 ->
-# dev-vllm27) while checking out the PR's commit. Deleting dev-vllm27 here made
-# that leg unresolvable against this tree -- `uv sync --group dev-vllm27` has no
-# such group -- and the leg died before pytest started. Keeping the group costs
-# nothing and is not a fiction: the `vllm` extra claims 0.26-0.32, so 0.27 is a
-# supported line that simply isn't worth its own per-run leg. Removable once the
-# matrix rename is on main.
-vllm27     = ["vllm>=0.27.0,<0.28.0"]
-vllm31     = ["vllm>=0.31.0,<0.32.0"]
 vllm32     = ["vllm>=0.32.0,<0.33.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
-dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
-dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
-dev-vllm31 = ["pytest", "pytest-cov", { include-group = "vllm31" }, "granite-switch[hf,compose,audio]"]
 dev-vllm32 = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-switch[hf,compose,audio]"]
 # The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
 # CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
@@ -108,45 +95,36 @@ dev-vllm32 = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-swi
 # every caller. Now on 0.32, the true ceiling of the `vllm` extra's range --
 # which is also the only state that may merge, since CI's upper leg comes from
 # this alias and anything lower would leave the top supported line untested
-# (the internal skill's `plumb_pyproject.py --check --final` enforces exactly
-# that). The preceding commit parked it on 0.31 to collect that line's own GPU
-# evidence at its own sha, because derive_legs.py reads the TESTED commit rather
-# than the branch tip.
+# (`plumb_pyproject.py --check --final` enforces exactly that). During the
+# upgrade it was parked on each added line in turn, one commit each, to collect
+# that line's own GPU evidence at its own sha.
 dev-latest = [{ include-group = "dev-vllm32" }]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
-# GENERATED by `plumb_pyproject.py` in the internal repo's upgrade-vllm skill
-# (generative-computing/granite-switch-internal). Edit by hand only if you also
-# regenerate the whole table -- see the quadratic-growth note below.
+# GENERATED by `plumb_pyproject.py` in the internal repo's upgrade-vllm
+# skill (generative-computing/granite-switch-internal). Edit by hand only
+# if you also regenerate the whole table -- see the growth note below.
 # Only the per-line GROUPS are mutually exclusive. The `vllm` extra spans
 # 0.26-0.32, so it overlaps every group and conflicts with none of them --
 # an extra pinned to one line while default-groups named another is what made
 # `uv sync` unsatisfiable once before.
 # Below: every pair of groups that would pull two different vLLM lines into one
-# venv. 5 lines are declared (0.26 / 0.27 / 0.30 / 0.31 / 0.32), each with a bare and a
-# dev flavour, so the 10 cross-line pairs give 48 entries. The line
-# `dev-latest` aliases carries a third name and so appears in more pairs --
-# uv matches group names literally, so the alias needs its own entries.
-# `test` is absent deliberately: it reaches the floor through
+# venv. 2 lines are declared (0.26 / 0.32), each with a bare and a
+# dev flavour, so the 1 cross-line pair gives 6 entries.
+# The line `dev-latest` aliases carries a third name and so appears in more
+# pairs -- uv matches group names literally, so the alias needs its own
+# entries. `test` is absent deliberately: it reaches the floor through
 # `include-group = "dev"` and uv derives that transitively.
+#
+# Only the floor and the ceiling are declared in a merged tree. An upgrade
+# run adds one group per new line so each can be `dev-latest` at some
+# commit and earn its own GPU evidence, then prunes them again: the entry
+# count grows quadratically in the number of lines, and a MISSING pair does
+# not fail loudly -- it lets `uv sync` resolve two vLLM wheels into one
+# environment.
 conflicts = [
-    # 0.26 vs 0.27
-    [{ group = "vllm26" },     { group = "vllm27" }],
-    [{ group = "vllm26" },     { group = "dev-vllm27" }],
-    [{ group = "dev" },        { group = "vllm27" }],
-    [{ group = "dev" },        { group = "dev-vllm27" }],
-    # 0.26 vs 0.30
-    [{ group = "vllm26" },     { group = "vllm30" }],
-    [{ group = "vllm26" },     { group = "dev-vllm30" }],
-    [{ group = "dev" },        { group = "vllm30" }],
-    [{ group = "dev" },        { group = "dev-vllm30" }],
-    # 0.26 vs 0.31
-    [{ group = "vllm26" },     { group = "vllm31" }],
-    [{ group = "vllm26" },     { group = "dev-vllm31" }],
-    [{ group = "dev" },        { group = "vllm31" }],
-    [{ group = "dev" },        { group = "dev-vllm31" }],
     # 0.26 vs 0.32
     [{ group = "vllm26" },     { group = "vllm32" }],
     [{ group = "vllm26" },     { group = "dev-vllm32" }],
@@ -154,42 +132,6 @@ conflicts = [
     [{ group = "dev" },        { group = "vllm32" }],
     [{ group = "dev" },        { group = "dev-vllm32" }],
     [{ group = "dev" },        { group = "dev-latest" }],
-    # 0.27 vs 0.30
-    [{ group = "vllm27" },     { group = "vllm30" }],
-    [{ group = "vllm27" },     { group = "dev-vllm30" }],
-    [{ group = "dev-vllm27" }, { group = "vllm30" }],
-    [{ group = "dev-vllm27" }, { group = "dev-vllm30" }],
-    # 0.27 vs 0.31
-    [{ group = "vllm27" },     { group = "vllm31" }],
-    [{ group = "vllm27" },     { group = "dev-vllm31" }],
-    [{ group = "dev-vllm27" }, { group = "vllm31" }],
-    [{ group = "dev-vllm27" }, { group = "dev-vllm31" }],
-    # 0.27 vs 0.32
-    [{ group = "vllm27" },     { group = "vllm32" }],
-    [{ group = "vllm27" },     { group = "dev-vllm32" }],
-    [{ group = "vllm27" },     { group = "dev-latest" }],
-    [{ group = "dev-vllm27" }, { group = "vllm32" }],
-    [{ group = "dev-vllm27" }, { group = "dev-vllm32" }],
-    [{ group = "dev-vllm27" }, { group = "dev-latest" }],
-    # 0.30 vs 0.31
-    [{ group = "vllm30" },     { group = "vllm31" }],
-    [{ group = "vllm30" },     { group = "dev-vllm31" }],
-    [{ group = "dev-vllm30" }, { group = "vllm31" }],
-    [{ group = "dev-vllm30" }, { group = "dev-vllm31" }],
-    # 0.30 vs 0.32
-    [{ group = "vllm30" },     { group = "vllm32" }],
-    [{ group = "vllm30" },     { group = "dev-vllm32" }],
-    [{ group = "vllm30" },     { group = "dev-latest" }],
-    [{ group = "dev-vllm30" }, { group = "vllm32" }],
-    [{ group = "dev-vllm30" }, { group = "dev-vllm32" }],
-    [{ group = "dev-vllm30" }, { group = "dev-latest" }],
-    # 0.31 vs 0.32
-    [{ group = "vllm31" },     { group = "vllm32" }],
-    [{ group = "vllm31" },     { group = "dev-vllm32" }],
-    [{ group = "vllm31" },     { group = "dev-latest" }],
-    [{ group = "dev-vllm31" }, { group = "vllm32" }],
-    [{ group = "dev-vllm31" }, { group = "dev-vllm32" }],
-    [{ group = "dev-vllm31" }, { group = "dev-latest" }],
 ]
 
 [tool.coverage.run]
