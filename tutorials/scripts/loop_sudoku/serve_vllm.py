@@ -87,7 +87,57 @@ def score(answers, boards, sols):
     }
 
 
-def run_engine(model, prompts, params, max_num_batched_tokens=None, logprobs=None):
+def install_solve_recorder(model):
+    """Record each solve the engine runs: its seed, read grid, iterations, answer.
+
+    Wraps the loop head's ``solve_rows`` inside the worker (``apply_model``),
+    so the chunked-prefill check can tell a grid read that differs from one
+    that is merely rounded differently.
+    """
+    from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
+
+    target = next(m for m in model.modules() if isinstance(m, GraniteSwitchForCausalLM))
+    records = []
+    target._loop_records = records
+    for head in target.model.loop_heads.heads.values():
+        original = head.solve_rows
+
+        def recording(read, seeds, *args, _original=original, **kwargs):
+            scores, state = _original(read, seeds, *args, **kwargs)
+            for i, seed in enumerate(seeds):
+                records.append(
+                    {
+                        "seed": int(seed),
+                        "read": read[i].float().cpu(),
+                        "iters": int(state["iters"][i]),
+                        "residual": float(state["residual"][i]),
+                        "answer": (scores[i].argmax(-1) + 1).tolist(),
+                    }
+                )
+            return scores, state
+
+        head.solve_rows = recording
+    return True
+
+
+def read_solve_records(model):
+    from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
+
+    target = next(m for m in model.modules() if isinstance(m, GraniteSwitchForCausalLM))
+    out = list(target._loop_records)
+    target._loop_records.clear()
+    return out
+
+
+def run_engine(
+    model,
+    prompts,
+    params,
+    max_num_batched_tokens=None,
+    logprobs=None,
+    max_num_seqs=None,
+    record=False,
+):
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
@@ -99,8 +149,12 @@ def run_engine(model, prompts, params, max_num_batched_tokens=None, logprobs=Non
         enable_prefix_caching=True,
     )
     if max_num_batched_tokens is not None:
-        kwargs.update(max_num_batched_tokens=max_num_batched_tokens, max_num_seqs=8)
+        kwargs["max_num_batched_tokens"] = max_num_batched_tokens
+    if max_num_seqs is not None:
+        kwargs["max_num_seqs"] = max_num_seqs
     llm = LLM(**kwargs)
+    if record:
+        llm.apply_model(install_solve_recorder)
     sp = [
         SamplingParams(
             temperature=0.0,
@@ -113,7 +167,10 @@ def run_engine(model, prompts, params, max_num_batched_tokens=None, logprobs=Non
     t0 = time.time()
     outs = llm.generate([TokensPrompt(prompt_token_ids=p) for p in prompts], sp)
     elapsed = time.time() - t0
+    records = llm.apply_model(read_solve_records)[0] if record else None
     del llm
+    if record:
+        return outs, elapsed, records
     return outs, elapsed
 
 
@@ -184,6 +241,84 @@ def hf_answers(model_path, prompt_ids, seeds, spec):
     return answers
 
 
+def chunked_record(a, loop_ids, seeds, budget):
+    """One engine (in this process): each solve's seed, read grid and answer.
+
+    ``budget`` 0 serves the prompts whole, else with that prefill token budget.
+    Both use the same small batch (max_num_seqs 8), so the budget is the only
+    change. Saved with torch so the compare step can read both runs.
+    """
+    import torch
+
+    n = min(a.chunk_count, len(loop_ids))
+    outs, _, records = run_engine(
+        a.model,
+        loop_ids[:n],
+        [(200, s) for s in seeds[:n]],
+        max_num_batched_tokens=budget or None,
+        max_num_seqs=8,
+        record=True,
+    )
+    tokens = [list(o.outputs[0].token_ids) for o in outs]
+    torch.save({"records": records, "tokens": tokens}, a.record_out)
+    print(f"recorded {len(records)} solves (budget {budget}) to {a.record_out}")
+
+
+def chunked_compare(whole_path, chunked_path, sols, lo, spec, budget):
+    """Solve by solve: a read grid that differs by more than bf16 rounding would
+    be a capture bug; a matching grid that solves to another answer is the
+    solver amplifying rounding."""
+    import torch
+
+    whole = torch.load(whole_path, weights_only=False)
+    chunked = torch.load(chunked_path, weights_only=False)
+    by_seed = {r["seed"]: r for r in whole["records"]}
+    rows = []
+    for r in chunked["records"]:
+        w = by_seed.get(r["seed"])
+        if w is None:
+            continue
+        diff = (r["read"] - w["read"]).abs().max().item()
+        scale = w["read"].abs().max().item()
+        truth = sols[r["seed"] - lo].tolist()
+        rows.append(
+            {
+                "seed": r["seed"],
+                "read_rel_diff": diff / max(scale, 1e-6),
+                "same": r["answer"] == w["answer"],
+                "converged": r["iters"] < spec["max_iter"]
+                and w["iters"] < spec["max_iter"],
+                "whole_solved": w["answer"] == truth,
+                "chunked_solved": r["answer"] == truth,
+                "iters": [w["iters"], r["iters"]],
+            }
+        )
+    conv = [x for x in rows if x["converged"]]
+    k = max(len(rows), 1)
+    pairs = list(zip(whole["tokens"], chunked["tokens"]))
+    return {
+        "budget": budget,
+        "n": len(rows),
+        "same_answers": sum(x["same"] for x in rows) / k,
+        "same_when_both_converged": sum(x["same"] for x in conv) / max(len(conv), 1),
+        "num_both_converged": len(conv),
+        "max_read_rel_diff": max((x["read_rel_diff"] for x in rows), default=None),
+        "median_read_rel_diff": float(np.median([x["read_rel_diff"] for x in rows]))
+        if rows
+        else None,
+        "exact_whole": sum(x["whole_solved"] for x in rows) / k,
+        "exact_chunked": sum(x["chunked_solved"] for x in rows) / k,
+        "tokens_match_whole_run": sum(x == y for x, y in pairs) / max(len(pairs), 1),
+        "solved_whole_not_chunked": sum(
+            x["whole_solved"] and not x["chunked_solved"] for x in rows
+        ),
+        "solved_chunked_not_whole": sum(
+            x["chunked_solved"] and not x["whole_solved"] for x in rows
+        ),
+        "differing": [x for x in rows if not x["same"]],
+    }
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("model")
@@ -197,9 +332,30 @@ def main():
     p.add_argument("--chunk-count", type=int, default=64)
     p.add_argument("--json", default=None)
     p.add_argument("--tag", default="LOOP_VLLM")
+    p.add_argument(
+        "--record",
+        type=int,
+        default=None,
+        metavar="BUDGET",
+        help="only record one engine's solves (0: whole prompts), to --record-out",
+    )
+    p.add_argument("--record-out", default=None)
+    p.add_argument(
+        "--compare",
+        nargs=2,
+        default=None,
+        metavar=("WHOLE", "CHUNKED"),
+        help="only compare two --record files",
+    )
     a = p.parse_args()
 
     os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    if a.record is not None:
+        # Each solve is read back through apply_model, as the probe tests do:
+        # the engine runs in this process, so no function is sent to a worker.
+        # One engine per process (run_serve_eval.sh), since an in-process
+        # engine keeps its GPU memory until the process exits.
+        os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
     from transformers import AutoTokenizer
 
@@ -222,6 +378,17 @@ def main():
     )
     seeds = list(range(lo, hi))  # a fixed start per puzzle
     plain = ordinary_prompts(tok)
+
+    if a.record is not None:
+        chunked_record(a, loop_ids, seeds, a.record)
+        return
+    if a.compare:
+        res = chunked_compare(*a.compare, sols, lo, spec, a.chunk)
+        summary = {k: v for k, v in res.items() if k != "differing"}
+        print(f"{a.tag}_CHUNKED " + json.dumps(summary), flush=True)
+        if a.json:
+            Path(a.json).write_text(json.dumps(res, indent=2))
+        return
 
     # 1. The main run: every puzzle plus the ordinary prompts, one engine.
     prompts = loop_ids + plain
@@ -279,21 +446,8 @@ def main():
     ]
     print(f"{a.tag}_ORDINARY " + json.dumps(res["ordinary_match_alone"]), flush=True)
 
-    # 4. Chunked prefill: grids span chunks; answers must not change.
-    if a.chunk:
-        n = min(a.chunk_count, len(loop_ids))
-        chunked, _ = run_engine(
-            a.model,
-            loop_ids[:n],
-            [(200, s) for s in seeds[:n]],
-            max_num_batched_tokens=a.chunk,
-        )
-        same = [
-            list(x.outputs[0].token_ids) == list(y.outputs[0].token_ids)
-            for x, y in zip(chunked, loop_outs[:n])
-        ]
-        res["chunked"] = {"budget": a.chunk, "n": n, "same_answers": sum(same) / n}
-        print(f"{a.tag}_CHUNKED " + json.dumps(res["chunked"]), flush=True)
+    # 4. Chunked prefill: run_serve_eval.sh runs it after this process, one
+    #    engine per process (--record), then --compare.
 
     # 5. HF agreement on the first puzzles, same seeded start.
     if a.hf:

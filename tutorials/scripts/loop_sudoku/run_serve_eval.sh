@@ -38,5 +38,14 @@ log "3/3 serve with vLLM"
 env -u RANK -u WORLD_SIZE -u LOCAL_RANK uv run --no-sync python \
   tutorials/scripts/loop_sudoku/serve_vllm.py "$WORK/ckpt" "$WORK/data" \
   --first "${EVAL_START:-2000}" --count "${EVAL_N:-2000}" \
-  --hf "${HF_N:-32}" --chunk "${CHUNK:-48}" --json "$RUN_DIR/serve_eval.json"
+  --hf "${HF_N:-32}" --json "$RUN_DIR/serve_eval.json"
+if [ "${CHUNK:-48}" -gt 0 ]; then
+  serve=(env -u RANK -u WORLD_SIZE -u LOCAL_RANK uv run --no-sync python
+    tutorials/scripts/loop_sudoku/serve_vllm.py "$WORK/ckpt" "$WORK/data"
+    --first "${EVAL_START:-2000}" --count "${EVAL_N:-2000}" --chunk-count "${CHUNK_N:-64}")
+  "${serve[@]}" --record 0 --record-out "$WORK/whole.pt"
+  "${serve[@]}" --record "${CHUNK:-48}" --record-out "$WORK/chunked.pt"
+  "${serve[@]}" --compare "$WORK/whole.pt" "$WORK/chunked.pt" --chunk "${CHUNK:-48}" \
+    --json "$RUN_DIR/chunked_eval.json"
+fi
 log "done"
