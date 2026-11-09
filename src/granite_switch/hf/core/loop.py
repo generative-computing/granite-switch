@@ -410,65 +410,6 @@ class LoopHead(nn.Module):
             state = self.step(state, x, decay, patience, fp_thresh)
         return self.logits(state["z"]), state
 
-    def fixed_start(self, seed: int = 0) -> torch.Tensor:
-        """A reproducible starting state ``[prefix + grid, W]`` for :meth:`solve_each`.
-
-        Drawn like :meth:`init_state` draws a random one (truncated normal,
-        std ``init_std``), but from a CPU generator seeded with ``seed``, so
-        every backend and device gets the same start.
-        """
-        gen = torch.Generator(device="cpu").manual_seed(seed)
-        # Explicit device and dtype: vLLM builds models under a default CUDA
-        # device and a bf16 default dtype, and the start must not follow them.
-        z0 = torch.empty(
-            self.prefix_len + self.grid_size,
-            self.width,
-            device="cpu",
-            dtype=torch.float32,
-        )
-        return trunc_normal_(z0, std=self.init_std, generator=gen)
-
-    @torch.no_grad()
-    def solve_each(
-        self,
-        read: torch.Tensor,
-        z0: torch.Tensor,
-        max_iter: int,
-        fp_thresh: float,
-        decay: float,
-        patience: int,
-        min_iter: int = 0,
-        check_every: int = 50,
-    ) -> tuple[torch.Tensor, dict]:
-        """Solve every row on its own: ``(logits [B, grid, outputs], state)``.
-
-        For serving, where a batch is whatever requests were scheduled
-        together, so one request's answer must not depend on the others:
-
-        * every row starts from the same state ``z0`` (``[prefix + grid, W]``)
-          rather than a random draw, so a request gets the same answer whatever
-          it is batched with and however often it is re-run;
-        * a row stops updating once it converges (its residual is below
-          ``fp_thresh``) or its step size has decayed below
-          :data:`MIN_STEPSIZE`, instead of waiting for the whole batch.
-
-        Convergence is checked on the host every ``check_every`` updates; in
-        between, converged rows are frozen on the device.
-        """
-        x = self.inject(read)
-        state = self.init_state(x)
-        state["z"] = z0.to(device=x.device, dtype=x.dtype).expand_as(x).clone()
-        active = torch.ones(x.shape[0], dtype=torch.bool, device=x.device)
-        for k in range(max_iter):
-            if k >= min_iter:
-                active = (state["residual"] >= fp_thresh) & (
-                    state["stepsize"].view(-1) >= MIN_STEPSIZE
-                )
-                if k % check_every == 0 and not bool(active.any()):
-                    break
-            state = self.step(state, x, decay, patience, fp_thresh, active=active)
-        return self.logits(state["z"]), state
-
 
 class SwitchedLoopHeads(nn.Module):
     """The loop heads of a checkpoint, one per loop slot, keyed by adapter index.
