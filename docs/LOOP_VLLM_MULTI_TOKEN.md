@@ -1,6 +1,7 @@
 # Loop Slot on vLLM: Emitting the Whole Answer in One Step
 
-Status: design (investigation branch `feature/loop-vllm-multi-token-emission-investigation`).
+Status: implemented and served on vLLM 0.26.0 (A100), branch
+`feature/loop-vllm-multi-token-emission-investigation`. Results are in section 8.
 vLLM sources read: 0.26.0, checked against 0.30.0 (the two ends of the supported range).
 
 ## 1. The problem
@@ -387,3 +388,44 @@ converged canvas.
      step, and that the held-out accuracy matches.
 6. **Benchmark on Vela**: throughput and latency, burst vs 82-step
    decoding.
+
+## 8. Results (vLLM 0.26.0, one A100 80 GB)
+
+The trained Sudoku head (the 77.5% head of the HF evaluation) was composed
+onto `granite-4.1-3b` and served with `vllm.LLM`
+(`tutorials/scripts/loop_sudoku/serve_vllm.py`, `run_vllm_eval.sh`).
+
+| Run | Puzzles | Answer as one burst | Exact | Cells right | Blank cells right |
+|---|---|---|---|---|---|
+| Held-out test, CUDA graphs | 20,000 | **100%** | **75.27%** | 90.5% | 86.3% |
+| Smoke, CUDA graphs | 64 | 100% | 76.6% | 92.0% | 88.3% |
+| Smoke, eager | 64 | 100% | 79.7% | 92.6% | 89.2% |
+| HF backend, same head (random starts) | 20,000 | (81 logit rows) | 77.5% | 91.2% | |
+
+* **One burst.** Every loop request finished in its prefill step with 82
+  tokens: the 81 digits, then EOS, finish reason `stop`.
+* **Other requests are unaffected.** Two ordinary chat prompts in the same
+  batch decoded normally ("The capital of France is Paris.").
+* **The engine settings applied as designed**: V2 model runner, async
+  scheduling off, chunked prefill off, prefix caching off.
+* **Agreement with HF.** 14 of 16 answers equal the HF backend's answer
+  from the same fixed start (15 of 16 eager). The difference is in the
+  base model's hidden states, not in the burst:
+  * vLLM's read layer differs from HF's by about 2% (relative, bf16), from
+    different attention and matmul kernels;
+  * the head solves vLLM's read exactly as the server does: 16 of 16
+    answers match when HF's head is given the rows vLLM read;
+  * the puzzles that differ are the hard ones, with hundreds of solver
+    iterations. They are also sensitive within HF: reading the same
+    hidden states in fp32 instead of bf16 flips 2 of 16 HF answers.
+  * Either way can be right. On these 16 the server solved 15 and HF 14
+    (CUDA graphs).
+* **Accuracy.** 75.3% served on vLLM vs 77.5% on the HF backend. The gap
+  is within what a different solver start gives.
+* **Speed.** 1.47 puzzles/s at `max_num_seqs=64`. The solve dominates:
+  hundreds to thousands of head iterations per puzzle.
+  * One request at a time, the median loop request took 0.19 s (prefill,
+    solve and all 82 tokens). An ordinary 82-token decode took 0.67 s.
+  * Hard puzzles take 1–3 s, all in the solver loop.
+* **Tests.** 43 tests passed on the GPU pod, including the burst tests and
+  the HF `solve_each` tests.
