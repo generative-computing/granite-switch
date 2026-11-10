@@ -11,6 +11,8 @@ from collections import defaultdict
 
 import torch
 
+from granite_switch.streams import routing as stream_routing
+
 from .arch import ArchDescriptor
 
 
@@ -84,11 +86,14 @@ def validate_cross_stream_population(model):
         # lora_B is the gate: lora_A is kaiming-initialized even for unpopulated
         # slots in a freshly built model, but lora_B decides whether the branch
         # contributes anything.
-        for adapter_idx in range(param.shape[0]):
-            if model.config.adapter_kinds[adapter_idx] == "probe":
+        # The tensor's rows are LoRA rows, not slots: a streams checkpoint
+        # keeps one per adapter slot, in row order (a pre-streams one has a row
+        # per slot, and a head slot's row never receives weights).
+        for row, slot in enumerate(stream_routing.lora_rows(model.config)):
+            if model.config.adapter_kinds[slot - 1] != "lora":
                 continue
-            if bool(torch.all(param[adapter_idx] == 0)):
-                empty.append(f"{name}[{adapter_idx}]")
+            if bool(torch.all(param[row] == 0)):
+                empty.append(f"{name}[{row}]")
 
     if empty:
         # Not fatal — an SR adapter may legitimately skip cross_stream on some
