@@ -682,6 +682,13 @@ def _validate_save_pretrained_writes(before, after, output_path):
 # ---------------------------------------------------------------------------
 
 
+def _non_empty_marker(value: str) -> str:
+    """argparse type for --asr-no-speech-marker: an empty marker would match everywhere."""
+    if not value:
+        raise argparse.ArgumentTypeError("--asr-no-speech-marker must not be empty")
+    return value
+
+
 def _compose_argparser():
     parser = argparse.ArgumentParser(
         description="Compose Granite Switch model with embedded LoRA adapters",
@@ -917,6 +924,19 @@ Examples:
         default=None,
         help="Chunker window overlap in seconds (default 5.0). Only used when "
         "the backend does not self-chunk. Requires --enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--asr-no-speech-marker",
+        dest="asr_no_speech_markers",
+        action="append",
+        default=None,
+        metavar="MARKER",
+        type=_non_empty_marker,
+        help="Exact string the ASR model emits for silence or non-speech, e.g. "
+        "'<|nospeech|>'. Every occurrence is removed from the transcript before "
+        "it reaches the prompt; other tags are kept. Repeat the flag for several "
+        "markers. Model-specific: no default, so nothing is removed unless set. "
+        "Requires --enable-audio; ignored without it.",
     )
     return parser
 
@@ -1355,6 +1375,8 @@ def build():
             model.config.asr_chunk_length_s = args.asr_chunk_length_s
         if args.asr_chunk_overlap_s is not None:
             model.config.asr_chunk_overlap_s = args.asr_chunk_overlap_s
+        if args.asr_no_speech_markers is not None:
+            model.config.asr_no_speech_markers = args.asr_no_speech_markers
         print(
             f"  Audio cascade enabled "
             f"(asr_model_id={args.asr_model or 'default'}, "
@@ -1364,7 +1386,8 @@ def build():
             f"pipeline_kwargs={args.asr_pipeline_kwargs or {}}, "
             f"generate_kwargs={args.asr_generate_kwargs or {}}, "
             f"max_audio_clips={args.asr_max_audio_clips or 'default'}, "
-            f"self_chunks={args.asr_self_chunks})"
+            f"self_chunks={args.asr_self_chunks}, "
+            f"no_speech_markers={args.asr_no_speech_markers or []})"
         )
 
     # Base model size (best effort)

@@ -92,6 +92,11 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 default CTC backend does not self-chunk, and the HF pipeline's own
                 CTC chunking mis-trims seams for it (it needs the model to publish
                 inputs_to_logits_ratio, which this checkpoint does not).
+            asr_no_speech_markers (Optional[list[str]]): Exact strings the ASR
+                model emits for silence or non-speech (e.g. ``"<|nospeech|>"``).
+                Every occurrence is removed from each transcribed window before
+                it reaches the prompt; any other tag is kept. Model-specific, so
+                set it to match ``asr_model_id``. Default: None (nothing removed).
 
         Shadow Residual (SR) parameters:
             dual_stream (bool): Whole-checkpoint decoder mode. ``False`` (default) =
@@ -179,6 +184,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         asr_chunk_length_s: float = 120.0,
         asr_chunk_overlap_s: float = 5.0,
         asr_self_chunks: bool = False,
+        asr_no_speech_markers: list[str] | None = None,
         # Shadow Residual (SR) parameters
         cross_stream_rank: int | None = None,
         dual_stream: bool = False,
@@ -325,6 +331,16 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.asr_chunk_length_s = asr_chunk_length_s
         self.asr_chunk_overlap_s = asr_chunk_overlap_s
         self.asr_self_chunks = asr_self_chunks
+        if asr_no_speech_markers is not None:
+            if isinstance(asr_no_speech_markers, str) or not all(
+                isinstance(m, str) and m for m in asr_no_speech_markers
+            ):
+                raise ValueError(
+                    "asr_no_speech_markers must be a list of non-empty strings, "
+                    f"got {asr_no_speech_markers!r}"
+                )
+            asr_no_speech_markers = list(asr_no_speech_markers)
+        self.asr_no_speech_markers = asr_no_speech_markers
 
         # Shadow Residual (SR).
         # Pre-fusion SR checkpoints carried unfused_qkv; their weight layout is
