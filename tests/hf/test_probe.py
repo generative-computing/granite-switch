@@ -60,7 +60,8 @@ def test_probe_head_built_only_when_slot_present():
     m_clf = GraniteSwitchForCausalLM(_probe_config(["lora", "probe"]))
     assert m_lora.model.probe_head is None
     assert m_clf.model.probe_head is not None
-    # Bank sized to the full index space so slot = index - 1 addresses it.
+    # The bank holds the slot's head row: a pre-streams config (no
+    # ``streams``) keeps the old layout, one row per slot.
     assert m_clf.model.probe_head.num_probe_slots == 2
     assert m_clf.model.probe_head.num_labels == 2
 
@@ -91,7 +92,7 @@ def test_probe_rewrites_last_logit_row_to_label_word():
     assert torch.isfinite(last_row[torch.tensor(label_ids)]).all()
     # The label-id scores equal the probe head's per-label verdict, sliced
     # to this slot's real label count (padded columns are never scattered).
-    verdict = model.model._last_probe_verdict[2][0, :n]  # [n_labels]
+    verdict = model.model._last_head_scores[2][0, :n]  # [n_labels]
     assert torch.allclose(last_row[torch.tensor(label_ids)], verdict.to(last_row.dtype))
     # The argmax (emitted token) is one of the label ids.
     assert int(last_row.argmax()) in label_ids
@@ -107,7 +108,7 @@ def test_lora_and_probe_slots_select_separately():
         model(input_ids=torch.tensor([[10, 250, 20, 30]]))
     assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
     assert not model.model._last_probe_indices.any()
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
 
     # The probe marker selects slot 2 and routes out of the LoRA stream.
     input_ids = torch.tensor([[10, 20, 30, 251]])
@@ -179,7 +180,7 @@ def test_decode_step_after_verdict_is_plain_lm():
     input_ids = torch.tensor([[10, 20, 30, 251]])
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=True)
-    assert model.model._last_probe_verdict is not None
+    assert model.model._last_head_scores is not None
 
     with torch.no_grad():
         step = model(
@@ -187,7 +188,7 @@ def test_decode_step_after_verdict_is_plain_lm():
             past_key_values=out.past_key_values,
             use_cache=True,
         )
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(step.logits).all()
 
 
@@ -228,7 +229,7 @@ def test_lora_only_path_unaffected():
         out = model(input_ids=input_ids)
 
     assert model.model.probe_head is None
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits).all()
     assert out.logits.shape == (1, 6, config.vocab_size)
 
@@ -248,7 +249,7 @@ def test_lora_generation_on_mixed_model_decodes():
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=True)
     # No probe fired -> no verdict, full finite vocab row.
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits).all()
 
     # Cached decode step of the same (LoRA) request yields finite logits.
@@ -260,7 +261,7 @@ def test_lora_generation_on_mixed_model_decodes():
         )
     assert step.logits.shape == (1, 1, config.vocab_size)
     assert torch.isfinite(step.logits).all()
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
 
 
 @pytest.mark.parametrize(
@@ -337,7 +338,7 @@ def test_intermediate_layer_probe_scores_that_layers_output():
 
     assert model.model._last_lora_indices[0, -1].item() == 0
     assert model.model._last_probe_indices[0, -1].item() == 2
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     expected = model.model.probe_head(out.hidden_states[1][rows, pos], slots)
     final = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
     torch.testing.assert_close(verdict, expected)
@@ -365,7 +366,7 @@ def test_final_decoder_layer_read_uses_pre_norm_output():
     finally:
         hook.remove()
 
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     expected = model.model.probe_head(captured[0][rows, pos], slots)
     final_norm = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
     torch.testing.assert_close(verdict, expected)
@@ -384,7 +385,7 @@ def test_batch_slots_score_at_their_own_read_layers():
             output_hidden_states=True,
         )
 
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     assert slots.tolist() == [1, 2]
     final_score = model.model.probe_head(
         out.hidden_states[-1][rows[:1], pos[:1]], slots[:1]

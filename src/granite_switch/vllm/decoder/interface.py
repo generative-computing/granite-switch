@@ -392,9 +392,10 @@ class LoRADecoderInterface(DecoderInterface):
         return loaded_params
 
     def finalize_modules(self, model, config) -> None:
-        if not hasattr(config, "adapter_ranks") or config.adapter_ranks is None:
+        # One rank per LoRA row (the LoRA tensors' first dim), not per slot.
+        adapter_ranks = getattr(config, "lora_row_ranks", None)
+        if adapter_ranks is None:
             return
-        adapter_ranks = config.adapter_ranks
         for module in model.modules():
             if isinstance(module, SwitchedLoRALinear):
                 module.finalize_weights(adapter_ranks)
@@ -544,11 +545,12 @@ class SRDecoderInterface(DecoderInterface):
         return loaded
 
     def finalize_modules(self, model, config) -> None:
-        adapter_ranks = getattr(config, "adapter_ranks", None)
+        # One rank per LoRA row (the LoRA tensors' first dim), not per slot.
+        adapter_ranks = getattr(config, "lora_row_ranks", None)
         if adapter_ranks is None:
             return
         cross_rank = int(getattr(config, "cross_stream_rank", 0) or 0)
-        cross_ranks = [cross_rank] * config.num_adapters
+        cross_ranks = [cross_rank] * config.num_lora_rows
 
         sll = [m for m in model.modules() if isinstance(m, SwitchedLoRALinear)]
         for m in sll:

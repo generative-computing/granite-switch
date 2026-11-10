@@ -1250,7 +1250,7 @@ def build():
             ANCHOR_MODE_SR
             if path and is_shadow_residual_adapter(path)
             else ANCHOR_MODE_PROBE
-            if probe_meta.get(name, {}).get("kind") == "probe"
+            if probe_meta.get(name, {}).get("kind", "lora") != "lora"
             else tech,
             source,
         )
@@ -1261,9 +1261,10 @@ def build():
     ]
     all_discovered = external_discovered + built_in_discovered
 
-    # Order LoRA slots first, probe slots last (Python sorts False before True)
+    # Order LoRA slots first, head slots last (Python sorts False before True):
+    # the composer's LoRA transfer fills rows in that order.
     all_discovered.sort(
-        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") == "probe"
+        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") != "lora"
     )
 
     has_external = len(external_discovered) > 0
@@ -1418,60 +1419,52 @@ def build():
                 _anchor_text, _sub, _mode = load_activation_anchor(_path, tokenizer)
             adapter_substitute_token_ids[_sub_offset + _i] = _sub
 
-    # adapter_kinds marks which slots are probes (same control token as a
-    # LoRA); resolve each slot's label words to token ids for the vLLM verdict.
-    if probe_meta:
-        adapter_kinds = [
-            probe_meta.get(name, {}).get("kind", "lora") for name in adapter_names
-        ]
-        probe_names = [
-            name
-            for name in adapter_names
-            if probe_meta.get(name, {}).get("kind") == "probe"
-        ]
-
-        if probe_names:
-            # Full width (length num_adapters, indexed by adapter_index - 1): each
-            # probe slot's label token ids. The config derives the per-slot
-            # counts and the padded bank width from this.
-            per_slot_label_names: list[list[str] | None] = []
-            per_slot_label_token_ids: list[list[int] | None] = []
-            # Full width too: each probe slot's read layer (None = final).
-            per_slot_read_layer: list[int | None] = []
-            for name, kind in zip(adapter_names, adapter_kinds):
-                if kind != "probe":
-                    per_slot_label_names.append(None)
-                    per_slot_label_token_ids.append(None)
-                    per_slot_read_layer.append(None)
-                    continue
-                labels = probe_meta[name].get("labels")
-                if not labels:
-                    raise ValueError(
-                        f"Adapter '{name}' is declared kind=probe but has no "
-                        f"'labels' in the manifest. Probe slots need label "
-                        f"words (e.g. labels: [safe, unsafe]) so the verdict exit "
-                        f"can emit them."
-                    )
-                label_names = list(labels)
-                per_slot_label_names.append(label_names)
-                per_slot_label_token_ids.append(
-                    resolve_label_token_ids(tokenizer, label_names)
+    # Head streams: one stream entry per slot (granite_switch.streams). A head
+    # slot's type is its manifest ``kind``; its label words become the output
+    # token ids, ``layer`` its read layer. Every head type goes through the same
+    # code; the type itself checks its settings when the model is built.
+    if any(m.get("kind", "lora") != "lora" for m in probe_meta.values()):
+        streams = []
+        head_rows: dict[str, int] = {}
+        print("\nHead streams:")
+        for name in adapter_names:
+            meta = probe_meta.get(name, {})
+            kind = meta.get("kind", "lora")
+            if kind == "lora":
+                streams.append({"type": "lora"})
+                continue
+            output = dict(meta.get("output") or {})
+            labels = meta.get("labels")
+            if labels:
+                output["token_ids"] = resolve_label_token_ids(tokenizer, list(labels))
+            if not output.get("token_ids"):
+                raise ValueError(
+                    f"Adapter '{name}' is declared kind={kind} but has no output "
+                    f"tokens. Give 'labels' (words, e.g. labels: [safe, unsafe]) or "
+                    f"'output: {{token_ids: [...]}}' so its scores have tokens to land on."
                 )
-                per_slot_read_layer.append(probe_meta[name].get("layer"))
-
-            optional_kwargs["adapter_kinds"] = adapter_kinds
-            optional_kwargs["probe_label_token_ids"] = per_slot_label_token_ids
-            optional_kwargs["probe_read_layers"] = per_slot_read_layer
-            print("\nProbe slots:")
-            for name, words, ids, layer in zip(
-                adapter_names,
-                per_slot_label_names,
-                per_slot_label_token_ids,
-                per_slot_read_layer,
-            ):
-                if ids is not None:
-                    where = "final norm" if layer is None else f"layer {layer}"
-                    print(f"  {name} → labels {words} → token ids {ids} @ {where}")
+            output.setdefault("mode", "select")
+            row = head_rows.get(kind, 0)
+            head_rows[kind] = row + 1
+            entry = {
+                "type": kind,
+                "read_layer": meta.get("layer"),
+                "head_row": row,
+                "output": output,
+            }
+            if meta.get("settings"):
+                entry["settings"] = dict(meta["settings"])
+            streams.append(entry)
+            where = (
+                "final norm"
+                if entry["read_layer"] is None
+                else f"layer {entry['read_layer']}"
+            )
+            print(
+                f"  {name} ({kind}) → {output['mode']} over token ids "
+                f"{output['token_ids']} @ {where}"
+            )
+        optional_kwargs["streams"] = streams
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,

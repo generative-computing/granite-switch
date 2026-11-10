@@ -62,3 +62,18 @@ class TestAdapterIndicesWiring:
 class TestKVVisibility:
     def test_suite(self):
         _run_inner_class("TestKVVisibility")
+
+
+class TestStreamCompactRows:
+    def test_suite(self):
+        _run_inner_class("TestStreamCompactRows")
+
+
+class TestStreamHeadsOnly:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadsOnly")
+
+
+class TestStreamPluginMerge:
+    def test_suite(self):
+        _run_inner_class("TestStreamPluginMerge")

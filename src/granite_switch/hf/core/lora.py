@@ -392,7 +392,9 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         self.kv_size = kv_size
 
         if "qkv_proj" in config.lora_target_modules:
-            num_adapters = config.num_adapters
+            # One row per LoRA slot (config.num_lora_rows): the model maps each
+            # token's slot to its row before the layers run.
+            num_adapters = config.num_lora_rows
             max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
             self.qkv_proj = MergedSwitchedLoRALinear(
                 self.hidden_size,
@@ -413,7 +415,7 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         # Output projection - conditionally add LoRA based on config
         if "o_proj" in config.lora_target_modules:
             # O projection with switched LoRA
-            num_adapters = config.num_adapters
+            num_adapters = config.num_lora_rows
             max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
             self.o_proj = SwitchedLoRALinear(
                 self.num_heads * self.head_dim,
@@ -670,7 +672,7 @@ def replace_shared_mlp_projections_with_lora(
     if mlp is None:
         return False, False
 
-    num_adapters = config.num_adapters
+    num_adapters = config.num_lora_rows
     max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
     has_input_lora = False
     has_output_lora = False
