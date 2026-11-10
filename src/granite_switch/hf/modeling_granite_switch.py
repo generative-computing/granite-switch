@@ -798,8 +798,24 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         self._last_probe_indices = probe_indices
 
         # The LoRA layers index their tensors by row, not by slot: a compact
-        # checkpoint keeps rows for LoRA slots only (config.streams).
+        # checkpoint keeps rows for LoRA slots only (config.streams). A probe
+        # stream that carries a Shadow Residual adapter runs it at its marker:
+        # the marker reads the adapter stream, which feeds no K/V, so every
+        # other token is unchanged.
         lora_rows = self._lora_rows(lora_indices)
+        if input_ids is not None and any(self.config.probe_lora_row_lut):
+            marker_rows = self._row_lut("probe_lora_row_lut", probe_indices.device)[
+                probe_indices
+            ]
+            is_marker = torch.isin(
+                input_ids,
+                torch.as_tensor(
+                    self.config.probe_control_token_ids, device=input_ids.device
+                ),
+            )
+            lora_rows = torch.where(
+                is_marker & (marker_rows > 0), marker_rows, lora_rows
+            )
 
         position_embeddings = None
         if self.rotary_emb is not None:

@@ -1355,6 +1355,25 @@ def build():
                     f"{spec['num_layers']} layers x width {spec['width']}"
                 )
 
+    # Probes on an adapter (manifest ``on:``): each probe slot -> the slot of
+    # the Shadow Residual adapter whose stream it reads.
+    probe_adapters = {}
+    for slot, name in enumerate(adapter_names):
+        on = probe_meta.get(name, {}).get("on")
+        if on is None:
+            continue
+        if probe_meta[name].get("kind") != "probe":
+            raise ValueError(
+                f"Adapter '{name}' sets on: {on!r} but is not kind: probe."
+            )
+        if on not in adapter_names:
+            raise ValueError(
+                f"Probe '{name}' reads adapter {on!r} (on:), which is not in "
+                f"this compose; adapters: {adapter_names}."
+            )
+        probe_adapters[slot] = adapter_names.index(on)
+        print(f"  Probe {name} reads the stream of adapter {on}")
+
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
         adapter_paths=adapter_paths,
@@ -1367,6 +1386,7 @@ def build():
         if args.lora_alpha is not None
         else float(args.lora_rank),
         require_loop_heads=not args.untrained_loop_heads,
+        probe_adapters=probe_adapters or None,
         **optional_kwargs,
     )
 

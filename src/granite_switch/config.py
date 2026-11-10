@@ -598,7 +598,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 ]
             self._legacy_rows = True
         else:
-            self._check_streams(streams, adapter_kinds)
+            self._check_streams(streams, adapter_kinds, self.dual_stream)
             self._legacy_rows = False
         self.streams = streams
 
@@ -617,6 +617,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # head its bank by the second.
         self.lora_row_lut = [0] + [
             s["lora_row"] + 1 if kind == "lora" else 0
+            for s, kind in zip(rows, adapter_kinds)
+        ]
+        # Derived: probe slot -> 1 + the LoRA row its marker runs (0 = none).
+        # A probe stream may carry a Shadow Residual adapter; the adapter runs
+        # at the marker only, so it is applied where the marker is, not through
+        # the switch's latest-wins index, which tokens after the marker inherit.
+        # A legacy probe slot's LoRA row is its unused zero row, never run.
+        self.probe_lora_row_lut = [0] + [
+            s["lora_row"] + 1
+            if kind == "probe" and s["lora_row"] is not None and not self._legacy_rows
+            else 0
             for s, kind in zip(rows, adapter_kinds)
         ]
         self.probe_row_lut = [0] + [
@@ -692,6 +703,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             "num_probe_rows",
             "lora_row_lut",
             "probe_row_lut",
+            "probe_lora_row_lut",
             "lora_row_ranks",
             "probe_num_labels_per_row",
         ):
@@ -699,12 +711,17 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         return out
 
     @staticmethod
-    def _check_streams(streams, adapter_kinds) -> None:
+    def _check_streams(streams, adapter_kinds, dual_stream=False) -> None:
         """Validate stream rows: one entry per slot, each kind on its own bank.
 
         A LoRA slot needs a LoRA row and no head row; a head slot needs a head
-        row and no LoRA row. Rows within a bank must be distinct and contiguous
-        from 0, so every row of a bank serves a slot.
+        row. Rows within a bank are distinct and contiguous from 0, so every
+        row serves a slot: each LoRA slot owns one LoRA row.
+
+        A probe slot of a Shadow Residual checkpoint may also name a LoRA row:
+        an adapter that runs at its marker, so the probe reads that adapter's
+        stream. The row must be a LoRA slot's, so the adapter's weights, rank
+        and alpha are that slot's and are stored once.
         """
         if len(streams) != len(adapter_kinds):
             raise ValueError(
@@ -712,6 +729,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                 f"({len(adapter_kinds)}): one entry per slot."
             )
         banks: dict[str, list[int]] = {}
+        carried: list[tuple[int, int]] = []
         for slot, (s, kind) in enumerate(zip(streams, adapter_kinds)):
             if not isinstance(s, dict) or set(s) != {"lora_row", "head_row"}:
                 raise ValueError(
@@ -734,16 +752,32 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                         f"no head_row; got {s!r}."
                     )
                 banks.setdefault("lora", []).append(lora_row)
-            else:
-                if head_row is None or lora_row is not None:
+                continue
+            if head_row is None:
+                raise ValueError(
+                    f"streams[{slot}] is a {kind} slot: it needs a head_row; got {s!r}."
+                )
+            banks.setdefault(kind, []).append(head_row)
+            if lora_row is not None:
+                # The adapter runs in the Shadow Residual adapter stream, which
+                # reads the base K/V; a LoRA/aLoRA adapter would change the
+                # marker's K/V instead, and loop heads are not wired for it.
+                if kind != "probe" or not dual_stream:
                     raise ValueError(
-                        f"streams[{slot}] is a {kind} slot: it needs a head_row and "
-                        f"no lora_row; got {s!r}."
+                        f"streams[{slot}] names a lora_row under a {kind} head; "
+                        "only a probe slot of a Shadow Residual checkpoint may "
+                        f"carry an adapter. Got {s!r}."
                     )
-                banks.setdefault(kind, []).append(head_row)
+                carried.append((slot, lora_row))
         for bank, used in banks.items():
             if sorted(used) != list(range(len(used))):
                 raise ValueError(
                     f"streams' {bank} rows must be 0..{len(used) - 1}, each used "
                     f"once; got {used}."
+                )
+        for slot, lora_row in carried:
+            if lora_row not in banks.get("lora", []):
+                raise ValueError(
+                    f"streams[{slot}] carries lora_row {lora_row}, which no LoRA "
+                    "slot owns; a probe shares an adapter slot's row."
                 )

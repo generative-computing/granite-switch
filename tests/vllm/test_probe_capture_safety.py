@@ -52,6 +52,8 @@ class _Model(torch.nn.Module):
         # and the stub head still sees each marker's slot id.
         self.lora_row_lut_t = torch.arange(num_slots + 1)
         self.probe_row_lut_t = torch.arange(num_slots + 1)
+        # No probe here carries an adapter.
+        self.probe_lora_row_lut_t = torch.zeros(num_slots + 1, dtype=torch.long)
         slots_by_layer = {}
         for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
             if is_clf:

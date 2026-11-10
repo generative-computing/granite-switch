@@ -122,6 +122,8 @@ def discover_adapters_from_yaml(
           kind: probe               # default "lora" when omitted
           labels: [faithful, hallucinated]
           layer: 12                 # optional decoder layer; omit for the final layer
+          on: rag                   # optional: read the stream of Shadow Residual
+                                    # adapter "rag" (it runs at the probe's marker)
 
     ``type`` and ``kind`` are independent axes: ``type`` is the LoRA technology
     (lora vs alora, which drives token placement), ``kind`` is whether the slot
@@ -165,12 +167,22 @@ def discover_adapters_from_yaml(
                 kind = info.get("kind")
                 labels = info.get("labels")
                 layer = info.get("layer")
-                if kind is not None or labels is not None or layer is not None:
+                # ``on: <adapter name>``: a probe reads that Shadow Residual
+                # adapter's stream (the adapter runs at the probe's marker).
+                on = info.get("on")
+                if (
+                    kind is not None
+                    or labels is not None
+                    or layer is not None
+                    or on is not None
+                ):
                     probe_meta[name] = {
                         "kind": kind or "lora",
                         "labels": labels,
                         "layer": layer,
                     }
+                    if on is not None:
+                        probe_meta[name]["on"] = on
 
     return found, probe_meta
 

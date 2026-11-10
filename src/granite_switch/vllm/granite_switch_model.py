@@ -204,6 +204,12 @@ class GraniteSwitchModel(nn.Module):
                 torch.tensor(config.probe_row_lut, dtype=torch.long),
                 persistent=False,
             )
+            # Probe slot -> 1 + the LoRA row its marker runs (0 = none).
+            self.register_buffer(
+                "probe_lora_row_lut_t",
+                torch.tensor(config.probe_lora_row_lut, dtype=torch.long),
+                persistent=False,
+            )
 
             # Packed verdicts assume the ordinary sampler's row selection.
             if vllm_config.speculative_config is not None:
@@ -437,6 +443,11 @@ class GraniteSwitchModel(nn.Module):
                 probe_indices = torch.where(
                     is_marker, probe_indices, torch.zeros_like(probe_indices)
                 )
+            # A probe stream that carries a Shadow Residual adapter runs it at
+            # its marker (probe_indices is nonzero at markers only, on every PP
+            # rank). Branch-free: probe slots without an adapter map to 0.
+            marker_rows = self.probe_lora_row_lut_t[probe_indices]
+            lora_indices = torch.where(marker_rows > 0, marker_rows, lora_indices)
 
         # Rebuild this rank's fixed-size kernel metadata from token-leading
         # adapter ids. The fused kernel routes on the LoRA stream.

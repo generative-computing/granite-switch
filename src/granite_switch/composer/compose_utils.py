@@ -40,6 +40,7 @@ class GraniteSwitchComposer:
         built_in_lora_rank: int = 8,
         built_in_lora_alpha: float = 8.0,
         require_loop_heads: bool = True,
+        probe_adapters: dict[int, int] | None = None,
         **kwargs,
     ):
         """Create a GraniteSwitch model from base model and LoRA adapters.
@@ -70,6 +71,10 @@ class GraniteSwitchComposer:
             require_loop_heads: When False, a loop folder without a trained
                 ``loop_head.safetensors`` keeps its fresh initialization (the
                 checkpoint a loop head is trained in).
+            probe_adapters: ``{probe slot: adapter slot}`` (0-based positions in
+                *adapter_paths*): each probe runs that Shadow Residual adapter
+                at its marker and reads its stream. The probe's stream shares
+                the adapter slot's LoRA row, so the adapter is stored once.
             **kwargs: Additional arguments passed to ``GraniteSwitchConfig``.
 
         Returns:
@@ -114,6 +119,14 @@ class GraniteSwitchComposer:
                 if kind == "lora"
                 else {"lora_row": None, "head_row": row}
             )
+        for probe_slot, adapter_slot in (probe_adapters or {}).items():
+            if ext_kinds[probe_slot] != "probe" or ext_kinds[adapter_slot] != "lora":
+                raise ValueError(
+                    f"probe_adapters maps slot {probe_slot} ({ext_kinds[probe_slot]}) "
+                    f"to slot {adapter_slot} ({ext_kinds[adapter_slot]}); it must "
+                    "map a probe slot to an adapter slot."
+                )
+            streams[probe_slot]["lora_row"] = streams[adapter_slot]["lora_row"]
         lora_adapter_paths = [adapter_paths[i] for i in lora_slots]
         probe_adapter_paths = [adapter_paths[i] for i in probe_slots]
         loop_adapter_paths = [adapter_paths[i] for i in loop_slots]

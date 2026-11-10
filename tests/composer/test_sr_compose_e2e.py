@@ -184,11 +184,13 @@ def _create_sr_adapter(
     save_file(state_dict, str(path / "adapter_model.safetensors"))
 
 
-def _compose_sr_probe(path: Path, read_layers=(None,)):
+def _compose_sr_probe(path: Path, read_layers=(None,), on_adapter=()):
     """Tiny SR + probe checkpoint, also used by the vLLM test.
 
     An identity head exposes every component of its input, so its scores pin
     the exact layer and normalization read without random margins.
+    ``on_adapter`` lists the probes (by position in ``read_layers``) that read
+    the SR adapter's stream: the adapter runs at their marker.
     """
     from granite_switch.composer import GraniteSwitchComposer
     from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
@@ -216,6 +218,7 @@ def _compose_sr_probe(path: Path, read_layers=(None,)):
             *[list(range(100, 100 + HIDDEN))] * len(read_layers),
         ],
         probe_read_layers=[None, *read_layers],
+        probe_adapters={1 + i: 0 for i in on_adapter} or None,
         switch_head_dim=16,
     ).eval()
 
@@ -285,6 +288,104 @@ def test_sr_and_probe_slots_select_separately(tmp_path, capsys, read_layer):
             restored = loaded(input_ids=ids, use_cache=False)
         torch.testing.assert_close(restored.logits, expected.logits)
     assert loaded.model._last_lora_indices[0, -1].item() == 1
+
+
+@pytest.mark.parametrize("read_layer", [None, 0, NUM_LAYERS - 1])
+def test_probe_on_sr_adapter_reads_the_adapted_stream(tmp_path, read_layer):
+    """A probe stream that carries the SR adapter reads that adapter's stream.
+
+    Two probes with the same identity head and read layer: one on the base,
+    one on the SR adapter. The adapter runs at the second probe's marker only,
+    so that probe's scores are the adapter stream's state at the marker, while
+    the base probe's are the base stream's. Every other row is untouched, and
+    the adapter is stored once.
+    """
+    from granite_switch.hf import load_model
+
+    model = _compose_sr_probe(
+        tmp_path, read_layers=[read_layer, read_layer], on_adapter=[1]
+    )
+    assert model.config.streams == [
+        {"lora_row": 0, "head_row": None},
+        {"lora_row": None, "head_row": 0},
+        {"lora_row": 0, "head_row": 1},
+    ]
+    assert model.model.layers[0].cross_stream.lora_B.shape[0] == 1
+
+    def run(m, ids):
+        streams = []
+        hook = m.model.layers[
+            -1 if read_layer is None else read_layer
+        ].register_forward_hook(lambda _mod, _args, out: streams.append(out[0]))
+        try:
+            with torch.no_grad():
+                output = m(input_ids=ids, use_cache=False)
+        finally:
+            hook.remove()
+        base, adapted = (
+            (m.model.norm(h) if read_layer is None else h)[0, -1] for h in streams[0]
+        )
+        return output, base, adapted
+
+    labels = model.config.probe_label_token_ids[1]
+    prompt = [10, 21, 20]
+    on_base, base_b, _ = run(model, torch.tensor([[*prompt, CONTROL_TOKEN_ID + 1]]))
+    on_sr, base_s, adapted_s = run(
+        model, torch.tensor([[*prompt, CONTROL_TOKEN_ID + 2]])
+    )
+
+    # The base probe reads the base stream, the SR probe the adapter stream.
+    torch.testing.assert_close(on_base.logits[0, -1, labels], base_b)
+    torch.testing.assert_close(on_sr.logits[0, -1, labels], adapted_s)
+    assert not torch.allclose(adapted_s, base_s), "the adapter must change the read"
+    # The adapter runs at the marker only: the prompt's rows are base rows.
+    torch.testing.assert_close(on_sr.logits[0, :-1], on_base.logits[0, :-1])
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
+    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 3]]
+
+    # It survives save and reload.
+    checkpoint = tmp_path / "composed"
+    model.save_pretrained(checkpoint)
+    loaded = load_model(str(checkpoint)).eval()
+    with torch.no_grad():
+        restored = loaded(
+            input_ids=torch.tensor([[*prompt, CONTROL_TOKEN_ID + 2]]), use_cache=False
+        )
+    torch.testing.assert_close(restored.logits, on_sr.logits)
+
+
+def test_probe_cannot_carry_a_non_sr_adapter():
+    """Only a probe on a Shadow Residual checkpoint may carry an adapter.
+
+    A LoRA/aLoRA adapter would change the marker's K/V instead of running in
+    a stream that reads the base K/V.
+    """
+    from granite_switch.config import GraniteSwitchConfig
+
+    kwargs = dict(
+        vocab_size=VOCAB_SIZE,
+        hidden_size=HIDDEN,
+        intermediate_size=INTERMEDIATE,
+        num_hidden_layers=NUM_LAYERS + 2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_adapters=2,
+        adapter_token_ids=[CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1],
+        adapter_substitute_token_ids=[1, 2],
+        adapter_names=["lora", "detect"],
+        max_lora_rank=LORA_RANK,
+        adapter_ranks=[LORA_RANK, LORA_RANK],
+        adapter_kinds=["lora", "probe"],
+        probe_label_token_ids=[None, [100, 101]],
+        streams=[
+            {"lora_row": 0, "head_row": None},
+            {"lora_row": 0, "head_row": 0},
+        ],
+    )
+    with pytest.raises(ValueError, match="only a probe slot of a Shadow Residual"):
+        GraniteSwitchConfig(**kwargs)
+    # The same streams are accepted on an SR checkpoint.
+    GraniteSwitchConfig(**kwargs, dual_stream=True, cross_stream_rank=CROSS_STREAM_RANK)
 
 
 # ---------------------------------------------------------------------------
