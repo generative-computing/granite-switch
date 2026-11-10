@@ -54,6 +54,9 @@ class _Model(torch.nn.Module):
         self.probe_row_lut_t = torch.arange(num_slots + 1)
         # No probe here carries an adapter.
         self.probe_lora_row_lut_t = torch.zeros(num_slots + 1, dtype=torch.long)
+        # The verdict rewrite's label tables, as GraniteSwitchModel builds them;
+        # set by _with_label_tables for the tests that exercise the rewrite.
+        self.probe_label_ids_t = self.probe_label_cols_t = None
         slots_by_layer = {}
         for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
             if is_clf:
@@ -173,12 +176,67 @@ def test_profiling_random_slot_on_a_lora_slot_leaves_logits_untouched():
     torch.nn.Module.__init__(wrapper)
     wrapper.model = _Model({91: 2}, kinds=["lora", "probe"])
     wrapper.config = type("Cfg", (), {"probe_label_token_ids": [None, [100, 200]]})()
+    wrapper.model.probe_label_ids_t = torch.tensor([[0, 0], [0, 0], [100, 200]])
+    wrapper.model.probe_label_cols_t = torch.tensor([[0, 0], [0, 0], [0, 1]])
     logits = torch.randn(1, 300)
     expected = logits.clone()
     out = GraniteSwitchForCausalLM._apply_probe_verdict(
         wrapper, logits, torch.randn(1, 2), torch.tensor([0.75])
     )
     assert torch.equal(out, expected)
+
+
+def test_verdict_rewrite_is_sync_free_and_exact():
+    """The rewrite matches the per-row reference and reads nothing back to the host.
+
+    Two probe slots with 2 and 3 labels, LoRA slots and out-of-range slots mixed
+    in one batch: each probe row is -inf except its own label ids, which carry
+    its own scores; every other row is unchanged.
+    """
+    wrapper = GraniteSwitchForCausalLM.__new__(GraniteSwitchForCausalLM)
+    torch.nn.Module.__init__(wrapper)
+    wrapper.model = _Model({90: 2, 91: 4}, kinds=["lora", "probe", "lora", "probe"])
+    per_slot = [None, [7, 9], None, [11, 3, 5]]
+    wrapper.model.probe_label_ids_t = torch.tensor(
+        [[0, 0, 0], [0, 0, 0], [7, 9, 7], [0, 0, 0], [11, 3, 5]]
+    )
+    wrapper.model.probe_label_cols_t = torch.tensor(
+        [[0, 0, 0], [0, 0, 0], [0, 1, 0], [0, 0, 0], [0, 1, 2]]
+    )
+    g = torch.Generator().manual_seed(0)
+    for dtype in (torch.float32, torch.bfloat16):
+        logits = torch.randn(7, 40, generator=g).to(dtype)
+        verdict = torch.randn(7, 3, generator=g)
+        slot = torch.tensor([0.0, 2.0, 1.0, 4.0, 3.0, 9.0, 2.0])
+        expected = logits.clone()
+        for r, s in enumerate(slot.long().tolist()):
+            if s in (2, 4):
+                ids = per_slot[s - 1]
+                expected[r] = float("-inf")
+                expected[r, ids] = verdict[r, : len(ids)].to(dtype)
+
+        reads = []
+        names = ("__bool__", "nonzero", "tolist", "item", "__int__")
+        originals = {n: getattr(torch.Tensor, n) for n in names}
+
+        def counting(name):
+            def f(t, *a, **k):
+                reads.append(name)
+                return originals[name](t, *a, **k)
+
+            return f
+
+        for n in names:
+            setattr(torch.Tensor, n, counting(n))
+        try:
+            out = GraniteSwitchForCausalLM._apply_probe_verdict(
+                wrapper, logits, verdict, slot
+            )
+        finally:
+            for n in names:
+                setattr(torch.Tensor, n, originals[n])
+        assert reads == [], f"host reads in the verdict rewrite: {reads}"
+        assert torch.equal(out, expected)
 
 
 def test_scoring_resolves_replaced_registered_buffers():

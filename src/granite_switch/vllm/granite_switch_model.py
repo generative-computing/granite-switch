@@ -232,6 +232,22 @@ class GraniteSwitchModel(nn.Module):
                 persistent=False,
             )
 
+            # Per 1-based slot: its label token ids and their verdict columns,
+            # padded to max_probe_labels by repeating the first label and its
+            # column, so the verdict rewrite is one gather + scatter with no
+            # host reads (a repeated write carries the same value). Rows of
+            # non-probe slots are never written (see _apply_probe_verdict).
+            width = max(config.max_probe_labels, 1)
+            label_ids = torch.zeros(num_adapters + 1, width, dtype=torch.long)
+            label_cols = torch.zeros(num_adapters + 1, width, dtype=torch.long)
+            for slot, ids in enumerate(config.probe_label_token_ids or [], start=1):
+                if ids:
+                    pad = width - len(ids)
+                    label_ids[slot] = torch.tensor([*ids, *[ids[0]] * pad])
+                    label_cols[slot] = torch.tensor([*range(len(ids)), *[0] * pad])
+            self.register_buffer("probe_label_ids_t", label_ids, persistent=False)
+            self.register_buffer("probe_label_cols_t", label_cols, persistent=False)
+
             # One buffer of slot ids per read layer (None = final). Store buffer
             # names, not tensors: Module.to() replaces registered buffers.
             read_layers = config.probe_read_layers or [None] * num_adapters
@@ -815,6 +831,12 @@ class GraniteSwitchForCausalLM(
         Rows are classified by the slot mask, not just ``slot > 0``: vLLM's
         profiling sampler run feeds random hidden states, so the packed slot
         column can land on a LoRA slot, which has no label ids.
+
+        Branch-free, with no host reads: every row gathers its slot's label
+        ids and verdict columns from tables built at load time. A probe row is
+        blanked to ``-inf`` and gets its scores; any other row writes back the
+        values it already had, a no-op. Each row writes only its own slot's
+        real label count (the padding repeats the first label and its score).
         """
         if logits is None or verdict is None or slot is None:
             return logits
@@ -824,20 +846,12 @@ class GraniteSwitchForCausalLM(
         slot_int = slot.round().long()
         # Out-of-range values land on the sentinel row 0.
         safe_idx = slot_int.clamp(min=0, max=num_slots)
-        is_probe = (slot_int == safe_idx) & slot_mask[safe_idx]
-        if not bool(is_probe.any()):
-            return logits
-
-        # Each row writes only its own slot's real label count; padded
-        # columns are never read.
-        per_slot_label_ids = self.config.probe_label_token_ids
-        rows = is_probe.nonzero(as_tuple=True)[0]
-        logits[rows] = float("-inf")
-        for r in rows.tolist():
-            row_slot = int(slot_int[r])
-            ids = per_slot_label_ids[row_slot - 1]
-            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
-            logits[r, label_ids] = verdict[r, : len(ids)].to(logits.dtype)
+        is_probe = ((slot_int == safe_idx) & slot_mask[safe_idx]).unsqueeze(-1)
+        ids = self.model.probe_label_ids_t[safe_idx]  # [T, L] label token ids
+        scores = verdict.gather(1, self.model.probe_label_cols_t[safe_idx])
+        logits.masked_fill_(is_probe, float("-inf"))
+        keep = logits.gather(1, ids)
+        logits.scatter_(1, ids, torch.where(is_probe, scores.to(logits.dtype), keep))
         return logits
 
     def sample(
