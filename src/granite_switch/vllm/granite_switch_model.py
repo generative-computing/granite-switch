@@ -256,9 +256,12 @@ class GraniteSwitchModel(nn.Module):
         self._head_layer_groups: dict[int, list[tuple[str, str, str]]] = {}
         self._head_final_groups: list[tuple[str, str, str]] = []
         self._head_width = stream_routing.max_head_outputs(config)
-        self._head_outputs = stream_routing.head_outputs(config)
         if not heads:
             return
+        # Per slot: output token ids, score columns, mode and merge weight, so
+        # the logits rewrite gathers them with no host reads.
+        for key, table in stream_routing.head_outputs(config).items():
+            self.register_buffer(f"head_out_{key}_t", table, persistent=False)
 
         self.register_buffer(
             "head_control_token_ids_t",
@@ -817,28 +820,27 @@ class GraniteSwitchForCausalLM(
 
         Rows are classified by the head-slot mask, not just ``slot > 0``: vLLM's
         profiling sampler run feeds random hidden states, so the packed slot
-        column can land on a LoRA slot, which has no head output.
+        column can land on a LoRA slot, which has no head output, or out of
+        range. Such a row maps to the sentinel 0 and is left as it was.
+
+        Branch-free, with no host reads (see ``streams.outputs``): every row
+        gathers its slot's output from tables built at load time.
         """
         if logits is None or scores is None or slot is None:
             return logits
 
-        slot_mask = self.model.head_slot_mask_t
+        model = self.model
+        slot_mask = model.head_slot_mask_t
         num_slots = slot_mask.shape[0] - 1
         slot_int = slot.round().long()
-        # Out-of-range values land on the sentinel row 0.
         safe_idx = slot_int.clamp(min=0, max=num_slots)
         is_head = (slot_int == safe_idx) & slot_mask[safe_idx]
-        if not bool(is_head.any()):
-            return logits
-
-        rows = is_head.nonzero(as_tuple=True)[0]
-        return apply_head_scores(
-            logits,
-            rows,
-            slot_int[rows],
-            scores[rows],
-            self.model._head_outputs,
-        )
+        slots = torch.where(is_head, safe_idx, torch.zeros_like(safe_idx))
+        tables = {
+            key: getattr(model, f"head_out_{key}_t")
+            for key in ("ids", "cols", "select", "merge", "weight")
+        }
+        return apply_head_scores(logits, slots, scores, tables)
 
     def sample(
         self,

@@ -195,6 +195,78 @@ def test_profiling_random_slot_on_a_lora_slot_leaves_logits_untouched():
     assert torch.equal(out, expected)
 
 
+def test_head_output_rewrite_is_sync_free_and_exact():
+    """The logits rewrite matches a per-row reference and reads nothing back.
+
+    Slots: 1 LoRA, 2 a select head (2 labels), 3 LoRA, 4 a merge head (3 ids,
+    weight 0.5). One batch mixes head rows, LoRA rows, base rows and
+    out-of-range slots: a select row is -inf except its own label ids, which
+    carry its own scores; a merge row adds 0.5 * its scores on its ids; every
+    other row is unchanged.
+    """
+    from granite_switch.streams import routing as stream_routing
+
+    wrapper = GraniteSwitchForCausalLM.__new__(GraniteSwitchForCausalLM)
+    torch.nn.Module.__init__(wrapper)
+    model = _Model({90: 2, 91: 4}, kinds=["lora", "probe", "lora", "probe"])
+    streams = [
+        {"type": "lora"},
+        {"type": "probe", "head_row": 0, "output": {"token_ids": [7, 9]}},
+        {"type": "lora"},
+        {
+            "type": "probe",
+            "head_row": 1,
+            "output": {"mode": "merge", "token_ids": [11, 3, 5], "weight": 0.5},
+        },
+    ]
+    model.config = GraniteSwitchConfig.from_dict(
+        {**model.config.to_dict(), "streams": streams}
+    )
+    GraniteSwitchModel._init_streams(model, model.config)
+    wrapper.model, wrapper.config = model, model.config
+    outputs = {2: ("select", [7, 9], 1.0), 4: ("merge", [11, 3, 5], 0.5)}
+    assert stream_routing.head_outputs(model.config)["ids"].shape == (5, 3)
+
+    g = torch.Generator().manual_seed(0)
+    for dtype in (torch.float32, torch.bfloat16):
+        logits = torch.randn(8, 40, generator=g).to(dtype)
+        scores = torch.randn(8, 3, generator=g)
+        slot = torch.tensor([0.0, 2.0, 1.0, 4.0, 3.0, 9.0, 2.0, -3.0])
+        expected = logits.clone()
+        for r, s in enumerate(slot.long().tolist()):
+            if s in outputs:
+                mode, ids, weight = outputs[s]
+                own = scores[r, : len(ids)].to(dtype)
+                if mode == "select":
+                    expected[r] = float("-inf")
+                    expected[r, ids] = own
+                else:
+                    expected[r, ids] = expected[r, ids] + weight * own
+
+        reads = []
+        names = ("__bool__", "nonzero", "tolist", "item", "__int__")
+        originals = {n: getattr(torch.Tensor, n) for n in names}
+
+        def counting(name):
+            def f(t, *a, **k):
+                reads.append(name)
+                return originals[name](t, *a, **k)
+
+            return f
+
+        for n in names:
+            setattr(torch.Tensor, n, counting(n))
+        try:
+            out = GraniteSwitchForCausalLM._apply_head_scores(
+                wrapper, logits, scores, slot
+            )
+        finally:
+            for n in names:
+                setattr(torch.Tensor, n, originals[n])
+        assert reads == [], f"host reads in the logits rewrite: {reads}"
+        torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+
 def test_scoring_resolves_replaced_registered_buffers():
     model = _Model({90: 1, 91: 2}, read_layers=[None, 0])
     old_buffers = list(model.buffers())

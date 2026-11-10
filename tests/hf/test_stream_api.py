@@ -28,7 +28,7 @@ from granite_switch.streams import (
     stream_specs,
 )
 from granite_switch.streams import routing as stream_routing
-from granite_switch.streams.outputs import apply_head_scores
+from granite_switch.streams.outputs import apply_head_scores, output_tables
 from granite_switch.streams.registry import _REGISTRY
 from granite_switch.streams.spec import parse_entries
 from tests.composer.test_sr_compose_e2e import (
@@ -240,14 +240,30 @@ class TestStreamEntries:
 # --------------------------------------------------------------------------- #
 # Output modes
 # --------------------------------------------------------------------------- #
+def _specs(*heads):
+    """Stream specs: slot 1 a LoRA, then one head per ``(mode, token_ids, weight)``."""
+    entries = [{"type": "lora"}] + [
+        {
+            "type": "probe",
+            "head_row": row,
+            "output": {"mode": mode, "token_ids": ids, "weight": weight},
+        }
+        for row, (mode, ids, weight) in enumerate(heads)
+    ]
+    return parse_entries(entries, len(entries))
+
+
 class TestOutputModes:
     def _apply(self, mode, weight=1.0):
         logits = torch.tensor([[2.1, 1.4, 3.0, 0.5], [1.0, 1.0, 1.0, 1.0]])
-        outputs = {3: (mode, torch.tensor([0, 1]), weight)}
-        scores = torch.tensor([[5.0, -1.0, 99.0]])  # third column is padding
-        return apply_head_scores(
-            logits, torch.tensor([0]), torch.tensor([3]), scores, outputs
+        # Slot 2 has two outputs; slot 3 widens the tables to three, so slot
+        # 2's third score column is padding and must not be read.
+        tables = output_tables(
+            _specs((mode, [0, 1], weight), ("select", [0, 1, 2], 1.0)), 3
         )
+        scores = torch.tensor([[5.0, -1.0, 99.0], [0.0, 0.0, 0.0]])
+        # Row 1 is not a head row (slot 0): it keeps its logits.
+        return apply_head_scores(logits, torch.tensor([2, 0]), scores, tables)
 
     def test_select_keeps_only_the_head_scores(self):
         out = self._apply("select")
@@ -259,6 +275,64 @@ class TestOutputModes:
         out = self._apply("merge", weight=0.5)
         torch.testing.assert_close(out[0], torch.tensor([4.6, 0.9, 3.0, 0.5]))
         assert out[1].tolist() == [1.0] * 4
+
+    def test_no_host_reads_and_matches_a_per_row_reference(self):
+        """Branch-free: no tensor is read back, so the step can be graph-captured.
+
+        One batch of select and merge heads with different widths, LoRA rows,
+        base rows and the padded columns of a narrower head.
+        """
+        heads = [("select", [7, 9], 1.0), ("merge", [11, 3, 5], 0.5)]
+        tables = output_tables(_specs(*heads), 3)
+        by_slot = dict(enumerate(heads, start=2))
+        g = torch.Generator().manual_seed(0)
+        for dtype in (torch.float32, torch.bfloat16):
+            logits = torch.randn(7, 40, generator=g).to(dtype)
+            scores = torch.randn(7, 3, generator=g)
+            slots = torch.tensor([0, 2, 1, 3, 0, 3, 2])
+            expected = logits.clone()
+            for r, s in enumerate(slots.tolist()):
+                if s in by_slot:
+                    mode, ids, weight = by_slot[s]
+                    own = scores[r, : len(ids)].to(dtype)
+                    if mode == "select":
+                        expected[r] = float("-inf")
+                        expected[r, ids] = own
+                    else:
+                        expected[r, ids] = expected[r, ids] + weight * own
+            reads = []
+            names = ("__bool__", "nonzero", "tolist", "item", "__int__")
+            originals = {n: getattr(torch.Tensor, n) for n in names}
+
+            def counting(name):
+                def f(t, *a, **k):
+                    reads.append(name)
+                    return originals[name](t, *a, **k)
+
+                return f
+
+            for n in names:
+                setattr(torch.Tensor, n, counting(n))
+            try:
+                out = apply_head_scores(logits, slots, scores, tables)
+            finally:
+                for n in names:
+                    setattr(torch.Tensor, n, originals[n])
+            assert reads == [], f"host reads in the head-output step: {reads}"
+            torch.testing.assert_close(out, expected, rtol=0, atol=0)
+
+    def test_traces_as_one_graph(self):
+        """``fullgraph=True`` compile: no graph break anywhere in the step."""
+        tables = output_tables(_specs(("select", [7, 9], 1.0), ("merge", [3], 2.0)), 3)
+        logits, scores = torch.randn(4, 16), torch.randn(4, 2)
+        slots = torch.tensor([2, 0, 3, 1])
+        compiled = torch.compile(apply_head_scores, fullgraph=True, backend="eager")
+        torch.testing.assert_close(
+            compiled(logits.clone(), slots, scores, tables),
+            apply_head_scores(logits.clone(), slots, scores, tables),
+            rtol=0,
+            atol=0,
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -444,3 +518,4 @@ def test_pre_streams_layout_is_unchanged():
     with torch.no_grad():
         model.model.probe_head.bias[2, :2] = torch.tensor([-5.0, 5.0])
     assert int(_last_row(model, [10, 20, 252]).argmax()) == LABELS[1]
+
