@@ -213,7 +213,7 @@ def _build_and_run(
 
 
 class TestTPRealAdapters:
-    """TP=1 vs TP=2 with adapters from granite-lib-rag (granite-4.0-micro).
+    """TP=1 vs TP=2 with adapters from granitelib-rag (granite-4.0-micro).
 
     Exercises the coded MultiSwitch engine (the only engine), which owns TWO
     extra attention layers with their own KV cache slots (counting + memory) --

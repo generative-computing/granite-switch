@@ -37,7 +37,7 @@ pytestmark = [pytest.mark.slow, pytest.mark.audio]
 # Same adapter library as test_compose_e2e.py, on the CLI's default base.
 # --technology-filter lora keeps the build to the cheapest useful shape.
 BASE_NAME = "granite-4.1-3b"
-ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
+ADAPTER_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 BUILD_TIMEOUT = 3600
 _LUT_KEY = "model.switch.control_to_substitute_lut"
 

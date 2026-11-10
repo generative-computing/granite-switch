@@ -47,7 +47,7 @@ from tests.shared import model_sources
 BASE_NAME = "granite-4.0-micro"
 # The mixed test embeds a LoRA from the RAG library, which must match its base.
 MIXED_BASE_NAME = "granite-4.1-3b"
-RAG_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
+RAG_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 MIXED_LORA = "citations"
 
 pytestmark = [

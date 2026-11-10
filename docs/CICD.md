@@ -226,7 +226,7 @@ rather than naming a Hub id, and parametrize over `model_sources.sources()`:
 def test_something(source):
     base = model_sources.base_model(source, "granite-4.1-3b")
     library = model_sources.adapter_library(
-        source, "ibm-granite/granite-lib-rag-r1.0", "granite-4.1-3b"
+        source, "ibm-granite/granitelib-rag-r1.0", "granite-4.1-3b"
     )
 ```
 

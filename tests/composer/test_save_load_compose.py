@@ -17,7 +17,7 @@ Two phases, each with full validation (inference, config, weights, files):
 
 Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny base
 and adapter library built from captured copies of the real ones; ``real``, the
-published granite-4.1-3b and granite-lib-rag-r1.0, in the release tier. Every check
+published granite-4.1-3b and granitelib-rag-r1.0, in the release tier. Every check
 compares a model with itself across a save/load, so both run the same assertions.
 """
 
@@ -41,7 +41,7 @@ from tests.shared import model_sources
 pytestmark = [pytest.mark.slow]
 
 BASE_NAME = "granite-4.1-3b"
-ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
+ADAPTER_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 
 SEED = 42
 

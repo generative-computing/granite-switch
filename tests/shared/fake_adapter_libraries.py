@@ -38,7 +38,6 @@ FIXTURES = Path(__file__).parent / "fixtures" / "adapter_libraries"
 
 #: Hub repo -> base flavours captured. Only the bases the fake bases cover.
 LIBRARIES = {
-    "ibm-granite/granite-lib-rag-r1.0": ("granite-4.0-micro", "granite-4.1-3b"),
     "ibm-granite/granitelib-rag-r1.0": ("granite-4.0-micro", "granite-4.1-3b"),
     "ibm-granite/granitelib-core-r1.0": ("granite-4.0-micro", "granite-4.1-3b"),
     "ibm-granite/granitelib-guardian-r1.0": ("granite-4.0-micro", "granite-4.1-3b"),

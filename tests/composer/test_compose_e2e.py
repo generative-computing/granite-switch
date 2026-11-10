@@ -7,7 +7,7 @@ across all test methods.
 
 Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny base
 and adapter library built from captured copies of the real ones; ``real``, the
-published granite-4.0-micro and granite-lib-rag-r1.0, in the release tier. Expected
+published granite-4.0-micro and granitelib-rag-r1.0, in the release tier. Expected
 sizes are read off the base each source composes, so both run the same checks.
 """
 
@@ -24,7 +24,7 @@ from granite_switch.config import SWITCH_CACHE_LAYERS
 from tests.shared import model_sources
 
 BASE_NAME = "granite-4.0-micro"
-ADAPTER_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
+ADAPTER_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 BUILD_TIMEOUT = 3600  # 60 min (parallel xdist workers compete for downloads)
 
 
