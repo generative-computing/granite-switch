@@ -31,9 +31,11 @@ def generate_adapter_population_table(
         dict with keys ``module_types``, ``adapter_names``, ``entries``,
         ``adapter_ranks``, ``max_rank``.
     """
-    # Get adapter information from model config
-    num_adapters = model.config.num_adapters
-    adapter_ranks = model.config.adapter_ranks
+    # One column per LoRA row. The tensors hold rows, not slots: a streams
+    # checkpoint keeps one per adapter slot, so the caller passes the LoRA
+    # slots only, in slot (= row) order.
+    num_adapters = min(model.config.num_lora_rows, len(adapter_paths))
+    adapter_ranks = model.config.lora_row_ranks
     max_rank = model.config.max_lora_rank
 
     # Build lookup structures from arch descriptor

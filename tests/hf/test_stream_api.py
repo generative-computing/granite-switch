@@ -519,3 +519,71 @@ def test_pre_streams_layout_is_unchanged():
         model.model.probe_head.bias[2, :2] = torch.tensor([-5.0, 5.0])
     assert int(_last_row(model, [10, 20, 252]).argmax()) == LABELS[1]
 
+
+# --------------------------------------------------------------------------- #
+# Compose checks read LoRA rows, not slots
+# --------------------------------------------------------------------------- #
+def _compose_probe_before_sr(tmp_path):
+    """A probe in slot 1 and an SR adapter in slot 2: the adapter owns LoRA row 0."""
+    from granite_switch.composer import GraniteSwitchComposer
+
+    base, sr, probe = tmp_path / "base", tmp_path / "sr", tmp_path / "probe"
+    base.mkdir()
+    _create_base_model(base)
+    _create_sr_adapter(sr)
+    probe.mkdir()
+    save_file(
+        {"weight": torch.randn(len(LABELS), HIDDEN), "bias": torch.zeros(len(LABELS))},
+        str(probe / "probe_head.safetensors"),
+    )
+    model = GraniteSwitchComposer.from_base_and_adapters(
+        base_model_name_or_path=str(base),
+        adapter_paths=[str(probe), str(sr)],
+        adapter_token_ids=[CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1],
+        adapter_substitute_token_ids=[1, 2],
+        adapter_names=["tox", "sr"],
+        streams=[
+            {"type": "probe", "head_row": 0, "output": {"token_ids": LABELS}},
+            {"type": "lora"},
+        ],
+        switch_head_dim=16,
+    ).eval()
+    return model, str(sr), str(base)
+
+
+def test_cross_stream_check_finds_an_empty_adapter_after_a_head(tmp_path, capsys):
+    """The check walks LoRA rows: an adapter behind a head is still checked."""
+    from granite_switch.composer.validator import validate_cross_stream_population
+
+    model, _, _ = _compose_probe_before_sr(tmp_path)
+    capsys.readouterr()
+    validate_cross_stream_population(model)
+    assert "OK: every adapter has cross_stream weights" in capsys.readouterr().out
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "cross_stream" in name and "lora_B" in name:
+                p.zero_()
+    validate_cross_stream_population(model)
+    assert "WARNING" in capsys.readouterr().out
+
+
+def test_population_table_has_one_column_per_lora_row(tmp_path):
+    """Given the LoRA slots only (as the compose report passes them), each
+    column reads that adapter's own row."""
+    from granite_switch.composer.arch import resolve_arch
+    from granite_switch.composer.reporting.population_table import (
+        generate_adapter_population_table,
+    )
+
+    model, sr, base = _compose_probe_before_sr(tmp_path)
+    analysis = model._build_mappings["source_analysis"]
+    table = generate_adapter_population_table(
+        model,
+        [sr],
+        adapter_names=["sr"],
+        arch=resolve_arch(base, dual_stream=True),
+        target_module_sets=analysis["adapter_targets"],
+    )
+    assert table["adapter_names"] == ["sr"]
+    cross = {k: v for k, v in table["entries"].items() if k.startswith("cross_stream")}
+    assert cross and all(v == {"sr": "copied"} for v in cross.values()), cross

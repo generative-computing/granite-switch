@@ -1534,15 +1534,24 @@ def build():
     print("Generating compose report...")
     print("=" * 80)
     if hasattr(model, "_build_mappings"):
+        # The report analyzes LoRA weights, so it gets the LoRA slots only, in
+        # slot order (their row order): a head folder carries a head, not
+        # adapter_model.safetensors.
+        lora_report = [
+            (path, name)
+            for path, name, _tech, _src in all_discovered
+            if path is not None
+            and probe_meta.get(name, {}).get("kind", "lora") == "lora"
+        ]
         generate_compose_report(
             base_mapping=model._build_mappings["base"],
             adapter_mapping=model._build_mappings["adapter"],
             output_path=args.output,
             model=model,
-            adapter_paths=adapter_paths,
-            adapter_names=adapter_names,
+            adapter_paths=[path for path, _ in lora_report],
+            adapter_names=[name for _, name in lora_report],
             arch=arch,
-            source_analysis=model._build_mappings.get("source_analysis"),
+            source_analysis=model._build_mappings.get("source_analysis") or None,
         )
         print(f"Compose report saved to {args.output}/compose_report.json")
 
