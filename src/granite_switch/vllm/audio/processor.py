@@ -84,9 +84,16 @@ def _base_hook_era(base: type) -> str:
 
     ``hasattr(base, "_call_hf_processor")`` cannot answer this. That name is
     present in era A, absent in B, and present again in C with an incompatible
-    signature, so an existence check maps A and C onto the same branch and feeds
-    era C's call the era-A code path -- which is how ASR breaks silently: the
-    transcript is simply never produced and every test stays green.
+    signature, so an existence check feeds era C's call the era-A code path, which
+    raises on every audio request (era C passes ``(hf_data, hf_kwargs)`` where era
+    A expects ``(prompt, mm_data, mm_kwargs, tok_kwargs)``) -- as a missing
+    positional against the old override, and as ``tokenizer.encode`` on a dict
+    against this file's era-A branch. Either way it is loud.
+
+    Silence was the 0.29 failure, where the hook was deleted and never called at
+    all. The quiet failure *within* era C is its ``"audios"`` -> ``"audio"`` mm-key
+    rename, which returns no clips instead of raising; see ``_call_hf_processor``.
+    That is the one that makes the era worth knowing exactly.
 
     The discriminator is the FIRST PARAMETER of ``_call_hf_processor``: era A
     takes ``prompt`` (it owns tokenization), era C takes ``hf_data`` (it is handed
@@ -512,10 +519,15 @@ class GraniteSwitchASRMultiModalProcessor(
           delegation forwards ``**kwargs`` untouched rather than naming it.
 
         Dispatching on ``hasattr(super(), "_call_hf_processor")`` -- as this did
-        until 0.31 -- collapses A and C onto one branch, which happens to be
-        right, but for era C it was reached for the wrong reason and the era-B
-        branch's ``kwargs["hf_processor_mm_kwargs"]`` would ``KeyError`` the
-        moment the era were misread. Gate on shape.
+        until 0.31 -- sends era C to the right branch but into the wrong hook: the
+        base calls ``_call_hf_processor(hf_data, hf_kwargs)`` positionally, which
+        hit the era-A four-argument signature and raised ``TypeError: missing 2
+        required positional arguments: 'mm_kwargs' and 'tok_kwargs'`` on every
+        audio request. The bug was never this dispatch -- delegation is right for
+        both A and C, and ``hasattr`` does report that one bit correctly. It was
+        the hook delegated INTO. So the fix is there: gate on shape and accept both
+        signatures. This method reads the same discriminator so the two cannot
+        disagree about the era.
         """
         era = _base_hook_era(super())
 

@@ -10,12 +10,20 @@ the eras are not ordered by whether a given attribute is present:
   now invoked *by* ``_apply_hf_processor_main(mm_items, hf_kwargs)``
 
 So ``hasattr(base, "_call_hf_processor")`` is true for A and C and false for B --
-it cannot tell A from C. Reading it as "this is 0.26-0.28" sent era C down era
-A's path, and era C's own kwarg rename (``hf_processor_mm_kwargs`` ->
-``hf_kwargs``) means a misread era raises ``KeyError`` on the ASR path instead of
-failing visibly at import. That class of bug produces NO transcript while every
-existing test stays green (vLLM 0.29 did exactly this), which is why this file
-asserts the routing EFFECT rather than that some hook got called.
+it cannot tell A from C. Reading era C as "this is 0.26-0.28" sends its
+two-argument call into era A's four-argument hook, where ``args[0]`` is the mm
+data rather than the prompt and ``tokenizer.encode`` raises ``TypeError`` on
+every audio request. That one is loud, and a single audio test catches it.
+
+The quiet one is era C's ``"audios"`` -> ``"audio"`` rename. ``_get_hf_mm_inputs``
+normalizes vLLM's plural modality key to the singular one HF processors take, and
+it runs BEFORE our hook -- so reading the plural yields no clips, the hook hands
+back an empty ``BatchFeature``, and nothing raises where the mistake was made.
+The request fails much further on, as ``IndexError`` in ``_get_prompt_updates``:
+a cumsum over an empty ``audio_num_tokens``, indexed for an audio item vLLM knows
+exists. That is why this file asserts the routing OUTCOME -- which era each stub
+resolves to, and which key the hook reads -- rather than that some hook got
+called.
 
 These tests stub the base class instead of importing vLLM: the discriminator is
 the signature of the base hook, so a stub shaped like each released era is a
@@ -171,8 +179,8 @@ class TestEraDetection:
 
     def test_era_a_and_c_are_distinguished(self):
         """The whole point: both HAVE the attribute, so hasattr cannot separate
-        them. If these ever collapse, era C runs era A's code path and ASR
-        silently stops producing transcripts."""
+        them. If these ever collapse, era C's two-argument call reaches era A's
+        code path and every audio request raises."""
         assert hasattr(EraA, "_call_hf_processor")
         assert hasattr(EraC, "_call_hf_processor")
         assert proc._base_hook_era(EraA) != proc._base_hook_era(EraC)
