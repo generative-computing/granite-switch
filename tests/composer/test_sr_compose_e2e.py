@@ -232,12 +232,14 @@ def test_sr_and_probe_slots_select_separately(tmp_path, capsys, read_layer):
     model = _compose_sr_probe(tmp_path, read_layers=[read_layer])
     assert "cross_stream slots are all-zero" not in capsys.readouterr().out
     assert model.config.dual_stream
+    # Each bank holds its own kind only: the probe bank one row (the probe
+    # slot's), the LoRA tensors one row (the SR slot's).
     head = model.model.probe_head
-    torch.testing.assert_close(head.weight[1], torch.eye(HIDDEN))
-    assert torch.count_nonzero(head.weight[0]) == 0
+    assert head.weight.shape[0] == 1
+    torch.testing.assert_close(head.weight[0], torch.eye(HIDDEN))
     for layer in model.model.layers:
+        assert layer.cross_stream.lora_B.shape[0] == 1
         assert torch.count_nonzero(layer.cross_stream.lora_B[0]) > 0
-        assert torch.count_nonzero(layer.cross_stream.lora_B[1]) == 0
 
     def run(m, ids):
         streams = []
