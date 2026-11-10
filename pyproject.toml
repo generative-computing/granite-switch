@@ -82,23 +82,29 @@ markers = [
 # `plumb_pyproject.py --add` / `--point-latest` walk the lines, `--prune` removes
 # the scaffolding, and `--check --final` refuses a tree where either step was
 # skipped. Changing a supported bound means repointing `dev` or `dev-latest`.
+# The two version-named groups, and the only ones. They are not CI's: CI asks for
+# `dev` and `dev-latest`. These exist because README.md and CONTRIBUTING.md hand
+# them to a reader who wants exactly one line pinned, and `vllm26` is what a bare
+# `uv sync` resolves through `default-groups` below.
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
 vllm32     = ["vllm>=0.32.0,<0.33.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
-dev-vllm32 = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-switch[hf,compose,audio]"]
-# The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
-# CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
-# the ceiling is repointing this one line instead of chasing the version through
-# every caller. Now on 0.32, the true ceiling of the `vllm` extra's range --
-# which is also the only state that may merge, since CI's upper leg comes from
-# this alias and anything lower would leave the top supported line untested
-# (`plumb_pyproject.py --check --final` enforces exactly that). During the
-# upgrade it was parked on each added line in turn, one commit each, to collect
-# that line's own GPU evidence at its own sha.
-dev-latest = [{ include-group = "dev-vllm32" }]
+# The ceiling's dev flavour, and the GPU workflow's upper leg. There is no
+# `dev-vllm32` in between: a version-named group whose only consumer was this
+# alias made the ceiling a two-step indirection, where repointing one of the two
+# and not the other is a silent misconfiguration rather than an error. So the
+# only version-named groups left are the two the docs hand to a reader who wants
+# one line pinned (README.md, CONTRIBUTING.md), and `dev` / `dev-latest` are the
+# only names CI resolves. Now on 0.32, the true ceiling of the `vllm` extra's
+# range -- which is also the only state that may merge, since CI's upper leg
+# comes from this group and anything lower would leave the top supported line
+# untested (`plumb_pyproject.py --check --final` enforces exactly that). During
+# the upgrade it was pointed at each added line in turn, one commit each, to
+# collect that line's own GPU evidence at its own sha.
+dev-latest = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
@@ -112,10 +118,8 @@ default-groups = ["vllm26"]
 # `uv sync` unsatisfiable once before.
 # Below: every pair of groups that would pull two different vLLM lines into one
 # venv. 2 lines are declared (0.26 / 0.32), each with a bare and a
-# dev flavour, so the 1 cross-line pair gives 6 entries.
-# The line `dev-latest` aliases carries a third name and so appears in more
-# pairs -- uv matches group names literally, so the alias needs its own
-# entries. `test` is absent deliberately: it reaches the floor through
+# dev flavour, so the 1 cross-line pair gives 4 entries.
+# `test` is absent deliberately: it reaches the floor through
 # `include-group = "dev"` and uv derives that transitively.
 #
 # Only the floor and the ceiling are declared in a merged tree. An upgrade
@@ -127,10 +131,8 @@ default-groups = ["vllm26"]
 conflicts = [
     # 0.26 vs 0.32
     [{ group = "vllm26" },     { group = "vllm32" }],
-    [{ group = "vllm26" },     { group = "dev-vllm32" }],
     [{ group = "vllm26" },     { group = "dev-latest" }],
     [{ group = "dev" },        { group = "vllm32" }],
-    [{ group = "dev" },        { group = "dev-vllm32" }],
     [{ group = "dev" },        { group = "dev-latest" }],
 ]
 
