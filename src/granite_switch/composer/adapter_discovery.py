@@ -161,15 +161,22 @@ def discover_adapters_from_yaml(
                 # Use manifest path as source for traceability
                 found.append((adapter_path, name, tech, manifest_path))
 
-                # Optional probe slots.
-                kind = info.get("kind")
-                labels = info.get("labels")
-                layer = info.get("layer")
-                if kind is not None or labels is not None or layer is not None:
+                # Optional head streams (granite_switch.streams): kind is the
+                # stream type; the rest fills the slot's stream entry.
+                stream_keys = (
+                    "kind",
+                    "labels",
+                    "layer",
+                    "output",
+                    "settings",
+                )
+                if any(info.get(k) is not None for k in stream_keys):
                     probe_meta[name] = {
-                        "kind": kind or "lora",
-                        "labels": labels,
-                        "layer": layer,
+                        "kind": info.get("kind") or "lora",
+                        "labels": info.get("labels"),
+                        "layer": info.get("layer"),
+                        "output": info.get("output"),
+                        "settings": info.get("settings"),
                     }
 
     return found, probe_meta

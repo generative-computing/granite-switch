@@ -62,8 +62,14 @@ SEED = 42
 def _tiny_vllm_config(
     adapter_kinds=None,
     probe_label_token_ids=None,
+    streams=None,
+    **extra,
 ):
-    """Minimal GraniteSwitchConfig for single-GPU vLLM tests."""
+    """Minimal GraniteSwitchConfig for single-GPU vLLM tests.
+
+    Two slots by default; ``streams`` (one entry per slot) sets the slot count.
+    """
+    n = len(streams) if streams is not None else 2
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -71,16 +77,18 @@ def _tiny_vllm_config(
         num_hidden_layers=4,  # 2 MultiSwitch cache slots + 2 decoder
         num_attention_heads=2,
         num_key_value_heads=2,
-        num_adapters=2,
-        adapter_token_ids=[250, 251],
-        adapter_names=["adapter_1", "adapter_2"],
-        adapter_substitute_token_ids=[1, 1],
+        num_adapters=n,
+        adapter_token_ids=[250 + i for i in range(n)],
+        adapter_names=[f"adapter_{i + 1}" for i in range(n)],
+        adapter_substitute_token_ids=[1] * n,
         # Rank must be in the fused kernel's SUPPORTED_RANKS (16, 32, ...);
         # finalize_weights asserts this for applicable adapters.
         max_lora_rank=16,
-        adapter_ranks=[16, 16],
+        adapter_ranks=[16] * n,
         adapter_kinds=adapter_kinds,
         probe_label_token_ids=probe_label_token_ids,
+        streams=streams,
+        **extra,
         switch_head_dim=32,
         max_position_embeddings=512,
         attention_multiplier=1.0,
@@ -502,6 +510,118 @@ class TestProbeSlotRouting(_VLLMModelTestBase):
             i for i in range(self.config.vocab_size) if i not in (100, 101)
         ]
         assert torch.isneginf(final_logits[non_label_ids]).all()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4b. Stream API: head types on the generic hooks (granite_switch.streams)
+# ════════════════════════════════════════════════════════════════════
+
+_HEAD_LABELS = [100, 101]
+
+
+def _probe_entry(row, **extra):
+    return {
+        "type": "probe",
+        "head_row": row,
+        "output": {"mode": "select", "token_ids": list(_HEAD_LABELS)},
+        **extra,
+    }
+
+
+def _non_labels(vocab_size):
+    return [i for i in range(vocab_size) if i not in _HEAD_LABELS]
+
+
+class TestStreamCompactRows(_VLLMModelTestBase):
+    """[probe, lora, probe]: one LoRA row, a two-row probe bank, any slot order."""
+
+    def _make_config(self):
+        return _tiny_vllm_config(
+            streams=[_probe_entry(0), {"type": "lora"}, _probe_entry(1)]
+        )
+
+    def test_rows_and_routing(self):
+        self.model.eval()
+        assert self.model.model.probe_head.weight.shape[0] == 2
+        qkv = self.model.model.layers[0].self_attn.qkv_proj
+        assert qkv.num_adapters == 1  # LoRA tensors hold the adapter slot only
+        assert self.model.model.lora_row_lut_t.tolist() == [0, 0, 1, 0]
+
+        with torch.no_grad():
+            self.model.model.probe_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
+            # The last probe slot (3) reads its own bank row (1).
+            logits = self._run_forward_and_logits([10, 20, 30, 252])
+        last = logits[-1]
+        assert int(last.argmax()) == _HEAD_LABELS[1]
+        assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
+
+        with torch.no_grad():
+            # The LoRA slot (2, in the middle) runs its LoRA row: it changes the
+            # post-control logits and leaves every row finite.
+            plain = self._run_forward_and_logits([10, 20, 30, 40])
+            adapted = self._run_forward_and_logits([10, 251, 30, 40])
+        assert torch.isfinite(adapted).all()
+        assert not torch.allclose(plain[2:], adapted[2:])
+
+
+class TestStreamHeadsOnly(_VLLMModelTestBase):
+    """Every slot a head: no LoRA layers and no kernel metadata at all."""
+
+    def _make_config(self):
+        return _tiny_vllm_config(streams=[_probe_entry(0), _probe_entry(1)])
+
+    def test_heads_only_serves_the_verdict(self):
+        self.model.eval()
+        assert self.config.lora_target_modules == []
+        assert self.model.model.lora_meta is None
+        assert not [n for n, _ in self.model.named_parameters() if "lora_" in n]
+        with torch.no_grad():
+            self.model.model.probe_head.bias[0, :2] = torch.tensor([5.0, -5.0])
+            logits = self._run_forward_and_logits([10, 20, 30, 250])
+        assert int(logits[-1].argmax()) == _HEAD_LABELS[0]
+
+
+class TestStreamPluginMerge(_VLLMModelTestBase):
+    """The example plugin type, with ``merge``: the LM row plus its scores."""
+
+    def _make_config(self):
+        import tests.shared.stream_plugins.mlp_head  # noqa: F401 (registers it)
+
+        return _tiny_vllm_config(
+            streams=[
+                {"type": "lora"},
+                {
+                    "type": "mlp_head",
+                    "head_row": 0,
+                    "output": {
+                        "mode": "merge",
+                        "token_ids": list(_HEAD_LABELS),
+                        "weight": 0.5,
+                    },
+                    "settings": {"width": 8},
+                },
+            ]
+        )
+
+    def test_merge_adds_the_head_scores(self):
+        self.model.eval()
+        module = self.model.model.stream_mlp_head
+        with torch.no_grad():
+            module.w1.normal_(0, 0.3)
+            module.w2.normal_(0, 1.0)
+            # The same prompt and marker, scored by the plugin, and a copy
+            # with the head zeroed: they may differ only on the label ids.
+            merged = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+            w1, w2 = module.w1.clone(), module.w2.clone()
+            module.w2.zero_()
+            plain = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+            module.w1.copy_(w1)
+            module.w2.copy_(w2)
+
+        others = _non_labels(self.config.vocab_size)
+        torch.testing.assert_close(merged[others], plain[others])
+        assert torch.isfinite(merged).all()
+        assert not torch.allclose(merged[_HEAD_LABELS], plain[_HEAD_LABELS])
 
 
 # ════════════════════════════════════════════════════════════════════

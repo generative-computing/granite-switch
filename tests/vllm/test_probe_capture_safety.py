@@ -14,6 +14,7 @@ pytest.importorskip("vllm")
 
 from vllm.sequence import IntermediateTensors
 
+from granite_switch.config import GraniteSwitchConfig
 from granite_switch.vllm.decoder.interface import (
     LoRADecoderInterface,
     SRDecoderInterface,
@@ -24,15 +25,49 @@ from granite_switch.vllm.granite_switch_model import (
 )
 
 
-class _StubProbeHead:
-    """Score = slot id * hidden[:, 0], so a score shows which slot and source it read."""
+class _StubProbeHead(torch.nn.Module):
+    """Score = row * hidden[:, 0], so a score shows which row and source it read.
 
-    def __call__(self, x, probe_indices):
-        return (probe_indices.to(x.dtype) * x[:, 0]).unsqueeze(-1).expand(-1, 2)
+    A pre-streams config puts each probe slot's head at row ``slot - 1``, and
+    the model passes ``1 + row``, so here the row IS the slot id.
+    """
+
+    def forward(self, x, rows):
+        return (rows.to(x.dtype) * x[:, 0]).unsqueeze(-1).expand(-1, 2)
+
+
+def _config(num_slots, read_layers=None, kinds=None):
+    """A tiny pre-streams config: per 1-based slot, its kind and read layer."""
+    kinds = kinds or ["probe"] * num_slots
+    read_layers = read_layers or [None] * num_slots
+    return GraniteSwitchConfig(
+        vocab_size=300,
+        hidden_size=4,
+        intermediate_size=8,
+        # The parent config checks its (unused) Mamba sizes against hidden_size.
+        mamba_n_heads=1,
+        mamba_d_head=8,
+        num_hidden_layers=12,  # 2 switch cache layers + 10 decoder layers
+        num_attention_heads=1,
+        num_key_value_heads=1,
+        num_adapters=num_slots,
+        adapter_token_ids=[89 + i for i in range(num_slots)],
+        adapter_substitute_token_ids=[1] * num_slots,
+        adapter_names=[f"slot{i + 1}" for i in range(num_slots)],
+        adapter_kinds=kinds,
+        probe_label_token_ids=[[100, 200] if k == "probe" else None for k in kinds],
+        probe_read_layers=[
+            layer if k == "probe" else None for k, layer in zip(kinds, read_layers)
+        ],
+        max_lora_rank=4,
+        adapter_ranks=[4] * num_slots,
+        switch_head_dim=16,
+        embedding_multiplier=1.0,
+    )
 
 
 class _Model(torch.nn.Module):
-    """Stands in for ``GraniteSwitchModel`` with the attributes its __init__ builds.
+    """Stands in for ``GraniteSwitchModel``: its real stream tables, a stub head.
 
     ``read_layers``/``kinds`` are per 1-based slot; None reads the final layer.
     """
@@ -41,45 +76,31 @@ class _Model(torch.nn.Module):
 
     def __init__(self, slot_of_marker, read_layers=None, kinds=None):
         super().__init__()
-        num_slots = max(slot_of_marker.values())
-        read_layers = read_layers or [None] * num_slots
-        is_probe = [k == "probe" for k in kinds or ["probe"] * num_slots]
-        self.config = type("Cfg", (), {"max_probe_labels": 2})()
+        self.config = _config(max(slot_of_marker.values()), read_layers, kinds)
+        GraniteSwitchModel._init_streams(self, self.config)
         self.probe_head = _StubProbeHead()
-        self.probe_slot_mask_t = torch.tensor([False, *is_probe])
-        slots_by_layer = {}
-        for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
-            if is_clf:
-                slots_by_layer.setdefault(layer, []).append(slot)
-        self._probe_final_layer_group = None
-        self._probe_layer_groups = {}
-        for layer, slot_ids in slots_by_layer.items():
-            name = f"_probe_slots_{'final' if layer is None else layer}"
-            self.register_buffer(name, torch.tensor(slot_ids))
-            if layer is None:
-                self._probe_final_layer_group = name
-            else:
-                self._probe_layer_groups[layer] = name
 
 
 def _run(model, slot_of_marker, tokens):
-    """Call ``_compute_probe_outputs`` on a flat token list; hidden[t] = t + 1."""
+    """Call ``_compute_head_outputs`` on a flat token list; hidden[t] = t + 1."""
     indices = [slot_of_marker.get(t, 0) for t in tokens]
     hidden = torch.arange(1.0, len(tokens) + 1).unsqueeze(1).expand(-1, 4)
-    return GraniteSwitchModel._compute_probe_outputs(
+    return GraniteSwitchModel._compute_head_outputs(
         model, hidden, torch.tensor(indices), torch.zeros(len(tokens), 2)
     )
 
 
 def _score(model, layer, hidden_value, indices, scores):
     hidden = torch.full((len(indices), 4), hidden_value)
+    (group,) = model._head_layer_groups[layer]
     return GraniteSwitchModel._score_group(
-        model,
-        model._probe_layer_groups[layer],
-        hidden,
-        torch.tensor(indices),
-        scores,
+        model, group, hidden, torch.tensor(indices), scores
     )
+
+
+def _final_group_slots(model):
+    (group,) = model._head_final_groups
+    return getattr(model, group[1]).tolist()
 
 
 def test_every_marker_token_gets_its_slot_and_score():
@@ -111,7 +132,7 @@ def test_no_marker_is_all_zero():
 
 def test_transferred_marker_indices_need_no_input_ids():
     model = _Model({90: 2, 91: 3})
-    scores, slot = GraniteSwitchModel._compute_probe_outputs(
+    scores, slot = GraniteSwitchModel._compute_head_outputs(
         model, torch.ones(3, 4), torch.tensor([0, 2, 0]), torch.zeros(3, 2)
     )
     assert slot.tolist() == [0, 2, 0]
@@ -121,7 +142,7 @@ def test_transferred_marker_indices_need_no_input_ids():
 def test_final_layer_scoring_leaves_intermediate_slot_scores_untouched():
     model = _Model({90: 2, 91: 3}, read_layers=[None, 1, None])
     pre_scores = torch.tensor([[0.0, 0.0], [99.0, 99.0], [0.0, 0.0]])
-    scores, slot = GraniteSwitchModel._compute_probe_outputs(
+    scores, slot = GraniteSwitchModel._compute_head_outputs(
         model,
         torch.ones(3, 4),
         torch.tensor([0, 2, 3]),
@@ -144,8 +165,8 @@ def test_each_intermediate_layer_scores_only_its_own_slots():
 
 def test_slots_sharing_a_layer_form_one_group():
     model = _Model({90: 1, 91: 2})
-    assert model._probe_layer_groups == {}
-    assert getattr(model, model._probe_final_layer_group).tolist() == [1, 2]
+    assert model._head_layer_groups == {}
+    assert _final_group_slots(model) == [1, 2]
     scores, slot = _run(model, {90: 1, 91: 2}, [90, 5, 91])
     assert slot.tolist() == [1, 0, 2]
     assert scores[0].tolist() == [1.0, 1.0]
@@ -154,8 +175,8 @@ def test_slots_sharing_a_layer_form_one_group():
 
 def test_lora_slots_form_no_group():
     model = _Model({91: 2}, kinds=["lora", "probe"])
-    assert getattr(model, model._probe_final_layer_group).tolist() == [2]
-    assert model._probe_layer_groups == {}
+    assert _final_group_slots(model) == [2]
+    assert model._head_layer_groups == {}
     _, slot = _run(model, {91: 2}, [5, 91, 6])
     assert slot.tolist() == [0, 2, 0]
 
@@ -165,10 +186,10 @@ def test_profiling_random_slot_on_a_lora_slot_leaves_logits_untouched():
     wrapper = GraniteSwitchForCausalLM.__new__(GraniteSwitchForCausalLM)
     torch.nn.Module.__init__(wrapper)
     wrapper.model = _Model({91: 2}, kinds=["lora", "probe"])
-    wrapper.config = type("Cfg", (), {"probe_label_token_ids": [None, [100, 200]]})()
+    wrapper.config = wrapper.model.config
     logits = torch.randn(1, 300)
     expected = logits.clone()
-    out = GraniteSwitchForCausalLM._apply_probe_verdict(
+    out = GraniteSwitchForCausalLM._apply_head_scores(
         wrapper, logits, torch.randn(1, 2), torch.tensor([0.75])
     )
     assert torch.equal(out, expected)
@@ -182,7 +203,7 @@ def test_scoring_resolves_replaced_registered_buffers():
     for tensor in old_buffers:
         tensor.zero_()
     scores = _score(model, 0, 3.0, [1, 2], torch.zeros(2, 2))
-    scores, slots = GraniteSwitchModel._compute_probe_outputs(
+    scores, slots = GraniteSwitchModel._compute_head_outputs(
         model,
         torch.full((2, 4), 5.0),
         torch.tensor([1, 2]),
@@ -239,17 +260,14 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
         read_layers=[None, 0, stages - 1, None],
         kinds=["lora", "probe", "probe", "probe"],
     )
-    model.config.hidden_size = 4
-    model.config.embedding_multiplier = 1.0
-    model.config.fused_add_norm = False
     model.switch = Switch()
     model.adapter_token_ids = torch.tensor([89, 90, 91, 92])
-    model.probe_control_token_ids_t = torch.tensor([90, 91, 92])
+    assert model.head_control_token_ids_t.tolist() == [90, 91, 92]
     model.lora_meta = model.lora_ctx = None
     model.decoder_interface = SRDecoderInterface() if sr else LoRADecoderInterface()
     model.layers = torch.nn.ModuleList([Layer() for _ in range(stages)])
     model.norm = torch.nn.Identity()
-    model._compute_probe_outputs = GraniteSwitchModel._compute_probe_outputs.__get__(
+    model._compute_head_outputs = GraniteSwitchModel._compute_head_outputs.__get__(
         model
     )
     model.start_layer, model.end_layer = 0, 1
@@ -265,8 +283,8 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
         inputs_embeds=torch.ones(5, 4, dtype=dtype),
     )[1:]
     assert isinstance(wire, IntermediateTensors)
-    assert wire["probe_indices"].tolist() == [2, 3, 4, 0]
-    assert wire["probe_scores"][:, 0].tolist() == [4, 0, 0, 0]
+    assert wire["head_indices"].tolist() == [2, 3, 4, 0]
+    assert wire["head_scores"][:, 0].tolist() == [4, 0, 0, 0]
     buffers = GraniteSwitchModel.make_empty_intermediate_tensors(
         model, 4, dtype, torch.device("cpu")
     )
@@ -284,7 +302,7 @@ def test_pipeline_handoff_without_later_token_ids(monkeypatch, sr, stages, dtype
             model, None, torch.arange(4), intermediate_tensors=buffers
         )
         if not group.is_last_rank:
-            assert torch.equal(packed["probe_scores"], wire["probe_scores"])
+            assert torch.equal(packed["head_scores"], wire["head_scores"])
             for key, tensor in packed.items():
                 buffers[key].copy_(tensor)
     assert packed[:, -1].tolist() == [2, 3, 4, 0]

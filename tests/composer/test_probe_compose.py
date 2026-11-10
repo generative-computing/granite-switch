@@ -305,7 +305,7 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     with torch.no_grad():
         out = model(input_ids=lora_ids, use_cache=False)
     assert model.model._last_lora_indices[0, -1].item() == 1
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits[0, -1]).all()
 
 

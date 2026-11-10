@@ -15,20 +15,21 @@ import torch
 
 
 def build_adapter_kind_lut(config) -> torch.Tensor | None:
-    """Bool LUT over adapter indices marking which slots are probes.
+    """Bool LUT over adapter indices marking which slots are head streams.
 
     ``[num_adapters + 1]``, indexed by ADAPTER INDEX: entry ``i`` is True when
-    adapter index ``i`` is a probe slot (index 0, base, is always False).
-    ``None`` when no slot is a probe, which lets the switch skip the split
-    entirely. Built from ``config.adapter_kinds``, so both backends' switches
-    agree on the table by construction.
+    adapter index ``i`` is a head slot -- any stream type other than ``lora``
+    (a probe, or a registered head type; see :mod:`granite_switch.streams`).
+    Index 0, base, is always False. ``None`` when no slot is a head, which lets
+    the switch skip the split entirely. Built from ``config.adapter_kinds``, so
+    both backends' switches agree on the table by construction.
     """
     kinds = getattr(config, "adapter_kinds", None) if config is not None else None
-    if kinds is None or not any(k == "probe" for k in kinds):
+    if kinds is None or not any(k != "lora" for k in kinds):
         return None
     lut = torch.zeros(len(kinds) + 1, dtype=torch.bool)
     for slot, kind in enumerate(kinds):  # slot is the 0-based adapter position
-        if kind == "probe":
+        if kind != "lora":
             lut[slot + 1] = True  # adapter index is slot + 1
     return lut
 

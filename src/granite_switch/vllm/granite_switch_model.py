@@ -45,6 +45,8 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from granite_switch.config import GraniteSwitchConfig
+from granite_switch.streams import routing as stream_routing
+from granite_switch.streams.outputs import apply_head_scores
 from granite_switch.token_exchange import apply_token_exchange
 
 from .audio.processor import (
@@ -158,9 +160,16 @@ class GraniteSwitchModel(nn.Module):
             # Fused kernel metadata (bitmask-based). The strategy builds the
             # adaptation's (kernel-meta, ctx) pair: LoRA -> (FusedLoRAKernelMeta,
             # LoRAContext); SR -> (SRFusedLoRAKernelMeta, SRLoRAContext).
-            self.lora_meta, self.lora_ctx = self.decoder_interface.make_kernel_meta(
-                vllm_config.device_config.device,
-            )
+            # A checkpoint whose slots are all heads has no LoRA rows and so no
+            # LoRA layers: it runs the plain base projections, with no kernel
+            # metadata to build.
+            if config.num_lora_rows > 0:
+                self.lora_meta, self.lora_ctx = self.decoder_interface.make_kernel_meta(
+                    vllm_config.device_config.device,
+                )
+            else:
+                self.lora_meta = None
+                self.lora_ctx = None
 
         else:
             self.switch = None
@@ -168,64 +177,19 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
-        # Probe heads: optional alternative for LoRA adapters. A probe
-        # slot shares the adapter index/token machinery, but its index is tagged
-        # as "probe" (via the switch's adapter_kind_lut). The switch's
-        # split_indices() routes those positions out of the LoRA stream (so LoRA
-        # no-ops there) and into a probe stream. The head scores each slot
-        # at its read layer (the final post-norm state by default).
-        if "probe" in getattr(config, "adapter_kinds", []):
-            from .core import SwitchedProbeHead
-
-            self.probe_head = SwitchedProbeHead(
-                hidden_size=config.hidden_size,
-                num_probe_slots=config.num_adapters,
-                max_num_labels=config.max_probe_labels,
-            )
-
-            # Packed verdicts assume the ordinary sampler's row selection.
+        # Streams (granite_switch.streams): the routing tables forward reads and
+        # one module per head type. A head slot shares the adapter index/token
+        # machinery; the switch's split_indices() routes its positions out of
+        # the LoRA stream (so LoRA no-ops there) and into the head stream. Each
+        # head scores its slots at their read layer (the final post-norm state
+        # by default).
+        self._init_streams(config)
+        if self._head_types:
+            # Packed scores assume the ordinary sampler's row selection.
             if vllm_config.speculative_config is not None:
-                raise ValueError("Probe slots do not support speculative decoding.")
+                raise ValueError("Head streams do not support speculative decoding.")
             if vllm_config.parallel_config.use_ubatching:
-                raise ValueError("Probe slots do not support microbatching.")
-
-            # Built once: copying a list to CUDA inside forward breaks capture.
-            self.register_buffer(
-                "probe_control_token_ids_t",
-                torch.tensor(config.probe_control_token_ids, dtype=torch.long),
-                persistent=False,
-            )
-
-            is_probe = [kind == "probe" for kind in config.adapter_kinds]
-            # Index 0 is a sentinel so a 1-based slot id indexes it directly.
-            self.register_buffer(
-                "probe_slot_mask_t",
-                torch.tensor([False, *is_probe]),
-                persistent=False,
-            )
-
-            # One buffer of slot ids per read layer (None = final). Store buffer
-            # names, not tensors: Module.to() replaces registered buffers.
-            read_layers = config.probe_read_layers or [None] * num_adapters
-            slots_by_layer: dict[int | None, list[int]] = {}
-            for slot, (is_clf, layer) in enumerate(zip(is_probe, read_layers), start=1):
-                if is_clf:
-                    slots_by_layer.setdefault(layer, []).append(slot)
-            self._probe_final_layer_group = None
-            self._probe_layer_groups: dict[int, str] = {}
-            for layer, slot_ids in slots_by_layer.items():
-                name = f"_probe_slots_{'final' if layer is None else layer}"
-                self.register_buffer(
-                    name, torch.tensor(slot_ids, dtype=torch.long), persistent=False
-                )
-                if layer is None:
-                    self._probe_final_layer_group = name
-                else:
-                    self._probe_layer_groups[layer] = name
-        else:
-            self.probe_head = None
-            self._probe_final_layer_group = None
-            self._probe_layer_groups = {}
+                raise ValueError("Head streams do not support microbatching.")
 
         # 3. Base transformer layers with custom LoRA
         #
@@ -268,6 +232,72 @@ class GraniteSwitchModel(nn.Module):
         # 4. RMS Layer norm
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
+    def _init_streams(self, config) -> None:
+        """Build the stream routing tables forward reads, and the head modules.
+
+        One module per head type, each holding every slot of that type. Every
+        table is a buffer built once from ``config.streams``: forward never asks
+        which type it runs, and copying a list to CUDA inside forward would
+        break graph capture.
+        """
+        if config.num_adapters > 0:
+            # Slot -> 1 + LoRA row (0 = no LoRA): a streams checkpoint keeps
+            # LoRA rows for adapter slots only.
+            self.register_buffer(
+                "lora_row_lut_t", stream_routing.lora_row_lut(config), persistent=False
+            )
+        heads = stream_routing.build_head_modules(config, "vllm")
+        self._head_types = list(heads)
+        for name, module in heads.items():
+            setattr(self, stream_routing.module_attr(name), module)
+        # The built-in probe keeps its attribute even when absent, as before.
+        if "probe" not in heads:
+            self.probe_head = None
+        self._head_layer_groups: dict[int, list[tuple[str, str, str]]] = {}
+        self._head_final_groups: list[tuple[str, str, str]] = []
+        self._head_width = stream_routing.max_head_outputs(config)
+        self._head_outputs = stream_routing.head_outputs(config)
+        if not heads:
+            return
+
+        self.register_buffer(
+            "head_control_token_ids_t",
+            torch.tensor(
+                stream_routing.head_control_token_ids(config), dtype=torch.long
+            ),
+            persistent=False,
+        )
+        # Index 0 is a sentinel so a 1-based slot id indexes it directly.
+        self.register_buffer(
+            "head_slot_mask_t", stream_routing.head_slot_mask(config), persistent=False
+        )
+
+        # Per read layer (None = final), per head type: the type's slot ids and
+        # its slot -> 1 + row table. Store buffer names, not tensors:
+        # Module.to() replaces registered buffers.
+        for layer, types in stream_routing.read_groups(config).items():
+            for name, slot_ids in types.items():
+                tag = f"{'final' if layer is None else layer}_{name}"
+                self.register_buffer(
+                    f"_head_slots_{tag}",
+                    torch.tensor(slot_ids, dtype=torch.long),
+                    persistent=False,
+                )
+                self.register_buffer(
+                    f"_head_rows_{tag}",
+                    stream_routing.row_lut(config, name),
+                    persistent=False,
+                )
+                group = (
+                    stream_routing.module_attr(name),
+                    f"_head_slots_{tag}",
+                    f"_head_rows_{tag}",
+                )
+                if layer is None:
+                    self._head_final_groups.append(group)
+                else:
+                    self._head_layer_groups.setdefault(layer, []).append(group)
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -305,12 +335,12 @@ class GraniteSwitchModel(nn.Module):
                 device=device,
             ),
         }
-        if self.probe_head is not None:
-            tensors["probe_indices"] = torch.zeros(
+        if self._head_types:
+            tensors["head_indices"] = torch.zeros(
                 batch_size, dtype=torch.long, device=device
             )
-            tensors["probe_scores"] = torch.zeros(
-                (batch_size, self.config.max_probe_labels),
+            tensors["head_scores"] = torch.zeros(
+                (batch_size, self._head_width),
                 dtype=dtype,
                 device=device,
             )
@@ -390,24 +420,30 @@ class GraniteSwitchModel(nn.Module):
             adapter_indices = intermediate_tensors["adapter_indices"]
 
         # Split the single adapter_indices stream into a LoRA stream and a
-        # probe stream. Probe positions are zeroed in lora_indices (so
-        # the LoRA path no-ops there).
+        # head stream. Head positions are zeroed in lora_indices (so the LoRA
+        # path no-ops there).
         if self.switch is not None:
-            lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+            lora_indices, head_indices = self.switch.split_indices(adapter_indices)
+            # The LoRA tensors are indexed by row, not by slot: a streams
+            # checkpoint keeps rows for adapter slots only. Everything
+            # downstream (kernel metadata, layer reads, the SR merge) only tells
+            # "no LoRA" (0) from "a LoRA" (> 0) apart from the kernel's own
+            # remap, so it runs on rows from here on.
+            lora_indices = self.lora_row_lut_t[lora_indices]
         else:
             lora_indices = adapter_indices
-            probe_indices = torch.zeros_like(adapter_indices)
+            head_indices = torch.zeros_like(adapter_indices)
 
         # The verdict is read only at the marker itself, not at tokens that
         # inherit its slot afterwards. Later PP ranks have no input ids, so they
         # receive the marker-only indices from the first rank.
-        if self.probe_head is not None:
+        if self._head_types:
             if not get_pp_group().is_first_rank:
-                probe_indices = intermediate_tensors["probe_indices"]
+                head_indices = intermediate_tensors["head_indices"]
             elif input_ids is not None:
-                is_marker = torch.isin(input_ids, self.probe_control_token_ids_t)
-                probe_indices = torch.where(
-                    is_marker, probe_indices, torch.zeros_like(probe_indices)
+                is_marker = torch.isin(input_ids, self.head_control_token_ids_t)
+                head_indices = torch.where(
+                    is_marker, head_indices, torch.zeros_like(head_indices)
                 )
 
         # Rebuild this rank's fixed-size kernel metadata from token-leading
@@ -445,27 +481,26 @@ class GraniteSwitchModel(nn.Module):
         # per-forward metadata (kernel meta + hiding masks) is on the shared ctx.
         # Probe slots reading an intermediate layer are scored as soon as
         # that layer runs; only the small score tensor is carried forward.
-        if self.probe_head is not None:
+        if self._head_types:
             if get_pp_group().is_first_rank:
-                probe_scores = torch.zeros(
-                    probe_indices.shape[0],
-                    self.config.max_probe_labels,
-                    device=probe_indices.device,
+                head_scores = torch.zeros(
+                    head_indices.shape[0],
+                    self._head_width,
+                    device=head_indices.device,
                     dtype=hidden_states.dtype,
                 )
             else:
-                probe_scores = intermediate_tensors["probe_scores"]
+                head_scores = intermediate_tensors["head_scores"]
         state = self.decoder_interface.enter_decoder_stack(hidden_states, residual)
         for i in range(self.start_layer, self.end_layer):
             state = self.decoder_interface.run_layer(self.layers[i], positions, state)
-            group = self._probe_layer_groups.get(i)
-            if group is not None:
-                probe_scores = self._score_group(
-                    group,
-                    self.decoder_interface.layer_output(state, lora_indices),
-                    probe_indices,
-                    probe_scores,
-                )
+            groups = self._head_layer_groups.get(i)
+            if groups:
+                layer_out = self.decoder_interface.layer_output(state, lora_indices)
+                for group in groups:
+                    head_scores = self._score_group(
+                        group, layer_out, head_indices, head_scores
+                    )
 
         if get_pp_group().is_last_rank:
             # Adaptation-specific finalize: LoRA folds the last residual via
@@ -479,12 +514,12 @@ class GraniteSwitchModel(nn.Module):
 
             # Pack scores and slot ids onto the hidden states so vLLM's own
             # logits_indices gather selects them; compute_logits unpacks them.
-            if self.probe_head is not None:
-                probe_scores, probe_slot = self._compute_probe_outputs(
-                    hidden_states, probe_indices, probe_scores
+            if self._head_types:
+                head_scores, head_slot = self._compute_head_outputs(
+                    hidden_states, head_indices, head_scores
                 )
                 hidden_states = torch.cat(
-                    [hidden_states, probe_scores, probe_slot.unsqueeze(-1)],
+                    [hidden_states, head_scores, head_slot.unsqueeze(-1)],
                     dim=-1,
                 )
 
@@ -499,46 +534,55 @@ class GraniteSwitchModel(nn.Module):
             intermediate_tensors["hidden_states"] = h_out
             intermediate_tensors["residual"] = r_out
             intermediate_tensors["adapter_indices"] = adapter_indices
-            if self.probe_head is not None:
-                intermediate_tensors["probe_indices"] = probe_indices
-                intermediate_tensors["probe_scores"] = probe_scores
+            if self._head_types:
+                intermediate_tensors["head_indices"] = head_indices
+                intermediate_tensors["head_scores"] = head_scores
             return intermediate_tensors
 
     def _score_group(
         self,
-        group: str,
+        group: tuple[str, str, str],
         hidden: torch.Tensor,
-        probe_indices: torch.Tensor,
-        probe_scores: torch.Tensor,
+        head_indices: torch.Tensor,
+        head_scores: torch.Tensor,
     ) -> torch.Tensor:
-        """Write the scores of the slots in buffer ``group``, read from ``hidden``."""
-        in_group = torch.isin(probe_indices, getattr(self, group))
-        slot_logits = self.probe_head(hidden, probe_indices)
-        return torch.where(in_group.unsqueeze(-1), slot_logits, probe_scores)
+        """Write one (head type, read layer) group's scores, read from ``hidden``.
 
-    def _compute_probe_outputs(
+        ``group`` names the type's module and two buffers: the group's slot ids
+        and the type's slot -> 1 + row table. The module runs on every token,
+        branch-free (CUDA-graph safe); tokens outside the group keep their
+        scores.
+        """
+        module_name, slots_name, rows_name = group
+        in_group = torch.isin(head_indices, getattr(self, slots_name))
+        rows = getattr(self, rows_name)[head_indices]
+        scores = getattr(self, module_name)(hidden, rows)
+        if scores.shape[-1] < head_scores.shape[-1]:
+            scores = torch.nn.functional.pad(
+                scores, (0, head_scores.shape[-1] - scores.shape[-1])
+            )
+        return torch.where(in_group.unsqueeze(-1), scores, head_scores)
+
+    def _compute_head_outputs(
         self,
         final_hidden_states: torch.Tensor,
-        probe_indices: torch.Tensor,
-        probe_scores: torch.Tensor,
+        head_indices: torch.Tensor,
+        head_scores: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Add final-layer scores and return per-token (scores, slot ids).
 
-        ``probe_indices`` is nonzero only at this forward's marker tokens,
+        ``head_indices`` is nonzero only at this forward's marker tokens,
         computed on the first PP rank and passed unchanged between stages.
-        Callers must place one probe marker last in each request;
-        misplaced or duplicate markers are not rejected (request-boundary
-        validation is deferred).
+        Callers must place one head marker last in each request; misplaced or
+        duplicate markers are not rejected (request-boundary validation is
+        deferred).
         """
-        probe_slot = probe_indices.to(final_hidden_states.dtype)
-        if self._probe_final_layer_group is not None:
-            probe_scores = self._score_group(
-                self._probe_final_layer_group,
-                final_hidden_states,
-                probe_indices,
-                probe_scores,
+        head_slot = head_indices.to(final_hidden_states.dtype)
+        for group in self._head_final_groups:
+            head_scores = self._score_group(
+                group, final_hidden_states, head_indices, head_scores
             )
-        return probe_scores, probe_slot
+        return head_scores, head_slot
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -723,7 +767,7 @@ class GraniteSwitchForCausalLM(
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
-        """Forward pass returning hidden states (probe columns packed on)."""
+        """Forward pass returning hidden states (head-score columns packed on)."""
         return self.model(
             input_ids=input_ids,
             positions=positions,
@@ -746,15 +790,13 @@ class GraniteSwitchForCausalLM(
         have to act where adapter_indices and hidden_states still share the
         same token dimension.
 
-        Probe exit: the probe request reports its verdict as a
-        generated token, like a guardian LoRA. With a probe head the
-        hidden states carry packed (scores, slot id) columns; split them off,
-        run the LM head on the real hidden state, then rewrite each probe
-        row: the whole vocab to -inf and the per-label scores onto the label
-        words' token ids (``probe_label_token_ids``). Other rows keep
-        their LM logits.
+        Head-stream exit: with head streams the hidden states carry packed
+        (scores, slot id) columns; split them off, run the LM head on the
+        real hidden state, then write each head marker's scores into its row
+        by its stream's output mode (select / merge, granite_switch.streams).
+        Other rows keep their LM logits.
         """
-        if self.model.probe_head is not None:
+        if self.model._head_types:
             hidden_size = self.config.hidden_size
             real_hidden = hidden_states[:, :hidden_size]
             verdict = hidden_states[:, hidden_size:-1]
@@ -763,43 +805,40 @@ class GraniteSwitchForCausalLM(
             real_hidden = hidden_states
             verdict = slot = None
         logits = self.logits_processor(self.lm_head, real_hidden)
-        return self._apply_probe_verdict(logits, verdict, slot)
+        return self._apply_head_scores(logits, verdict, slot)
 
-    def _apply_probe_verdict(
+    def _apply_head_scores(
         self,
         logits: torch.Tensor | None,
-        verdict: torch.Tensor | None,
+        scores: torch.Tensor | None,
         slot: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        """Rewrite probe requests' logit rows to emit their label word.
+        """Write head markers' scores into their logits rows.
 
-        Rows are classified by the slot mask, not just ``slot > 0``: vLLM's
+        Rows are classified by the head-slot mask, not just ``slot > 0``: vLLM's
         profiling sampler run feeds random hidden states, so the packed slot
-        column can land on a LoRA slot, which has no label ids.
+        column can land on a LoRA slot, which has no head output.
         """
-        if logits is None or verdict is None or slot is None:
+        if logits is None or scores is None or slot is None:
             return logits
 
-        slot_mask = self.model.probe_slot_mask_t
+        slot_mask = self.model.head_slot_mask_t
         num_slots = slot_mask.shape[0] - 1
         slot_int = slot.round().long()
         # Out-of-range values land on the sentinel row 0.
         safe_idx = slot_int.clamp(min=0, max=num_slots)
-        is_probe = (slot_int == safe_idx) & slot_mask[safe_idx]
-        if not bool(is_probe.any()):
+        is_head = (slot_int == safe_idx) & slot_mask[safe_idx]
+        if not bool(is_head.any()):
             return logits
 
-        # Each row writes only its own slot's real label count; padded
-        # columns are never read.
-        per_slot_label_ids = self.config.probe_label_token_ids
-        rows = is_probe.nonzero(as_tuple=True)[0]
-        logits[rows] = float("-inf")
-        for r in rows.tolist():
-            row_slot = int(slot_int[r])
-            ids = per_slot_label_ids[row_slot - 1]
-            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
-            logits[r, label_ids] = verdict[r, : len(ids)].to(logits.dtype)
-        return logits
+        rows = is_head.nonzero(as_tuple=True)[0]
+        return apply_head_scores(
+            logits,
+            rows,
+            slot_int[rows],
+            scores[rows],
+            self.model._head_outputs,
+        )
 
     def sample(
         self,

@@ -573,12 +573,15 @@ class TestManifestProbeMetadata:
 
         # The adapter tuples are unchanged (still 4-wide).
         assert {(n) for _, n, _, _ in found} == {"rag", "hallucination"}
-        # Only the probe entry appears in the metadata dict.
+        # Only the probe entry appears in the metadata dict, with every head
+        # stream key (unset ones as None).
         assert probe_meta == {
             "hallucination": {
                 "kind": "probe",
                 "labels": ["faithful", "hallucinated"],
                 "layer": None,
+                "output": None,
+                "settings": None,
             }
         }
 
