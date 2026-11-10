@@ -487,7 +487,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         cache = self.__dict__.setdefault("_stream_luts", {})
         key = (name, args, device)
         if key not in cache:
-            cache[key] = getattr(stream_routing, name)(self.config, *args).to(device)
+            table = getattr(stream_routing, name)(self.config, *args)
+            # A table is one tensor, or a dict of them (the output tables).
+            if isinstance(table, dict):
+                table = {k: t.to(device) for k, t in table.items()}
+            else:
+                table = table.to(device)
+            cache[key] = table
         return cache[key]
 
     def _locate_head_markers(self, input_ids, head_indices, attention_mask):
@@ -926,11 +932,9 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
                 "A head-stream marker's logits were not kept (logits_to_keep)."
             )
         flat = logits.view(-1, logits.shape[-1])
-        apply_head_scores(
-            flat,
-            rows * logits.shape[1] + cols,
-            slots,
-            scores,
-            stream_routing.head_outputs(self.config),
+        index = rows * logits.shape[1] + cols
+        tables = self.model._row_lut_cached("head_outputs", logits.device)
+        flat[index] = apply_head_scores(
+            flat[index], slots.to(torch.long), scores, tables
         )
         return logits

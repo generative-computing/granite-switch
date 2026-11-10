@@ -33,8 +33,8 @@ class SwitchedProbeHead(nn.Module):
             (0-based) serves adapter index ``s + 1``. Slots that are not
             probes simply never get selected.
         max_num_labels: Padded label width of the bank (``max`` over the per-slot
-            label counts). Keeping this uniform is what lets the per-token logits
-            be one fused ``einsum``. Slots with fewer labels leave their extra
+            label counts). Keeping this uniform is what lets every slot's head
+            run as one matmul. Slots with fewer labels leave their extra
             rows zero. The verdict exit slices each slot back to its real label
             count.
     """
@@ -83,13 +83,26 @@ class SwitchedProbeHead(nn.Module):
         is_probe = probe_indices > 0  # [total_tokens]
         slot = (probe_indices - 1).clamp_min(0)  # [total_tokens]; base -> row 0
 
-        w_per_token = self.weight[slot]  # [total_tokens, num_labels, hidden]
-        b_per_token = self.bias[slot]  # [total_tokens, num_labels]
-
-        # Per-token linear, batched over tokens as one fused einsum.
-        logits = torch.einsum("tlh,th->tl", w_per_token, x)
-        logits = logits + b_per_token
+        # Every slot's head on every token as one matmul ([T, H] x [H, S*L]),
+        # then each token keeps its own slot's L scores. The bank is a few
+        # labels per slot, so this costs no more than one head per token and,
+        # unlike gathering a weight copy per token ([T, L, H]), allocates
+        # nothing that grows with the hidden size.
+        #
+        # The matmul reads the activation as served and sums in fp32
+        # (out_dtype); the bias is added in fp32 and each score is rounded
+        # once. A bf16-output matmul rounds inside the reduction, and
+        # upcasting the activation first would let the compiler fuse the
+        # final norm into the head and skip the activation's own bf16
+        # rounding, so a compiled head would score a different input than
+        # the one it serves.
+        num_slots, num_labels, hidden = self.weight.shape
+        weight = self.weight.reshape(num_slots * num_labels, hidden)
+        all_scores = torch.mm(x, weight.t(), out_dtype=torch.float32)
+        all_scores = all_scores.view(-1, num_slots, num_labels)
+        index = slot.view(-1, 1, 1).expand(-1, 1, num_labels)
+        logits = all_scores.gather(1, index).squeeze(1) + self.bias[slot].float()
 
         # Zero out base positions.
         logits = logits * is_probe.unsqueeze(-1).to(logits.dtype)
-        return logits
+        return logits.to(x.dtype)

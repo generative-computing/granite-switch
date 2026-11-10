@@ -8,7 +8,8 @@ once at load time:
 * ``row_lut`` -- per slot index, ``1 + head_row`` in that slot's type bank, or 0
   (a LoRA slot, or base); the head modules take these "row + 1" indices, with
   0 meaning "not this type's marker";
-* ``outputs`` -- per head slot, its output mode, token ids and merge weight;
+* ``outputs`` -- per slot, its output mode, token ids and merge weight, as
+  tables a row gathers from;
 * the read groups -- per read layer, the head types that read it, and which
   slots of each.
 
@@ -17,6 +18,7 @@ Nothing here depends on a particular head type.
 
 import torch
 
+from .outputs import output_tables
 from .registry import get_head_type
 from .spec import stream_specs
 
@@ -104,12 +106,8 @@ def head_slot_mask(config) -> torch.Tensor:
 
 
 def head_outputs(config) -> dict:
-    """``{slot: (mode, token_ids LongTensor, weight)}`` for every head slot."""
-    return {
-        s.slot: (s.mode, torch.tensor(s.token_ids, dtype=torch.long), s.weight)
-        for s in stream_specs(config)
-        if s.is_head
-    }
+    """The head slots' output tables (:func:`~.outputs.output_tables`)."""
+    return output_tables(stream_specs(config), config.num_adapters)
 
 
 def max_head_outputs(config) -> int:
