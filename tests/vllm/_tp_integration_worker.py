@@ -127,15 +127,15 @@ def _install():
 
                         rank = get_tensor_model_parallel_rank()
                     if rank == 0 and getattr(base, "weight", None) is not None:
-                        with torch.no_grad():
-                            base.weight.neg_()
-                        # A SwitchedLoRALinear has already fused the base weight
-                        # into w_ext at finalize; corrupt that copy as well.
+                        # Negate exactly ONCE. After finalize_weights a
+                        # SwitchedLoRALinear's base_layer.weight is a VIEW of
+                        # w_ext[:N_total] (forward reads w_ext), so negating both
+                        # would cancel out and leave the weights untouched.
                         w_ext = getattr(mod, "w_ext", None)
                         n = getattr(mod, "_N_total", None)
-                        if w_ext is not None and n is not None:
-                            with torch.no_grad():
-                                w_ext[:n].neg_()
+                        target = w_ext[:n] if w_ext is not None and n is not None else base.weight
+                        with torch.no_grad():
+                            target.neg_()
                         hit += 1
             print(f"GS_TP_FAULT {_FAULT}: applied to {hit} module(s)", flush=True)
             return loaded
@@ -382,26 +382,28 @@ def cmd_run(args):
             }
         )
 
+    # One chat prompt per adapter. The composed chat template gates control-token
+    # injection on ``adapter_name`` (composer/tokenizer_setup.py::
+    # configure_chat_template emits "{%- if adapter_name is defined and
+    # adapter_name in adapter_map %}"). This call previously passed
+    # ``intrinsic_name``; Jinja silently treats an unknown kwarg as not-defined,
+    # so no control token was ever injected and the chat arm of the TP comparison
+    # agreed vacuously -- two servers both running plain base. Guard it rather
+    # than trust the key.
     if args.intrinsic_name:
-        # The composed chat template gates control-token injection on
-        # ``adapter_name`` (composer/tokenizer_setup.py::configure_chat_template
-        # emits "{%- if adapter_name is defined and adapter_name in adapter_map %}").
-        # This call previously passed ``intrinsic_name``; Jinja silently treats an
-        # unknown kwarg as not-defined, so no control token was ever injected and
-        # the chat arm of the TP comparison agreed vacuously -- two servers both
-        # running plain base. Guard it rather than trust the key.
         tok = AutoTokenizer.from_pretrained(model_path)
+    for name in args.intrinsic_name or []:
         rendered = tok.apply_chat_template(
             CHAT_MESSAGES,
             tokenize=False,
             add_generation_prompt=True,
-            adapter_name=args.intrinsic_name,
+            adapter_name=name,
         )
-        expected_token = f"<|{args.intrinsic_name}|>"
+        expected_token = f"<|{name}|>"
         if expected_token not in rendered:
             print(
                 f"RUN_FAIL: chat template did not inject {expected_token} for "
-                f"adapter_name={args.intrinsic_name!r}; the chat arm would compare "
+                f"adapter_name={name!r}; the chat arm would compare "
                 f"two base-only runs and agree vacuously. Rendered: {rendered[:300]!r}",
                 file=sys.stderr,
             )
@@ -409,7 +411,7 @@ def cmd_run(args):
         chat_outputs = llm.chat(
             CHAT_MESSAGES,
             sampling_params=sampling,
-            chat_template_kwargs={"adapter_name": args.intrinsic_name},
+            chat_template_kwargs={"adapter_name": name},
         )
         for o in chat_outputs:
             completion = o.outputs[0]
@@ -452,8 +454,9 @@ def main():
     p_run.add_argument("--output-path", required=True)
     p_run.add_argument(
         "--intrinsic-name",
+        action="append",
         default=None,
-        help="If set, adds a chat-template prompt activating this adapter",
+        help="Adds a chat-template prompt activating this adapter; repeatable",
     )
     p_run.add_argument(
         "--token-prompts",

@@ -171,8 +171,9 @@ def _build_and_run(
     tp2_out = os.path.join(work_dir, "tp2.json")
 
     run_extra = []
-    if intrinsic_name:
-        run_extra = ["--intrinsic-name", intrinsic_name]
+    names = [intrinsic_name] if isinstance(intrinsic_name, str) else intrinsic_name
+    for name in names or []:
+        run_extra = [*run_extra, "--intrinsic-name", name]
     if token_prompts:
         run_extra = [*run_extra, "--token-prompts"]
 
@@ -231,7 +232,7 @@ class TestTPRealAdapters:
             str(tmp_path),
             build_args=_rag_build_args(source),
             label=f"granite-4.0-micro-rag-{source}",
-            intrinsic_name="answerability",
+            intrinsic_name=_ADAPTER_PROMPTS,
         )
 
 
@@ -244,6 +245,13 @@ _RAG_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 #: (8 query / 4 KV heads) so each rank holds several KV heads, which is where GQA
 #: sharding bugs show; the default geometry leaves each rank one.
 _FAKE_KW = {"preset": LIVE_LAYERS, "dims": TP_DIMS}
+
+#: One chat prompt per adapter, chosen so the adapter path is sharded in BOTH
+#: directions. answerability adapts only q/k/v (column-parallel: LoRA-B is split
+#: by output rows). hallucination_detection also adapts o_proj (row-parallel:
+#: LoRA-A is split by input columns). With answerability alone a wrong LoRA-A
+#: shard went undetected, because no prompt ever reached a row-parallel LoRA.
+_ADAPTER_PROMPTS = ["answerability", "hallucination_detection"]
 
 
 def _rag_build_args(source):
@@ -305,7 +313,7 @@ class TestTPDetectsShardingBugs:
             str(tmp_path),
             build_args=_rag_build_args("fake"),
             label=label,
-            intrinsic_name="answerability",
+            intrinsic_name=_ADAPTER_PROMPTS,
             fault=fault,
         )
         failures = _comparison_fails(label, records_tp1, records_tp2)
