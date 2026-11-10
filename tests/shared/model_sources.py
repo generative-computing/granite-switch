@@ -18,6 +18,8 @@ captured; the real run proves the captures still match what is published.
 
 from __future__ import annotations
 
+import atexit
+import shutil
 import tempfile
 from functools import cache
 from pathlib import Path
@@ -39,8 +41,22 @@ FAKE = "fake"
 REAL = "real"
 SOURCES = (FAKE, REAL)
 
-#: A session-wide build directory, shared across tests and xdist-safe per process.
-_ROOT = Path(tempfile.mkdtemp(prefix="gs-fake-models-"))
+
+@cache
+def _root() -> Path:
+    """This process's build directory for fake models, removed when it exits.
+
+    Created on first use, not at import, so importing this module has no side
+    effects. One per process: each xdist worker gets its own. Removed by atexit
+    rather than a session fixture, because the paths built here are also read
+    outside pytest's lifetime (the compose CLI and the vLLM/test workers run as
+    subprocesses). Safe because only the process that builds a fake owns it:
+    workers receive paths from their parent, which outlives them, and never
+    build fakes themselves.
+    """
+    root = Path(tempfile.mkdtemp(prefix="gs-fake-models-"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+    return root
 
 
 def sources(*, real_marks=()):
@@ -83,7 +99,7 @@ def _fake_base(name: str, preset: WeightPreset, dims: tuple) -> str:
     # The directory is named after the model, as a Hub id's last component is:
     # the composer derives --target-model from it, which picks the base flavour
     # inside an adapter library. So the preset and shape go in the parent.
-    dest = _ROOT / "bases" / _preset_tag(preset, dims) / name
+    dest = _root() / "bases" / _preset_tag(preset, dims) / name
     return str(build_fake_base(name, dest, preset=preset, dims=dict(dims)))
 
 
@@ -97,7 +113,7 @@ def _fake_library(
 ) -> str:
     tag = "-".join(include) if include else "all"
     dest = (
-        _ROOT
+        _root()
         / "libraries"
         / _preset_tag(preset, dims)
         / base_name
