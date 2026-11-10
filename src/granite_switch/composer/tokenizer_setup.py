@@ -1360,6 +1360,7 @@ def resolve_label_token_ids(tokenizer, label_names: list[str]) -> list[int]:
 def configure_chat_template(
     tokenizer,
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
+    head_adapters: dict[str, str] | None = None,
 ):
     """Inject adapter control token mappings into a Granite chat template.
 
@@ -1390,9 +1391,21 @@ def configure_chat_template(
     (``namespace()``, ``add_generation_prompt``, etc.).  The caller is
     responsible for gating invocation to Granite models only.
 
+    A head slot that runs on an adapter (``head_adapters``, from its stream
+    entry's ``adapter``) reads that adapter's state at its marker, the last
+    token. The marker runs the adapter there. When the adapter would also run
+    on earlier tokens -- a LoRA from the sequence start, an aLoRA invoked
+    inside the last user message -- the template places the adapter's own
+    token too, where it goes when the adapter is selected alone, so those
+    tokens carry the adapter's K/V. Where the adapter would start at the
+    marker's own position (an aLoRA invoked at the assistant header), or
+    writes no K/V (Shadow Residual), the marker alone gives the same state.
+
     Args:
         tokenizer: HuggingFace tokenizer with a chat_template to modify.
         discovered_adapters: List of ``(adapter_path, adapter_name, technology, source)`` tuples.
+        head_adapters: ``{head slot name: adapter slot name}`` for heads that
+            run on an adapter.
 
     Returns:
         ``(template_format_name, sr_substitute_token_ids)``.  The second element
@@ -1471,6 +1484,33 @@ def configure_chat_template(
                 )
         adapter_mapping[adapter_name] = entry
 
+    # A head on a single-stream adapter (LoRA or aLoRA) carries that adapter's
+    # token and placement in its own entry, under 'adapter_token' and the
+    # adapter's placement fields; the template places the adapter's token
+    # where it goes, then the head's marker last. A Shadow Residual adapter
+    # needs no token of its own (see the docstring).
+    for head, adapter in (head_adapters or {}).items():
+        if head not in adapter_mapping or adapter not in adapter_mapping:
+            raise ValueError(
+                f"head_adapters names {head!r} -> {adapter!r}, but the chat "
+                f"template has no such slot ({sorted(adapter_mapping)})."
+            )
+        target = adapter_mapping[adapter]
+        if adapter_mapping[head]["type"] != ANCHOR_MODE_PROBE:
+            raise ValueError(f"head_adapters key {head!r} is not a head slot.")
+        if target["type"] == ANCHOR_MODE_SR:
+            continue
+        if target["type"] not in ("lora", ANCHOR_MODE_ALORA):
+            raise ValueError(
+                f"Head {head!r} runs on {adapter!r}, a {target['type']!r} slot; "
+                "a head runs on a LoRA, aLoRA or Shadow Residual adapter."
+            )
+        adapter_mapping[head]["adapter_token"] = target["token"]
+        adapter_mapping[head]["adapter_type"] = target["type"]
+        for key in ("invocation_text", "invocation_drop_chars"):
+            if key in target:
+                adapter_mapping[head][key] = target[key]
+
     if len(sr_anchors) > 1:
         raise ValueError(
             f"Shadow Residual adapters in one checkpoint must share a "
@@ -1484,17 +1524,18 @@ def configure_chat_template(
         # ``type`` is the placement mode: lora (sequence start) / alora (before
         # the invocation text) / sr (replaces the generation-prompt anchor) /
         # probe (very last token, after the last turn's close).
+        fields = [f"'token': '{info['token']}'", f"'type': '{info['type']}'"]
+        if "adapter_token" in info:
+            fields += [
+                f"'adapter_token': '{info['adapter_token']}'",
+                f"'adapter_type': '{info['adapter_type']}'",
+            ]
         if "invocation_text" in info:
-            mapping_entries.append(
-                f"    '{adapter_name}': {{'token': '{info['token']}', "
-                f"'type': '{info['type']}', "
-                f"'invocation_text': '{info['invocation_text']}', "
-                f"'invocation_drop_chars': {info['invocation_drop_chars']}}}"
-            )
-        else:
-            mapping_entries.append(
-                f"    '{adapter_name}': {{'token': '{info['token']}', 'type': '{info['type']}'}}"
-            )
+            fields += [
+                f"'invocation_text': '{info['invocation_text']}'",
+                f"'invocation_drop_chars': {info['invocation_drop_chars']}",
+            ]
+        mapping_entries.append(f"    '{adapter_name}': {{" + ", ".join(fields) + "}")
     adapter_map_def = (
         "{%- set adapter_map = {\n" + ",\n".join(mapping_entries) + "\n} %}\n"
     )
@@ -1504,17 +1545,30 @@ def configure_chat_template(
 {%- set adapter_type = '' %}
 {%- set adapter_invocation_text = '' %}
 {%- set adapter_invocation_drop_chars = 1 %}
+{%- set head_token = '' %}
 {%- if adapter_name is defined and adapter_name in adapter_map %}
 {%- set adapter_token = adapter_map[adapter_name]['token'] %}
 {%- set adapter_type = adapter_map[adapter_name]['type'] %}
-{%- if adapter_map[adapter_name]['type'] == 'alora' %}
+{%- if adapter_type == 'probe' %}
+{%- set head_token = adapter_token %}
+{%- if 'adapter_token' in adapter_map[adapter_name] %}
+{#- A head on a single-stream adapter: the adapter's own token goes where
+    that adapter goes; the head's marker still goes last. -#}
+{%- set adapter_token = adapter_map[adapter_name]['adapter_token'] %}
+{%- set adapter_type = adapter_map[adapter_name]['adapter_type'] %}
+{%- else %}
+{%- set adapter_token = '' %}
+{%- set adapter_type = '' %}
+{%- endif %}
+{%- endif %}
+{%- if adapter_type == 'alora' %}
 {%- set adapter_invocation_text = adapter_map[adapter_name]['invocation_text'] %}
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
 {#- A probe reads its verdict at the marker, so nothing may follow it:
     drop the generation prompt even when the caller asks for one. -#}
-{%- set probe_mode = adapter_type == 'probe' %}
+{%- set probe_mode = head_token != '' %}
 {%- if probe_mode %}
 {%- set add_generation_prompt = false %}
 {%- endif %}
@@ -1641,8 +1695,10 @@ def configure_chat_template(
     alora_insertion = """{#- ALoRA fallback: insert activation token right before generation prompt.
      Only fires when Pass 1 found no user message with the invocation text
      (alora_target_idx == -1), meaning the adapter activates at the assistant
-     role token boundary rather than inside a user message. -#}
-{%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 %}
+     role token boundary rather than inside a user message. Not for a head on
+     this adapter: its marker takes exactly this position and runs the adapter
+     there. -#}
+{%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 and not probe_mode %}
 {{- ns.adapter_token }}
 {%- set ns.skip_next_role_marker = true %}
 {%- endif %}
@@ -1811,9 +1867,7 @@ def configure_chat_template(
     # Probe placement: the marker is the very last token, after the last
     # turn's close.
     if any(i["type"] == ANCHOR_MODE_PROBE for i in adapter_mapping.values()):
-        modified_chat_template += (
-            "\n{%- if probe_mode %}{{- adapter_token }}{%- endif %}"
-        )
+        modified_chat_template += "\n{%- if probe_mode %}{{- head_token }}{%- endif %}"
 
     # Insert alora fallback before generation prompt
     gen_prompt_pattern = r"(\{%- if add_generation_prompt %\})"

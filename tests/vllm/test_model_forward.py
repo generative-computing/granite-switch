@@ -77,3 +77,13 @@ class TestStreamHeadsOnly:
 class TestStreamPluginMerge:
     def test_suite(self):
         _run_inner_class("TestStreamPluginMerge")
+
+
+class TestStreamHeadOnAdapter:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadOnAdapter")
+
+
+class TestStreamHeadOnLoRAAdapter:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadOnLoRAAdapter")

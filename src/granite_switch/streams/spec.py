@@ -6,6 +6,7 @@ A head slot's entry says everything the model needs to run it::
     {"type": "probe",            # the registered head type
      "read_layer": 20,           # decoder layer it reads; null = the final norm
      "head_row": 0,              # its row in its type's weight bank
+     "adapter": null,            # an adapter slot run at the marker; null = base
      "output": {"mode": "select", "token_ids": [9891, 2201], "weight": 1.0},
      "settings": {}}             # type-specific (validated by the type)
 
@@ -33,7 +34,7 @@ from .outputs import OUTPUT_MODES
 LORA = "lora"
 
 #: The fields a head entry, and its ``output``, may carry.
-HEAD_FIELDS = ("type", "read_layer", "head_row", "output", "settings")
+HEAD_FIELDS = ("type", "read_layer", "head_row", "adapter", "output", "settings")
 OUTPUT_FIELDS = ("mode", "token_ids", "weight")
 
 
@@ -55,6 +56,7 @@ class StreamSpec:
     type: str
     read_layer: int | None = None
     head_row: int | None = None
+    adapter: str | None = None  # an adapter slot's name, run at this marker
     mode: str = "select"
     token_ids: tuple[int, ...] = ()
     weight: float = 1.0
@@ -138,12 +140,19 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
             raise ValueError(
                 f"streams[{slot - 1}].head_row must be a non-negative int; got {row!r}."
             )
+        adapter = e.get("adapter")
+        if adapter is not None and not isinstance(adapter, str):
+            raise ValueError(
+                f"streams[{slot - 1}].adapter must be an adapter slot's name or "
+                f"null; got {adapter!r}."
+            )
         specs.append(
             StreamSpec(
                 slot=slot,
                 type=e["type"],
                 read_layer=e.get("read_layer"),
                 head_row=row,
+                adapter=adapter,
                 mode=mode,
                 token_ids=token_ids,
                 weight=float(out.get("weight", 1.0)),

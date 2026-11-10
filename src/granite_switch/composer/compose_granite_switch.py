@@ -1350,8 +1350,15 @@ def build():
     normalized_type = getattr(base_config, "model_type", "").replace("_switch", "")
     sr_substitute_token_ids: dict[str, int] = {}
     if normalized_type.startswith("granite"):
+        # Heads that run on an adapter (manifest ``adapter:``): the template
+        # also places that adapter's own token before the head's marker.
+        head_adapters = {
+            name: meta["adapter"]
+            for name, meta in probe_meta.items()
+            if meta.get("kind", "lora") != "lora" and meta.get("adapter")
+        }
         _fmt_name, sr_substitute_token_ids = configure_chat_template(
-            tokenizer, all_discovered
+            tokenizer, all_discovered, head_adapters=head_adapters
         )
         if audio_enabled:
             # Make the chat template emit <|audio|> for audio content parts so
@@ -1421,8 +1428,9 @@ def build():
 
     # Head streams: one stream entry per slot (granite_switch.streams). A head
     # slot's type is its manifest ``kind``; its label words become the output
-    # token ids, ``layer`` its read layer. Every head type goes through the same
-    # code; the type itself checks its settings when the model is built.
+    # token ids, ``layer`` its read layer, ``adapter`` the adapter run at its
+    # marker. Every head type goes through the same code; the type itself
+    # checks its settings when the model is built.
     if any(m.get("kind", "lora") != "lora" for m in probe_meta.values()):
         streams = []
         head_rows: dict[str, int] = {}
@@ -1452,6 +1460,8 @@ def build():
                 "head_row": row,
                 "output": output,
             }
+            if meta.get("adapter") is not None:
+                entry["adapter"] = meta["adapter"]
             if meta.get("settings"):
                 entry["settings"] = dict(meta["settings"])
             streams.append(entry)
@@ -1460,8 +1470,9 @@ def build():
                 if entry["read_layer"] is None
                 else f"layer {entry['read_layer']}"
             )
+            on = f" on {entry['adapter']}" if "adapter" in entry else ""
             print(
-                f"  {name} ({kind}) → {output['mode']} over token ids "
+                f"  {name} ({kind}{on}) → {output['mode']} over token ids "
                 f"{output['token_ids']} @ {where}"
             )
         optional_kwargs["streams"] = streams

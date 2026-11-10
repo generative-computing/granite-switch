@@ -10,6 +10,11 @@ CPU, tiny random models. Covers:
 * the two output modes, ``select`` and ``merge``;
 * an example plugin type (``tests/shared/stream_plugins/mlp_head.py``) composed
   through the real composer and run end to end, with ``merge``;
+* a head that names an adapter: its marker runs that adapter (Shadow
+  Residual), so the head reads the adapter stream's state;
+* a head that names an adapter: its marker runs that adapter, so the head
+  reads the adapter's state (Shadow Residual from the marker alone;
+  single-stream LoRA with the adapter's own token in the prompt too);
 * compact LoRA rows: head slots take no row in the LoRA tensors;
 * the pre-streams checkpoint layout, unchanged.
 """
@@ -153,13 +158,18 @@ class TestStreamEntries:
         specs = parse_entries(
             [
                 {"type": "lora"},
-                _probe(0, read_layer=1, settings={"k": 2}),
+                _probe(0, read_layer=1, adapter="s1", settings={"k": 2}),
             ],
             2,
         )
         assert [s.is_head for s in specs] == [False, True]
         head = specs[1]
-        assert (head.slot, head.read_layer, head.head_row) == (2, 1, 0)
+        assert (head.slot, head.read_layer, head.head_row, head.adapter) == (
+            2,
+            1,
+            0,
+            "s1",
+        )
         assert (head.mode, head.token_ids, head.weight) == ("select", (100, 200), 1.0)
         assert head.settings == {"k": 2}
 
@@ -175,6 +185,7 @@ class TestStreamEntries:
                 "token_ids must be non-empty",
             ),
             ({**_probe(0), "head_row": None}, "head_row must be a non-negative int"),
+            ({**_probe(0), "adapter": 3}, "adapter must be"),
         ],
     )
     def test_rejects_bad_entries(self, entry, message):
@@ -470,6 +481,119 @@ def test_plugin_rejects_misshaped_weights(tmp_path):
     _write_mlp_head(tmp_path / "h", torch.zeros(WIDTH + 1, 64), torch.zeros(2, WIDTH))
     with pytest.raises(ValueError, match="do not match width"):
         transfer_head_weights([str(tmp_path / "h")], [1], model)
+
+
+# --------------------------------------------------------------------------- #
+# A head on an adapter (Shadow Residual)
+# --------------------------------------------------------------------------- #
+def _identity_probe_model():
+    """[SR adapter "s1", probe on base, the same probe head on "s1"]."""
+    torch.manual_seed(0)
+    config = _config(
+        [{"type": "lora"}, _probe(0), _probe(1, adapter="s1")],
+        dual_stream=True,
+        hidden=64,
+    )
+    labels = list(range(100, 164))
+    config.streams[1]["output"]["token_ids"] = labels
+    config.streams[2]["output"]["token_ids"] = labels
+    config = GraniteSwitchConfig.from_dict(config.to_dict())
+    model = _model(config)
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "lora_A" in name or "lora_B" in name:
+                p.copy_(torch.randn_like(p) * 0.1)
+        model.model.probe_head.weight.zero_()
+        for row in (0, 1):
+            model.model.probe_head.weight[row, :64] = torch.eye(64)
+    return model, labels
+
+
+def test_head_on_an_adapter_reads_that_adapter():
+    """The identity head returns the state it read, so its row IS that state."""
+    model, labels = _identity_probe_model()
+    states = []
+
+    def run(ids):
+        states.clear()
+        hook = model.model.layers[-1].register_forward_hook(
+            lambda m, i, o: states.append(o[0])
+        )
+        try:
+            row = _last_row(model, ids)[labels]
+        finally:
+            hook.remove()
+        base, adapted = (model.model.norm(h)[0, -1] for h in states[0])
+        return row, base, adapted
+
+    prompt = [5, 17, 42, 99]
+    on_base, base, _ = run([*prompt, 251])
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0]]
+    torch.testing.assert_close(on_base, base, atol=1e-5, rtol=0)
+
+    on_adapter, base_again, adapted = run([*prompt, 252])
+    # The marker runs adapter slot 1 (its LoRA row), and only the marker.
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 1]]
+    torch.testing.assert_close(on_adapter, adapted, atol=1e-5, rtol=0)
+    assert not torch.allclose(on_adapter, base_again, atol=1e-3)
+    # Every token before the marker is the base model's, both times.
+    torch.testing.assert_close(base, base_again)
+
+
+def _identity_lora_model():
+    """The same three slots, on a single-stream LoRA checkpoint."""
+    torch.manual_seed(0)
+    labels = list(range(100, 164))
+    streams = [{"type": "lora"}, _probe(0), _probe(1, adapter="s1")]
+    for e in streams[1:]:
+        e["output"]["token_ids"] = labels
+    model = _model(_config(streams))
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "lora_A" in name or "lora_B" in name:
+                p.copy_(torch.randn_like(p) * 0.2)
+        model.model.probe_head.weight.zero_()
+        for row in (0, 1):
+            model.model.probe_head.weight[row, :64] = torch.eye(64)
+    return model, labels
+
+
+def _final_state(model, ids):
+    with torch.no_grad():
+        out = model.model(input_ids=torch.tensor([ids]), use_cache=False)
+    return out.last_hidden_state[0, -1]
+
+
+def test_head_on_a_lora_adapter_reads_that_adapter_with_its_token():
+    """Single-stream LoRA: the adapter's own token makes the head's read exact.
+
+    The adapter writes the K/V of every token it runs on, so the marker alone
+    can't stand in for it. With the adapter's token first, as the chat
+    template places it, the head reads exactly the state the adapter computes
+    when it runs alone: the identity head's row IS that state.
+    """
+    model, labels = _identity_lora_model()
+    body = [5, 17, 42, 99]
+    # The reference: the adapter alone, then a plain token that embeds as the
+    # marker does (its substitute, id 1).
+    reference = _final_state(model, [250, *body, 1])
+    paired = _last_row(model, [250, *body, 252])[labels]
+    assert model.model._last_lora_indices.tolist() == [[1, 1, 1, 1, 1, 1]]
+    torch.testing.assert_close(paired, reference, atol=1e-5, rtol=0)
+
+    # The marker alone runs the adapter on one token only: not the same state.
+    alone = _last_row(model, [1, *body, 252])[labels]
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0, 1]]
+    assert not torch.allclose(alone, reference, atol=1e-2)
+
+
+def test_a_head_names_an_adapter_slot():
+    with pytest.raises(ValueError, match="not an adapter slot"):
+        _model(
+            _config(
+                [{"type": "lora"}, _probe(0), _probe(1, adapter="s2")], dual_stream=True
+            )
+        )
 
 
 # --------------------------------------------------------------------------- #

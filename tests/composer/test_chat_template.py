@@ -604,6 +604,121 @@ class TestEndToEndAdapterConfigToRender:
         assert "<|summarization|>" not in result_none
 
 
+class TestHeadOnAnAdapter:
+    """A head slot that runs on an adapter (its stream entry's ``adapter``).
+
+    The marker, last, runs the adapter. When the adapter would run on earlier
+    tokens too (a LoRA, an aLoRA invoked in the user message), the template
+    places its token where it goes alone, so the prompt before the marker is
+    the adapter-alone render without a generation prompt. Where the adapter
+    would start at the marker's position (an aLoRA at the assistant header) or
+    writes no K/V (Shadow Residual), the marker alone is the whole change.
+    """
+
+    _ANSWERABILITY = os.path.join(_FIXTURES, "answerability_adapter")
+    _CONTEXT_REL = os.path.join(_FIXTURES, "context_relevance_adapter")
+    _SUMMARIZATION = os.path.join(_FIXTURES, "summarization_adapter")
+    _SR = os.path.join(_FIXTURES, "sr_answerability_adapter")
+    _DECODE = {
+        (100264, 78191, 100265): "<|start_of_role|>assistant<|end_of_role|>",
+        (100264,): "<|start_of_role|>",
+    }
+    _MESSAGES = [{"role": "user", "content": "Summarize this."}]
+
+    def _configure(self, adapter, technology, head_adapters):
+        tokenizer = _FixtureTokenizer(_GRANITE_TEMPLATE, self._DECODE)
+        configure_chat_template(
+            tokenizer,
+            [
+                (adapter, "base_adapter", technology),
+                (None, "tox", "probe"),
+                (None, "tox_on", "probe"),
+            ],
+            head_adapters=head_adapters,
+        )
+        return tokenizer
+
+    def _render(self, tokenizer, gen, **kwargs):
+        return _render(
+            tokenizer, messages=self._MESSAGES, add_generation_prompt=gen, **kwargs
+        )
+
+    def test_lora_adapter_token_first_marker_last(self):
+        tokenizer = self._configure(
+            self._SUMMARIZATION, "lora", {"tox_on": "base_adapter"}
+        )
+        paired = self._render(tokenizer, True, adapter_name="tox_on")
+        alone = self._render(tokenizer, False, adapter_name="base_adapter")
+        assert paired == alone + "<|tox_on|>"
+        assert paired.startswith("<|base_adapter|>user<|end_of_role|>")
+
+    def test_alora_invoked_in_the_message_keeps_its_token(self):
+        """The aLoRA runs from its invocation in the user message: place it."""
+        tokenizer = _FixtureTokenizer(
+            _GRANITE_TEMPLATE, {(27, 9998): "<context>", (27,): "<"}
+        )
+        configure_chat_template(
+            tokenizer,
+            [(self._CONTEXT_REL, "base_adapter", "alora"), (None, "tox_on", "probe")],
+            head_adapters={"tox_on": "base_adapter"},
+        )
+        messages = [{"role": "user", "content": "<context>docs</context>"}]
+        paired = _render(
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=True,
+            adapter_name="tox_on",
+        )
+        alone = _render(
+            tokenizer,
+            messages=messages,
+            add_generation_prompt=False,
+            adapter_name="base_adapter",
+        )
+        assert paired == alone + "<|tox_on|>"
+        assert "<|base_adapter|>context>docs" in paired
+
+    def test_alora_at_the_assistant_header_needs_only_the_marker(self):
+        """That aLoRA would start where the marker sits: the marker alone."""
+        tokenizer = self._configure(
+            self._ANSWERABILITY, "alora", {"tox_on": "base_adapter"}
+        )
+        paired = self._render(tokenizer, True, adapter_name="tox_on")
+        assert paired == self._render(tokenizer, False) + "<|tox_on|>"
+        assert "<|base_adapter|>" not in paired
+        # Selected alone, the aLoRA is unchanged: its token, then the prompt.
+        alone = self._render(tokenizer, True, adapter_name="base_adapter")
+        assert alone.endswith("<|base_adapter|>assistant<|end_of_role|>")
+
+    def test_head_on_base_is_unchanged(self):
+        tokenizer = self._configure(
+            self._SUMMARIZATION, "lora", {"tox_on": "base_adapter"}
+        )
+        plain = self._render(tokenizer, False)
+        assert self._render(tokenizer, True, adapter_name="tox") == plain + "<|tox|>"
+
+    def test_shadow_residual_adapter_needs_only_the_marker(self):
+        tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
+        configure_chat_template(
+            tokenizer,
+            [(self._SR, "base_adapter", "sr"), (None, "tox_on", "probe")],
+            head_adapters={"tox_on": "base_adapter"},
+        )
+        paired = self._render(tokenizer, True, adapter_name="tox_on")
+        assert paired == self._render(tokenizer, False) + "<|tox_on|>"
+        assert "<|base_adapter|>" not in paired
+
+    def test_unknown_pair_is_rejected(self):
+        with pytest.raises(ValueError, match="no such slot"):
+            self._configure(self._SUMMARIZATION, "lora", {"tox_on": "nope"})
+
+    def test_only_a_head_runs_on_an_adapter(self):
+        with pytest.raises(ValueError, match="is not a head slot"):
+            self._configure(
+                self._SUMMARIZATION, "lora", {"base_adapter": "base_adapter"}
+            )
+
+
 # ---------------------------------------------------------------------------
 # ChatML (Granite 4.2) render-level tests
 # ---------------------------------------------------------------------------

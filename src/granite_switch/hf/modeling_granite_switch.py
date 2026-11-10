@@ -430,6 +430,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         for name, module in heads.items():
             setattr(self, stream_routing.module_attr(name), module)
         self._head_types = list(heads)
+        if heads:
+            # Built here (and cached per device later) so a bad ``adapter`` in a
+            # stream entry fails at load, not at the first request.
+            stream_routing.adapter_lut(config)
         # The built-in probe keeps its attribute even when absent, as before.
         if "probe" not in heads:
             self.probe_head = None
@@ -684,6 +688,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # (so the LoRA path no-ops there).
         if self.switch is not None:
             lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+            # A head stream that names an adapter runs it at its marker: its
+            # tokens route through that adapter slot's LoRA (stream_routing.
+            # adapter_lut); a head on the base model maps to 0, as before.
+            if self._head_types:
+                lut = self._row_lut_cached("adapter_lut", adapter_indices.device)
+                lora_indices = lut[adapter_indices]
             # The LoRA layers index their tensors by row, not by slot: a
             # streams checkpoint keeps rows for adapter slots only.
             lora_rows = self._row_lut_cached("lora_row_lut", lora_indices.device)[

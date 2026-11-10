@@ -580,6 +580,7 @@ class TestManifestProbeMetadata:
                 "kind": "probe",
                 "labels": ["faithful", "hallucinated"],
                 "layer": None,
+                "adapter": None,
                 "output": None,
                 "settings": None,
             }
