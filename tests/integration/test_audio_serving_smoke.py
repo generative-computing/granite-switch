@@ -51,14 +51,16 @@ def _pair(source, base_name):
 
 
 _DEFAULT_BASE_MODEL_PAIRS = [
-    pytest.param(("fake", "granite-4.0-micro"), id="granite-4.0-micro-fake"),
     pytest.param(
-        ("real", "granite-4.0-micro"),
+        (model_sources.FAKE, "granite-4.0-micro"), id="granite-4.0-micro-fake"
+    ),
+    pytest.param(
+        (model_sources.REAL, "granite-4.0-micro"),
         marks=pytest.mark.release,
         id="granite-4.0-micro-real",
     ),
     pytest.param(
-        ("real", "granite-4.1-3b"),
+        (model_sources.REAL, "granite-4.1-3b"),
         marks=pytest.mark.release,
         id="granite-4.1-3b-real",
     ),

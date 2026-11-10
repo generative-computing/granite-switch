@@ -137,12 +137,14 @@ def _cases():
         ]
     pr_name = BASE_MODELS[0].split("/")[-1]
     cases = [
-        pytest.param(("fake", pr_name, flavor), id=f"{pr_name}-{flavor}-fake")
+        pytest.param(
+            (model_sources.FAKE, pr_name, flavor), id=f"{pr_name}-{flavor}-fake"
+        )
         for flavor in FLAVORS
     ]
     cases += [
         pytest.param(
-            ("real", base, flavor),
+            (model_sources.REAL, base, flavor),
             marks=pytest.mark.release,
             id=f"{base.split('/')[-1]}-{flavor}-real",
         )
@@ -160,11 +162,13 @@ def _resolve_case(case):
     if len(case) == 2:
         return case
     source, base, flavor = case
-    if source == "fake":
+    if source == model_sources.FAKE:
         # LIVE_LAYERS: the `distinct` check needs every adapter to move the output,
         # which the default fake base's barely-reached layers cannot do (see
         # tests/shared/fake_bases.py).
-        return model_sources.base_model("fake", base, preset=LIVE_LAYERS), flavor
+        return model_sources.base_model(
+            model_sources.FAKE, base, preset=LIVE_LAYERS
+        ), flavor
     return base, flavor
 
 

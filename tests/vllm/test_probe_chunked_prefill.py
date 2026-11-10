@@ -45,9 +45,9 @@ _REAL_BASE = os.environ.get("CLS_TEST_BASE", model_sources.BASES[_BASE_NAME])
 @pytest.fixture(scope="module", params=model_sources.sources())
 def base_model(request):
     """The base the base-model probe checkpoints compose on, per source."""
-    if request.param == "real":
+    if request.param == model_sources.REAL:
         return _REAL_BASE
-    return model_sources.base_model("fake", _BASE_NAME)
+    return model_sources.base_model(model_sources.FAKE, _BASE_NAME)
 
 
 def _mid_layer(base, fraction):

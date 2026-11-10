@@ -33,7 +33,11 @@ from tests.shared.fake_bases import (
     build_fake_base,
 )
 
-SOURCES = ("fake", "real")
+#: The two sources. Use these, not string literals: the resolvers below reject
+#: anything else, so a typo fails instead of quietly picking a model.
+FAKE = "fake"
+REAL = "real"
+SOURCES = (FAKE, REAL)
 
 #: A session-wide build directory, shared across tests and xdist-safe per process.
 _ROOT = Path(tempfile.mkdtemp(prefix="gs-fake-models-"))
@@ -45,9 +49,21 @@ def sources(*, real_marks=()):
     ``real_marks`` adds marks to the real case only, e.g. ``requires_model``.
     """
     return [
-        pytest.param("fake", id="fake"),
-        pytest.param("real", id="real", marks=(pytest.mark.release, *real_marks)),
+        pytest.param(FAKE, id=FAKE),
+        pytest.param(REAL, id=REAL, marks=(pytest.mark.release, *real_marks)),
     ]
+
+
+def _is_real(source: str) -> bool:
+    """True for :data:`REAL`, False for :data:`FAKE`; raise on anything else.
+
+    The resolvers branch on this. Comparing to REAL alone would send a typo
+    ("Real", "rea1") down the fake branch, quietly turning a release-tier
+    real-model test into a fake one.
+    """
+    if source not in SOURCES:
+        raise ValueError(f"unknown model source {source!r}; expected one of {SOURCES}")
+    return source == REAL
 
 
 def _preset_tag(preset: WeightPreset, dims: tuple) -> str:
@@ -112,7 +128,7 @@ def base_model(
     ``LIVE_LAYERS``) and ``dims`` its size (``fake_bases.TINY_DIMS`` by default,
     ``TP_DIMS`` for the tensor-parallel tests); the real source ignores both.
     """
-    if source == "real":
+    if _is_real(source):
         return BASES[name]
     return _fake_base(name, preset, _dims_key(dims))
 
@@ -132,7 +148,7 @@ def adapter_library(
     passed whole, so a test that needs only some adapters should also pass the
     composer's own ``--include-adapters``.
     """
-    if source == "real":
+    if _is_real(source):
         return repo
     return _fake_library(
         repo, base_name, tuple(include) if include else None, preset, _dims_key(dims)
@@ -146,7 +162,7 @@ def lora_adapter_dir(source: str, repo: str, base_name: str, adapter: str) -> st
     rather than a library. The real source downloads only that adapter.
     """
     rel = f"{adapter}/{base_name}/lora"
-    if source == "real":
+    if _is_real(source):
         from huggingface_hub import snapshot_download
 
         return str(Path(snapshot_download(repo, allow_patterns=[f"{rel}/*"])) / rel)
@@ -154,6 +170,8 @@ def lora_adapter_dir(source: str, repo: str, base_name: str, adapter: str) -> st
 
 
 __all__ = [
+    "FAKE",
+    "REAL",
     "SOURCES",
     "adapter_library",
     "base_model",

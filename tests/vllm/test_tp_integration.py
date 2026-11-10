@@ -261,7 +261,7 @@ def _rag_build_args(source):
     of the real ones (tests/shared/model_sources.py), with :data:`_FAKE_KW`.
     ``real`` runs in the release tier.
     """
-    kw = _FAKE_KW if source == "fake" else {}
+    kw = _FAKE_KW if source == model_sources.FAKE else {}
     return [
         "build-compose",
         "--base-model",
@@ -311,7 +311,7 @@ class TestTPDetectsShardingBugs:
         label = f"granite-4.0-micro-rag-fake-fault-{fault}"
         records_tp1, records_tp2 = _build_and_run(
             str(tmp_path),
-            build_args=_rag_build_args("fake"),
+            build_args=_rag_build_args(model_sources.FAKE),
             label=label,
             intrinsic_name=_ADAPTER_PROMPTS,
             fault=fault,

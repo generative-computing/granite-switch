@@ -39,9 +39,11 @@ _BUILT_IN_ADAPTERS = [f"slot{i}" for i in range(1, 14)]
 _BASE_NAME = "granite-4.0-micro"
 # (source, base, adapter libraries); None means the built-in slots above.
 _DEFAULT_BASE_MODEL_PAIRS = [
-    pytest.param(("fake", _BASE_NAME, None), id=f"{_BASE_NAME}-fake"),
+    pytest.param((model_sources.FAKE, _BASE_NAME, None), id=f"{_BASE_NAME}-fake"),
     pytest.param(
-        ("real", _BASE_NAME, None), marks=pytest.mark.release, id=f"{_BASE_NAME}-real"
+        (model_sources.REAL, _BASE_NAME, None),
+        marks=pytest.mark.release,
+        id=f"{_BASE_NAME}-real",
     ),
 ]
 
