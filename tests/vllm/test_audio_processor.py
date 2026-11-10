@@ -112,6 +112,13 @@ class TestProcessingInfoAsrAccessors:
         assert info._asr_pipeline_kwargs() == {"chunk_length_s": 15}
         assert info._asr_generate_kwargs() == {"language": "de"}
 
+    def test_no_speech_markers_default_empty(self):
+        assert _make_info(asr_enabled=True)._asr_no_speech_markers() == []
+
+    def test_no_speech_markers_from_config(self):
+        info = _make_info(asr_enabled=True, asr_no_speech_markers=["<|nospeech|>"])
+        assert info._asr_no_speech_markers() == ["<|nospeech|>"]
+
     def test_longaudio_accessor_defaults(self):
         info = _make_info(asr_enabled=True)
         assert info._asr_max_audio_clips() == 32
@@ -174,12 +181,17 @@ def _make_processor(info, monkeypatch, capture):
             return "hello world"
 
     def fake_get_transcriber(
-        model_id=None, device="cpu", pipeline_kwargs=None, dtype=None
+        model_id=None,
+        device="cpu",
+        pipeline_kwargs=None,
+        dtype=None,
+        no_speech_markers=None,
     ):
         capture["model_id"] = model_id
         capture["device"] = device
         capture["pipeline_kwargs"] = pipeline_kwargs
         capture["dtype"] = dtype
+        capture["no_speech_markers"] = no_speech_markers
         return FakeTranscriber()
 
     monkeypatch.setattr(proc_mod, "get_transcriber", fake_get_transcriber)
@@ -339,6 +351,17 @@ class TestMultiClipAndBudget:
         assert capture["chunk_length_s"] == 20.0
         assert capture["chunk_overlap_s"] == 3.0
 
+    def test_no_speech_markers_forwarded_to_transcriber(self, monkeypatch):
+        capture = {}
+        info = _make_info(
+            asr_enabled=True,
+            asr_model_id="w",
+            asr_no_speech_markers=["<|nospeech|>", "<|nocaptions|>"],
+        )
+        proc = _make_processor(info, monkeypatch, capture)
+        proc._transcribe(np.zeros(1600, dtype=np.float32), {})
+        assert capture["no_speech_markers"] == ["<|nospeech|>", "<|nocaptions|>"]
+
 
 def _make_processor_transcribing(info, monkeypatch, text, *, ids_for):
     """Processor whose transcriber returns a fixed ``text``; ``ids_for`` maps it to ids."""
@@ -364,9 +387,7 @@ def _make_processor_transcribing(info, monkeypatch, text, *, ids_for):
     monkeypatch.setattr(
         proc_mod,
         "get_transcriber",
-        lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-            FakeTranscriber()
-        ),
+        lambda **_: (FakeTranscriber()),
     )
     return proc
 
@@ -478,9 +499,7 @@ class TestEmptyAndSilentClip:
         monkeypatch.setattr(
             proc_mod,
             "get_transcriber",
-            lambda model_id=None, device="cpu", pipeline_kwargs=None, dtype=None: (
-                FakeTranscriber()
-            ),
+            lambda **_: (FakeTranscriber()),
         )
 
         bf = proc._call_hf_processor(

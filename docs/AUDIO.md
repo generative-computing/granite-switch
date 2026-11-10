@@ -117,6 +117,31 @@ editing that file directly — no re-compose and no patched package:
   "asr_generate_kwargs": {"language": "de", "task": "transcribe"} }
 ```
 
+### No-speech markers
+
+Some ASR models emit a marker instead of text for silence or non-speech, e.g.
+`<|nospeech|>` or `<|nocaptions|>`. Left alone, that marker is spliced into the prompt as
+if the user had said it. `asr_no_speech_markers` lists the exact strings to drop:
+every occurrence is removed from each transcribed window (before long-audio
+windows are merged), wherever it appears. A clip that was only markers becomes an
+empty transcript. Any other tag (timings, emotions, language tags) is kept.
+
+The marker depends on the ASR model, so there is no default: nothing is removed
+unless you set it. Pass it at compose time (repeat the flag for several markers;
+quote the value, since `<` and `|` are shell operators):
+
+```bash
+python -m granite_switch.composer.compose_granite_switch \
+  --adapters ... --enable-audio \
+  --asr-no-speech-marker "<|nospeech|>"
+```
+
+or set it in an existing checkpoint's `config.json`:
+
+```json
+{ "asr_no_speech_markers": ["<|nospeech|>"] }
+```
+
 ### Long audio & multiple clips
 
 The transcript is spliced into the prompt as ordinary text tokens — it is **not**

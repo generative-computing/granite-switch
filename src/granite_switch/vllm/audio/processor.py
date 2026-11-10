@@ -111,6 +111,10 @@ class GraniteSwitchASRProcessingInfo(BaseProcessingInfo):
         cfg = self.get_hf_config()
         return getattr(cfg, "asr_generate_kwargs", None) or {}
 
+    def _asr_no_speech_markers(self) -> list[str]:
+        cfg = self.get_hf_config()
+        return list(getattr(cfg, "asr_no_speech_markers", None) or [])
+
     def _asr_max_audio_clips(self) -> int:
         cfg = self.get_hf_config()
         return int(getattr(cfg, "asr_max_audio_clips", 32) or 32)
@@ -276,6 +280,7 @@ class GraniteSwitchASRMultiModalProcessor(
             device=self.info._asr_device(),
             pipeline_kwargs=self.info._asr_pipeline_kwargs(),
             dtype=self.info._asr_dtype(),
+            no_speech_markers=self.info._asr_no_speech_markers(),
         )
         # The data parser already resampled to _TARGET_SR.
         text = transcriber.transcribe(

@@ -171,6 +171,68 @@ class TestChunkedTranscribe:
         assert out == "seg80000"
 
 
+class TestNoSpeechMarkers:
+    """Configured no-speech markers are removed per window, everything else kept."""
+
+    def _transcriber(self, texts, markers=("<|nospeech|>",)):
+        t = asr.ASRTranscriber(model_id="x", device="cpu", no_speech_markers=markers)
+        outputs = iter(texts)
+        t._pipeline = lambda inp, **k: {"text": next(outputs)}
+        return t
+
+    def _one(self, text, markers=("<|nospeech|>",)):
+        t = self._transcriber([text], markers)
+        return t.transcribe(np.zeros(1600, dtype=np.float32), sampling_rate=16000)
+
+    def test_marker_alone_becomes_empty(self):
+        assert self._one("  <|nospeech|>  ") == ""
+
+    def test_repeated_marker_becomes_empty(self):
+        assert self._one("<|nospeech|><|nospeech|> <|nospeech|>") == ""
+
+    def test_marker_next_to_speech_is_removed(self):
+        assert self._one("hello <|nospeech|>") == "hello"
+        assert self._one("<|nospeech|>hello") == "hello"
+
+    def test_marker_mid_sentence_is_removed(self):
+        assert self._one("hello <|nospeech|> world") == "hello world"
+
+    def test_multiple_markers(self):
+        out = self._one(
+            "<|nocaptions|> hi <|nospeech|>", markers=("<|nospeech|>", "<|nocaptions|>")
+        )
+        assert out == "hi"
+
+    def test_other_tags_are_kept(self):
+        # Only the configured markers go: timing/emotion/language tags survive.
+        assert self._one("<|en|> hi <|0.50|> <|nospeech|>") == "<|en|> hi <|0.50|>"
+
+    def test_no_markers_leaves_text_untouched(self):
+        assert self._one(" hi <|nospeech|> ", markers=None) == "hi <|nospeech|>"
+
+    def test_self_chunks_path(self):
+        t = self._transcriber(["hi <|nospeech|>"])
+        out = t.transcribe(
+            np.zeros(70 * 16000, dtype=np.float32),
+            sampling_rate=16000,
+            self_chunks=True,
+        )
+        assert out == "hi"
+
+    def test_removed_per_window_before_merge(self):
+        # 70s, 30s window, 5s overlap -> 3 windows. The all-silence middle window
+        # contributes nothing, and a marker inside a window never reaches merge.
+        t = self._transcriber(["hello there", "<|nospeech|>", "<|nospeech|> and then"])
+        out = t.transcribe(
+            np.zeros(70 * 16000, dtype=np.float32),
+            sampling_rate=16000,
+            self_chunks=False,
+            chunk_length_s=30.0,
+            chunk_overlap_s=5.0,
+        )
+        assert out == "hello there and then"
+
+
 class TestUnsupportedArchitectureError:
     """A transformers too old for the default model must say so actionably."""
 
@@ -312,6 +374,14 @@ class TestTranscriberCache:
         c = asr.get_transcriber("pk", "cpu", pipeline_kwargs={"chunk_length_s": 15})
         assert a is not b
         assert a is c
+
+    def test_no_speech_markers_are_part_of_cache_key(self):
+        a = asr.get_transcriber("ns", "cpu", no_speech_markers=["<|nospeech|>"])
+        b = asr.get_transcriber("ns", "cpu")
+        c = asr.get_transcriber("ns", "cpu", no_speech_markers=("<|nospeech|>",))
+        assert a is not b
+        assert a is c
+        assert a.no_speech_markers == ("<|nospeech|>",)
 
     def test_pipeline_kwargs_key_is_order_independent(self):
         a = asr.get_transcriber("pk2", "cpu", pipeline_kwargs={"x": 1, "y": 2})

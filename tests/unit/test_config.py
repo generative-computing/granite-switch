@@ -110,6 +110,25 @@ class TestAudioConfig:
         assert cfg.asr_dtype is None
         assert cfg.asr_pipeline_kwargs is None
         assert cfg.asr_generate_kwargs is None
+        # Model-specific, so no default: nothing is removed unless composed in.
+        assert cfg.asr_no_speech_markers is None
+
+    def test_no_speech_markers_round_trip(self, tmp_path):
+        cfg = GraniteSwitchConfig(
+            num_adapters=0,
+            asr_enabled=True,
+            asr_no_speech_markers=["<|nospeech|>", "<|nocaptions|>"],
+        )
+        cfg.save_pretrained(tmp_path)
+        loaded = GraniteSwitchConfig.from_pretrained(tmp_path)
+        assert loaded.asr_no_speech_markers == ["<|nospeech|>", "<|nocaptions|>"]
+
+    @pytest.mark.parametrize("bad", ["<|nospeech|>", [""], ["ok", 3]])
+    def test_invalid_no_speech_markers_raise(self, bad):
+        # A bare string would be iterated per character; an empty marker would
+        # match between every character.
+        with pytest.raises(ValueError, match="asr_no_speech_markers"):
+            GraniteSwitchConfig(num_adapters=0, asr_no_speech_markers=bad)
 
     def test_asr_dtype_round_trip(self, tmp_path):
         cfg = GraniteSwitchConfig(

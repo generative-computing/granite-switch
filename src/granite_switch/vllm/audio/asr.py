@@ -3,7 +3,8 @@
 
 Wraps a HuggingFace ASR pipeline. Free of any vLLM import so it unit-tests on
 CPU. The model loads lazily and is cached per (model_id, device, dtype,
-pipeline_kwargs), so a process loads each ASR model at most once.
+pipeline_kwargs, no_speech_markers), so a process loads each ASR model at most
+once.
 
 Device defaults to CUDA (the default CTC encoder is small and GPU-bound work is
 what makes it fast); dtype follows the device unless a checkpoint sets
@@ -15,7 +16,7 @@ from __future__ import annotations
 import os
 import subprocess
 import threading
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Union
 
 import numpy as np
@@ -218,11 +219,15 @@ class ASRTranscriber:
         device: str = "cuda",
         pipeline_kwargs: Mapping[str, Any] | None = None,
         dtype: str | None = None,
+        no_speech_markers: Sequence[str] | None = None,
     ) -> None:
         self.model_id = model_id
         self.device = device
         self.dtype = dtype
         self.pipeline_kwargs: dict[str, Any] = dict(pipeline_kwargs or {})
+        # Exact strings this ASR model emits for silence/non-speech. Removed per
+        # window (see _strip_no_speech_markers); everything else is kept.
+        self.no_speech_markers: tuple[str, ...] = tuple(no_speech_markers or ())
         self._pipeline = None
         # Set by load(): whether the resolved backend decodes with CTC (no
         # generation, so no decode kwargs and no pipeline-level chunking).
@@ -320,7 +325,24 @@ class ASRTranscriber:
             **call_kwargs,
         )
         text = result["text"] if isinstance(result, dict) else str(result)
+        # Per window, so merge_transcripts never sees a marker (nor matches its
+        # seam overlap on one).
+        return _strip_no_speech_markers(text, self.no_speech_markers)
+
+
+def _strip_no_speech_markers(text: str, markers: Sequence[str]) -> str:
+    """Remove every occurrence of each no-speech marker, then normalize spacing.
+
+    A marker can stand alone (silence), repeat, or sit next to real words, so a
+    whole-transcript equality check is not enough. Only the configured exact
+    strings are removed: other tags (timings, emotions, language) pass through.
+    Without markers the text is only stripped, so spacing is left untouched.
+    """
+    if not markers:
         return text.strip()
+    for marker in markers:
+        text = text.replace(marker, " ")
+    return " ".join(text.split())
 
 
 # ── Module-level cache + convenience function ────────────────────────────────
@@ -372,14 +394,21 @@ def get_transcriber(
     device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
+    no_speech_markers: Sequence[str] | None = None,
 ) -> ASRTranscriber:
     """Return a process-wide cached :class:`ASRTranscriber`.
 
-    Cached per ``(model_id, device, dtype, pipeline_kwargs)``. ``model_id`` of
-    None resolves to :data:`DEFAULT_ASR_MODEL_ID`.
+    Cached per ``(model_id, device, dtype, pipeline_kwargs, no_speech_markers)``.
+    ``model_id`` of None resolves to :data:`DEFAULT_ASR_MODEL_ID`.
     """
     resolved = model_id or DEFAULT_ASR_MODEL_ID
-    key = (resolved, device, dtype, _freeze(pipeline_kwargs or {}))
+    key = (
+        resolved,
+        device,
+        dtype,
+        _freeze(pipeline_kwargs or {}),
+        tuple(no_speech_markers or ()),
+    )
     transcriber = _TRANSCRIBERS.get(key)
     if transcriber is None:
         with _CACHE_LOCK:
@@ -390,6 +419,7 @@ def get_transcriber(
                     device=device,
                     pipeline_kwargs=pipeline_kwargs,
                     dtype=dtype,
+                    no_speech_markers=no_speech_markers,
                 )
                 _TRANSCRIBERS[key] = transcriber
     return transcriber
@@ -403,6 +433,7 @@ def transcribe(
     device: str = "cuda",
     pipeline_kwargs: Mapping[str, Any] | None = None,
     dtype: str | None = None,
+    no_speech_markers: Sequence[str] | None = None,
     generate_kwargs: Mapping[str, Any] | None = None,
     self_chunks: bool = False,
     chunk_length_s: float = DEFAULT_CHUNK_LENGTH_S,
@@ -414,6 +445,7 @@ def transcribe(
         device=device,
         pipeline_kwargs=pipeline_kwargs,
         dtype=dtype,
+        no_speech_markers=no_speech_markers,
     ).transcribe(
         audio,
         sampling_rate,
