@@ -9,6 +9,10 @@ import os
 import re
 from dataclasses import dataclass
 
+import jinja2
+import jinja2.ext
+import jinja2.nodes
+
 from .adapter_loader import load_adapter_config
 
 # Name of the optional return-to-base control token (``<|base_reset|>``). It is
@@ -463,7 +467,7 @@ def _resolve_sr_substitution_site(region: str, anchor: str, tokenizer) -> str:
 
 def _replace_anchor_in_generation_prompt(
     template: str, anchor: str, tokenizer
-) -> tuple[str, str, int]:
+) -> tuple[str, str, int, str, list[str]]:
     """Make every generation-prompt branch emit the control token in place of
     one token.
 
@@ -482,9 +486,12 @@ def _replace_anchor_in_generation_prompt(
         tokenizer: Used to check candidate sites are a single token.
 
     Returns:
-        ``(patched_template, site, num_replacements)`` where *site* is the
-        literal actually replaced — the anchor itself unless the branches forced
-        an earlier common token (see :func:`_resolve_sr_substitution_site`).
+        ``(patched_template, site, num_replacements, header, literals)`` where
+        *site* is the literal actually replaced — the anchor itself unless the
+        branches forced an earlier common token (see
+        :func:`_resolve_sr_substitution_site`) — and *header* / *literals* are
+        what the ``history_adapters`` wrap matches (see
+        :func:`_sr_history_header`), taken from the same branches.
 
     Raises:
         ValueError: If there is no ``add_generation_prompt`` block, if the site
@@ -553,7 +560,333 @@ def _replace_anchor_in_generation_prompt(
             f"control token, otherwise the ones that miss it render an adapter "
             f"that never activates."
         )
-    return head + region, site, count
+    header, history_literals = _sr_history_header(
+        [_unescape_literal(body) for body in literals], site
+    )
+    return head + region, site, count, header, history_literals
+
+
+#: A ``for`` / ``endfor`` statement tag, for depth-matching the message loop.
+#: Accepts every whitespace-control spelling: ``{%``, ``{%-`` and ``{%+``.
+_FOR_TAG_RE = re.compile(r"\{%[-+]?\s*(for|endfor)\b")
+
+
+class _GenerationTag(jinja2.ext.Extension):
+    """Parses HF's ``{% generation %}`` block (assistant-token masking) so that
+    templates using it parse here too; the block is marked so the
+    ``history_adapters`` wrap can refuse one inside the message loop."""
+
+    tags = {"generation"}
+
+    def parse(self, parser):
+        lineno = next(parser.stream).lineno
+        body = parser.parse_statements(("name:endgeneration",), drop_needle=True)
+        # Jinja forbids custom node types, so the block is an ordinary scope
+        # carrying an extension attribute that marks it.
+        return jinja2.nodes.Scope(
+            [jinja2.nodes.ExtensionAttribute(self.identifier, "generation"), *body],
+            lineno=lineno,
+        )
+
+
+def _is_generation_block(node: "jinja2.nodes.Node") -> bool:
+    return (
+        isinstance(node, jinja2.nodes.Scope)
+        and bool(node.body)
+        and isinstance(node.body[0], jinja2.nodes.ExtensionAttribute)
+        and node.body[0].identifier == _GenerationTag.identifier
+    )
+
+
+#: Parses chat templates the way HF's renderer accepts them.
+_TEMPLATE_PARSE_ENV = jinja2.Environment(
+    extensions=["jinja2.ext.loopcontrols", _GenerationTag]
+)
+
+
+def _message_loop_node(tree: "jinja2.nodes.Template", loop_var_source: str):
+    """The first ``for message in <loop_var_source>`` loop in *tree*, or None."""
+    for node in tree.find_all(jinja2.nodes.For):
+        if (
+            isinstance(node.target, jinja2.nodes.Name)
+            and node.target.name == "message"
+            and isinstance(node.iter, jinja2.nodes.Name)
+            and node.iter.name == loop_var_source
+        ):
+            return node
+    return None
+
+
+def _has_own_loop_control(nodes_: list) -> bool:
+    """Whether *nodes_* hold a ``continue``/``break`` that belongs to their own
+    loop, i.e. one not inside a nested ``for``."""
+    for node in nodes_:
+        if isinstance(node, (jinja2.nodes.Continue, jinja2.nodes.Break)):
+            return True
+        if isinstance(node, jinja2.nodes.For):
+            # Its body's controls are the inner loop's; only its else-block
+            # runs in the outer loop's iteration.
+            if _has_own_loop_control(node.else_):
+                return True
+            continue
+        if _has_own_loop_control(list(node.iter_child_nodes())):
+            return True
+    return False
+
+
+def _jinja_string_literal(text: str) -> str:
+    """*text* as a single-quoted Jinja string literal that renders back to it."""
+    escaped = text.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n")
+    return "'" + escaped + "'"
+
+
+def _sr_history_header(literals: list[str], site: str) -> tuple[str, list[str]]:
+    """The rendered assistant header, through *site*, that history turns repeat,
+    and the generation prompt's full *literals* (rendered text) that start with it.
+
+    Every generation-prompt branch opens with the same assistant header, and a
+    history assistant turn renders that same header before its content
+    (``<|start_of_role|>assistant<|end_of_role|>`` on 4.1,
+    ``<|im_start|>assistant\\n<think>`` on 4.2, where the history turn continues
+    ``</think>``). The full literals (4.2: ``...<think>\\n`` and
+    ``...<think></think>``) are what a history turn renders when the template
+    wrote the header itself, so matching them rather than the bare header keeps
+    an answer that merely starts with *site* untouched.
+
+    Raises:
+        ValueError: If the branches share no prefix that contains *site*.
+    """
+    prefix = os.path.commonprefix(literals) if literals else ""
+    cut = prefix.rfind(site)
+    if cut == -1:
+        raise ValueError(
+            f"The generation prompt's branches share no prefix containing the "
+            f"Shadow Residual substitution site {site!r} ({literals!r}), so the "
+            f"history_adapters rewrite has no header to match."
+        )
+    header = prefix[: cut + len(site)]
+    # Longest first, so a literal that extends another is tried before it.
+    return header, sorted(set(literals), key=len, reverse=True)
+
+
+def _wrap_message_loop_for_history_adapters(
+    template: str,
+    loop_var_source: str,
+    header: str,
+    site: str,
+    literals: list[str] | None = None,
+) -> str:
+    """Let ``history_adapters`` put SR control tokens back into history turns.
+
+    Rendering history from ``messages`` emits every assistant header with the
+    SR *site* (the token the control token replaced at generation time), so the
+    re-rendered ids diverge from the ones that were sent and the prefix cache
+    misses. ``history_adapters[k]`` names the adapter that produced the k-th
+    assistant message; this rewrites that message's header back so its *site*
+    is the control token.
+
+    The match is on each full generation-prompt *literal* (e.g. 4.2's
+    ``<|im_start|>assistant\\n<think></think>`` and ``...<think>\\n``), each of
+    which starts with *header*, not on *site* or *header* alone. Granite 4.2
+    writes its own ``<think></think>`` only when the answer has no think tags,
+    so for an answer that mentions ``<think>`` -- even at its very start -- the
+    first ``<think>`` is the answer's text, and only the full literal tells the
+    two apart. The thinking-on form a caller stores (``"<think>\\n"`` + answer)
+    renders the ``...<think>\\n`` literal, so it still gets its token. Only an
+    answer that itself starts with a full literal's tail (``<think>\\n`` or
+    ``<think></think>``) is indistinguishable from the header. *literals*
+    defaults to ``[header]``.
+
+    The replacement applies to each message's rendered text rather than to
+    each assistant emission in the source: the 4.2 template emits the assistant
+    header from several branches and reads ``<think>`` in its own
+    history-truncation logic, so a token placed in the source would be seen
+    (and stripped, or misread) by that logic. Rendered-text replacement runs
+    after it and is indifferent to which branch ran.
+
+    Each message's body is wrapped in a ``{% filter %}`` that does the
+    replacement. A ``{% continue %}`` / ``{% break %}`` would leave that filter
+    before it prints, dropping the message's output, and HF's
+    ``{% generation %}`` would take its assistant-mask offsets from text the
+    filter has not printed yet. A message loop that uses either (a nested
+    loop's own continue/break are fine), or has a ``{% else %}``, is rejected
+    at compose time.
+
+    Only applied when the current turn is SR (``ns.adapter_type == 'sr'``): a
+    base turn after a kept SR token would generate under SR (latest-wins).
+
+    ``history_adapters`` must have exactly one entry per assistant message
+    (``None`` for a turn that had no adapter); any other length raises.
+
+    Raises:
+        ValueError: If *header* does not end in *site*, the template does not
+            parse, has no main message loop with a matching ``endfor``, uses
+            ``continue``/``break``, ``{% generation %}`` or ``{% else %}`` in
+            that loop, or the tag scan misread a
+            comment or string as the loop (the result does not parse, or the
+            real loop is left unwrapped).
+    """
+    if not header.endswith(site):
+        raise ValueError(
+            f"history_adapters header {header!r} does not end in the Shadow "
+            f"Residual substitution site {site!r}."
+        )
+    literals = literals or [header]
+    try:
+        tree = _TEMPLATE_PARSE_ENV.parse(template)
+    except jinja2.TemplateSyntaxError as exc:
+        raise ValueError(
+            f"The chat template does not parse ({exc}), so history_adapters "
+            f"cannot be added to it."
+        ) from exc
+    loop = _message_loop_node(tree, loop_var_source)
+    if loop is not None:
+        # Each would misbehave inside the per-message filter: continue/break
+        # leave it before it prints, dropping the message's output; HF's
+        # generation block takes its assistant-mask offsets from text the
+        # filter has not printed yet; an else block would land inside it.
+        if loop.else_:
+            unsupported = "an else block"
+        elif any(
+            _is_generation_block(node)
+            for body_node in loop.body
+            for node in [body_node, *body_node.find_all(jinja2.nodes.Scope)]
+        ):
+            unsupported = "a {% generation %} block"
+        elif _has_own_loop_control(loop.body):
+            unsupported = "continue/break"
+        else:
+            unsupported = None
+        if unsupported is not None:
+            raise ValueError(
+                f"The chat template's message loop uses {unsupported}, which "
+                f"history_adapters does not support (line {loop.lineno})."
+            )
+    open_tag = re.search(
+        r"\{%[-+]?\s*for message in " + re.escape(loop_var_source) + r"\s*[-+]?%\}",
+        template,
+    )
+    if open_tag is None:
+        raise ValueError(
+            f"No '{{%- for message in {loop_var_source} %}}' loop in the chat "
+            f"template, so history_adapters has nothing to wrap."
+        )
+    depth = 1
+    for tag in _FOR_TAG_RE.finditer(template, open_tag.end()):
+        depth += 1 if tag.group(1) == "for" else -1
+        if depth == 0:
+            close_at = tag.start()
+            break
+    else:
+        raise ValueError(
+            "The chat template's message loop has no matching endfor, so "
+            "history_adapters has nothing to wrap."
+        )
+
+    # Each inserted tag copies the whitespace control of the loop tag it sits
+    # next to, so the wrap neither strips nor adds whitespace when unused.
+    # ``+`` is copied too: under ``lstrip_blocks`` it keeps the indentation
+    # before the tag, which a plain inserted tag would strip.
+    def _control(char: str) -> str:
+        return char if char in "-+" else ""
+
+    lead = _control(open_tag.group(0)[2])
+    trail = _control(open_tag.group(0)[-3])
+    close_lead = _control(template[close_at + 2])
+    # Checked once, before the loop: a list that does not line up one-to-one
+    # with the assistant messages is a caller bug, and silently padding or
+    # truncating it would put tokens on the wrong turns.
+    precheck = (
+        "{%" + lead + " if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        " and history_adapters is defined and history_adapters is not none %}"
+        "{% if history_adapters is string or history_adapters is mapping"
+        " or history_adapters is not iterable %}"
+        "{{ raise_exception('history_adapters must be a list of adapter names "
+        "(or none), one per assistant message') }}"
+        "{% endif %}"
+        "{% set _gs_expected = " + loop_var_source + " | selectattr('role', "
+        "'equalto', 'assistant') | list | length %}"
+        "{% if history_adapters | length != _gs_expected %}"
+        "{{ raise_exception('history_adapters has ' ~ (history_adapters | length)"
+        " ~ ' entries but the conversation has ' ~ _gs_expected ~ ' assistant "
+        "messages; pass exactly one entry (an adapter name or none) per "
+        "assistant message') }}"
+        "{% endif %}"
+        "{% for _gs_entry in history_adapters %}"
+        # ``is not string`` first: ``or`` short-circuits, so an unhashable entry
+        # never reaches the ``in`` lookup and gets this message, not a TypeError.
+        "{% if _gs_entry is not none and (_gs_entry is not string"
+        " or _gs_entry not in adapter_map"
+        " or adapter_map[_gs_entry]['type'] != '" + ANCHOR_MODE_SR + "') %}"
+        "{{ raise_exception('history_adapters names ' ~ _gs_entry ~ ', which is "
+        "not a Shadow Residual adapter of this checkpoint') }}"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% endif %}"
+    )
+    # Every literal gets a replace, but at most one matches the header: the
+    # rest would need the full literal, role marker included, inside the answer.
+    # With ``_gs_tok`` left at *site* every replace is a no-op.
+    head = header[: len(header) - len(site)]
+    replaces = " | ".join(
+        "replace("
+        + _jinja_string_literal(literal)
+        + ", "
+        + _jinja_string_literal(head)
+        + " ~ _gs_tok ~ "
+        + _jinja_string_literal(literal[len(header) :])
+        + ", 1)"
+        for literal in literals
+    )
+    # Picks this message's token before its body renders. The last tag copies
+    # the loop tag's trailing whitespace control, since the body now follows it.
+    choose = (
+        "{% set _gs_tok = " + _jinja_string_literal(site) + " %}"
+        "{% if message.role == 'assistant' %}"
+        "{% if ns.adapter_type == '" + ANCHOR_MODE_SR + "'"
+        " and history_adapters is defined and history_adapters is not none"
+        " and history_adapters[ns.assistant_idx] is not none %}"
+        "{% set _gs_tok = adapter_map[history_adapters[ns.assistant_idx]]['token'] %}"
+        "{% endif %}"
+        "{% set ns.assistant_idx = ns.assistant_idx + 1 %}"
+        "{% endif %}"
+        "{% filter " + replaces + " " + trail + "%}"
+    )
+    wrapped = (
+        template[: open_tag.start()]
+        + precheck
+        + template[open_tag.start() : open_tag.end()]
+        + choose
+        + template[open_tag.end() : close_at]
+        + "{%"
+        + close_lead
+        + " endfilter %}"
+        + template[close_at:]
+    )
+
+    # The tag scan is textual, so it can misread a comment or a string as the
+    # loop. Check the parsed result instead: a misread either leaves an inserted
+    # tag unbalanced, or wraps text that is not the real loop, whose body then
+    # has no filter.
+    try:
+        wrapped_tree = _TEMPLATE_PARSE_ENV.parse(wrapped)
+    except jinja2.TemplateSyntaxError as exc:
+        raise ValueError(
+            f"Wrapping the chat template's message loop for history_adapters "
+            f"produced a template that does not parse ({exc}). The loop's "
+            f"endfor was probably mis-identified, e.g. one inside a comment or "
+            f"a string."
+        ) from exc
+    wrapped_loop = _message_loop_node(wrapped_tree, loop_var_source)
+    if wrapped_loop is None or not any(
+        isinstance(node, jinja2.nodes.FilterBlock) for node in wrapped_loop.body
+    ):
+        raise ValueError(
+            "Wrapping the chat template's message loop for history_adapters "
+            "wrapped text that is not the loop itself, e.g. a copy of it inside "
+            "a comment or a string."
+        )
+    return wrapped
 
 
 def add_control_tokens(
@@ -729,53 +1062,171 @@ def _inject_audio_granite_format(template: str, marker: str) -> str:
     return template.replace(_GRANITE_TEXT_PART_BRANCH, new, 1)
 
 
-def _inject_audio_chatml(template: str, marker: str) -> str:
-    """Rebuild ChatML's stringified content from its parts, emitting the marker.
+# Marker that identifies the ChatML content-normalize block (so the audio pass
+# can find and upgrade a text-only block rather than inject a competing second
+# one).
+_CHATML_FLATTEN_SENTINEL = "{#- gs:chatml-content-normalize -#}"
 
-    ChatML has no content-part loop at all: its user/system branch does
-    ``{%- set content = message.content | string %}``, so a multimodal parts
-    *list* renders as that list's Python repr — base64 audio payload included —
-    and the marker never appears.
+# The ChatML message loop. The normalize pass is injected immediately before it,
+# so every role-dispatch branch inside the loop sees a plain-string `content`.
+_CHATML_MESSAGE_LOOP = "{%- for message in loop_messages %}"
 
-    The flattening block is appended immediately *after* that assignment rather
-    than replacing it, which keeps the statement intact as
-    :func:`configure_chat_template`'s ALoRA Pass 2 anchor. Since Pass 2 is
-    inserted directly after the same anchor, calling this after
-    ``configure_chat_template`` lands the flattening ahead of Pass 2 — required,
-    because Pass 2 calls ``rsplit`` on ``content`` and so needs a string.
 
-    Part joining mirrors the granite_format loop: a text part is newline-
-    separated from whatever precedes it, and the marker is appended directly.
-    Part *order* is preserved, so the transcript the ASR processor splices in
-    lands where the clip sat relative to the text.
+def _chatml_content_flatten_block(marker: str | None) -> str:
+    """The Jinja block that normalizes every ChatML message's ``content``.
+
+    ChatML reads ``message.content`` at *seven* sites with different shapes of
+    assumption: the user/system branch stringifies it (rendering a parts list as
+    its Python repr ``[{'type': 'text', ...}]``), the assistant branch gates on
+    ``content is string`` (silently DROPPING a parts list's text when the turn
+    also carries tool calls), the tool branch emits it straight into
+    ``<tool_response>``, and the catch-all ``else`` concatenates it to a string
+    (``TypeError`` on a list). Under vLLM's ``openai`` content format *every*
+    message arrives as a parts list, including assistant history, because vLLM
+    wraps plain strings too.
+
+    Patching those sites individually is only ever as complete as the list of
+    sites someone remembered — three were missed on the first pass. So instead
+    this rebuilds ``loop_messages`` with flattened content ONCE, before the loop,
+    which is what the granite_format (4.1) family already does natively. Text
+    parts are newline-joined in order; everything else is dropped. Role-agnostic
+    by construction, so a role added to a future base template is covered
+    without touching this code.
+
+    ``dict(_m, content=...)`` makes a flattened *copy* — the messages are not
+    mutated, which also keeps this working under the immutable Jinja sandbox
+    ``transformers`` renders with.
+
+    When *marker* is given (audio enabled) an extra branch emits it for audio
+    parts, interleaved in part order so the ASR transcript lands where the clip
+    sat. When *marker* is ``None`` the block is text-only. Note that normalizing
+    centrally widens audio to *any* role, where the previous per-site injection
+    reached user/system only; emitting a marker too widely is the safe direction,
+    since a DROPPED audio part is what crashes vLLM's prompt replacement.
+
+    The sentinel comment lets :func:`configure_audio_chat_template` recognize a
+    text-only block already injected by :func:`configure_chat_template` and
+    upgrade it in place, rather than stack a second competing block.
     """
-    if _CHATML_CONTENT_SET not in template:
+    audio_branch = (
+        (
+            "            {%- if _e.type is defined and 'audio' in _e.type %}\n"
+            "                {%- set _c.val = _c.val + '" + marker + "' %}\n"
+            "            {%- elif _e.type is defined and _e.type == 'text' %}\n"
+        )
+        if marker is not None
+        else "            {%- if _e.type is defined and _e.type == 'text' %}\n"
+    )
+    return (
+        _CHATML_FLATTEN_SENTINEL + "\n"
+        "{#- Normalize every message's content to a plain string before the loop:\n"
+        " under vLLM's 'openai' content format each content arrives as a parts\n"
+        " list, and the branches below variously repr it, drop it, or raise. -#}\n"
+        "{%- set _norm = namespace(msgs=[]) %}\n"
+        "{%- for _m in loop_messages %}\n"
+        "    {%- if _m.content is not string and _m.content is iterable "
+        "and _m.content is not mapping %}\n"
+        "        {%- set _c = namespace(val='') %}\n"
+        "        {%- for _e in _m.content %}\n"
+        + audio_branch
+        + "                {%- if _c.val != '' %}\n"
+        "                    {%- set _c.val = _c.val + '\\n' %}\n"
+        "                {%- endif %}\n"
+        "                {%- set _c.val = _c.val + _e.text %}\n"
+        "            {%- endif %}\n"
+        "        {%- endfor %}\n"
+        "        {%- set _norm.msgs = _norm.msgs + [dict(_m, content=_c.val)] %}\n"
+        "    {%- else %}\n"
+        "        {%- set _norm.msgs = _norm.msgs + [_m] %}\n"
+        "    {%- endif %}\n"
+        "{%- endfor %}\n"
+        "{%- set loop_messages = _norm.msgs %}\n"
+    )
+
+
+# The ChatML preamble pulls the leading system message's content into a scalar
+# `system_message` that is later concatenated with a string. A parts list there
+# crashes the render ("can only concatenate str (not list)") before the main
+# loop runs, so it needs the same flatten as the per-message user/system branch.
+_CHATML_SYSTEM_MESSAGE_SET = '{%- set system_message = messages[0]["content"] %}'
+
+
+def _inject_chatml_system_message_flatten(template: str) -> str:
+    """Flatten a parts-list leading system message in the ChatML preamble.
+
+    Appends a block after ``{%- set system_message = messages[0]["content"] %}``
+    that, when that content is a non-string iterable, rebuilds it as the newline-
+    joined text parts. Text-only: an audio part in the *leading system* message
+    is still dropped (matching the per-message audio scope and the fact that no
+    caller places a clip in the system turn).
+
+    This site is NOT covered by the pre-loop normalize pass: the preamble reads
+    ``messages[0]["content"]`` directly, before ``loop_messages`` exists.
+
+    Raises:
+        ValueError: if the anchor is absent. A silent no-op here would compose a
+            checkpoint that renders a parts-list system turn as a ``TypeError``,
+            with nothing failing until a prompt is served.
+    """
+    if _CHATML_SYSTEM_MESSAGE_SET not in template:
         raise ValueError(
-            "Could not find the ChatML per-message content assignment "
-            f"({_CHATML_CONTENT_SET!r}) to inject audio handling; the base chat "
-            "template may have changed."
+            "Could not find the ChatML leading-system-message assignment "
+            f"({_CHATML_SYSTEM_MESSAGE_SET!r}) to inject content flattening; "
+            "the base chat template may have changed."
         )
     block = (
         "\n"
-        "        {#- Audio: ChatML stringifies message.content, so rebuild it from\n"
-        "         the parts when it is a list — otherwise a multimodal turn renders\n"
-        "         as a Python repr and the audio marker never appears. -#}\n"
-        "        {%- if message.content is not string and message.content is iterable %}\n"
-        "            {%- set _audio = namespace(val='') %}\n"
-        "            {%- for entry in message.content %}\n"
-        "                {%- if entry.type is defined and 'audio' in entry.type %}\n"
-        "                    {%- set _audio.val = _audio.val + '" + marker + "' %}\n"
-        "                {%- elif entry.type is defined and entry.type == 'text' %}\n"
-        "                    {%- if _audio.val != '' %}\n"
-        "                        {%- set _audio.val = _audio.val + '\\n' %}\n"
-        "                    {%- endif %}\n"
-        "                    {%- set _audio.val = _audio.val + entry.text %}\n"
-        "                {%- endif %}\n"
-        "            {%- endfor %}\n"
-        "            {%- set content = _audio.val %}\n"
-        "        {%- endif %}"
+        "{%- if system_message is not string and system_message is iterable %}\n"
+        "    {%- set _sys = namespace(val='') %}\n"
+        "    {%- for entry in system_message %}\n"
+        "        {%- if entry.type is defined and entry.type == 'text' %}\n"
+        "            {%- if _sys.val != '' %}\n"
+        "                {%- set _sys.val = _sys.val + '\\n' %}\n"
+        "            {%- endif %}\n"
+        "            {%- set _sys.val = _sys.val + entry.text %}\n"
+        "        {%- endif %}\n"
+        "    {%- endfor %}\n"
+        "    {%- set system_message = _sys.val %}\n"
+        "{%- endif %}"
     )
-    return template.replace(_CHATML_CONTENT_SET, _CHATML_CONTENT_SET + block, 1)
+    return template.replace(
+        _CHATML_SYSTEM_MESSAGE_SET, _CHATML_SYSTEM_MESSAGE_SET + block, 1
+    )
+
+
+def _inject_chatml_content_flatten(template: str, marker: str | None) -> str:
+    """Insert (or upgrade) the ChatML content-normalize block.
+
+    Inserted immediately *before* the message loop, so every role-dispatch
+    branch inside the loop reads an already-flattened string. ALoRA Pass 1 is
+    injected at the same anchor and must still see the ORIGINAL content shape —
+    it scans for the invocation text in both string and parts form — so this
+    block goes in first and Pass 1 lands before it.
+
+    If a text-only block (marked by :data:`_CHATML_FLATTEN_SENTINEL`) is already
+    present — injected by :func:`configure_chat_template` — and *marker* is
+    given, the existing block is swapped for the audio-aware variant instead of
+    stacking a second block that would re-normalize ``loop_messages``.
+
+    Raises:
+        ValueError: if the message-loop anchor is absent.
+    """
+    desired = _chatml_content_flatten_block(marker)
+    if _CHATML_FLATTEN_SENTINEL in template:
+        # A block is already installed; swap it wholesale (upgrade text-only ->
+        # audio, or re-inject identically).
+        existing = _chatml_content_flatten_block(None)
+        if existing in template:
+            return template.replace(existing, desired, 1)
+        # Already the audio variant (or an unexpected shape): leave as-is.
+        return template
+    if _CHATML_MESSAGE_LOOP not in template:
+        raise ValueError(
+            "Could not find the ChatML message loop "
+            f"({_CHATML_MESSAGE_LOOP!r}) to inject content normalization; the "
+            "base chat template may have changed."
+        )
+    return template.replace(_CHATML_MESSAGE_LOOP, desired + _CHATML_MESSAGE_LOOP, 1)
 
 
 def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
@@ -791,8 +1242,11 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
 
     * **granite_format** (3.x / 4.0 / 4.1) — one ``elif`` added to the existing
       content-part loop. See :func:`_inject_audio_granite_format`.
-    * **chatml** (Granite 4.2) — no content-part loop exists, so a flattening
-      block rebuilds ``content`` from the parts. See :func:`_inject_audio_chatml`.
+    * **chatml** (Granite 4.2) — no content-part loop exists, so a normalize
+      pass before the message loop rebuilds each ``content`` from its parts. A
+      text-only pass is already installed by :func:`configure_chat_template`;
+      this upgrades it in place to also emit the marker for audio parts. See
+      :func:`_inject_chatml_content_flatten`.
 
     Matching on ``'audio' in entry.type`` covers ``audio`` / ``input_audio`` /
     ``audio_url`` in both.
@@ -800,9 +1254,13 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
     Call *after* :func:`configure_chat_template`, gated on audio being enabled;
     the ChatML path depends on that order.
 
-    Scope is the per-message loop. An audio part in the leading system message is
-    dropped by both families — matching the pre-existing granite_format
-    behaviour, and not a shape any caller sends.
+    An audio part in the leading *system* message is dropped by both families —
+    matching the pre-existing granite_format behaviour, and not a shape any
+    caller sends. Otherwise ChatML's scope is now every role, because the
+    normalize pass it upgrades is role-agnostic (granite_format remains
+    per-message-loop). Widening the marker is the safe direction: a *dropped*
+    audio part is what fails vLLM's prompt replacement, an extra marker in a
+    role no caller uses is inert.
 
     Raises:
         ValueError: if the template family is unrecognized or its injection
@@ -823,7 +1281,7 @@ def configure_audio_chat_template(tokenizer, marker: str = "<|audio|>") -> None:
         )
 
     if fmt.name == "chatml":
-        tokenizer.chat_template = _inject_audio_chatml(template, marker)
+        tokenizer.chat_template = _inject_chatml_content_flatten(template, marker)
     else:
         tokenizer.chat_template = _inject_audio_granite_format(template, marker)
     print(
@@ -1214,7 +1672,9 @@ def configure_chat_template(
             "\n                       adapter_invocation_text=adapter_invocation_text,"
             "\n                       adapter_invocation_drop_chars=adapter_invocation_drop_chars,"
             "\n                       alora_target_idx=-1,"
-            "\n                       skip_next_role_marker=false"
+            # history_adapters state (SR only): the assistant message being visited.
+            + ("\n                       assistant_idx=0," if sr_anchors else "")
+            + "\n                       skip_next_role_marker=false"
             "\n                       )"
         )
         modified_chat_template = (
@@ -1321,6 +1781,23 @@ def configure_chat_template(
                 + alora_pass2
                 + modified_chat_template[insertion_point:]
             )
+        # Normalize every message's content to a plain string BEFORE the loop.
+        # vLLM's content-format auto-detector resolves to 'openai' whenever a
+        # template iterates message.content (which the ALoRA Pass 1 scan above
+        # does), and then feeds every content as a parts list — assistant history
+        # included, since it wraps plain strings too. ChatML's branches variously
+        # repr that list, silently drop it, or raise on it, so normalizing once
+        # up front is what makes all of them correct; patching each branch is
+        # only ever as complete as the list of branches someone remembered.
+        # Text-only here; the audio pass upgrades this same block.
+        modified_chat_template = _inject_chatml_content_flatten(
+            modified_chat_template, marker=None
+        )
+        # Not covered by the pass above: the preamble reads messages[0]["content"]
+        # directly, before loop_messages exists, and concatenates it to a string.
+        modified_chat_template = _inject_chatml_system_message_flatten(
+            modified_chat_template
+        )
     else:
         match = re.search(fmt.user_role_anchor_re, modified_chat_template)
         if match:
@@ -1363,6 +1840,8 @@ def configure_chat_template(
             modified_chat_template,
             sr_site,
             sr_replacements,
+            sr_header,
+            sr_literals,
         ) = _replace_anchor_in_generation_prompt(
             modified_chat_template, next(iter(sr_anchors)), tokenizer
         )
@@ -1374,6 +1853,13 @@ def configure_chat_template(
             for name, info in adapter_mapping.items()
             if info["type"] == ANCHOR_MODE_SR
         }
+        modified_chat_template = _wrap_message_loop_for_history_adapters(
+            modified_chat_template,
+            fmt.loop_var_source,
+            sr_header,
+            sr_site,
+            sr_literals,
+        )
 
     # Skip-once wrapper for every role-open marker emission in the template.
     # ns.skip_next_role_marker is set to true immediately after a LoRA or
@@ -1469,5 +1955,9 @@ def configure_chat_template(
         print(
             f"  - SR tokens: substituted for {sr_site!r} in all "
             f"{sr_replacements} generation-prompt render path(s)"
+        )
+        print(
+            f"  - SR history: history_adapters=[...] restores {sr_site!r} -> "
+            f"control token in earlier assistant turns"
         )
     return fmt.name, sr_substitute_token_ids
