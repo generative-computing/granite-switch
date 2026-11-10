@@ -274,6 +274,11 @@ class GraniteSwitchModel(nn.Module):
         self.register_buffer(
             "head_slot_mask_t", stream_routing.head_slot_mask(config), persistent=False
         )
+        # Slot -> the adapter slot whose LoRA runs there (a head on an adapter
+        # runs it at its marker); the identity on adapter slots.
+        self.register_buffer(
+            "adapter_lut_t", stream_routing.adapter_lut(config), persistent=False
+        )
 
         # Per read layer (None = final), per head type: the type's slot ids and
         # its slot -> 1 + row table. Store buffer names, not tensors:
@@ -427,6 +432,11 @@ class GraniteSwitchModel(nn.Module):
         # path no-ops there).
         if self.switch is not None:
             lora_indices, head_indices = self.switch.split_indices(adapter_indices)
+            # A head stream that names an adapter runs it at its marker: route
+            # its tokens through that adapter slot's LoRA (stream_routing.
+            # adapter_lut); a head on the base model maps to 0, as before.
+            if self._head_types:
+                lora_indices = self.adapter_lut_t[adapter_indices]
             # The LoRA tensors are indexed by row, not by slot: a streams
             # checkpoint keeps rows for adapter slots only. Everything
             # downstream (kernel metadata, layer reads, the SR merge) only tells

@@ -75,6 +75,36 @@ def row_lut(config, type_name: str) -> torch.Tensor:
     return lut
 
 
+def adapter_lut(config) -> torch.Tensor:
+    """``[num_adapters + 1]``: slot -> the adapter slot its LoRA layers run.
+
+    The identity for adapter slots and base (0); 0 for a head slot on the base
+    model; the named adapter's slot for a head slot with an ``adapter``. The
+    model routes LoRA through this table, so a head's marker token runs its
+    adapter, and the head then reads that adapter's state.
+    """
+    lut = torch.zeros(config.num_adapters + 1, dtype=torch.long)
+    names = config.adapter_names or []
+    for s in stream_specs(config):
+        if not s.is_head:
+            lut[s.slot] = s.slot
+        elif s.adapter is not None:
+            # The marker runs the adapter. On Shadow Residual that alone gives
+            # the adapter's state, because the adapter writes no K/V. A
+            # single-stream adapter writes the K/V of every token it runs on,
+            # so its own control token must also sit in the prompt, where that
+            # adapter goes (the chat template places it), for the head to read
+            # the state the adapter computes.
+            target = names.index(s.adapter) + 1 if s.adapter in names else 0
+            if target == 0 or stream_specs(config)[target - 1].is_head:
+                raise ValueError(
+                    f"stream slot {s.slot} names adapter {s.adapter!r}, which is not "
+                    f"an adapter slot of this checkpoint ({names})."
+                )
+            lut[s.slot] = target
+    return lut
+
+
 def lora_rows(config) -> list[int]:
     """The adapter slots that own a LoRA row, in row order (1-based slots).
 
@@ -89,7 +119,12 @@ def lora_rows(config) -> list[int]:
 
 
 def lora_row_lut(config) -> torch.Tensor:
-    """``[num_adapters + 1]``: slot -> 1 + its LoRA row (0 = no LoRA)."""
+    """``[num_adapters + 1]``: slot -> 1 + its LoRA row (0 = no LoRA).
+
+    Composed with :func:`adapter_lut`, a token's LoRA row is
+    ``lora_row_lut[adapter_lut[slot]]``: a head on an adapter reads that
+    adapter's row.
+    """
     lut = torch.zeros(config.num_adapters + 1, dtype=torch.long)
     for row, slot in enumerate(lora_rows(config)):
         lut[slot] = row + 1

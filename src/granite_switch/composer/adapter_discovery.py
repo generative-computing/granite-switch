@@ -167,6 +167,7 @@ def discover_adapters_from_yaml(
                     "kind",
                     "labels",
                     "layer",
+                    "adapter",
                     "output",
                     "settings",
                 )
@@ -175,6 +176,7 @@ def discover_adapters_from_yaml(
                         "kind": info.get("kind") or "lora",
                         "labels": info.get("labels"),
                         "layer": info.get("layer"),
+                        "adapter": info.get("adapter"),
                         "output": info.get("output"),
                         "settings": info.get("settings"),
                     }

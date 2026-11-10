@@ -624,6 +624,82 @@ class TestStreamPluginMerge(_VLLMModelTestBase):
         assert not torch.allclose(merged[_HEAD_LABELS], plain[_HEAD_LABELS])
 
 
+class TestStreamHeadOnAdapter(_VLLMModelTestBase):
+    """A probe that names an adapter runs it at its marker (Shadow Residual).
+
+    The adapter writes no K/V, so the marker alone gives the adapter's state:
+    the probe on the adapter must read what the probe on the base model reads,
+    plus the adapter's change.
+    """
+
+    def _make_config(self):
+        return _tiny_vllm_config(
+            streams=[
+                {"type": "lora"},
+                _probe_entry(0),
+                _probe_entry(1, adapter="adapter_1"),
+            ],
+            dual_stream=True,
+            cross_stream_rank=16,
+        )
+
+    def test_marker_routes_through_the_named_adapter(self):
+        self.model.eval()
+        assert self.model.model.adapter_lut_t.tolist() == [0, 1, 0, 1]
+        head = self.model.model.probe_head
+        with torch.no_grad():
+            # Both rows score the same way, so only the read state differs.
+            head.weight[0, :2].normal_(0, 0.5)
+            head.weight[1, :2] = head.weight[0, :2]
+            on_base = self._run_forward_and_logits([10, 20, 30, 251])[-1]
+            on_adapter = self._run_forward_and_logits([10, 20, 30, 252])[-1]
+        assert torch.isfinite(on_base[_HEAD_LABELS]).all()
+        assert torch.isfinite(on_adapter[_HEAD_LABELS]).all()
+        assert not torch.allclose(on_base[_HEAD_LABELS], on_adapter[_HEAD_LABELS])
+
+
+class TestStreamHeadOnLoRAAdapter(_VLLMModelTestBase):
+    """A probe on a single-stream LoRA adapter, with the adapter's own token.
+
+    The prompt carries the adapter's token first (as the chat template places
+    it) and the probe's marker last. The probe must read the state the adapter
+    computes when it runs alone: with an identity-like head, its scores equal
+    the head applied to the adapter-alone state at that position.
+    """
+
+    def _make_config(self):
+        return _tiny_vllm_config(
+            streams=[
+                {"type": "lora"},
+                _probe_entry(0),
+                _probe_entry(1, adapter="adapter_1"),
+            ]
+        )
+
+    def test_paired_read_is_the_adapter_state(self):
+        self.model.eval()
+        assert self.model.model.adapter_lut_t.tolist() == [0, 1, 0, 1]
+        head = self.model.model.probe_head
+        n = len(_HEAD_LABELS)
+        with torch.no_grad():
+            head.weight[1, :n].normal_(0, 0.5)
+            body = [10, 20, 30]
+            # The adapter alone, then a plain token that embeds as the marker
+            # does (its substitute, id 1): the reference state.
+            alone = self._run_forward([250, *body, 1])[-1, : self.config.hidden_size]
+            reference = head.weight[1, :n] @ alone.to(head.weight.dtype)
+            paired = self._run_forward_and_logits([250, *body, 252])[-1]
+            marker_only = self._run_forward_and_logits([1, *body, 252])[-1]
+        torch.testing.assert_close(
+            paired[_HEAD_LABELS].float(), reference.float(), atol=0.05, rtol=0.02
+        )
+        # Without the adapter's token, the marker runs it on one token only:
+        # a different state, so different scores.
+        assert not torch.allclose(
+            paired[_HEAD_LABELS].float(), marker_only[_HEAD_LABELS].float(), atol=0.05
+        )
+
+
 # ════════════════════════════════════════════════════════════════════
 # 5. KV visibility tests
 # ════════════════════════════════════════════════════════════════════
