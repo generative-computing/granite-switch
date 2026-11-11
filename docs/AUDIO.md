@@ -140,7 +140,7 @@ its `asr/` folder is fetched for the ASR, through the normal HF cache, so a
 pre-populated cache serves offline too. vLLM does not mistake `asr/*.safetensors`
 for LLM weights: it only reads weight files at the checkpoint's top level.
 
-### Migrating a checkpoint composed before 0.2.0
+### Migrating a checkpoint composed before 0.1.2
 
 Older audio checkpoints have `"asr_model_id": null` and relied on a default
 inside the library, which no longer exists. Serving one fails at startup with an
@@ -152,7 +152,7 @@ error naming the fix. Either re-compose, or add these two fields to its
 "asr_model_revision": "947f59af40db9791170a0628cf0f3f4812d720f1"
 ```
 
-Checkpoints composed with 0.2.0 need granite-switch 0.2.0 or newer to serve
+Checkpoints composed with 0.1.2 need granite-switch 0.1.2 or newer to serve
 correctly. An older library ignores `asr_model_revision` and `asr_bundled_path`
 without an error: it loads the ASR unpinned from the Hub, and a bundled
 checkpoint still goes online.

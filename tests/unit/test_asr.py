@@ -309,7 +309,7 @@ class TestResolveAsrSource:
         with pytest.raises(ValueError) as excinfo:
             asr.resolve_asr_source(None, None, None, "/ckpt")
         message = str(excinfo.value)
-        # The error carries the exact fix for a pre-0.2.0 checkpoint.
+        # The error carries the exact fix for a pre-0.1.2 checkpoint.
         assert asr.DEFAULT_ASR_MODEL_ID in message
         assert asr.DEFAULT_ASR_MODEL_REVISION in message
 

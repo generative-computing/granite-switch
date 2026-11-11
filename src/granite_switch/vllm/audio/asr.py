@@ -236,7 +236,7 @@ def resolve_asr_source(
             "longer falls back to a built-in ASR model; the config must name it. "
             "Re-compose with --enable-audio, or add to the checkpoint's "
             f'config.json: "asr_model_id": "{DEFAULT_ASR_MODEL_ID}", '
-            f'"asr_model_revision": "{DEFAULT_ASR_MODEL_REVISION}". Checkpoints composed before granite-switch 0.2.0 '
+            f'"asr_model_revision": "{DEFAULT_ASR_MODEL_REVISION}". Checkpoints composed before granite-switch 0.1.2 '
             "need this. See docs/AUDIO.md."
         )
     return asr_model_id, asr_model_revision
