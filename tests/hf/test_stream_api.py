@@ -181,6 +181,19 @@ class TestStreamEntries:
         with pytest.raises(ValueError, match=message):
             parse_entries([entry], 1)
 
+    @pytest.mark.parametrize(
+        "entry, field",
+        [
+            ({**_probe(0), "read_layr": 3}, "read_layr"),
+            ({**_probe(0), "output": {"token_ids": [1], "scale": 2.0}}, "scale"),
+        ],
+    )
+    def test_refuses_fields_it_does_not_know(self, entry, field):
+        # A field from a newer version would change what the slot computes;
+        # skipping it would run the slot as something else, with no error.
+        with pytest.raises(ValueError, match=f"doesn't know: \\['{field}'\\]"):
+            parse_entries([entry], 1)
+
     def test_one_entry_per_slot(self):
         with pytest.raises(ValueError, match="one entry per slot"):
             parse_entries([{"type": "lora"}], 2)

@@ -13,6 +13,11 @@ A LoRA slot's entry is ``{"type": "lora"}``. The control token, the substitute
 token and the chat-template placement stay where they are (the ``adapter_*``
 config fields and the composer); a stream entry only says what runs.
 
+An entry may carry only the fields listed in ``HEAD_FIELDS`` and
+``OUTPUT_FIELDS``. A field this version doesn't know is refused, not skipped:
+it may come from a newer Granite Switch, and running the slot without it would
+quietly compute something else.
+
 A checkpoint composed before streams has no ``streams`` field. Its entries are
 rebuilt from the probe fields it does carry (``adapter_kinds``,
 ``probe_label_token_ids``, ``probe_read_layers``) with the head row equal to
@@ -26,6 +31,20 @@ from .outputs import OUTPUT_MODES
 
 #: The built-in adapter stream: the decoder layers' LoRA banks, no head module.
 LORA = "lora"
+
+#: The fields a head entry, and its ``output``, may carry.
+HEAD_FIELDS = ("type", "read_layer", "head_row", "output", "settings")
+OUTPUT_FIELDS = ("mode", "token_ids", "weight")
+
+
+def _refuse_unknown(where: str, entry: dict, known: tuple[str, ...]) -> None:
+    unknown = sorted(set(entry) - set(known))
+    if unknown:
+        raise ValueError(
+            f"{where} has fields this version of Granite Switch doesn't know: "
+            f"{unknown}. Known: {list(known)}. A newer version may have "
+            f"composed this checkpoint; upgrade Granite Switch to load it."
+        )
 
 
 @dataclass(frozen=True)
@@ -97,7 +116,9 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
                 )
             specs.append(StreamSpec(slot=slot, type=LORA))
             continue
+        _refuse_unknown(f"streams[{slot - 1}]", e, HEAD_FIELDS)
         out = e.get("output") or {}
+        _refuse_unknown(f"streams[{slot - 1}].output", out, OUTPUT_FIELDS)
         mode = out.get("mode", "select")
         if mode not in OUTPUT_MODES:
             raise ValueError(
