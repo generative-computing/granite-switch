@@ -53,6 +53,7 @@ from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from huggingface_hub.utils import filter_repo_objects
 from transformers import AutoTokenizer
 
 from granite_switch.composer.adapter_discovery import (
@@ -83,7 +84,12 @@ from granite_switch.composer.tokenizer_setup import (
 )
 from granite_switch.composer.validator import validate_control_lut
 from granite_switch.composer.weight_transfer import validate_untied_lm_head_saved
-from granite_switch.config import ASR_DTYPES
+from granite_switch.config import (
+    ASR_BUNDLE_DIR,
+    ASR_DTYPES,
+    DEFAULT_ASR_MODEL_ID,
+    DEFAULT_ASR_MODEL_REVISION,
+)
 from granite_switch.token_exchange import rebuild_control_to_substitute_lut
 
 # ---------------------------------------------------------------------------
@@ -616,6 +622,130 @@ def _copy_upstream_auxiliary_files(base_model_local_path, output_path):
     return copied
 
 
+def _resolve_asr_model(args) -> tuple[str, str | None]:
+    """``(asr_model_id, asr_model_revision)`` to write into an audio config.
+
+    The default model is pinned to DEFAULT_ASR_MODEL_REVISION. A custom model
+    takes --asr-revision as given; without one it loads the repo's current main
+    at serve time, which can change under the checkpoint, so that is warned.
+
+    A local directory is only a bundle source: without --bundle-asr serving
+    would load a path that exists on this machine alone, so it is refused. With
+    --bundle-asr the config records the directory's name, not its path, which
+    would leak the builder's filesystem into a published checkpoint.
+    """
+    model_id = args.asr_model or DEFAULT_ASR_MODEL_ID
+    if os.path.isdir(model_id):
+        if not args.bundle_asr:
+            raise ValueError(
+                f"--asr-model {model_id} is a local directory, which only "
+                f"--bundle-asr can use: serving loads asr_model_id from the Hub, "
+                f"and this path exists on this machine alone. Add --bundle-asr, "
+                f"or pass a Hub repo id."
+            )
+        return os.path.basename(os.path.normpath(model_id)), args.asr_revision
+    revision = args.asr_revision
+    if revision is None and model_id == DEFAULT_ASR_MODEL_ID:
+        revision = DEFAULT_ASR_MODEL_REVISION
+    if revision is None:
+        print(
+            f"  WARNING: --asr-model {model_id} has no --asr-revision; it will "
+            f"load the repo's current main at serve time, so its transcripts can "
+            f"change without the checkpoint changing."
+        )
+    return model_id, revision
+
+
+# What a bundled ASR keeps from its source repo: everything transformers loads
+# (config, weights, tokenizer, feature extractor) plus its README and license.
+# Excludes legacy .bin/.pt weights and custom code, which a bundled model must
+# not need.
+_ASR_BUNDLE_PATTERNS = [
+    "*.json",
+    "*.safetensors",
+    "*.txt",
+    "*.model",
+    "*.jinja",
+    "README.md",
+    "LICENSE*",
+]
+
+
+def _copy_asr_bundle_files(src: str, dest: str) -> None:
+    """Copy the files of a local ASR directory that a Hub bundle would get.
+
+    Matches each file's path relative to ``src`` against _ASR_BUNDLE_PATTERNS
+    with the filter snapshot_download applies, so a local source and a Hub
+    source give the same bundle. Hidden directories (.git, .cache) are not
+    walked: a git-lfs clone would otherwise bring its object store along.
+    """
+    rel_paths = []
+    for dirpath, dirnames, filenames in os.walk(src):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        rel_dir = os.path.relpath(dirpath, src)
+        rel_paths += [os.path.normpath(os.path.join(rel_dir, f)) for f in filenames]
+    for rel in filter_repo_objects(rel_paths, allow_patterns=_ASR_BUNDLE_PATTERNS):
+        os.makedirs(os.path.dirname(os.path.join(dest, rel)), exist_ok=True)
+        shutil.copy2(os.path.join(src, rel), os.path.join(dest, rel))
+
+
+def bundle_asr_model(model_id: str, revision: str | None, dest: str) -> None:
+    """Copy the ASR model into ``dest`` and check it loads with no network.
+
+    ``model_id`` is a Hub repo (downloaded at ``revision``) or a local
+    directory (copied, so the bundle can be built inside an airgapped network).
+    """
+    print(f"\nBundling ASR model {model_id} (revision {revision}) into {dest}")
+    if os.path.isdir(model_id) and os.path.realpath(model_id) == os.path.realpath(dest):
+        raise ValueError(f"--asr-model {model_id} is the bundle destination itself")
+    # Built and validated in a staging directory, then swapped in, so a failed
+    # download or validation leaves any existing bundle at dest untouched.
+    # Starting from an empty staging dir and replacing dest whole means a
+    # re-compose never leaves the previous ASR's files beside the new ones.
+    staging = f"{dest}.partial"
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        if os.path.isdir(model_id):
+            _copy_asr_bundle_files(model_id, staging)
+        else:
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                local_dir=staging,
+                allow_patterns=_ASR_BUNDLE_PATTERNS,
+            )
+        # snapshot_download(local_dir=...) leaves its download cache metadata here.
+        shutil.rmtree(os.path.join(staging, ".cache"), ignore_errors=True)
+        _validate_asr_bundle(staging)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    shutil.rmtree(dest, ignore_errors=True)
+    os.replace(staging, dest)
+    size_gb, _ = _get_directory_size(dest)
+    if size_gb is not None:
+        print(f"  ASR bundle size: {size_gb:.2f} GB")
+
+
+def _validate_asr_bundle(path: str) -> None:
+    """Fail the compose if the bundle cannot load from disk alone."""
+    if not os.path.isfile(os.path.join(path, "config.json")):
+        raise FileNotFoundError(f"Bundled ASR at {path} has no config.json")
+    if not any(f.endswith(".safetensors") for f in os.listdir(path)):
+        raise FileNotFoundError(
+            f"Bundled ASR at {path} has no .safetensors weights; only "
+            f"safetensors models can be bundled."
+        )
+    from transformers import AutoConfig, AutoFeatureExtractor, AutoTokenizer
+
+    # local_files_only proves the bundle is self-contained: nothing here may
+    # reach the Hub, exactly as at airgapped serve time.
+    AutoConfig.from_pretrained(path, local_files_only=True)
+    AutoFeatureExtractor.from_pretrained(path, local_files_only=True)
+    AutoTokenizer.from_pretrained(path, local_files_only=True)
+    print("  ASR bundle loads offline (config, feature extractor, tokenizer)")
+
+
 # Files that save_pretrained() is expected to write or overwrite.
 _EXPECTED_SAVE_FILES = {
     # model.save_pretrained
@@ -837,9 +967,30 @@ Examples:
         "--asr-model",
         type=str,
         default=None,
-        help="HF id of the speech-to-text model the audio preprocessor loads. "
-        "Requires --enable-audio; ignored without it. Defaults to ibm-granite/"
-        "granite-speech-5.0-470m-turboctc (470M English CTC) when unset.",
+        help="HF id of the speech-to-text model the audio preprocessor loads, "
+        "written to asr_model_id. With --bundle-asr it may also be a local "
+        "directory, recorded in the config by its name only. Requires "
+        "--enable-audio; ignored without it. Defaults to "
+        f"{DEFAULT_ASR_MODEL_ID} (470M English CTC) when unset.",
+    )
+    parser.add_argument(
+        "--asr-revision",
+        type=str,
+        default=None,
+        help="Hub revision (commit, tag or branch) of --asr-model, written to "
+        "asr_model_revision. Defaults to the pinned "
+        f"{DEFAULT_ASR_MODEL_REVISION[:7]} for the default model; a custom "
+        "--asr-model without it loads unpinned (warned). Requires "
+        "--enable-audio; ignored without it.",
+    )
+    parser.add_argument(
+        "--bundle-asr",
+        action="store_true",
+        default=False,
+        help=f"Copy the ASR model's weights into <output>/{ASR_BUNDLE_DIR}/ and "
+        "set asr_bundled_path, so the checkpoint serves audio with no Hub "
+        "access (airgapped deployments). Adds the ASR model's size (~1 GB for "
+        "the default) to the checkpoint. Implies --enable-audio.",
     )
     parser.add_argument(
         "--asr-device",
@@ -1178,7 +1329,11 @@ def build():
     # default besides, so `--asr-device cuda:0` alone yielded a text-only
     # checkpoint with no diagnostic. A single explicit flag has no such gap, and
     # nothing to keep in step when an --asr-* option is added.
-    audio_enabled = args.enable_audio
+    audio_enabled = args.enable_audio or args.bundle_asr
+    # Resolved before the model is built, so a refused --asr-model fails fast.
+    asr_model_id, asr_revision = (
+        _resolve_asr_model(args) if audio_enabled else (None, None)
+    )
     # The control tokens are re-passed so this call doesn't drop them from the
     # tokenizer's additional-special-tokens list (add_special_tokens replaces
     # that list rather than extending it).
@@ -1336,7 +1491,12 @@ def build():
     # self-describing and the vLLM backend gates audio on asr_enabled.
     if audio_enabled:
         model.config.asr_enabled = True
-        model.config.asr_model_id = args.asr_model
+        # Always named in the config (serving has no default), so a checkpoint
+        # on the Hub shows which ASR it runs and at which revision.
+        model.config.asr_model_id = asr_model_id
+        model.config.asr_model_revision = asr_revision
+        if args.bundle_asr:
+            model.config.asr_bundled_path = ASR_BUNDLE_DIR
         model.config.asr_device = args.asr_device
         model.config.asr_dtype = args.asr_dtype
         # Optional pipeline-construction extras and default decode kwargs. Only
@@ -1357,7 +1517,9 @@ def build():
             model.config.asr_chunk_overlap_s = args.asr_chunk_overlap_s
         print(
             f"  Audio cascade enabled "
-            f"(asr_model_id={args.asr_model or 'default'}, "
+            f"(asr_model_id={asr_model_id}, "
+            f"asr_model_revision={asr_revision or 'unpinned'}, "
+            f"bundled={args.bundle_asr}, "
             f"asr_device={args.asr_device}, "
             f"asr_dtype={args.asr_dtype or 'auto'}, "
             f"audio_token_id={audio_token_id}, "
@@ -1513,6 +1675,18 @@ def save_and_validate_model_artifacts(
 
     # Snapshot directory state before save_pretrained
     before_snapshot = _snapshot_directory(args.output)
+
+    # Bundle before save_pretrained: the config written below points at the
+    # bundle, so a bundle that fails to download or validate must fail the
+    # compose before that config exists.
+    if getattr(model.config, "asr_bundled_path", None):
+        # args.asr_model, not asr_model_id: for a local source the config
+        # records only the directory's name (see _resolve_asr_model).
+        bundle_asr_model(
+            args.asr_model or model.config.asr_model_id,
+            model.config.asr_model_revision,
+            os.path.join(args.output, model.config.asr_bundled_path),
+        )
 
     model.save_pretrained(args.output, max_shard_size="5GB")
     print("Model saved")

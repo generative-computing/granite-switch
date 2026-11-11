@@ -183,7 +183,7 @@ class TestUnsupportedArchitectureError:
             )
         )
         with _patched_pipeline(boom):
-            t = asr.ASRTranscriber(model_id=asr.DEFAULT_ASR_MODEL_ID, device="cpu")
+            t = asr.ASRTranscriber(model_id="m", device="cpu")
             with pytest.raises(ImportError) as excinfo:
                 t.load()
         message = str(excinfo.value)
@@ -258,6 +258,113 @@ class TestBackendKindDrivesCallKwargs:
         assert "chunk_length_s" not in factory.call_args.kwargs
 
 
+class TestRevisionReachesPipeline:
+    """The pinned revision is what keeps a checkpoint's transcripts stable when
+    the ASR repo's main branch moves."""
+
+    def test_revision_is_passed(self):
+        factory = mock.Mock(return_value=mock.Mock(type="ctc"))
+        with _patched_pipeline(factory):
+            asr.ASRTranscriber(model_id="m", device="cpu", revision="abc").load()
+        assert factory.call_args.kwargs["revision"] == "abc"
+
+    def test_no_revision_passes_none_through(self):
+        factory = mock.Mock(return_value=mock.Mock(type="ctc"))
+        with _patched_pipeline(factory):
+            asr.ASRTranscriber(model_id="m", device="cpu").load()
+        assert "revision" not in factory.call_args.kwargs
+
+    def test_pipeline_kwargs_revision_overrides(self):
+        factory = mock.Mock(return_value=mock.Mock(type="ctc"))
+        with _patched_pipeline(factory):
+            asr.ASRTranscriber(
+                model_id="m",
+                device="cpu",
+                revision="abc",
+                pipeline_kwargs={"revision": "override"},
+            ).load()
+        assert factory.call_args.kwargs["revision"] == "override"
+
+
+class TestResolveAsrSource:
+    """Where the ASR loads from: bundled weights, else the Hub id, else refuse."""
+
+    @pytest.fixture(autouse=True)
+    def _clear_cache(self):
+        asr.resolve_asr_source.cache_clear()
+
+    def _bundle(self, root):
+        bundle = root / "asr"
+        bundle.mkdir()
+        (bundle / "config.json").write_text("{}")
+        return root
+
+    def test_hub_id_and_revision(self):
+        assert asr.resolve_asr_source("org/m", "abc", None, "/ckpt") == (
+            "org/m",
+            "abc",
+        )
+
+    def test_missing_model_id_is_refused(self):
+        with pytest.raises(ValueError) as excinfo:
+            asr.resolve_asr_source(None, None, None, "/ckpt")
+        message = str(excinfo.value)
+        # The error carries the exact fix for a pre-0.1.2 checkpoint.
+        assert asr.DEFAULT_ASR_MODEL_ID in message
+        assert asr.DEFAULT_ASR_MODEL_REVISION in message
+
+    def test_bundle_in_local_checkpoint_wins(self, tmp_path):
+        root = self._bundle(tmp_path)
+        model, revision = asr.resolve_asr_source("org/m", "abc", "asr", str(root))
+        assert model == str(root / "asr")
+        assert revision is None
+
+    def test_bundle_in_hub_checkpoint_fetches_only_the_subfolder(self, tmp_path):
+        root = self._bundle(tmp_path)
+        with mock.patch(
+            "huggingface_hub.snapshot_download", return_value=str(root)
+        ) as fetch:
+            model, _ = asr.resolve_asr_source(
+                "org/m", "abc", "asr", "org/checkpoint", "rev1"
+            )
+        assert model == str(root / "asr")
+        fetch.assert_called_once_with(
+            "org/checkpoint", revision="rev1", allow_patterns=["asr/*"]
+        )
+
+    def test_missing_bundle_is_refused(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="--bundle-asr"):
+            asr.resolve_asr_source("org/m", "abc", "asr", str(tmp_path))
+
+    def test_bundle_without_checkpoint_location_is_refused(self):
+        with pytest.raises(ValueError, match="checkpoint location"):
+            asr.resolve_asr_source("org/m", "abc", "asr", None)
+
+    @pytest.mark.parametrize("spelling", ["asr/", "./asr", "asr//", "x/../asr"])
+    def test_bundle_path_spellings_resolve_to_the_same_subfolder(
+        self, tmp_path, spelling
+    ):
+        root = self._bundle(tmp_path)
+        with mock.patch(
+            "huggingface_hub.snapshot_download", return_value=str(root)
+        ) as fetch:
+            model, _ = asr.resolve_asr_source("org/m", None, spelling, "org/ckpt")
+        assert model == str(root / "asr")
+        assert fetch.call_args.kwargs["allow_patterns"] == ["asr/*"]
+
+    @pytest.mark.parametrize("bad", ["/asr", "../asr", "asr/../../x", ".", ""])
+    def test_bundle_path_outside_the_checkpoint_is_refused(self, tmp_path, bad):
+        if not bad:
+            # Empty means "no bundle": it falls through to the Hub id.
+            assert asr.resolve_asr_source("org/m", None, bad, str(tmp_path)) == (
+                "org/m",
+                None,
+            )
+            return
+        with pytest.raises(ValueError, match="subdirectory of the checkpoint"):
+            asr.resolve_asr_source("org/m", None, bad, str(tmp_path))
+
+
 class TestSinglePassCeiling:
     """The default 120s window is the boundary between 'backend handles it whole'
     and 'our chunker splits it'."""
@@ -291,9 +398,17 @@ class TestTranscriberCache:
         b = asr.get_transcriber("m", "cpu")
         assert a is b
 
-    def test_default_model_id_resolution(self):
-        t = asr.get_transcriber(None, "cpu")
-        assert t.model_id == asr.DEFAULT_ASR_MODEL_ID
+    def test_model_id_is_required(self):
+        with pytest.raises(ValueError, match="model_id"):
+            asr.get_transcriber(None, "cpu")
+
+    def test_revision_is_part_of_the_key(self):
+        a = asr.get_transcriber("rev", "cpu", revision="aaa")
+        b = asr.get_transcriber("rev", "cpu", revision="bbb")
+        c = asr.get_transcriber("rev", "cpu", revision="aaa")
+        assert a is not b
+        assert a is c
+        assert a.revision == "aaa"
 
     def test_different_device_distinct_instance(self):
         a = asr.get_transcriber("m", "cpu")
