@@ -21,10 +21,14 @@ Documentation = "https://github.com/generative-computing/granite-switch/tree/mai
 
 [project.optional-dependencies]
 hf = ["accelerate>=0.20.0"]
-# Every line from 0.26 through 0.30 is supported by one tree; the backend uses
-# capability checks (hasattr) rather than version comparisons where the two
-# differ. Pin a specific line with the per-line dependency groups below.
-vllm = ["vllm>=0.26.0,<0.31.0"]
+# Every line from 0.26 through 0.32 is supported by one tree; the backend uses
+# capability checks rather than version comparisons where the two differ. Prefer
+# probing an API's SHAPE over its mere existence: 0.31 reintroduced the
+# multimodal `_call_hf_processor` hook that 0.29 had deleted, but with a
+# different signature, so `hasattr` alone reads 0.26-0.28 and 0.31+ as the same
+# thing (see src/granite_switch/vllm/audio/processor.py).
+# Pin a specific line with the per-line dependency groups below.
+vllm = ["vllm>=0.26.0,<0.33.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
@@ -59,72 +63,77 @@ markers = [
 ]
 
 [dependency-groups]
-# vllm26 AND vllm30 ARE THE TWO CI LEGS -- the ends of the supported range, which
-# is why these two and not two others. The `vllm` extra above claims 0.26-0.30,
-# and the two bounds are where a break actually lands: a deleted API shows up at
+# TWO LINES ARE DECLARED AND THEY ARE THE TWO CI LEGS: `dev` pins the floor and
+# `dev-latest` the ceiling, which is what /opt/gsw/derive_legs.py reads out of
+# the tested commit. The `vllm` extra above claims the whole 0.26-0.32 range; the
+# two bounds are where a break actually lands, since a deleted API shows up at
 # the ceiling and an API that does not exist yet shows up at the floor.
-# 0.27/0.28/0.29 sit strictly between two tested lines, so they add install time
-# without adding a failure mode the ends would miss. All five lines were verified
-# together out of band (five-leg GPU matrix, every suite green); these two are
-# what CI re-checks on every run.
+#
+# The intermediate lines have no groups here, and that is deliberate rather than
+# an omission. They are not taken on trust either: an upgrade adds a group per
+# line temporarily, so that each line can be `dev-latest` at one commit and be
+# dispatched at that commit's own sha -- the only way to get per-line evidence
+# when derive_legs.py emits at most two legs. Once the evidence exists the group
+# has no remaining job, and leaving it would pin a line that nothing resolves and
+# nothing tests. So the upgrade prunes them before merging.
+#
+# Both halves of that are automated by the `upgrade-vllm` skill in the internal
+# repo (generative-computing/granite-switch-internal, .claude/skills/upgrade-vllm/):
+# `plumb_pyproject.py --add` / `--point-latest` walk the lines, `--prune` removes
+# the scaffolding, and `--check --final` refuses a tree where either step was
+# skipped. Changing a supported bound means repointing `dev` or `dev-latest`.
+# The two version-named groups, and the only ones. They are not CI's: CI asks for
+# `dev` and `dev-latest`. These exist because README.md and CONTRIBUTING.md hand
+# them to a reader who wants exactly one line pinned, and `vllm26` is what a bare
+# `uv sync` resolves through `default-groups` below.
 vllm26     = ["vllm>=0.26.0,<0.27.0"]
-vllm30     = ["vllm>=0.30.0,<0.31.0"]
-# vllm27 IS NOT A CI LEG -- it exists so the GPU workflow stays dispatchable
-# during this transition. `workflow_dispatch` always executes the workflow file
-# from the DEFAULT BRANCH, so until the 0.26/0.30 matrix lands on main, a
-# `/gpu-test` run uses main's matrix (legs vllm26 -> dev and vllm27 ->
-# dev-vllm27) while checking out the PR's commit. Deleting dev-vllm27 here made
-# that leg unresolvable against this tree -- `uv sync --group dev-vllm27` has no
-# such group -- and the leg died before pytest started. Keeping the group costs
-# nothing and is not a fiction: the `vllm` extra claims 0.26-0.30, so 0.27 is a
-# supported line that simply isn't worth its own per-run leg. Removable once the
-# matrix rename is on main.
-vllm27     = ["vllm>=0.27.0,<0.28.0"]
+vllm32     = ["vllm>=0.32.0,<0.33.0"]
 # `audio` is included so the audio tests can actually run: the ASR path needs
 # vLLM's audio deps (av/soundfile/resampy) at runtime, and no group pulled them
 # in before (integration tests failed with ModuleNotFoundError on a synced pod).
 dev        = ["pytest", "pytest-cov", { include-group = "vllm26" }, "granite-switch[hf,compose,audio]"]
-dev-vllm27 = ["pytest", "pytest-cov", { include-group = "vllm27" }, "granite-switch[hf,compose,audio]"]
-dev-vllm30 = ["pytest", "pytest-cov", { include-group = "vllm30" }, "granite-switch[hf,compose,audio]"]
-# The newest vLLM line, as an alias. The GPU workflow (derive_legs.py) and
-# CLAUDE.md ask for `dev-latest` rather than the concrete `dev-vllmNN`, so moving
-# the ceiling is repointing this one line instead of chasing the version through
-# every caller. Currently the 0.30 line.
-dev-latest = [{ include-group = "dev-vllm30" }]
+# The ceiling's dev flavour, and the GPU workflow's upper leg. There is no
+# `dev-vllm32` in between: a version-named group whose only consumer was this
+# alias made the ceiling a two-step indirection, where repointing one of the two
+# and not the other is a silent misconfiguration rather than an error. So the
+# only version-named groups left are the two the docs hand to a reader who wants
+# one line pinned (README.md, CONTRIBUTING.md), and `dev` / `dev-latest` are the
+# only names CI resolves. Now on 0.32, the true ceiling of the `vllm` extra's
+# range -- which is also the only state that may merge, since CI's upper leg
+# comes from this group and anything lower would leave the top supported line
+# untested (`plumb_pyproject.py --check --final` enforces exactly that). During
+# the upgrade it was pointed at each added line in turn, one commit each, to
+# collect that line's own GPU evidence at its own sha.
+dev-latest = ["pytest", "pytest-cov", { include-group = "vllm32" }, "granite-switch[hf,compose,audio]"]
 test       = ["pytest", "pytest-cov", "bitsandbytes", "optimum-quanto", { include-group = "dev" }]
 
 [tool.uv]
 default-groups = ["vllm26"]
-# Only the per-line GROUPS are mutually exclusive now. The `vllm` extra spans
-# 0.26-0.30, so it overlaps every group and no longer conflicts with any of them --
-# which is what made `uv sync` unsatisfiable while the extra said 0.30-only and the
-# default group said 0.26.
-# Every pair that would pull two different vLLM lines into one venv. Three lines
-# are declared (0.26 / 0.27 / 0.30) with a bare and a dev- flavour each, so the
-# 26-side {vllm26, dev}, the 27-side {vllm27, dev-vllm27} and the 30-side
-# {vllm30, dev-vllm30} give 3 x (2 x 2) = 12 cross-line pairs. `test` is absent
-# deliberately: it reaches vllm26 through `include-group = "dev"` and uv derives
-# that transitively -- main's two-line version listed it nowhere either.
+# GENERATED by `plumb_pyproject.py` in the internal repo's upgrade-vllm
+# skill (generative-computing/granite-switch-internal). Edit by hand only
+# if you also regenerate the whole table -- see the growth note below.
+# Only the per-line GROUPS are mutually exclusive. The `vllm` extra spans
+# 0.26-0.32, so it overlaps every group and conflicts with none of them --
+# an extra pinned to one line while default-groups named another is what made
+# `uv sync` unsatisfiable once before.
+# Below: every pair of groups that would pull two different vLLM lines into one
+# venv. 2 lines are declared (0.26 / 0.32), each with a bare and a
+# dev flavour, so the 1 cross-line pair gives 4 entries.
+# `test` is absent deliberately: it reaches the floor through
+# `include-group = "dev"` and uv derives that transitively.
+#
+# Only the floor and the ceiling are declared in a merged tree. An upgrade
+# run adds one group per new line so each can be `dev-latest` at some
+# commit and earn its own GPU evidence, then prunes them again: the entry
+# count grows quadratically in the number of lines, and a MISSING pair does
+# not fail loudly -- it lets `uv sync` resolve two vLLM wheels into one
+# environment.
 conflicts = [
-    # 0.26 vs 0.27
-    [{ group = "vllm26" },     { group = "vllm27" }],
-    [{ group = "vllm26" },     { group = "dev-vllm27" }],
-    [{ group = "dev" },        { group = "vllm27" }],
-    [{ group = "dev" },        { group = "dev-vllm27" }],
-    # 0.26 vs 0.30 (dev-latest aliases dev-vllm30, so it conflicts with the 0.26 side too)
-    [{ group = "vllm26" },     { group = "vllm30" }],
-    [{ group = "vllm26" },     { group = "dev-vllm30" }],
+    # 0.26 vs 0.32
+    [{ group = "vllm26" },     { group = "vllm32" }],
     [{ group = "vllm26" },     { group = "dev-latest" }],
-    [{ group = "dev" },        { group = "vllm30" }],
-    [{ group = "dev" },        { group = "dev-vllm30" }],
+    [{ group = "dev" },        { group = "vllm32" }],
     [{ group = "dev" },        { group = "dev-latest" }],
-    # 0.27 vs 0.30
-    [{ group = "vllm27" },     { group = "vllm30" }],
-    [{ group = "vllm27" },     { group = "dev-vllm30" }],
-    [{ group = "vllm27" },     { group = "dev-latest" }],
-    [{ group = "dev-vllm27" }, { group = "vllm30" }],
-    [{ group = "dev-vllm27" }, { group = "dev-vllm30" }],
-    [{ group = "dev-vllm27" }, { group = "dev-latest" }],
 ]
 
 [tool.coverage.run]

@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 import torch
 
 from tests.shared.vllm_distributed import ensure_distributed
-from tests.shared.vllm_kv_cache import setup_kv_cache
+from tests.shared.vllm_kv_cache import cascade_kwargs, setup_kv_cache
 
 BLOCK_SIZE = 16
 MAX_TOKENS = 8192
@@ -242,11 +242,7 @@ def _build_metadata(harness, seq_len):
             seq_lens=seq_lens,
             block_table=block_table,
             slot_mapping=slot_mapping,
-            use_cascade=False,
-            common_prefix_len=0,
-            cu_prefix_query_lens=None,
-            prefix_kv_lens=None,
-            suffix_kv_lens=None,
+            **cascade_kwargs(),
             causal=True,
             scheduler_metadata=scheduler_metadata,
         )
@@ -403,11 +399,7 @@ def _build_batch_metadata(harness, seq_lens):
         seq_lens=seq_lens_t,
         block_table=block_table,
         slot_mapping=slot_mapping,
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
+        **cascade_kwargs(),
         causal=True,
         scheduler_metadata=scheduler_metadata,
     )
@@ -514,11 +506,7 @@ def _build_step_metadata(harness, query_lens, seq_lens, block_base):
         seq_lens=seq_lens_t,
         block_table=block_table,
         slot_mapping=slot_mapping,
-        use_cascade=False,
-        common_prefix_len=0,
-        cu_prefix_query_lens=None,
-        prefix_kv_lens=None,
-        suffix_kv_lens=None,
+        **cascade_kwargs(),
         causal=True,
         scheduler_metadata=scheduler_metadata,
     )
