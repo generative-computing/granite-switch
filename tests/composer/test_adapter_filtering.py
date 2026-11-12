@@ -132,6 +132,22 @@ class TestTechnologyFilterAdapters:
 # -- filter_adapters tests ---------------------------------------------------
 
 
+class TestProbeDiscovery:
+    def test_probe_dir_is_discovered_with_suffix(self, tmp_path):
+        root = _make_adapter_library(tmp_path, "granite-4.0-micro", [("ans", ["lora"])])
+        probe = tmp_path / "ans" / "granite-4.0-micro" / "probe"
+        probe.mkdir(parents=True)
+        (probe / "io.yaml").write_text("name: ans_probe\n")
+        (probe / "probe_config.json").write_text('{"labels": ["no", "yes"]}')
+        (probe / "probe_head.safetensors").write_bytes(b"\x00")
+        arch = resolve_arch("ibm-granite/granite-4.0-micro")
+        found = discover_adapters(root, "granite-4.0-micro", arch)
+        assert sorted((n, t) for _, n, t, _ in found) == [
+            ("ans", "lora"),
+            ("ans_probe", "probe"),
+        ]
+
+
 class TestFilterAdapters:
     def test_no_filters_passthrough(self, sample_discovered):
         result = filter_adapters(sample_discovered)
