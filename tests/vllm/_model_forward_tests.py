@@ -624,6 +624,32 @@ class TestStreamPluginMerge(_VLLMModelTestBase):
         assert not torch.allclose(merged[_HEAD_LABELS], plain[_HEAD_LABELS])
 
 
+class TestStreamHeadOutputFit(_VLLMModelTestBase):
+    """A head module may return extra columns, in another float dtype.
+
+    Here the module returns fp32 (the model runs bf16) and two columns more
+    than its outputs: the scores are fitted to the score row, column k landing
+    on token_ids[k].
+    """
+
+    def _make_config(self):
+        return _tiny_vllm_config(streams=[{"type": "lora"}, _probe_entry(0)])
+
+    def test_wide_fp32_scores_fit_the_row(self, monkeypatch):
+        self.model.eval()
+        n = len(_HEAD_LABELS)
+        wide = torch.arange(1.0, n + 3, device=self.device)
+
+        def forward(hidden, rows):
+            return wide.expand(hidden.shape[0], -1).float()
+
+        monkeypatch.setattr(self.model.model.probe_head, "forward", forward)
+        with torch.no_grad():
+            last = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+        torch.testing.assert_close(last[_HEAD_LABELS], wide[:n])
+        assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
+
+
 class TestStreamHeadOnAdapter(_VLLMModelTestBase):
     """A probe that names an adapter runs it at its marker (Shadow Residual).
 

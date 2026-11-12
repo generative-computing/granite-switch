@@ -116,7 +116,7 @@ scores = module(hidden, rows)
 |---|---|---|
 | `hidden` | `[n, hidden_size]` | The read layer's hidden state, one row per token passed in |
 | `rows` | `[n]` | Which slot's weights each token uses: the slot's `head_row` + 1. A 0 means "no slot of this type here" |
-| returns | `[n, width]` | One score per output token of the slot, in the order of its `token_ids`; `width` is at least the slot's number of outputs. Values on rows with 0 are ignored |
+| returns | `[n, width]` | One score per output token of the slot, in the order of its `token_ids`, in any float dtype; `width` is at least the slot's number of outputs, and extra columns are ignored. Values on rows with 0 are ignored |
 
 Granite Switch decides where the module runs and on what: the layer, the tokens and the rows. The
 module only does the math. It never sees control tokens, positions or logits.
