@@ -16,7 +16,8 @@ def install_probe_recorder(model):
     target._probe_test_records = records
     original = target.compute_logits
     config = target.config
-    head = target.model.probe_head
+    # Only the probe's bank is read back below; a checkpoint may have none.
+    head = getattr(target.model, "probe_head", None)
     specs = {s.slot: s for s in stream_specs(config)}
 
     def compute_logits(hidden_states):
@@ -34,7 +35,7 @@ def install_probe_recorder(model):
             }
             # Only a final-layer head reads the packed hidden-state prefix. The
             # slot's head lives at its own row of the probe bank.
-            if spec.read_layer is None and spec.type == "probe":
+            if spec.read_layer is None and spec.type == "probe" and head is not None:
                 record["served_hidden"] = hidden_states[row, :h].float().cpu()
                 record["loaded_weight"] = head.weight[spec.head_row, :n].float().cpu()
                 record["loaded_bias"] = head.bias[spec.head_row, :n].float().cpu()

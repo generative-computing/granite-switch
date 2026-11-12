@@ -58,7 +58,7 @@ def _probe_config(
 def test_probe_head_built_only_when_slot_present():
     m_lora = GraniteSwitchForCausalLM(_probe_config(["lora", "lora"]))
     m_clf = GraniteSwitchForCausalLM(_probe_config(["lora", "probe"]))
-    assert m_lora.model.probe_head is None
+    assert not hasattr(m_lora.model, "probe_head")
     assert m_clf.model.probe_head is not None
     # The bank holds the slot's head row: a pre-streams config (no
     # ``streams``) keeps the old layout, one row per slot.
@@ -228,7 +228,7 @@ def test_lora_only_path_unaffected():
     with torch.no_grad():
         out = model(input_ids=input_ids)
 
-    assert model.model.probe_head is None
+    assert not hasattr(model.model, "probe_head")
     assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits).all()
     assert out.logits.shape == (1, 6, config.vocab_size)

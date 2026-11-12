@@ -145,9 +145,17 @@ def validate_all_parameters(
 
     switch_to_peft = arch.switch_to_peft
 
+    from granite_switch.streams.routing import head_param_prefixes
+
+    # Head banks are filled from each head's folder, and a bank row a slot does
+    # not use stays zero, so they are not base weights to validate here.
+    config = getattr(model, "config", None)
+    head_prefixes = head_param_prefixes(config) if config is not None else ()
     for name, param in model.named_parameters():
-        # Skip config buffers
-        if any(kw in name for kw in arch.buffer_keywords):
+        # Skip config buffers and head banks
+        if any(kw in name for kw in arch.buffer_keywords) or name.startswith(
+            head_prefixes
+        ):
             continue
 
         is_all_zero = torch.all(param == 0)

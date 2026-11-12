@@ -185,6 +185,9 @@ class TestStreamEntries:
                 "token_ids must be non-empty",
             ),
             ({**_probe(0), "head_row": None}, "head_row must be a non-negative int"),
+            ({**_probe(0), "read_layer": -1}, "read_layer must be a decoder layer"),
+            ({**_probe(0), "read_layer": True}, "read_layer must be a decoder layer"),
+            ({**_probe(0), "read_layer": "1"}, "read_layer must be a decoder layer"),
             ({**_probe(0), "adapter": 3}, "adapter must be"),
         ],
     )
@@ -204,6 +207,27 @@ class TestStreamEntries:
         # skipping it would run the slot as something else, with no error.
         with pytest.raises(ValueError, match=f"doesn't know: \\['{field}'\\]"):
             parse_entries([entry], 1)
+
+    @pytest.mark.parametrize(
+        "head",
+        [
+            _probe(0, read_layer=2),
+            {
+                "type": "mlp_head",
+                "read_layer": 5,
+                "head_row": 0,
+                "output": {"mode": "merge", "token_ids": list(LABELS)},
+                "settings": {"width": 8},
+            },
+        ],
+        ids=["probe", "plugin"],
+    )
+    def test_read_layer_must_be_a_decoder_layer(self, head):
+        # Every head type, not only the probe: a layer the model doesn't have
+        # is never reached, so the head would silently score nothing.
+        config = _config([{"type": "lora"}, head])  # 2 decoder layers
+        with pytest.raises(ValueError, match=r"has decoder layers 0\.\.1"):
+            stream_specs(config)
 
     def test_one_entry_per_slot(self):
         with pytest.raises(ValueError, match="one entry per slot"):
@@ -226,7 +250,7 @@ class TestStreamEntries:
         assert config.adapter_kinds == ["lora", "probe"]
         assert config.probe_label_token_ids == [None, LABELS]
         assert config.probe_read_layers == [None, 1]
-        assert config.probe_control_token_ids == [251]
+        assert stream_routing.head_control_token_ids(config) == [251]
 
     def test_adapter_kinds_must_agree_with_the_streams(self):
         with pytest.raises(ValueError, match="disagree with the streams"):
