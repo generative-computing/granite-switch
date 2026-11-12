@@ -123,31 +123,103 @@ class TestRegistry:
         assert "mlp_head" in _REGISTRY
         assert get_head_type("mlp_head").weights_file == MLP_HEAD_FILE
 
-    def test_plugins_load_from_the_entry_point_group(self, monkeypatch):
+    @staticmethod
+    def _install(monkeypatch, entry_points):
+        """Stand in for the installed entry points; returns the lookups made."""
         from granite_switch.streams import registry
-
-        class EntryPointType(HeadType):
-            name = "ep_type"
-
-        class FakeEntryPoint:
-            name = "ep_type"
-
-            def load(self):
-                return EntryPointType
 
         seen = []
 
-        def fake_entry_points(group):
-            seen.append(group)
-            return [FakeEntryPoint()]
+        def fake_entry_points(group, name=None):
+            seen.append((group, name))
+            return [ep for ep in entry_points if name is None or ep.name == name]
 
         monkeypatch.setattr(registry, "entry_points", fake_entry_points)
-        monkeypatch.delitem(_REGISTRY, "ep_type", raising=False)
+        return seen
+
+    @staticmethod
+    def _entry_point(name, load):
+        class FakeEntryPoint:
+            value = f"plugin_pkg:{name}"
+
+            def load(self):
+                return load()
+
+        ep = FakeEntryPoint()
+        ep.name = name
+        return ep
+
+    def test_plugins_load_from_the_entry_point_group(self, monkeypatch):
+        class EntryPointType(HeadType):
+            name = "ep_type"
+
+        seen = self._install(
+            monkeypatch, [self._entry_point("ep_type", lambda: EntryPointType)]
+        )
         try:
             assert isinstance(get_head_type("ep_type"), EntryPointType)
-            assert seen == ["granite_switch.streams"]
+            # Only the entry point for the name asked is looked up.
+            assert seen == [("granite_switch.streams", "ep_type")]
         finally:
             _REGISTRY.pop("ep_type", None)
+
+    def test_a_broken_plugin_affects_only_its_own_name(self, monkeypatch):
+        class EntryPointType(HeadType):
+            name = "ep_type"
+
+        def broken():
+            raise ImportError("the plugin's package is broken")
+
+        self._install(
+            monkeypatch,
+            [
+                self._entry_point("broken", broken),
+                self._entry_point("ep_type", lambda: EntryPointType),
+            ],
+        )
+        try:
+            assert isinstance(get_head_type("ep_type"), EntryPointType)
+            with pytest.raises(ImportError, match="broken"):
+                get_head_type("broken")
+        finally:
+            _REGISTRY.pop("ep_type", None)
+
+    def test_an_entry_point_is_named_after_its_type(self, monkeypatch):
+        class EntryPointType(HeadType):
+            name = "long_name"
+
+        self._install(monkeypatch, [self._entry_point("short", lambda: EntryPointType)])
+        with pytest.raises(ValueError, match="name the entry point after the type"):
+            get_head_type("short")
+        assert "long_name" not in _REGISTRY
+
+    def test_an_entry_point_loads_a_head_type(self, monkeypatch):
+        self._install(monkeypatch, [self._entry_point("not_a_type", lambda: len)])
+        with pytest.raises(TypeError, match="not a HeadType subclass"):
+            get_head_type("not_a_type")
+
+    def test_names_list_plugins_without_importing_them(self, monkeypatch):
+        def must_not_load():
+            raise AssertionError("listing names must not import a plugin")
+
+        self._install(monkeypatch, [self._entry_point("listed", must_not_load)])
+        assert {"probe", "listed"} <= set(head_type_names())
+
+    def test_a_taken_name_is_refused(self):
+        class Impostor(HeadType):
+            name = "probe"
+
+        with pytest.raises(ValueError, match="already registered"):
+            register_head_type(Impostor)
+        assert get_head_type("probe").module_name == "probe_head"
+
+    def test_registering_the_same_class_again_is_a_no_op(self):
+        probe = type(get_head_type("probe"))
+        assert register_head_type(probe) is probe
+
+    def test_only_head_types_register(self):
+        with pytest.raises(TypeError, match="not a HeadType subclass"):
+            register_head_type(object)
 
 
 # --------------------------------------------------------------------------- #

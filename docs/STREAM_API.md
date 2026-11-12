@@ -167,6 +167,12 @@ mlp_head = "my_streams.mlp_head:MLPHeadType"
 The entry point is what makes the type visible to every process: compose, HF, and vLLM's engine and
 worker processes, which import nothing from the caller.
 
+- **Name the entry point after the type:** its name must be the class's `name`.
+- **Only the named entry point is imported,** so a plugin that fails to import affects only the
+  checkpoints that use it.
+- **A name belongs to one class:** registering a second class under a taken name is refused, so a
+  plugin can't replace the built-in `probe`.
+
 ## Composing a head
 
 A head is an entry in the compose manifest, next to the adapters:
