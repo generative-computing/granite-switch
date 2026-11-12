@@ -84,6 +84,11 @@ class TestStreamPluginMerge:
         _run_inner_class("TestStreamPluginMerge")
 
 
+class TestStreamHeadOutputFit:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadOutputFit")
+
+
 class TestStreamHeadOnAdapter:
     def test_suite(self):
         _run_inner_class("TestStreamHeadOnAdapter")

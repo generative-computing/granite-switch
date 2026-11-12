@@ -10,6 +10,7 @@ CPU, tiny models composed by the real composer. Covers:
 * the two output modes, ``select`` and ``merge``;
 * an example plugin type (``tests/shared/stream_plugins/mlp_head.py``) run end
   to end, with ``merge``;
+* a head module's wider, other-dtype output fitted to its score row;
 * a head that names an adapter: its marker runs that adapter, so the head
   reads the adapter's state (Shadow Residual from the marker alone;
   single-stream LoRA with the adapter's own token in the prompt too);
@@ -603,6 +604,48 @@ def test_plugin_rejects_misshaped_weights(tmp_path):
     )
     with pytest.raises(ValueError, match="do not match width"):
         _compose(tmp_path, [("nudge", head)], [_mlp_entry()])
+
+
+class _WideHeads(torch.nn.Module):
+    """Returns the leading ``width`` columns of the state it reads, in float64."""
+
+    def __init__(self, width):
+        super().__init__()
+        self.width = width
+
+    def forward(self, hidden, rows):
+        return hidden[:, : self.width].double()
+
+
+class _WideType(HeadType):
+    """A head whose module returns two columns more than its outputs."""
+
+    name = "test_wide"
+    weights_file = "wide.safetensors"
+
+    def hf_module(self, specs, config):
+        return _WideHeads(max(s.num_outputs for s in specs) + 2)
+
+    def load_weights(self, module, row, state, spec):
+        pass
+
+
+def test_a_head_may_return_extra_columns_in_any_float_dtype(tmp_path, monkeypatch):
+    """Column k lands on ``token_ids[k]``; the extra columns are dropped."""
+    monkeypatch.setitem(_REGISTRY, _WideType.name, _WideType)
+    head = tmp_path / "wide"
+    head.mkdir()
+    save_file({"unused": torch.zeros(1)}, str(head / _WideType.weights_file))
+    model = _compose(tmp_path, [("wide", head)], [_probe(0, type="test_wide")])
+
+    states = []
+    hook = model.model.norm.register_forward_hook(lambda m, i, o: states.append(o))
+    try:
+        row = _last_row(model, [10, 20, CONTROL_TOKEN_ID])
+    finally:
+        hook.remove()
+    assert row.dtype == torch.float32
+    torch.testing.assert_close(row[LABELS], states[0][0, -1, : len(LABELS)])
 
 
 # --------------------------------------------------------------------------- #

@@ -549,6 +549,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         """Run every head type that reads ``layer`` (None = final) on its markers.
 
         ``scores[i]`` is filled for each marker ``i`` whose slot reads ``layer``.
+        A module may return any float dtype and extra columns: its scores are
+        cast to ``scores``' dtype and cut to its width.
         """
         reads = self._head_reads.get(layer)
         if not reads:
@@ -564,6 +566,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             idx = sel.nonzero(as_tuple=True)[0]
             lut = self._stream_table(stream_routing.row_lut, slots.device, name)
             out = getattr(self, attr)(hidden[rows[idx], pos[idx]], lut[slots[idx]])
+            out = out[:, : scores.shape[-1]]
             scores[idx, : out.shape[-1]] = out.to(scores.dtype)
 
     def forward(

@@ -561,16 +561,18 @@ class GraniteSwitchModel(nn.Module):
         ``group`` names the type's module and two buffers: the group's slot ids
         and the type's slot -> 1 + row table. The module runs on every token,
         branch-free (CUDA-graph safe); tokens outside the group keep their
-        scores.
+        scores. A module may return any float dtype and extra columns: its
+        scores are cast to the score buffer's dtype and fitted to its width,
+        so they pack onto the hidden state unchanged.
         """
         module_name, slots_name, rows_name = group
         in_group = torch.isin(head_indices, getattr(self, slots_name))
         rows = getattr(self, rows_name)[head_indices]
-        scores = getattr(self, module_name)(hidden, rows)
-        if scores.shape[-1] < head_scores.shape[-1]:
-            scores = torch.nn.functional.pad(
-                scores, (0, head_scores.shape[-1] - scores.shape[-1])
-            )
+        width = head_scores.shape[-1]
+        scores = getattr(self, module_name)(hidden, rows)[:, :width]
+        scores = scores.to(head_scores.dtype)
+        if scores.shape[-1] < width:
+            scores = torch.nn.functional.pad(scores, (0, width - scores.shape[-1]))
         return torch.where(in_group.unsqueeze(-1), scores, head_scores)
 
     def _compute_head_outputs(
