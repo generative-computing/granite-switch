@@ -126,13 +126,17 @@ class StubTokenizer:
         return ids
 
 
-def make_stub_tokenizer(adapters, chatml=False):
+def make_stub_tokenizer(adapters, chatml=False, head_adapters=None):
     """Build a StubTokenizer whose template knows ``adapters``.
 
     Args:
         adapters: list of ``(name, technology, invocation_text)``. ``technology``
-            is ``"alora"`` or ``"lora"``; ``invocation_text`` is ignored for lora.
+            is ``"alora"``, ``"lora"``, or the head placement
+            (``tokenizer_setup.ANCHOR_MODE_HEAD``); ``invocation_text`` is used
+            for alora only.
         chatml: use the ChatML fixture instead of the role-marker one.
+        head_adapters: ``{head name: adapter name}`` for heads that run on an
+            adapter (passed through to ``configure_chat_template``).
     """
     name = "granite_chatml_template.jinja" if chatml else "granite_chat_template.jinja"
     with open(os.path.join(_FIXTURES, name)) as f:
@@ -151,7 +155,7 @@ def make_stub_tokenizer(adapters, chatml=False):
     invocations = [inv for _n, tech, inv in adapters if tech == "alora"]
     discovered = [(f"/path/{n}", n, tech, None) for n, tech, _inv in adapters]
     with patch(_PATCH_TARGET, side_effect=invocations):
-        configure_chat_template(tokenizer, discovered)
+        configure_chat_template(tokenizer, discovered, head_adapters=head_adapters)
 
     # Any <|...|> introduced by injection must also tokenize atomically.
     new_specials = sorted(
@@ -163,8 +167,22 @@ def make_stub_tokenizer(adapters, chatml=False):
 
 
 class StubConfig:
-    """Stand-in for GraniteSwitchConfig, for the guards."""
+    """Stand-in for GraniteSwitchConfig, for the guards.
 
-    def __init__(self, adapter_token_ids, switch_type="multi"):
+    ``adapter_names`` and ``adapter_kinds`` (one per slot, ``"lora"`` for an
+    adapter) tell ``Conversation`` which slots are heads.
+    """
+
+    def __init__(
+        self,
+        adapter_token_ids,
+        switch_type="multi",
+        adapter_names=None,
+        adapter_kinds=None,
+    ):
         self.adapter_token_ids = list(adapter_token_ids)
         self.switch_type = switch_type
+        if adapter_names is not None:
+            self.adapter_names = list(adapter_names)
+        if adapter_kinds is not None:
+            self.adapter_kinds = list(adapter_kinds)

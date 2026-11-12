@@ -47,6 +47,27 @@ LoRA turn always full-renders. This happens on its own; nothing detects "LoRA".
 Under ``PRESERVE_MIXED_HISTORY`` that full render is a re-prefill -- it drops the
 preserved control tokens for that turn.
 
+Head turns. A head stream (a probe, or any registered head type) answers a
+question *about* the conversation with one token, read at its marker, the
+prompt's last token. It is not a turn *in* the conversation, so it is handled
+apart:
+
+* The head reads only this turn. Under ``PRESERVE_MIXED_HISTORY``, when the kept
+  ids hold any control token, the head's prompt is rendered from text, as
+  ``RE_PREFILL`` renders it: an earlier adapter's token would otherwise run that
+  adapter over the history, and a LoRA or aLoRA writes the history's K/V, so the
+  head would read a state that adapter changed. The kept ids are not touched.
+  With no control token kept, the turn appends as usual.
+* Its verdict joins the transcript as text only. Recording it adds an assistant
+  message; the kept ids stay where they were, and the next turn's delta carries
+  the head turn's text. A marker is never kept inside a later prompt, where it
+  would route the tokens after it through the head's slot.
+* :meth:`completion_payload` asks for one token for a head turn, unless the
+  caller passes ``max_tokens``.
+
+Which slots are heads comes from the config (``adapter_names`` and
+``adapter_kinds``); without them, every slot is treated as an adapter.
+
 Not handled here: returning routing to *base* between two adapter regions. That
 needs a base-reset control token, which this module never emits, so under this
 policy an earlier adapter carries forward until the next control token fires.
@@ -210,6 +231,13 @@ class Conversation:
         self._control_ids = set(getattr(config, "adapter_token_ids", None) or [])
         self._control_text_cache: list[str] | None = None
 
+        # Head slots (see the module docstring): every slot whose kind is not an
+        # adapter. A head turn reads only itself and is recorded as text only.
+        names = list(getattr(config, "adapter_names", None) or [])
+        kinds = list(getattr(config, "adapter_kinds", None) or [])
+        self._head_names = {n for n, k in zip(names, kinds) if k != "lora"}
+        self._pending_head = False
+
         if policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY:
             if config is None:
                 raise ValueError(
@@ -303,7 +331,9 @@ class Conversation:
             **template_kwargs: forwarded to ``apply_chat_template`` (e.g.
                 ``documents=[...]`` for RAG adapters).
         """
-        if self.policy is KVHistoryPolicy.RE_PREFILL:
+        if self.is_head(adapter):
+            ids = self._build_head_prompt(adapter, **template_kwargs)
+        elif self.policy is KVHistoryPolicy.RE_PREFILL:
             ids = self._build_reprefill(adapter, **template_kwargs)
         elif not self._sent_ids:
             ids = self._render_full(adapter, **template_kwargs)
@@ -359,8 +389,42 @@ class Conversation:
         self._assert_control_budget(ids)
         self._pending = ids
         self._pending_adapter = adapter
+        self._pending_head = self.is_head(adapter)
         self._pending_template_kwargs = dict(template_kwargs)
         return PromptTokenIds(ids, self.policy)
+
+    def is_head(self, adapter):
+        """True when ``adapter`` names a head slot (a probe or another head type)."""
+        return adapter is not None and adapter in self._head_names
+
+    def _build_head_prompt(self, adapter, **template_kwargs):
+        """A head turn's prompt: what the head reads comes from this turn alone.
+
+        Under ``RE_PREFILL`` history is rendered from text already, so the turn
+        is built as any other. Under ``PRESERVE_MIXED_HISTORY`` the kept ids are
+        reused only when they hold no control token; otherwise the transcript is
+        rendered from text, leaving the kept ids as they are (no re-prefill: the
+        conversation's own history keeps its attribution).
+        """
+        if self.policy is KVHistoryPolicy.RE_PREFILL:
+            return self._build_reprefill(adapter, **template_kwargs)
+        if not self._sent_ids or self._control_count(self._sent_ids):
+            return self._render_full(adapter, **template_kwargs)
+        prev = self._render(
+            self._messages[: self._sent_messages],
+            gen=False,
+            **self._sent_template_kwargs,
+        )
+        full = self._render(
+            self._messages, gen=True, adapter=adapter, **template_kwargs
+        )
+        if self._appendable(full, prev):
+            return self._sent_ids + self._encode(
+                self._delta(adapter, **template_kwargs)
+            )
+        # A pair on a LoRA: the adapter's token sits at index 0, so no delta can
+        # carry it. Render from text; nothing kept changes.
+        return self._render_full(adapter, **template_kwargs)
 
     def _build_reprefill(self, adapter, **template_kwargs):
         """RE_PREFILL: reuse base-demoted ids for history, text-render the tail.
@@ -427,13 +491,17 @@ class Conversation:
 
         The correct call for both policies, and the only correct one for
         ``PRESERVE_MIXED_HISTORY``: ``prompt`` carries token ids, so the server
-        neither re-renders nor re-tokenizes.
+        neither re-renders nor re-tokenizes. A head turn asks for one token (its
+        verdict) unless ``max_tokens`` is given.
 
         Args:
             adapter: adapter name for this turn, or ``None`` for base.
             **extra: merged into the body (``max_tokens``, ``temperature``, ...).
         """
-        return {"prompt": list(self.build_prompt(adapter=adapter)), **extra}
+        body = {"prompt": list(self.build_prompt(adapter=adapter)), **extra}
+        if self.is_head(adapter):
+            body.setdefault("max_tokens", 1)
+        return body
 
     def record_answer(self, answer, adapter=None):
         """Record the assistant turn produced by the last :meth:`build_prompt`.
@@ -460,7 +528,14 @@ class Conversation:
 
         self._messages.append({"role": "assistant", "content": text})
         self._turn_adapters.append(adapter)
-        self._sent_messages = len(self._messages)
+        # A head turn under PRESERVE leaves the kept ids where they were, so its
+        # messages stay "not yet sent" and the next turn's delta carries them as
+        # text (the module docstring explains why).
+        head_kept_apart = (
+            self._pending_head and self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY
+        )
+        if not head_kept_apart:
+            self._sent_messages = len(self._messages)
 
         # Surface a control token the model named itself. Only answerable from
         # ids: the text arrived with the token already stripped, so re-encoding it
@@ -472,7 +547,9 @@ class Conversation:
             else [int(t) for t in answer_ids if t in self._control_ids]
         )
 
-        if self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY:
+        if head_kept_apart:
+            pass
+        elif self.policy is KVHistoryPolicy.PRESERVE_MIXED_HISTORY:
             # Close the turn on a special token so the next delta can be appended
             # without tokenizer merges shifting ids across the seam.
             tail = answer_ids if answer_ids is not None else self._encode(text)
@@ -485,6 +562,7 @@ class Conversation:
             self._re_base_text = self._pending_re_base_text
 
         self._pending = None
+        self._pending_head = False
         return text
 
     # ── internals ─────────────────────────────────────────────────────────────
@@ -637,8 +715,10 @@ class Conversation:
     def _control_char_index(self, rendered):
         """Char offset of this turn's control token in ``rendered``, or -1.
 
-        A fresh render carries at most one control token, so the earliest
-        occurrence of any control string is this turn's.
+        A fresh render carries only this turn's control tokens: one, or two for
+        a head on an adapter (the adapter's token, then the marker last). The
+        earliest occurrence is therefore the one that decides where this turn's
+        routing starts.
         """
         idxs = [i for i in (rendered.find(t) for t in self._control_texts()) if i >= 0]
         return min(idxs, default=-1)
