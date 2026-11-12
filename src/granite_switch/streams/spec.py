@@ -26,6 +26,7 @@ the slot position, the layout those checkpoints were written in, so they load
 unchanged.
 """
 
+import math
 from dataclasses import dataclass, field
 
 from .outputs import OUTPUT_MODES
@@ -135,6 +136,26 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
                 f"streams[{slot - 1}].output.token_ids must be non-empty real token "
                 f"ids; got {list(token_ids)}."
             )
+        if len(set(token_ids)) != len(token_ids):
+            raise ValueError(
+                f"streams[{slot - 1}].output.token_ids must be distinct: each score "
+                f"lands on its own token; got {list(token_ids)}."
+            )
+        weight = out.get("weight", 1.0)
+        if (
+            not isinstance(weight, (int, float))
+            or isinstance(weight, bool)
+            or not math.isfinite(weight)
+        ):
+            raise ValueError(
+                f"streams[{slot - 1}].output.weight must be a finite number; "
+                f"got {weight!r}."
+            )
+        settings = e.get("settings")
+        if settings is not None and not isinstance(settings, dict):
+            raise ValueError(
+                f"streams[{slot - 1}].settings must be a dict or null; got {settings!r}."
+            )
         read_layer = e.get("read_layer")
         if read_layer is not None and (
             not isinstance(read_layer, int)
@@ -165,8 +186,8 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
                 adapter=adapter,
                 mode=mode,
                 token_ids=token_ids,
-                weight=float(out.get("weight", 1.0)),
-                settings=dict(e.get("settings") or {}),
+                weight=float(weight),
+                settings=dict(settings or {}),
             )
         )
     return specs
