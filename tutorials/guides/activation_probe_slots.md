@@ -10,7 +10,11 @@ request.
 An **activation probe slot** (probe for short) holds a small linear head instead of a LoRA. It
 uses the same control-token machinery (one `<|name|>` token, one adapter index) and reads the
 configured layer's activation to produce per-label logits. Probe and generation-adapter slots can
-coexist in one checkpoint; a request selects one slot.
+coexist in one checkpoint; a request selects one slot. A probe reads the base model's state, or,
+with `adapter:`, the state one named adapter computes ([A probe on an adapter](#a-probe-on-an-adapter)).
+
+The probe is the first **head stream** type of Granite Switch's stream API. Other head types plug
+in the same way, with no change to Granite Switch; see [The Stream API](../../docs/STREAM_API.md).
 
 At inference the verdict does not come back as a raw score vector. Each label word is resolved to a
 single token id at compose time, and the model rewrites the request's final logit row so that the
@@ -53,7 +57,9 @@ Train the head however you like (a frozen base model plus a trainable linear lay
 hidden state is the usual recipe). At serving time the head reads the hidden state of the control
 token, which the model embeds as the base's role-open marker: `<|start_of_role|>` on Granite
 4.0/4.1, `<|im_start|>` on 4.2. So train on the chat-rendered prompt with no generation prompt,
-with that marker appended, and read the hidden state there.
+with that marker appended, and read the hidden state there. A probe on an adapter reads the state
+that adapter computes, so train it on that: the prompt the chat template renders for the pair (see
+[A probe on an adapter](#a-probe-on-an-adapter)), with the adapter loaded.
 
 By default that is the **final post-norm** hidden state (HF's `last_hidden_state`). A slot can
 instead read an intermediate decoder layer (see `layer` in Step 2); train it on that layer's output.
@@ -90,8 +96,8 @@ def make_head(name, labels):
 ```
 
 > The directory layout `<name>/<name>/<target_model>/<technology>/` mirrors the library layout the
-> composer expects for a local adapter. The trailing `lora`/`alora` segment selects **token
-> placement** (LoRA vs activated-LoRA), independent of the fact that this slot is a probe.
+> composer expects for a local adapter. For a probe the trailing segment is not used: a probe's
+> control token always goes last.
 >
 > The `io.yaml` is required for **every** slot: compose copies each slot's `io.yaml` into the
 > output's `io_configs/<name>/`, so a slot without one fails the copy step. Real adapters ship a
@@ -105,7 +111,7 @@ token id per label. If a label word does not encode to a single token in the bas
 compose fails loud and lists the offenders, e.g.:
 
 ```
-1 probe label word(s) do not encode to a single token, ...
+1 label word(s) do not encode to a single token, ...
   'Ambiguous' → 3 tokens: ['Amb', 'igu', 'ous']
 ```
 
@@ -115,22 +121,21 @@ If no natural single-token word fits, the tokenizer's reserved `<|unused_N|>` to
 
 ## Step 2: Declare the slot in a manifest
 
-Probe slots are declared with two extra keys — `kind: probe` and `labels:` — on top of the
-normal adapter fields. The simplest way to pass one or more of them to compose is a **YAML manifest**
-that maps each slot name to its path and metadata:
+Probe slots are declared with two extra keys — `kind: probe` and `labels:` — next to the slot's
+path. The simplest way to pass one or more of them to compose is a **YAML manifest** that maps each
+slot name to its path and metadata:
 
 ```yaml
 # ./adapters.yaml (one probe slot)
 safety:
   path: ./safety-head/safety/granite-4.1-3b/lora
-  type: lora                 # token placement (lora vs alora); independent of `kind`
-  kind: probe                # marks this slot a probe head (default "lora" when omitted)
+  kind: probe                # the stream type: a probe head (default "lora" when omitted)
   labels: [safe, unsafe]     # label words, resolved to single token ids at compose
 ```
 
-`type` and `kind` are independent axes: `type` is the LoRA *technology* (drives control-token
-placement), while `kind` is whether the slot is a real LoRA or a probe head. A plain LoRA entry
-simply omits `kind`/`labels`.
+`kind` is the slot's stream type. An adapter entry's `type` (its LoRA technology, `lora` or
+`alora`) decides where its control token goes; a probe's control token always goes last, so a probe
+entry needs no `type`. A plain adapter entry simply omits `kind`/`labels`.
 
 A probe entry may also set an optional `layer`, the zero-based decoder layer whose output the
 head reads (the residual stream after that layer, before the final norm). Omit it to read the final
@@ -139,15 +144,14 @@ post-norm hidden state:
 ```yaml
 safety_mid:
   path: ./safety-mid-head/safety_mid/granite-4.1-3b/lora
-  type: lora
   kind: probe
   labels: [safe, unsafe]
   layer: 20                  # 0..num_decoder_layers - 1; omit for final
 ```
 
-Probe slots can also be composed alongside Shadow Residual (SR) adapters; a probe
-request reads that layer's base stream. Decoder layer numbers exclude the switch's KV-cache slots.
-Pipeline parallelism preserves the same numbering across stages.
+A layer the model doesn't have is refused when the model is built (at compose, too). Decoder layer
+numbers exclude the switch's KV-cache slots. Pipeline parallelism preserves the same numbering
+across stages.
 
 You can mix LoRA and probe entries in one manifest, and give each probe its own `labels`
 list of any length:
@@ -159,21 +163,18 @@ answerability:
   type: lora
 safety:
   path: ./safety-head/safety/granite-4.1-3b/lora
-  type: lora
   kind: probe
   labels: [safe, unsafe]
 faithfulness:
   path: ./faithfulness-head/faithfulness/granite-4.1-3b/lora
-  type: lora
   kind: probe
   labels: [good, bad, neutral]      # single-token words — see the label rule above
 ```
 
-> **Slot ordering is automatic.** Compose stably reorders slots so all LoRA slots come first and
-> probe slots last, then derives every downstream artifact (control tokens, chat template,
-> adapter indices) from that order. You do not need to order the manifest yourself; probes
-> ending up as the contiguous suffix is what lets the LoRA weight transfer stay positional and the
-> probe head bank pad uniformly.
+> **Slot order.** Compose lists adapter slots first and heads after them, then derives every
+> downstream artifact (control tokens, chat template, adapter indices) from that order. You do not
+> need to order the manifest yourself. Heads take no LoRA rows, and the probe head bank holds one
+> row per probe slot, padded to the widest slot's label count.
 
 The script below download a rag lora and constructed two synthetic probes for testing.
 
@@ -197,15 +198,43 @@ faith_dir = make_head("faithfulness", ["good", "bad", "neutral"])
 # 3. Emit the manifest pairing the real LoRA with the two synthetic probes.
 manifest = {
     "answerability": {"path": lora_dir, "type": "lora"},
-    "safety": {"path": safety_dir, "type": "lora", "kind": "probe",
-               "labels": ["safe", "unsafe"]},
-    "faithfulness": {"path": faith_dir, "type": "lora", "kind": "probe",
+    "safety": {"path": safety_dir, "kind": "probe", "labels": ["safe", "unsafe"]},
+    "faithfulness": {"path": faith_dir, "kind": "probe",
                      "labels": ["good", "bad", "neutral"]},
 }
 Path("./adapters.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
 print("wrote ./adapters.yaml")
 ```
 
+### A probe on an adapter
+
+A probe entry may name an adapter slot of the same checkpoint. The probe then reads the state that
+adapter computes, not the base model's:
+
+```yaml
+answerability:
+  path: /path/to/answerability/granite-4.1-3b/lora
+  type: lora
+safety_rag:                  # the safety probe, on the answerability adapter
+  path: ./safety-rag-head/safety_rag/granite-4.1-3b/lora
+  kind: probe
+  labels: [safe, unsafe]
+  adapter: answerability
+```
+
+Each pair of a probe and an adapter is its own slot, with its own control token, fixed at compose
+time; a request still names one slot (`adapter_name="safety_rag"`). The chat template places what
+that adapter needs for the probe to read exactly the state it computes alone:
+
+| The adapter | What the template places |
+|---|---|
+| Shadow Residual | The probe's control token alone (the adapter writes no K/V) |
+| LoRA | The adapter's own token where it goes alone (the start), then the probe's token last |
+| aLoRA invoked inside the user message | The adapter's own token there, then the probe's token last |
+| aLoRA invoked at the assistant header | The probe's token alone: the adapter would start right there |
+
+Each pair costs a slot, a control token and a bank row, even when the same head is reused on
+several adapters.
 
 ## Step 3: Compose
 
@@ -223,36 +252,40 @@ Compose will:
 
 1. Load the base model and discover the slots from the manifest.
 2. Resolve each probe's label words to single token ids (failing loud on multi-token words).
-3. Read each probe's `probe_head.safetensors` into the head bank at its slot.
+3. Give each probe the next row of the probe bank, and read its `probe_head.safetensors` into it.
 4. Stack everything into one checkpoint under `--output`.
 
 
 ```
-Probe slots:
-  safety → labels ['safe', 'unsafe'] → token ids [19193, 39257] @ final norm
-  faithfulness → labels ['good', 'bad', 'neutral'] → token ids [19045, 14176, 60668] @ final norm
+Head streams:
+  safety (probe) → select over token ids [19193, 39257] @ final norm
+  faithfulness (probe) → select over token ids [19045, 14176, 60668] @ final norm
 ```
 
-A slot with `layer: 20` prints `@ layer 20` instead.
+A slot with `layer: 20` prints `@ layer 20` instead, and a probe on an adapter prints
+`(probe on answerability)`.
 
-The resulting `config.json` carries the per-slot probe metadata as plain lists/ints, so it
-round-trips through `save_pretrained`/`from_pretrained` with no custom code, and both the HF and
-vLLM backends read it identically. Three fields are the stored contract:
+The resulting `config.json` holds one **stream entry** per slot, under `streams`, as plain
+lists/ints, so it round-trips through `save_pretrained`/`from_pretrained` with no custom code, and
+both the HF and vLLM backends read it identically. A probe's entry:
+
+```json
+{"type": "probe", "read_layer": null, "head_row": 0,
+ "output": {"mode": "select", "token_ids": [19193, 39257]}}
+```
 
 | Field | Meaning |
 |-------|---------|
-| `adapter_kinds` | per-slot `"lora"` / `"probe"`, one entry per adapter — what marks a slot a probe |
-| `probe_label_token_ids` | per-slot list of label token ids, `null` on LoRA slots |
-| `probe_read_layers` | per-slot zero-based decoder layer a probe reads; `null` for the final post-norm state and on LoRA slots |
+| `type` | `"probe"`; an adapter slot's entry is just `{"type": "lora"}` |
+| `read_layer` | the zero-based decoder layer the probe reads; `null` for the final post-norm state |
+| `head_row` | the slot's row in the probe bank |
+| `adapter` | only on a probe on an adapter: that adapter's slot name |
+| `output.token_ids` | the label token ids; `output.mode` is `select` for a probe |
 
-The rest are **derived** from those in `GraniteSwitchConfig.__init__`, so they appear on the config
-object but are not independent inputs:
-
-| Derived field | From |
-|---------------|------|
-| `probe_num_labels_per_slot` | `len()` of each slot's label token ids (`0` on LoRA slots) |
-| `max_probe_labels` | `max()` of the above — the padded width the head bank is built with |
-| `probe_control_token_ids` | the control-token ids of the probe slots; both backends match these in `input_ids` to locate a verdict's read point |
+`config.json` also keeps the older probe fields (`adapter_kinds`, `probe_label_token_ids`,
+`probe_read_layers`), derived from the entries, so older versions of Granite Switch can read it. A
+checkpoint composed before stream entries has only those fields and still loads: its entries are
+rebuilt from them. See [The Stream API](../../docs/STREAM_API.md) for every field.
 
 Note that the label *words* are not stored — only their token ids. Compose resolves and prints the
 words, but `config.json` keeps ids, so recovering the words means decoding them with the
@@ -271,7 +304,8 @@ python -m vllm.entrypoints.openai.api_server \
 Fire a probe by placing its control token at the very end of the prompt, after the last turn's
 close — one token per slot, `<|safety|>` for the `safety` slot, `<|faithfulness|>` for the other. The
 verdict is read at the control token, so leave out the generation prompt. The completion is the
-emitted label word:
+emitted label word. (A probe on a LoRA or aLoRA adapter also needs that adapter's own token in the
+prompt; let the chat template place both, below.)
 
 ```bash
 curl http://localhost:8000/v1/completions \
@@ -296,7 +330,8 @@ two labels for a 2-label slot, three for a 3-label slot.
 
 Instead of placing `<|safety|>` by hand, you can let the composed model's chat template place it for
 you by passing `adapter_name` — a probe slot is activated exactly like any other adapter. The
-template appends the control token after the last turn:
+template appends the control token after the last turn, and for a probe on an adapter, also places
+that adapter's token:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -331,9 +366,10 @@ channel.
 ## How it works (brief)
 
 - **Routing.** A probe control token selects its slot like any adapter; its position is routed
-  out of the LoRA stream and the head reads the activation there.
-- **Padded head bank.** All heads share one tensor padded to `max_probe_labels` (like the LoRA
-  bank pads to `max_lora_rank`), keeping the vLLM head one compile-safe operation.
+  out of the LoRA stream (or, for a probe on an adapter, through that adapter's LoRA) and the head
+  reads the activation there.
+- **Padded head bank.** All probes share one tensor, one row per probe slot, padded to the widest
+  slot's label count, keeping the vLLM head one compile-safe matmul.
 - **Scoring.** Intermediate-layer slots are scored as that layer runs, final-layer slots after the
   final norm. Scores and slot id travel with the hidden states to the logits step, so this also
   works under CUDA-graph capture. Under pipeline parallelism the first stage finds the markers and
@@ -343,5 +379,7 @@ channel.
 
 ## Related
 
+- [The Stream API](../../docs/STREAM_API.md) — stream entries, heads on adapters, and how to write
+  a new head type.
 - [Bring Your Own Adapter](build_your_own_adapter.md) — train and compose a LoRA adapter.
 - [Composer README](../../src/granite_switch/composer/README.md) — full compose CLI reference.
