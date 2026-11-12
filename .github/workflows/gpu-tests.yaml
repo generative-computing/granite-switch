@@ -102,8 +102,8 @@ permissions:
 
 jobs:
   # WHICH vLLM LINES TO TEST, read from the tested commit's own pyproject.toml
-  # rather than written here. Up to two legs, from the dependency groups `dev` and
-  # `dev-latest` (usually an alias: dev-latest = [{ include-group = "dev-vllm27" }]).
+  # rather than written here. Up to two legs, from the dependency groups `dev`
+  # (the floor) and `dev-latest` (the ceiling) -- those two names and no others.
   # Each is labelled `vllmNN` after the vLLM minor its requirements pin, which the
   # GPU harness asserts the leg really installed; when both pin the same minor it
   # is one leg. So moving to a new vLLM line is a pyproject edit and nothing else,
@@ -132,8 +132,13 @@ jobs:
     # The suite is in the job name because it cannot be read from env.LEG here --
     # this is evaluated before any step runs.
     name: GPU Tests (${{ matrix.label }} · ${{ inputs.suite || 'full' }})
-    # One pod per vLLM line: the lines cannot share a venv (pyproject declares the
-    # vllmNN groups as conflicting), and every one the repo supports must be tested.
+    # One pod per vLLM line: the lines cannot share a venv, since pyproject's
+    # `conflicts` table declares every pair that would pull two of them in. The
+    # two legs are the ENDS of the supported range, not every line in it -- a
+    # break lands at an end (an API deleted upstream fails at the ceiling, one
+    # that does not exist yet fails at the floor) and an intermediate line is
+    # bracketed by two tested ones. Per-line evidence for a line being ADDED is
+    # the bumping PR's job, by pointing `dev-latest` at it in its own commit.
     strategy:
       fail-fast: false   # one line's failure must not hide another's result
       matrix:
