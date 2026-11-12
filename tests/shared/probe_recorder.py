@@ -22,6 +22,8 @@ def install_probe_recorder(model):
 
     def compute_logits(hidden_states):
         logits = original(hidden_states)
+        if logits is None:  # a tensor-parallel rank that gathers no logits
+            return logits
         slots = hidden_states[:, -1].round().long()
         for row in (slots > 0).nonzero(as_tuple=True)[0].tolist():
             spec = specs[int(slots[row])]

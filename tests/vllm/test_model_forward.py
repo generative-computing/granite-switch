@@ -59,6 +59,11 @@ class TestAdapterIndicesWiring:
         _run_inner_class("TestAdapterIndicesWiring")
 
 
+class TestProbeSlotRouting:
+    def test_suite(self):
+        _run_inner_class("TestProbeSlotRouting")
+
+
 class TestKVVisibility:
     def test_suite(self):
         _run_inner_class("TestKVVisibility")
