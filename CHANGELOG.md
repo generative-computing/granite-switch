@@ -15,7 +15,7 @@ This project uses [semantic versioning](https://semver.org/).
   built-in default when `asr_model_id` is null; it fails at startup with the fix.
   Checkpoints composed before this release need `asr_model_id` and
   `asr_model_revision` added to `config.json`, or a re-compose (see
-  docs/AUDIO.md, *Migrating a checkpoint composed before 0.2.0*).
+  docs/AUDIO.md, *Migrating a checkpoint composed before 0.1.2*).
 - Checkpoints composed with this release need this release to serve: older
   versions ignore the new ASR fields and load the ASR unpinned from the Hub.
 - `DEFAULT_ASR_MODEL_ID` moved from `granite_switch.vllm.audio` to

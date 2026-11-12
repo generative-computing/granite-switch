@@ -78,7 +78,7 @@ class TestProcessingInfoGating:
 class TestProcessingInfoAsrAccessors:
     def test_missing_model_id_fails_at_startup(self):
         # No built-in fallback: get_supported_mm_limits runs at engine startup,
-        # so a pre-0.2.0 checkpoint is refused before it serves.
+        # so a pre-0.1.2 checkpoint is refused before it serves.
         info = _make_info(asr_enabled=True, asr_model_id=None)
         with pytest.raises(ValueError, match="asr_model_id"):
             info.get_supported_mm_limits()
