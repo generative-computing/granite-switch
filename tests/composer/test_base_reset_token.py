@@ -23,7 +23,7 @@ _PROBE = (
     "granite_switch.composer.compose_granite_switch._probe_lora_substitute_token_id"
 )
 _PROBE_SLOT_SUB = (
-    "granite_switch.composer.compose_granite_switch._probe_slot_substitute_token_id"
+    "granite_switch.composer.compose_granite_switch._head_substitute_token_id"
 )
 _ALORA = "granite_switch.composer.tokenizer_setup.get_alora_first_invocation_token_id"
 

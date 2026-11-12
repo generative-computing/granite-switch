@@ -681,10 +681,10 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             )
 
         # Split the single adapter_indices stream into a LoRA stream and
-        # a probe stream. Probe positions are zeroed in lora_indices
-        # (so the LoRA path no-ops there).
+        # a head stream. Head positions are zeroed in lora_indices
+        # (so the LoRA path no-ops there, unless a head names an adapter).
         if self.switch is not None:
-            lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+            lora_indices, head_indices = self.switch.split_indices(adapter_indices)
             # A head stream that names an adapter runs it at its marker: its
             # tokens route through that adapter slot's LoRA (stream_routing.
             # adapter_lut); a head on the base model maps to 0, as before.
@@ -698,7 +698,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             ]
         else:
             lora_indices = adapter_indices
-            probe_indices = torch.zeros_like(adapter_indices)
+            head_indices = torch.zeros_like(adapter_indices)
             lora_rows = lora_indices
 
         # Embed once, on the (possibly-rewritten) input_ids. The decoder is
@@ -709,12 +709,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         inputs_embeds = inputs_embeds * self.embedding_multiplier
 
         # Expose adapter_indices for tests and debugging. _last_adapter_indices is
-        # the full stream (LoRA + probe); _last_lora_indices is what the
-        # decoder routes on; _last_probe_indices is the probe-only
-        # stream the verdict reads.
+        # the full stream (adapters + heads); _last_lora_indices is what the
+        # decoder routes on; _last_head_indices is the head-only stream the
+        # heads read.
         self._last_adapter_indices = adapter_indices
         self._last_lora_indices = lora_indices
-        self._last_probe_indices = probe_indices
+        self._last_head_indices = head_indices
 
         position_embeddings = None
         if self.rotary_emb is not None:
@@ -736,7 +736,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         # Resolve head-stream markers before the decoder runs, so each read layer
         # scores only its marker rows as it produces them.
-        markers = self._locate_head_markers(input_ids, probe_indices, attention_mask)
+        markers = self._locate_head_markers(input_ids, head_indices, attention_mask)
         self._last_head_scores = None
         if markers is not None:
             head_scores = inputs_embeds.new_zeros(

@@ -13,13 +13,6 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
-# The probe's weights file and keys, kept importable here; the probe stream
-# type owns them now.
-from granite_switch.streams.types.probe import (  # noqa: F401
-    PROBE_HEAD_FILE,
-    PROBE_HEAD_KEYS,
-)
-
 from .arch import ArchDescriptor
 
 # ---------------------------------------------------------------------------
@@ -855,7 +848,7 @@ def validate_untied_lm_head_saved(output_path, expected_vocab_size, hidden_size)
 
 
 # ---------------------------------------------------------------------------
-# Probe head transfer
+# Head weights
 # ---------------------------------------------------------------------------
 
 

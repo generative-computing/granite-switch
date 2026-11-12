@@ -20,8 +20,9 @@ Types register in one of two ways:
 The module contract (both backends)::
 
     module(hidden, rows) -> scores
-      hidden: [n, hidden_size]  the read layer's state at n marker rows
-      rows:   [n]               each marker's head_row in this type's bank
+      hidden: [n, hidden_size]  the read layer's state at n tokens
+      rows:   [n]               1 + the slot's head_row in this type's bank;
+                                0 where the token is not this type's marker
       scores: [n, width]        one score per output token, width >= num_outputs
 
 The vLLM module is called on every token of a step (branch-free, so it runs

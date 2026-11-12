@@ -598,8 +598,8 @@ class SRDecoderInterface(DecoderInterface):
         hs = state.hs
         m = adapter_indices.shape[0]
         # Read after the layer's cross-stream shunt: adapter-active tokens use
-        # the adapted stream, the rest (including probe markers, whose LoRA
-        # stream is zeroed) use the base stream.
+        # the adapted stream, the rest (including a head's marker on the base
+        # model, whose LoRA index is 0) use the base stream.
         select = (adapter_indices > 0).unsqueeze(1)  # [M, 1]
         return torch.where(select, hs[m:], hs[:m])
 

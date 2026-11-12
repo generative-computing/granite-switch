@@ -444,8 +444,8 @@ class GraniteSwitchModel(nn.Module):
             lora_indices = adapter_indices
             head_indices = torch.zeros_like(adapter_indices)
 
-        # The verdict is read only at the marker itself, not at tokens that
-        # inherit its slot afterwards. Later PP ranks have no input ids, so they
+        # A head reads only at its marker itself, not at tokens that inherit its
+        # slot afterwards. Later PP ranks have no input ids, so they
         # receive the marker-only indices from the first rank.
         if self._head_types:
             if not get_pp_group().is_first_rank:
@@ -809,13 +809,13 @@ class GraniteSwitchForCausalLM(
         if self.model._head_types:
             hidden_size = self.config.hidden_size
             real_hidden = hidden_states[:, :hidden_size]
-            verdict = hidden_states[:, hidden_size:-1]
+            head_scores = hidden_states[:, hidden_size:-1]
             slot = hidden_states[:, -1]
         else:
             real_hidden = hidden_states
-            verdict = slot = None
+            head_scores = slot = None
         logits = self.logits_processor(self.lm_head, real_hidden)
-        return self._apply_head_scores(logits, verdict, slot)
+        return self._apply_head_scores(logits, head_scores, slot)
 
     def _apply_head_scores(
         self,

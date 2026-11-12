@@ -151,7 +151,7 @@ def _fixed_head(seed, num_labels, hidden_size, scale=0.5):
 def _write_head(slot_dir, weight, bias, labels):
     from safetensors.torch import save_file
 
-    from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
+    from granite_switch.streams.types.probe import PROBE_HEAD_FILE
 
     os.makedirs(slot_dir, exist_ok=True)
     save_file(

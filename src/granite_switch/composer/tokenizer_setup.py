@@ -150,8 +150,8 @@ ANCHOR_MODE_ALORA = "alora"
 ANCHOR_MODE_SR = "sr"
 
 #: Placement mode where the control token is emitted as the very last token,
-#: after the last turn's close (probe slot, manifest ``kind``).
-ANCHOR_MODE_PROBE = "probe"
+#: after the last turn's close: a head stream's marker (manifest ``kind``).
+ANCHOR_MODE_HEAD = "head"
 
 
 def _load_alora_invocation_token_ids(adapter_path: str) -> list[int]:
@@ -1294,7 +1294,7 @@ def build_substitute_token_ids(
     discovered_adapters: list[tuple[str | None, str, str, str | None]],
     lora_substitute_id: int,
     base_reset: bool = False,
-    probe_slot_substitute_id: int | None = None,
+    head_substitute_id: int | None = None,
 ) -> list[int]:
     """Build the token-exchange substitute ids, index-aligned with the control tokens.
 
@@ -1308,14 +1308,14 @@ def build_substitute_token_ids(
       * base-reset: ``lora_substitute_id`` as well. The token is placed at a turn
         boundary, where the role-open marker is exactly what the decoder expects
         at that position.
-      * probe: ``probe_slot_substitute_id``, the base's role-open marker.
+      * head: ``head_substitute_id``, the base's role-open marker.
 
     Args:
         discovered_adapters: ``(adapter_path, adapter_name, technology, source)`` tuples.
         lora_substitute_id: Probed sequence-start token id.
         base_reset: When True, prepend the base-reset slot's substitute so the
             list stays aligned with ``add_control_tokens(base_reset=True)``.
-        probe_slot_substitute_id: The base's role-open marker id.
+        head_substitute_id: The base's role-open marker id.
 
     Returns:
         One substitute id per control token, in the same order.
@@ -1324,17 +1324,17 @@ def build_substitute_token_ids(
     for adapter_path, _name, technology, _source in discovered_adapters:
         if technology == "alora":
             substitute_ids.append(get_alora_first_invocation_token_id(adapter_path))
-        elif technology == "probe":
-            if probe_slot_substitute_id is None:
-                raise ValueError("A probe slot needs probe_slot_substitute_id.")
-            substitute_ids.append(probe_slot_substitute_id)
+        elif technology == ANCHOR_MODE_HEAD:
+            if head_substitute_id is None:
+                raise ValueError("A head slot needs head_substitute_id.")
+            substitute_ids.append(head_substitute_id)
         else:
             substitute_ids.append(lora_substitute_id)
     return substitute_ids
 
 
 def resolve_label_token_ids(tokenizer, label_names: list[str]) -> list[int]:
-    """Turn each probe label word into its single token id."""
+    """Turn each head label word into its single token id."""
     token_ids: list[int] = []
     non_atomic: list[str] = []
     for word in label_names:
@@ -1348,8 +1348,8 @@ def resolve_label_token_ids(tokenizer, label_names: list[str]) -> list[int]:
 
     if non_atomic:
         raise ValueError(
-            f"{len(non_atomic)} probe label word(s) do not encode to a "
-            f"single token, but the vLLM probe exit writes the verdict at "
+            f"{len(non_atomic)} label word(s) do not encode to a single "
+            f"token, but a head's scores land on "
             f"one token id per label. Choose a single-token synonym for each:\n  "
             + "\n  ".join(non_atomic)
         )
@@ -1441,11 +1441,11 @@ def configure_chat_template(
     # still costing compute. Callers therefore classify SR from the checkpoint
     # weights (``is_shadow_residual_adapter``) and pass ``sr`` here, rather than
     # trusting a directory label that no SR training run produces.
-    # A probe slot arrives as technology ``probe``, like SR arrives as
+    # A head slot arrives as technology ``head``, like SR arrives as
     # ``sr``: the caller derives the placement mode (SR from the checkpoint
-    # weights, probe from the manifest's ``kind``) and passes it in
-    # the discovered tuple. ``technology`` is the placement axis this function
-    # dispatches on; a probe is a fourth mode alongside lora / alora / sr.
+    # weights, a head from the manifest's ``kind``) and passes it in the
+    # discovered tuple. ``technology`` is the placement axis this function
+    # dispatches on; a head is a fourth mode alongside lora / alora / sr.
     adapter_mapping: dict[str, dict[str, str]] = {}
     sr_anchors: set[str] = set()
     for adapter_info in discovered_adapters:
@@ -1496,7 +1496,7 @@ def configure_chat_template(
                 f"template has no such slot ({sorted(adapter_mapping)})."
             )
         target = adapter_mapping[adapter]
-        if adapter_mapping[head]["type"] != ANCHOR_MODE_PROBE:
+        if adapter_mapping[head]["type"] != ANCHOR_MODE_HEAD:
             raise ValueError(f"head_adapters key {head!r} is not a head slot.")
         if target["type"] == ANCHOR_MODE_SR:
             continue
@@ -1549,7 +1549,7 @@ def configure_chat_template(
 {%- if adapter_name is defined and adapter_name in adapter_map %}
 {%- set adapter_token = adapter_map[adapter_name]['token'] %}
 {%- set adapter_type = adapter_map[adapter_name]['type'] %}
-{%- if adapter_type == 'probe' %}
+{%- if adapter_type == 'head' %}
 {%- set head_token = adapter_token %}
 {%- if 'adapter_token' in adapter_map[adapter_name] %}
 {#- A head on a single-stream adapter: the adapter's own token goes where
@@ -1566,10 +1566,10 @@ def configure_chat_template(
 {%- set adapter_invocation_drop_chars = adapter_map[adapter_name]['invocation_drop_chars'] %}
 {%- endif %}
 {%- endif %}
-{#- A probe reads its verdict at the marker, so nothing may follow it:
-    drop the generation prompt even when the caller asks for one. -#}
-{%- set probe_mode = head_token != '' %}
-{%- if probe_mode %}
+{#- A head reads at its marker, so nothing may follow it: drop the
+    generation prompt even when the caller asks for one. -#}
+{%- set head_mode = head_token != '' %}
+{%- if head_mode %}
 {%- set add_generation_prompt = false %}
 {%- endif %}
 
@@ -1698,7 +1698,7 @@ def configure_chat_template(
      role token boundary rather than inside a user message. Not for a head on
      this adapter: its marker takes exactly this position and runs the adapter
      there. -#}
-{%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 and not probe_mode %}
+{%- if ns.adapter_token and ns.adapter_type == 'alora' and ns.alora_target_idx == -1 and not head_mode %}
 {{- ns.adapter_token }}
 {%- set ns.skip_next_role_marker = true %}
 {%- endif %}
@@ -1866,8 +1866,8 @@ def configure_chat_template(
 
     # Probe placement: the marker is the very last token, after the last
     # turn's close.
-    if any(i["type"] == ANCHOR_MODE_PROBE for i in adapter_mapping.values()):
-        modified_chat_template += "\n{%- if probe_mode %}{{- head_token }}{%- endif %}"
+    if any(i["type"] == ANCHOR_MODE_HEAD for i in adapter_mapping.values()):
+        modified_chat_template += "\n{%- if head_mode %}{{- head_token }}{%- endif %}"
 
     # Insert alora fallback before generation prompt
     gen_prompt_pattern = r"(\{%- if add_generation_prompt %\})"
@@ -1981,7 +1981,7 @@ def configure_chat_template(
     tokenizer.chat_template = modified_chat_template
     print(f"Chat template configured with {len(adapter_mapping)} adapter mappings:")
     for adapter_name, info in adapter_mapping.items():
-        if info["type"] == ANCHOR_MODE_PROBE:
+        if info["type"] == ANCHOR_MODE_HEAD:
             placement = "after the last turn's close (last token; read point = marker)"
         elif info["type"] == ANCHOR_MODE_SR:
             placement = f"replacing '{sr_site}' in the generation prompt"

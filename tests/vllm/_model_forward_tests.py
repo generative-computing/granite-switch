@@ -492,10 +492,10 @@ class TestProbeSlotRouting(_VLLMModelTestBase):
         original_split = switch.split_indices
 
         def record_split(adapter_indices):
-            lora_indices, probe_indices = original_split(adapter_indices)
+            lora_indices, head_indices = original_split(adapter_indices)
             seen["lora"] = lora_indices.detach().cpu()
-            seen["probe"] = probe_indices.detach().cpu()
-            return lora_indices, probe_indices
+            seen["probe"] = head_indices.detach().cpu()
+            return lora_indices, head_indices
 
         monkeypatch.setattr(switch, "split_indices", record_split)
 

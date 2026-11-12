@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The activation probe: a linear head per slot, ``scores = W @ h + b``.
 
-The first head type on the stream API. Its modules are the probe heads the
-backends already had (``SwitchedProbeHead``), so a probe checkpoint keeps its
-weight names (``model.probe_head.weight`` / ``.bias``) and its numbers.
+The first head type on the stream API. Its modules live with it (``hf_head``,
+``vllm_head``), and a probe checkpoint keeps its weight names
+(``model.probe_head.weight`` / ``.bias``) and its numbers.
 
 Weights: a slot folder ships ``probe_head.safetensors`` with ``weight``
 ``[n_labels, hidden]`` and ``bias`` ``[n_labels]``. Output: ``select`` over the
@@ -12,7 +12,7 @@ label words' token ids -- the request emits one label word.
 
 import torch
 
-from ..registry import HeadType, register_head_type
+from ...registry import HeadType, register_head_type
 
 #: The trained head a probe folder ships, and the keys it must hold.
 PROBE_HEAD_FILE = "probe_head.safetensors"
@@ -37,13 +37,13 @@ class ProbeType(HeadType):
         return config.hidden_size, rows, width
 
     def hf_module(self, specs, config):
-        from granite_switch.hf.core.probe import SwitchedProbeHead
+        from .hf_head import SwitchedProbeHead
 
         hidden, rows, width = self._shape(specs, config)
         return SwitchedProbeHead(hidden, rows, width)
 
     def vllm_module(self, specs, config):
-        from granite_switch.vllm.core.probe import SwitchedProbeHead
+        from .vllm_head import SwitchedProbeHead
 
         hidden, rows, width = self._shape(specs, config)
         return SwitchedProbeHead(hidden, rows, width)
