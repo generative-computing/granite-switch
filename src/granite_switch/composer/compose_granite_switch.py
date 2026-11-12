@@ -1261,8 +1261,10 @@ def build():
     ]
     all_discovered = external_discovered + built_in_discovered
 
-    # Order LoRA slots first, head slots last (Python sorts False before True):
-    # the composer's LoRA transfer fills rows in that order.
+    # LoRA slots first, then head slots, each in manifest order (a stable sort;
+    # False sorts before True). The composer takes any order when the config
+    # has stream entries; this keeps the slot layout of checkpoints composed
+    # before streams.
     all_discovered.sort(
         key=lambda t: head_meta.get(t[1], {}).get("kind", "lora") != "lora"
     )
