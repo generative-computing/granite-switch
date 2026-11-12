@@ -1,0 +1,114 @@
+<svg viewBox="-16 -16 1056 415" width="1056" height="415" role="img" aria-labelledby="dTitle-grid dDesc-grid" xmlns="http://www.w3.org/2000/svg">
+<title id="dTitle-grid">The simulated agent, and what each lane does at an adapter switch</title>
+<desc id="dDesc-grid">Each agent prefills its own prompt, then generates in 32-token steps, switching adapter at each, with a tool call after every 256 tokens. At each switch, stock vLLM ends the request, waits an adapter switching round trip (2&#8211;10 ms) and prefills the context again; granite-switch SR keeps one request running until a tool call.</desc>
+<defs><marker id="dArrow-grid" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#777"/></marker></defs>
+<style>
+  text { font-family: 'IBM Plex Mono', Consolas, 'Cascadia Code', Monaco, monospace; }
+  .d-h    { fill: #9a9a9a; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; }
+  .d-step { fill: #bdbdbd; font-size: 11px; font-weight: 600; }
+  .d-lane { fill: #9cdcfe; font-size: 12px; font-weight: 600; }
+  .d-chip { fill: #1e1e1e; font-size: 10px; }
+  .d-lab  { fill: #cccccc; font-size: 11px; }
+  .d-sub  { fill: #8a8a8a; font-size: 10.5px; }
+  .d-note { fill: #8a8a8a; font-size: 11px; }
+  .d-arrow, .d-rule { stroke: #666; stroke-width: 1; fill: none; }
+  .d-node     { fill: #e0e0e0; font-size: 12px; font-weight: 600; }
+  .d-node-sub { fill: #8fb8cc; font-size: 10.5px; }
+  .d-node-tool     { fill: #1e1e1e; font-size: 12px; font-weight: 600; }
+  .d-node-tool-sub { fill: #3a3a1e; font-size: 10.5px; }
+  .d-node-tag { fill: #6f6f6f; font-size: 9.5px; letter-spacing: 0.04em; }
+  .d-term     { fill: #2a2a2a; stroke: #9e9e9e; stroke-width: 1.5; }
+  .d-term-lab { fill: #bdbdbd; font-size: 9.5px; font-weight: 700; }
+  .d-edge     { stroke: #8a8a8a; stroke-width: 1.3; fill: none; }
+  .d-edge-end { stroke-dasharray: 4 3; stroke: #66bb6a; }
+  .d-edge-lab { fill: #9a9a9a; font-size: 10px; }
+</style>
+<rect x="-16" y="-16" width="1056" height="415" fill="#1e1e1e"/>
+<text x="0" y="11" class="d-h">EACH AGENT · THE SAME IN BOTH LANES</text>
+<g><title>The agent's own prompt, 256 to 16,384 tokens, shared with no other agent. Its first request prefills it, in both lanes.</title><rect x="0" y="34" width="100" height="30" rx="2" fill="none" stroke="#ef5350" stroke-width="1.5"/><text x="50" y="53" class="d-lab" text-anchor="middle">prompt</text></g>
+<text x="50" y="88" class="d-sub" text-anchor="middle">256&#8211;16,384 tok</text>
+<path d="M102,49 H118" class="d-arrow" marker-end="url(#dArrow-grid)"/>
+<text x="120" y="29" class="d-step">generation</text>
+<g><title>generation: 32 tokens on adapter ad25</title><rect x="120" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="140" y="53" class="d-chip" text-anchor="middle">ad25</text></g>
+<g><title>generation: 32 tokens on adapter ad57</title><rect x="163" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="183" y="53" class="d-chip" text-anchor="middle">ad57</text></g>
+<g><title>generation: 32 tokens on adapter ad34</title><rect x="206" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="226" y="53" class="d-chip" text-anchor="middle">ad34</text></g>
+<g><title>generation: 32 tokens on adapter ad14</title><rect x="249" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="269" y="53" class="d-chip" text-anchor="middle">ad14</text></g>
+<g><title>generation: 32 tokens on adapter ad24</title><rect x="292" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="312" y="53" class="d-chip" text-anchor="middle">ad24</text></g>
+<g><title>generation: 32 tokens on adapter ad4</title><rect x="335" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="355" y="53" class="d-chip" text-anchor="middle">ad4</text></g>
+<g><title>generation: 32 tokens on adapter ad2</title><rect x="378" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="398" y="53" class="d-chip" text-anchor="middle">ad2</text></g>
+<g><title>generation: 32 tokens on adapter ad40</title><rect x="421" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="441" y="53" class="d-chip" text-anchor="middle">ad40</text></g>
+<path d="M120,70 v4 H461 v-4" class="d-rule"/>
+<text x="290.5" y="88" class="d-sub" text-anchor="middle">256 tokens · switching adapter every 32</text>
+<path d="M463,49 H479" class="d-arrow" marker-end="url(#dArrow-grid)"/>
+<text x="481" y="29" class="d-step">act</text>
+<g><title>act: the tool call. Calculator (1&#8211;10 ms), SQL lookup (5&#8211;50 ms) or RAG retrieval (20&#8211;80 ms), slept for real. Both lanes make the same calls.</title><rect x="481" y="34" width="92" height="30" rx="2" fill="#fff176"/><text x="527" y="53" class="d-chip" text-anchor="middle">tool call</text></g>
+<text x="527" y="88" class="d-sub" text-anchor="middle">1&#8211;80 ms</text>
+<path d="M575,49 H591" class="d-arrow" marker-end="url(#dArrow-grid)"/>
+<text x="593" y="29" class="d-step">generation</text>
+<g><title>generation: 32 tokens on adapter ad41</title><rect x="593" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="613" y="53" class="d-chip" text-anchor="middle">ad41</text></g>
+<g><title>generation: 32 tokens on adapter ad10</title><rect x="636" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="656" y="53" class="d-chip" text-anchor="middle">ad10</text></g>
+<g><title>generation: 32 tokens on adapter ad7</title><rect x="679" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="699" y="53" class="d-chip" text-anchor="middle">ad7</text></g>
+<g><title>generation: 32 tokens on adapter ad47</title><rect x="722" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="742" y="53" class="d-chip" text-anchor="middle">ad47</text></g>
+<g><title>generation: 32 tokens on adapter ad45</title><rect x="765" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="785" y="53" class="d-chip" text-anchor="middle">ad45</text></g>
+<g><title>generation: 32 tokens on adapter ad26</title><rect x="808" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="828" y="53" class="d-chip" text-anchor="middle">ad26</text></g>
+<g><title>generation: 32 tokens on adapter ad54</title><rect x="851" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="871" y="53" class="d-chip" text-anchor="middle">ad54</text></g>
+<g><title>generation: 32 tokens on adapter ad56</title><rect x="894" y="34" width="40" height="30" rx="2" fill="#4fc3f7"/><text x="914" y="53" class="d-chip" text-anchor="middle">ad56</text></g>
+<path d="M593,70 v4 H934 v-4" class="d-rule"/>
+<text x="763.5" y="88" class="d-sub" text-anchor="middle">another 256 tokens</text>
+<path d="M936,49 H952" class="d-arrow" marker-end="url(#dArrow-grid)"/>
+<g><title>Done: the agent's last token. Its slot goes to the next agent.</title><rect x="954" y="34" width="64" height="30" rx="2" fill="none" stroke="#66bb6a" stroke-width="1.5"/><text x="986" y="53" class="d-lab" text-anchor="middle">done</text></g>
+<text x="986" y="88" class="d-sub" text-anchor="middle">512 tok</text>
+<text x="0" y="112" class="d-note">These agents are simplified: every step is a 32-token generation on a new adapter. At 1,024 tokens: 3 tool calls; at 128 or 256: none.</text>
+<text x="0" y="150" class="d-h">AT EACH SWITCH · WHERE THE LANES DIFFER</text>
+<rect x="567.5" y="142" width="9" height="9" rx="1" fill="#4fc3f7"/>
+<text x="581.5" y="150" class="d-sub">generation</text>
+<rect x="660.5" y="142" width="9" height="9" rx="1" fill="#ef5350"/>
+<text x="674.5" y="150" class="d-sub">prefill</text>
+<rect x="734.6" y="142" width="9" height="9" rx="1" fill="#9575cd"/>
+<text x="748.6" y="150" class="d-sub">adapter switching (rtt)</text>
+<rect x="909.5" y="142" width="9" height="9" rx="1" fill="#fff176"/>
+<text x="923.5" y="150" class="d-sub">act (tool call)</text>
+<text x="0" y="170" class="d-lane">lora-vllm</text>
+<text x="0" y="186" class="d-sub">stock vLLM LoRA</text>
+<g><title>generation on ad25</title><rect x="130" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="154" y="177" class="d-chip" text-anchor="middle">ad25</text></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="180" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
+<g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="190" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="240" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
+<g><title>generation on ad57</title><rect x="292" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="316" y="177" class="d-chip" text-anchor="middle">ad57</text></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="342" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
+<g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="352" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="402" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
+<g><title>generation on ad34</title><rect x="454" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="478" y="177" class="d-chip" text-anchor="middle">ad34</text></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="504" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
+<g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="514" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="564" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
+<g><title>generation on ad14</title><rect x="616" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="640" y="177" class="d-chip" text-anchor="middle">ad14</text></g>
+<g><title>adapter switching (rtt): the request ends, its tokens go back to the agent's software, which sends a new request on the next adapter. 2&#8211;10 ms, slept for real.</title><rect x="666" y="161" width="8" height="24" rx="2" fill="#9575cd"/></g>
+<g><title>prefill: the context computed again, except what vLLM's prefix cache holds for this adapter (its cache is per adapter).</title><rect x="676" y="161" width="100" height="24" rx="2" fill="#ef5350"/><text x="726" y="177" class="d-chip" text-anchor="middle">prefill again</text></g>
+<g><title>generation on ad24</title><rect x="778" y="161" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="802" y="177" class="d-chip" text-anchor="middle">ad24</text></g>
+<text x="834" y="177" class="d-sub">…</text>
+<text x="130" y="201" class="d-note">A new request per adapter: an adapter switching (rtt), then a prefill of the context again.</text>
+<text x="0" y="226" class="d-lane">gs-sr-vllm</text>
+<text x="0" y="242" class="d-sub">granite-switch SR</text>
+<g><title>generation on ad25</title><rect x="130" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="154" y="233" class="d-chip" text-anchor="middle">ad25</text></g>
+<g><title>generation on ad57</title><rect x="180" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="204" y="233" class="d-chip" text-anchor="middle">ad57</text></g>
+<g><title>generation on ad34</title><rect x="230" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="254" y="233" class="d-chip" text-anchor="middle">ad34</text></g>
+<g><title>generation on ad14</title><rect x="280" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="304" y="233" class="d-chip" text-anchor="middle">ad14</text></g>
+<g><title>generation on ad24</title><rect x="330" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="354" y="233" class="d-chip" text-anchor="middle">ad24</text></g>
+<g><title>generation on ad4</title><rect x="380" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="404" y="233" class="d-chip" text-anchor="middle">ad4</text></g>
+<g><title>generation on ad2</title><rect x="430" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="454" y="233" class="d-chip" text-anchor="middle">ad2</text></g>
+<g><title>act (tool call): the request ends; the next one finds its context cached</title><rect x="480" y="217" width="10" height="24" rx="2" fill="#fff176"/></g>
+<g><title>generation on ad40</title><rect x="492" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="516" y="233" class="d-chip" text-anchor="middle">ad40</text></g>
+<g><title>generation on ad41</title><rect x="542" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="566" y="233" class="d-chip" text-anchor="middle">ad41</text></g>
+<g><title>generation on ad10</title><rect x="592" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="616" y="233" class="d-chip" text-anchor="middle">ad10</text></g>
+<g><title>generation on ad7</title><rect x="642" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="666" y="233" class="d-chip" text-anchor="middle">ad7</text></g>
+<g><title>generation on ad47</title><rect x="692" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="716" y="233" class="d-chip" text-anchor="middle">ad47</text></g>
+<g><title>generation on ad45</title><rect x="742" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="766" y="233" class="d-chip" text-anchor="middle">ad45</text></g>
+<g><title>generation on ad26</title><rect x="792" y="217" width="48" height="24" rx="2" fill="#4fc3f7"/><text x="816" y="233" class="d-chip" text-anchor="middle">ad26</text></g>
+<g><title>done</title><rect x="844" y="217" width="60" height="24" rx="2" fill="none" stroke="#66bb6a" stroke-width="1.5"/><text x="874" y="233" class="d-lab" text-anchor="middle">done</text></g>
+<text x="130" y="257" class="d-note">One request until a tool call: its K/V come from the base model, so the adapter* changes in place.</text>
+<text x="1018" y="257" class="d-sub" text-anchor="end">time →</text>
+<text x="0" y="291" class="d-h">ADAPTER SWITCHING (RTT) · WHAT IS TAKEN</text>
+<text x="0" y="307" class="d-note">Stock vLLM sets a LoRA per request, so it can't change adapter inside a generation.</text>
+<text x="0" y="321" class="d-note">At each switch, its tokens go back to the agent's software, which sends a new request on the next adapter.</text>
+<text x="0" y="335" class="d-note">That round trip takes 2&#8211;10 ms (the same datacenter), drawn per switch and slept for real: the GPU serves other agents meanwhile.</text>
+<text x="0" y="349" class="d-note">SR has none: it stops only at a tool call, as stock vLLM does.</text>
+<text x="0" y="371" class="d-note">* Shown switching as often as LoRA. SR's switch isn't implemented yet, so the run kept one adapter; on the GPU, SR costs the same either way.</text>
+</svg>

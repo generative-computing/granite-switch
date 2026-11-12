@@ -478,6 +478,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
 - `docs/AUDIO.md` - Audio input (ASR cascade)
 - `docs/CICD.md` - Pre-commit hooks and CI setup
+- `docs/AGENT_RACE.md` - Agent race page: granite-switch SR against stock vLLM LoRA, agents switching adapters
 
 ## Git Workflow
 
