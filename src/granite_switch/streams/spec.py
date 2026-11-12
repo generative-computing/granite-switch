@@ -135,6 +135,16 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
                 f"streams[{slot - 1}].output.token_ids must be non-empty real token "
                 f"ids; got {list(token_ids)}."
             )
+        read_layer = e.get("read_layer")
+        if read_layer is not None and (
+            not isinstance(read_layer, int)
+            or isinstance(read_layer, bool)
+            or read_layer < 0
+        ):
+            raise ValueError(
+                f"streams[{slot - 1}].read_layer must be a decoder layer (an int "
+                f"from 0) or null for the final norm; got {read_layer!r}."
+            )
         row = e.get("head_row")
         if not isinstance(row, int) or isinstance(row, bool) or row < 0:
             raise ValueError(
@@ -150,7 +160,7 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
             StreamSpec(
                 slot=slot,
                 type=e["type"],
-                read_layer=e.get("read_layer"),
+                read_layer=read_layer,
                 head_row=row,
                 adapter=adapter,
                 mode=mode,
@@ -173,13 +183,32 @@ def check_rows(specs: list[StreamSpec]) -> None:
             raise ValueError(f"streams of type {t!r} share a head_row: {sorted(rows)}.")
 
 
+def check_read_layers(specs: list[StreamSpec], config) -> None:
+    """A head's read layer must be one of the model's decoder layers.
+
+    Checked for every head type: a layer the model doesn't have is never
+    reached, so the head would silently score nothing. The switch's own cache
+    layers are not decoder layers a head can read.
+    """
+    from ..config import SWITCH_CACHE_LAYERS
+
+    num_layers = config.num_hidden_layers - SWITCH_CACHE_LAYERS
+    for s in specs:
+        if s.is_head and s.read_layer is not None and s.read_layer >= num_layers:
+            raise ValueError(
+                f"streams[{s.slot - 1}].read_layer is {s.read_layer}, but the model "
+                f"has decoder layers 0..{num_layers - 1}; use null for the final norm."
+            )
+
+
 def stream_specs(config) -> list[StreamSpec]:
     """The config's streams, one :class:`StreamSpec` per slot.
 
-    Parsed on each call (a handful of entries, read at load time only); nothing
-    is cached on the config, so nothing extra is ever serialized with it.
+    Parsed on each call (a handful of entries, read at load time only). The
+    records are not cached on the config, so they are never saved with it.
     """
     entries = config.streams if config.streams is not None else _legacy_entries(config)
     specs = parse_entries(entries, config.num_adapters) if config.num_adapters else []
     check_rows(specs)
+    check_read_layers(specs, config)
     return specs

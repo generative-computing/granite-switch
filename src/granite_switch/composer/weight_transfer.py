@@ -105,12 +105,14 @@ def transfer_base_weights(
 
     switch_state_dict = model.state_dict()
 
-    # Record target params (excluding LoRA and buffers)
+    # Record target params (excluding LoRA, buffers and head banks)
     exclude_keywords = arch.lora_keywords + arch.buffer_keywords
+    head_prefixes = _head_module_prefixes(switch_config)
     mapping_record["target_params"] = [
         name
         for name in switch_state_dict.keys()
         if not any(kw in name for kw in exclude_keywords)
+        and not name.startswith(head_prefixes)
     ]
 
     lora_target_modules = switch_config.lora_target_modules
@@ -311,9 +313,9 @@ def _head_module_prefixes(config) -> tuple[str, ...]:
     A head's weights come from its own folder (``transfer_head_weights``), never
     from the base model, whatever its type is called.
     """
-    from granite_switch.streams.routing import head_specs, module_attr
+    from granite_switch.streams.routing import head_param_prefixes
 
-    return tuple(f"model.{module_attr(name)}." for name in head_specs(config))
+    return head_param_prefixes(config)
 
 
 def _validate_base_transfer(

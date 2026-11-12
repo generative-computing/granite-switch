@@ -434,9 +434,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             # Built here (and cached per device later) so a bad ``adapter`` in a
             # stream entry fails at load, not at the first request.
             stream_routing.adapter_lut(config)
-        # The built-in probe keeps its attribute even when absent, as before.
-        if "probe" not in heads:
-            self.probe_head = None
 
         # Decoder layers
         if config.num_adapters > 0:

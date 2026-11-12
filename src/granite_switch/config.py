@@ -553,20 +553,6 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             if adapter_ranks is not None
             else None
         )
-        self.probe_num_labels_per_slot = [
-            len(ids) if ids else 0 for ids in (probe_label_token_ids or [])
-        ] or [0] * num_adapters
-        self.max_probe_labels = max(self.probe_num_labels_per_slot, default=0)
-
-        # Derived: the control-token ids that mark a probe slot. Both backends
-        # locate a verdict's read point by matching these in the original input_ids,
-        # so the id set is defined once here.
-        probe_token_offset = len(adapter_token_ids or []) - num_adapters
-        self.probe_control_token_ids = [
-            (adapter_token_ids or [])[i + probe_token_offset]
-            for i, kind in enumerate(adapter_kinds)
-            if kind == "probe" and adapter_token_ids is not None
-        ]
 
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.

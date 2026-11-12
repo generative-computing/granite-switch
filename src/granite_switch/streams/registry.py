@@ -47,6 +47,10 @@ class HeadType:
     #: Weight file a slot folder ships (compose loads it into ``head_row``).
     weights_file: str = "head.safetensors"
 
+    #: The model attribute holding this type's module, and so its checkpoint key
+    #: prefix (``model.<module_name>.*``). None means ``stream_<name>``.
+    module_name: str | None = None
+
     def check(self, spec, config) -> None:
         """Validate one slot's ``settings`` (raise ``ValueError``). Default: none."""
 

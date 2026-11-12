@@ -384,11 +384,12 @@ def run_sr_probe(ckpt, out_path, *, eager, pp_size=1):
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
+    from granite_switch.streams.routing import head_control_token_ids
     from tests.composer.test_sr_compose_e2e import CONTROL_TOKEN_ID, HIDDEN
 
     labels = list(range(100, 100 + HIDDEN))
     config = AutoConfig.from_pretrained(ckpt)
-    markers = config.probe_control_token_ids
+    markers = head_control_token_ids(config)
     kw = dict(
         model=ckpt,
         skip_tokenizer_init=True,

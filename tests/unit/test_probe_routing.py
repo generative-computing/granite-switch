@@ -8,6 +8,7 @@ from granite_switch.probe_routing import (
     build_adapter_kind_lut,
     split_adapter_indices,
 )
+from granite_switch.streams.routing import head_control_token_ids
 
 
 def _config(adapter_kinds, label_ids, base_reset=False):
@@ -45,7 +46,7 @@ class TestAdapterKindLut:
         """The LUT is indexed by adapter index, not by control-token position."""
         cfg = _config(["lora", "probe"], [None, [100, 101]], base_reset=True)
         assert build_adapter_kind_lut(cfg).tolist() == [False, False, True]
-        assert cfg.probe_control_token_ids == [501]
+        assert head_control_token_ids(cfg) == [501]
 
 
 class TestSplitAdapterIndices:

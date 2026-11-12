@@ -53,7 +53,17 @@ def module_attr(name: str) -> str:
     A type may pin its checkpoint names with ``module_name`` (the probe keeps
     ``probe_head``); others live at ``stream_<name>``.
     """
-    return getattr(get_head_type(name), "module_name", None) or f"stream_{name}"
+    return get_head_type(name).module_name or f"stream_{name}"
+
+
+def head_param_prefixes(config) -> tuple[str, ...]:
+    """State-dict prefixes of the config's head modules: ``model.<attr>.`` each.
+
+    A head's weights come from its own folder, never from the base model, so the
+    composer's base-weight checks skip these by prefix, whatever the type is
+    called.
+    """
+    return tuple(f"model.{module_attr(name)}." for name in head_specs(config))
 
 
 def head_control_token_ids(config) -> list[int]:

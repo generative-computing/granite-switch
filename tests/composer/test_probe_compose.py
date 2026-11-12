@@ -5,7 +5,7 @@ A "probe" slot is the probe-head analog of a LoRA adapter: it shares
 the same control-token / adapter-index machinery, but instead of LoRA weights it
 carries a small linear head (``weight [n_labels, hidden]`` + ``bias [n_labels]``)
 that emits a per-request verdict. Each probe slot may declare a DIFFERENT
-number of labels; the head bank is padded to ``max_probe_labels`` (like the
+number of labels; the head bank is padded to the widest slot (like the
 LoRA bank pads ranks to ``max_lora_rank``), so a slot's trained head lands in the
 top ``n_labels`` rows of its bank row and the pad rows stay zero. The compose
 pipeline builds the ``SwitchedProbeHead`` from config and transfers the

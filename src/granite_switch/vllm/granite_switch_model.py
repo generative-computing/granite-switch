@@ -250,9 +250,6 @@ class GraniteSwitchModel(nn.Module):
         self._head_types = list(heads)
         for name, module in heads.items():
             setattr(self, stream_routing.module_attr(name), module)
-        # The built-in probe keeps its attribute even when absent, as before.
-        if "probe" not in heads:
-            self.probe_head = None
         self._head_layer_groups: dict[int, list[tuple[str, str, str]]] = {}
         self._head_final_groups: list[tuple[str, str, str]] = []
         self._head_width = stream_routing.max_head_outputs(config)
