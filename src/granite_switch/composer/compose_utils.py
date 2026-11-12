@@ -317,14 +317,13 @@ class GraniteSwitchComposer:
 
         if lora_adapter_paths:
             # --- Step 7: Transfer LoRA adapter weights ---
-            # LoRAs are the contiguous leading slots, so the leading k entries of
-            # adapter_ranks/adapter_alphas are exactly the LoRA slots' values and
-            # each path's list position is its bank row (no slot remapping).
-            n_lora = len(lora_adapter_paths)
+            # LoRA path i fills LoRA row i: the rows follow the adapter slots'
+            # order (a pre-streams compose's LoRA slots lead, checked above),
+            # and adapter_alphas holds one alpha per LoRA path, in path order.
             adapter_mapping = transfer_adapter_weights(
                 lora_adapter_paths,
                 model,
-                list(adapter_alphas)[:n_lora],
+                list(adapter_alphas),
                 arch,
             )
 
