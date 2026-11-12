@@ -2,16 +2,14 @@
 """The stream API: a head stream type plugs in with a config entry, a module
 and a weights file, and nothing else (``granite_switch.streams``).
 
-CPU, tiny random models. Covers:
+CPU, tiny models composed by the real composer. Covers:
 
-* the registry (built-in probe, plugins, unknown names);
+* the registry (built-in probe, plugins by entry point, refused names);
 * stream entries: validation, and the legacy entries rebuilt from the
   pre-streams probe fields;
 * the two output modes, ``select`` and ``merge``;
-* an example plugin type (``tests/shared/stream_plugins/mlp_head.py``) composed
-  through the real composer and run end to end, with ``merge``;
-* a head that names an adapter: its marker runs that adapter (Shadow
-  Residual), so the head reads the adapter stream's state;
+* an example plugin type (``tests/shared/stream_plugins/mlp_head.py``) run end
+  to end, with ``merge``;
 * a head that names an adapter: its marker runs that adapter, so the head
   reads the adapter's state (Shadow Residual from the marker alone;
   single-stream LoRA with the adapter's own token in the prompt too);
@@ -24,7 +22,6 @@ import torch
 from safetensors.torch import save_file
 
 from granite_switch.config import GraniteSwitchConfig
-from granite_switch.hf import GraniteSwitchForCausalLM
 from granite_switch.streams import (
     HeadType,
     get_head_type,
@@ -36,32 +33,36 @@ from granite_switch.streams import routing as stream_routing
 from granite_switch.streams.outputs import apply_head_scores, output_tables
 from granite_switch.streams.registry import _REGISTRY
 from granite_switch.streams.spec import parse_entries
+from granite_switch.streams.types.probe import PROBE_HEAD_FILE
 from tests.composer.test_sr_compose_e2e import (
     CONTROL_TOKEN_ID,
     HIDDEN,
     VOCAB_SIZE,
     _create_base_model,
     _create_sr_adapter,
+    _create_standard_lora_adapter,
 )
 from tests.shared.stream_plugins.mlp_head import MLP_HEAD_FILE, MLPHeads
 
 LABELS = [100, 200]
 
 
-def _probe(row, **extra):
+def _probe(row, labels=LABELS, **extra):
+    """A probe slot's stream entry, selecting over ``labels``."""
     return {
         "type": "probe",
         "head_row": row,
-        "output": {"mode": "select", "token_ids": list(LABELS)},
+        "output": {"mode": "select", "token_ids": list(labels)},
         **extra,
     }
 
 
-def _config(streams, *, dual_stream=False, hidden=64, **extra):
+def _config(streams, **extra):
+    """A config for the entry and routing tests; models come from the composer."""
     n = len(streams)
     return GraniteSwitchConfig(
         vocab_size=300,
-        hidden_size=hidden,
+        hidden_size=64,
         intermediate_size=128,
         num_hidden_layers=4,  # 2 switch cache layers + 2 decoder layers
         num_attention_heads=4,
@@ -74,18 +75,8 @@ def _config(streams, *, dual_stream=False, hidden=64, **extra):
         max_lora_rank=4,
         adapter_ranks=[4] * n,
         streams=streams,
-        dual_stream=dual_stream,
-        cross_stream_rank=4 if dual_stream else None,
         **extra,
     )
-
-
-def _model(config):
-    model = GraniteSwitchForCausalLM(config).eval()
-    model.model.adapter_token_ids.data = torch.tensor(
-        config.adapter_token_ids, dtype=torch.long
-    )
-    return model
 
 
 def _last_row(model, ids):
@@ -456,44 +447,98 @@ class TestOutputModes:
 
 
 # --------------------------------------------------------------------------- #
-# The example plugin, end to end through the composer
+# Checkpoints composed for real
 # --------------------------------------------------------------------------- #
+# Every model below is built by GraniteSwitchComposer from adapter and head
+# folders on disk, so these tests run the compose pipeline itself (CLAUDE.md).
 WIDTH = 8
+IDENTITY_LABELS = list(range(100, 100 + HIDDEN))
 
 
-def _write_mlp_head(path, w1, w2):
-    path.mkdir(parents=True)
-    save_file({"w1": w1, "w2": w2}, str(path / MLP_HEAD_FILE))
+def _compose(tmp_path, slots, streams, **kwargs):
+    """Compose ``slots``, ``[(name, folder), ...]`` in slot order, on a tiny base.
 
-
-def _compose_with_plugin(tmp_path, mode, weight=1.0):
-    """A tiny base + one SR adapter + one ``mlp_head`` slot, composed for real."""
+    Slot ``i`` gets control token ``CONTROL_TOKEN_ID + i``; every control token
+    embeds as token 1.
+    """
     from granite_switch.composer import GraniteSwitchComposer
 
-    base, sr, head = tmp_path / "base", tmp_path / "sr", tmp_path / "nudge"
-    base.mkdir()
-    _create_base_model(base)
-    _create_sr_adapter(sr)
+    base = tmp_path / "base"
+    if not base.exists():
+        base.mkdir()
+        _create_base_model(base)
+    n = len(slots)
+    return GraniteSwitchComposer.from_base_and_adapters(
+        base_model_name_or_path=str(base),
+        adapter_paths=[str(folder) for _, folder in slots],
+        adapter_token_ids=[CONTROL_TOKEN_ID + i for i in range(n)],
+        adapter_substitute_token_ids=[1] * n,
+        adapter_names=[name for name, _ in slots],
+        streams=streams,
+        switch_head_dim=16,
+        **kwargs,
+    ).eval()
+
+
+def _sr(path):
+    """A Shadow Residual adapter's folder."""
+    _create_sr_adapter(path)
+    return path
+
+
+def _lora(path):
+    """A single-stream LoRA adapter's folder."""
+    _create_standard_lora_adapter(path)
+    return path
+
+
+def _probe_folder(path, weight, bias=None):
+    """A probe slot's folder: its ``[n_labels, hidden]`` weight and its bias."""
+    path.mkdir(parents=True)
+    if bias is None:
+        bias = torch.zeros(weight.shape[0])
+    save_file({"weight": weight, "bias": bias}, str(path / PROBE_HEAD_FILE))
+    return path
+
+
+def _verdict_probe(path, label):
+    """A probe that always answers ``LABELS[label]``: a zero weight and a bias."""
+    bias = torch.full((len(LABELS),), -5.0)
+    bias[label] = 5.0
+    return _probe_folder(path, torch.zeros(len(LABELS), HIDDEN), bias)
+
+
+def _mlp_head_folder(path, w1, w2):
+    """An ``mlp_head`` slot's folder."""
+    path.mkdir(parents=True)
+    save_file({"w1": w1, "w2": w2}, str(path / MLP_HEAD_FILE))
+    return path
+
+
+def _mlp_entry(mode="merge", weight=1.0, width=WIDTH):
+    return {
+        "type": "mlp_head",
+        "head_row": 0,
+        "output": {"mode": mode, "token_ids": LABELS, "weight": weight},
+        "settings": {"width": width},
+    }
+
+
+# --------------------------------------------------------------------------- #
+# The example plugin, end to end
+# --------------------------------------------------------------------------- #
+def _compose_with_plugin(tmp_path, mode, weight=1.0):
+    """A tiny base + one SR adapter + one ``mlp_head`` slot."""
     torch.manual_seed(3)
     w1, w2 = torch.randn(WIDTH, HIDDEN) * 0.3, torch.randn(len(LABELS), WIDTH)
-    _write_mlp_head(head, w1, w2)
-    model = GraniteSwitchComposer.from_base_and_adapters(
-        base_model_name_or_path=str(base),
-        adapter_paths=[str(sr), str(head)],
-        adapter_token_ids=[CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1],
-        adapter_substitute_token_ids=[1, 2],
-        adapter_names=["sr", "nudge"],
-        streams=[
-            {"type": "lora"},
-            {
-                "type": "mlp_head",
-                "head_row": 0,
-                "output": {"mode": mode, "token_ids": LABELS, "weight": weight},
-                "settings": {"width": WIDTH},
-            },
+    model = _compose(
+        tmp_path,
+        [
+            ("sr", _sr(tmp_path / "sr")),
+            ("nudge", _mlp_head_folder(tmp_path / "nudge", w1, w2)),
         ],
-        switch_head_dim=16,
-    ).eval()
+        [{"type": "lora"}, _mlp_entry(mode, weight)],
+    )
     return model, w1, w2
 
 
@@ -545,69 +590,46 @@ def test_plugin_type_survives_save_and_reload(tmp_path):
 
 
 def test_plugin_checks_its_settings(tmp_path):
+    head = _mlp_head_folder(
+        tmp_path / "nudge", torch.zeros(WIDTH, HIDDEN), torch.zeros(2, WIDTH)
+    )
     with pytest.raises(ValueError, match="settings.width"):
-        _model(
-            _config(
-                [
-                    {
-                        "type": "mlp_head",
-                        "head_row": 0,
-                        "output": {"mode": "merge", "token_ids": LABELS},
-                        "settings": {"width": 0},
-                    }
-                ]
-            )
-        )
+        _compose(tmp_path, [("nudge", head)], [_mlp_entry(width=0)])
 
 
 def test_plugin_rejects_misshaped_weights(tmp_path):
-    from granite_switch.composer.weight_transfer import transfer_head_weights
-
-    config = _config(
-        [
-            {
-                "type": "mlp_head",
-                "head_row": 0,
-                "output": {"mode": "merge", "token_ids": LABELS},
-                "settings": {"width": WIDTH},
-            }
-        ]
+    head = _mlp_head_folder(
+        tmp_path / "nudge", torch.zeros(WIDTH + 1, HIDDEN), torch.zeros(2, WIDTH)
     )
-    model = _model(config)
-    _write_mlp_head(tmp_path / "h", torch.zeros(WIDTH + 1, 64), torch.zeros(2, WIDTH))
     with pytest.raises(ValueError, match="do not match width"):
-        transfer_head_weights([str(tmp_path / "h")], [1], model)
+        _compose(tmp_path, [("nudge", head)], [_mlp_entry()])
 
 
 # --------------------------------------------------------------------------- #
-# A head on an adapter (Shadow Residual)
+# A head on an adapter
 # --------------------------------------------------------------------------- #
-def _identity_probe_model():
-    """[SR adapter "s1", probe on base, the same probe head on "s1"]."""
-    torch.manual_seed(0)
-    config = _config(
-        [{"type": "lora"}, _probe(0), _probe(1, adapter="s1")],
-        dual_stream=True,
-        hidden=64,
+def _identity_probe_model(tmp_path, adapter):
+    """[adapter "ad", a probe on the base, a probe on "ad"], identity heads.
+
+    An identity head returns the state it read, so its label scores ARE that
+    state. ``adapter`` writes the adapter's folder (:func:`_sr` or
+    :func:`_lora`).
+    """
+    probe = _probe_folder(tmp_path / "probe", torch.eye(HIDDEN))
+    return _compose(
+        tmp_path,
+        [("ad", adapter(tmp_path / "ad")), ("probe", probe), ("probe_on_ad", probe)],
+        [
+            {"type": "lora"},
+            _probe(0, labels=IDENTITY_LABELS),
+            _probe(1, labels=IDENTITY_LABELS, adapter="ad"),
+        ],
     )
-    labels = list(range(100, 164))
-    config.streams[1]["output"]["token_ids"] = labels
-    config.streams[2]["output"]["token_ids"] = labels
-    config = GraniteSwitchConfig.from_dict(config.to_dict())
-    model = _model(config)
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if "lora_A" in name or "lora_B" in name:
-                p.copy_(torch.randn_like(p) * 0.1)
-        model.model.probe_head.weight.zero_()
-        for row in (0, 1):
-            model.model.probe_head.weight[row, :64] = torch.eye(64)
-    return model, labels
 
 
-def test_head_on_an_adapter_reads_that_adapter():
-    """The identity head returns the state it read, so its row IS that state."""
-    model, labels = _identity_probe_model()
+def test_head_on_an_adapter_reads_that_adapter(tmp_path):
+    """Shadow Residual: the marker alone runs the adapter, and the head reads it."""
+    model = _identity_probe_model(tmp_path, _sr)
     states = []
 
     def run(ids):
@@ -616,7 +638,7 @@ def test_head_on_an_adapter_reads_that_adapter():
             lambda m, i, o: states.append(o[0])
         )
         try:
-            row = _last_row(model, ids)[labels]
+            row = _last_row(model, ids)[IDENTITY_LABELS]
         finally:
             hook.remove()
         base, adapted = (model.model.norm(h)[0, -1] for h in states[0])
@@ -636,31 +658,13 @@ def test_head_on_an_adapter_reads_that_adapter():
     torch.testing.assert_close(base, base_again)
 
 
-def _identity_lora_model():
-    """The same three slots, on a single-stream LoRA checkpoint."""
-    torch.manual_seed(0)
-    labels = list(range(100, 164))
-    streams = [{"type": "lora"}, _probe(0), _probe(1, adapter="s1")]
-    for e in streams[1:]:
-        e["output"]["token_ids"] = labels
-    model = _model(_config(streams))
-    with torch.no_grad():
-        for name, p in model.named_parameters():
-            if "lora_A" in name or "lora_B" in name:
-                p.copy_(torch.randn_like(p) * 0.2)
-        model.model.probe_head.weight.zero_()
-        for row in (0, 1):
-            model.model.probe_head.weight[row, :64] = torch.eye(64)
-    return model, labels
-
-
 def _final_state(model, ids):
     with torch.no_grad():
         out = model.model(input_ids=torch.tensor([ids]), use_cache=False)
     return out.last_hidden_state[0, -1]
 
 
-def test_head_on_a_lora_adapter_reads_that_adapter_with_its_token():
+def test_head_on_a_lora_adapter_reads_that_adapter_with_its_token(tmp_path):
     """Single-stream LoRA: the adapter's own token makes the head's read exact.
 
     The adapter writes the K/V of every token it runs on, so the marker alone
@@ -668,40 +672,49 @@ def test_head_on_a_lora_adapter_reads_that_adapter_with_its_token():
     template places it, the head reads exactly the state the adapter computes
     when it runs alone: the identity head's row IS that state.
     """
-    model, labels = _identity_lora_model()
+    model = _identity_probe_model(tmp_path, _lora)
     body = [5, 17, 42, 99]
     # The reference: the adapter alone, then a plain token that embeds as the
     # marker does (its substitute, id 1).
     reference = _final_state(model, [250, *body, 1])
-    paired = _last_row(model, [250, *body, 252])[labels]
+    paired = _last_row(model, [250, *body, 252])[IDENTITY_LABELS]
     assert model.model._last_lora_indices.tolist() == [[1, 1, 1, 1, 1, 1]]
     torch.testing.assert_close(paired, reference, atol=1e-5, rtol=0)
 
     # The marker alone runs the adapter on one token only: not the same state.
-    alone = _last_row(model, [1, *body, 252])[labels]
+    alone = _last_row(model, [1, *body, 252])[IDENTITY_LABELS]
     assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0, 1]]
     assert not torch.allclose(alone, reference, atol=1e-2)
 
 
-def test_a_head_names_an_adapter_slot():
+def test_a_head_names_an_adapter_slot(tmp_path):
+    probe = _verdict_probe(tmp_path / "probe", 0)
     with pytest.raises(ValueError, match="not an adapter slot"):
-        _model(
-            _config(
-                [{"type": "lora"}, _probe(0), _probe(1, adapter="s2")], dual_stream=True
-            )
+        _compose(
+            tmp_path,
+            [("ad", _sr(tmp_path / "ad")), ("probe", probe), ("on_probe", probe)],
+            [{"type": "lora"}, _probe(0), _probe(1, adapter="probe")],
         )
 
 
 # --------------------------------------------------------------------------- #
 # Compact rows
 # --------------------------------------------------------------------------- #
-def test_head_slots_take_no_lora_rows_and_order_is_free():
+def test_head_slots_take_no_lora_rows_and_order_is_free(tmp_path):
     """[probe, lora, probe]: one LoRA row, a two-row probe bank, any order."""
-    config = _config([_probe(0), {"type": "lora"}, _probe(1)])
+    model = _compose(
+        tmp_path,
+        [
+            ("first", _verdict_probe(tmp_path / "first", 0)),
+            ("ad", _lora(tmp_path / "ad")),
+            ("last", _verdict_probe(tmp_path / "last", 1)),
+        ],
+        [_probe(0), {"type": "lora"}, _probe(1)],
+    )
+    config = model.config
     assert config.num_lora_rows == 1
     assert stream_routing.lora_row_lut(config).tolist() == [0, 0, 1, 0]
     assert stream_routing.row_lut(config, "probe").tolist() == [0, 1, 0, 2]
-    model = _model(config)
     assert model.model.probe_head.weight.shape[0] == 2
     lora_b = next(p for n, p in model.named_parameters() if "lora_B" in n)
     assert lora_b.shape[0] == 1
@@ -709,47 +722,45 @@ def test_head_slots_take_no_lora_rows_and_order_is_free():
     # The LoRA slot, in the middle, routes to LoRA row 1.
     _last_row(model, [10, 251, 20, 30])
     assert model.model._last_lora_indices.tolist() == [[0, 2, 2, 2]]
-    # The last probe slot reads its own bank row.
-    with torch.no_grad():
-        model.model.probe_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
+    # Each probe slot reads its own bank row.
+    assert int(_last_row(model, [10, 20, 250]).argmax()) == LABELS[0]
     assert int(_last_row(model, [10, 20, 252]).argmax()) == LABELS[1]
 
 
-def test_heads_only_checkpoint_has_no_lora():
-    config = _config([_probe(0), _probe(1)])
-    assert config.num_lora_rows == 0 and config.lora_target_modules == []
-    model = _model(config)
+def test_heads_only_checkpoint_has_no_lora(tmp_path):
+    model = _compose(
+        tmp_path,
+        [
+            ("first", _verdict_probe(tmp_path / "first", 0)),
+            ("last", _verdict_probe(tmp_path / "last", 1)),
+        ],
+        [_probe(0), _probe(1)],
+    )
+    assert model.config.num_lora_rows == 0
+    assert model.config.lora_target_modules == []
     assert not [n for n, _ in model.named_parameters() if "lora_" in n]
-    with torch.no_grad():
-        model.model.probe_head.bias[0, :2] = torch.tensor([5.0, -5.0])
     assert int(_last_row(model, [10, 20, 250]).argmax()) == LABELS[0]
+    assert int(_last_row(model, [10, 20, 251]).argmax()) == LABELS[1]
 
 
-def test_pre_streams_layout_is_unchanged():
+def test_pre_streams_layout_is_unchanged(tmp_path):
     """No ``streams``: every slot keeps its LoRA row and its probe-bank row."""
-    config = GraniteSwitchConfig(
-        vocab_size=300,
-        hidden_size=64,
-        intermediate_size=128,
-        num_hidden_layers=4,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        num_adapters=3,
-        adapter_token_ids=[250, 251, 252],
-        adapter_substitute_token_ids=[1, 1, 1],
-        adapter_names=["s1", "s2", "s3"],
+    model = _compose(
+        tmp_path,
+        [
+            ("ad", _lora(tmp_path / "ad")),
+            ("first", _verdict_probe(tmp_path / "first", 0)),
+            ("last", _verdict_probe(tmp_path / "last", 1)),
+        ],
+        None,
         adapter_kinds=["lora", "probe", "probe"],
         probe_label_token_ids=[None, LABELS, LABELS],
-        max_lora_rank=4,
-        adapter_ranks=[4, 4, 4],
-        switch_head_dim=16,
     )
-    model = _model(config)
+    assert model.config.streams is None
     assert model.model.probe_head.weight.shape[0] == 3
     lora_b = next(p for n, p in model.named_parameters() if "lora_B" in n)
     assert lora_b.shape[0] == 3
-    with torch.no_grad():
-        model.model.probe_head.bias[2, :2] = torch.tensor([-5.0, 5.0])
+    assert int(_last_row(model, [10, 20, 251]).argmax()) == LABELS[0]
     assert int(_last_row(model, [10, 20, 252]).argmax()) == LABELS[1]
 
 
@@ -758,30 +769,12 @@ def test_pre_streams_layout_is_unchanged():
 # --------------------------------------------------------------------------- #
 def _compose_probe_before_sr(tmp_path):
     """A probe in slot 1 and an SR adapter in slot 2: the adapter owns LoRA row 0."""
-    from granite_switch.composer import GraniteSwitchComposer
-
-    base, sr, probe = tmp_path / "base", tmp_path / "sr", tmp_path / "probe"
-    base.mkdir()
-    _create_base_model(base)
-    _create_sr_adapter(sr)
-    probe.mkdir()
-    save_file(
-        {"weight": torch.randn(len(LABELS), HIDDEN), "bias": torch.zeros(len(LABELS))},
-        str(probe / "probe_head.safetensors"),
+    probe = _probe_folder(tmp_path / "probe", torch.randn(len(LABELS), HIDDEN))
+    sr = _sr(tmp_path / "sr")
+    model = _compose(
+        tmp_path, [("tox", probe), ("sr", sr)], [_probe(0), {"type": "lora"}]
     )
-    model = GraniteSwitchComposer.from_base_and_adapters(
-        base_model_name_or_path=str(base),
-        adapter_paths=[str(probe), str(sr)],
-        adapter_token_ids=[CONTROL_TOKEN_ID, CONTROL_TOKEN_ID + 1],
-        adapter_substitute_token_ids=[1, 2],
-        adapter_names=["tox", "sr"],
-        streams=[
-            {"type": "probe", "head_row": 0, "output": {"token_ids": LABELS}},
-            {"type": "lora"},
-        ],
-        switch_head_dim=16,
-    ).eval()
-    return model, str(sr), str(base)
+    return model, str(sr), str(tmp_path / "base")
 
 
 def test_cross_stream_check_finds_an_empty_adapter_after_a_head(tmp_path, capsys):
