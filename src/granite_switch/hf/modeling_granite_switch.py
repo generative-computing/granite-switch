@@ -430,6 +430,14 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         for name, module in heads.items():
             setattr(self, stream_routing.module_attr(name), module)
         self._head_types = list(heads)
+        # Read from the config once: the score-row width, and per read layer
+        # (None = final) the head types that read it, with their modules'
+        # attributes.
+        self._head_width = stream_routing.max_head_outputs(config)
+        self._head_reads = {
+            layer: [(name, stream_routing.module_attr(name)) for name in types]
+            for layer, types in stream_routing.read_groups(config).items()
+        }
         if heads:
             # Built here (and cached per device later) so a bad ``adapter`` in a
             # stream entry fails at load, not at the first request.
@@ -479,19 +487,23 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             for layer in self.layers:
                 nn.init.zeros_(layer.cross_stream.base_layer.weight)
 
-    def _row_lut_cached(self, name, device, *args):
-        """A routing table from :mod:`granite_switch.streams.routing`, cached per device.
+    def _stream_table(self, build, device, *args):
+        """``build(config, *args)`` on ``device``, cached: a routing table.
 
-        Built from the config (the source of truth) and kept off the state
-        dict: an old checkpoint has no such tensor to load.
+        ``build`` is a :mod:`granite_switch.streams.routing` function returning
+        a tensor, a dict of tensors, or a list of ids. The table is built
+        on first use rather than in ``__init__`` (from_pretrained builds the
+        model on the meta device), and kept off the state dict: an old
+        checkpoint has no such tensor to load.
         """
-        cache = self.__dict__.setdefault("_stream_luts", {})
-        key = (name, args, device)
+        cache = self.__dict__.setdefault("_stream_tables", {})
+        key = (build.__name__, args, device)
         if key not in cache:
-            table = getattr(stream_routing, name)(self.config, *args)
-            # A table is one tensor, or a dict of them (the output tables).
+            table = build(self.config, *args)
             if isinstance(table, dict):
                 table = {k: t.to(device) for k, t in table.items()}
+            elif isinstance(table, list):
+                table = torch.tensor(table, dtype=torch.long, device=device)
             else:
                 table = table.to(device)
             cache[key] = table
@@ -511,10 +523,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                     "Head-stream requests need input_ids, not inputs_embeds."
                 )
             return None
-        marker_ids = torch.tensor(
-            stream_routing.head_control_token_ids(self.config),
-            device=input_ids.device,
-            dtype=input_ids.dtype,
+        marker_ids = self._stream_table(
+            stream_routing.head_control_token_ids, input_ids.device
         )
         rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
         if rows.numel() == 0:
@@ -540,18 +550,20 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         ``scores[i]`` is filled for each marker ``i`` whose slot reads ``layer``.
         """
-        groups = stream_routing.read_groups(self.config).get(layer)
-        if not groups:
+        reads = self._head_reads.get(layer)
+        if not reads:
             return
         rows, pos, slots = markers
-        for name, type_slots in groups.items():
-            sel = torch.isin(slots, torch.tensor(type_slots, device=slots.device))
+        for name, attr in reads:
+            type_slots = self._stream_table(
+                stream_routing.read_slots, slots.device, layer, name
+            )
+            sel = torch.isin(slots, type_slots)
             if not bool(sel.any()):
                 continue
             idx = sel.nonzero(as_tuple=True)[0]
-            lut = self._row_lut_cached("row_lut", slots.device, name)
-            module = getattr(self, stream_routing.module_attr(name))
-            out = module(hidden[rows[idx], pos[idx]], lut[slots[idx]])
+            lut = self._stream_table(stream_routing.row_lut, slots.device, name)
+            out = getattr(self, attr)(hidden[rows[idx], pos[idx]], lut[slots[idx]])
             scores[idx, : out.shape[-1]] = out.to(scores.dtype)
 
     def forward(
@@ -689,13 +701,15 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             # tokens route through that adapter slot's LoRA (stream_routing.
             # adapter_lut); a head on the base model maps to 0, as before.
             if self._head_types:
-                lut = self._row_lut_cached("adapter_lut", adapter_indices.device)
+                lut = self._stream_table(
+                    stream_routing.adapter_lut, adapter_indices.device
+                )
                 lora_indices = lut[adapter_indices]
             # The LoRA layers index their tensors by row, not by slot: a
             # streams checkpoint keeps rows for adapter slots only.
-            lora_rows = self._row_lut_cached("lora_row_lut", lora_indices.device)[
-                lora_indices
-            ]
+            lora_rows = self._stream_table(
+                stream_routing.lora_row_lut, lora_indices.device
+            )[lora_indices]
         else:
             lora_indices = adapter_indices
             head_indices = torch.zeros_like(adapter_indices)
@@ -740,7 +754,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         self._last_head_scores = None
         if markers is not None:
             head_scores = inputs_embeds.new_zeros(
-                (markers[0].numel(), stream_routing.max_head_outputs(self.config))
+                (markers[0].numel(), self._head_width)
             )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -940,7 +954,7 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
             )
         flat = logits.view(-1, logits.shape[-1])
         index = rows * logits.shape[1] + cols
-        tables = self.model._row_lut_cached("head_outputs", logits.device)
+        tables = self.model._stream_table(stream_routing.head_outputs, logits.device)
         flat[index] = apply_head_scores(
             flat[index], slots.to(torch.long), scores, tables
         )
