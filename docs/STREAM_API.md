@@ -45,9 +45,9 @@ head type. A new type needs three things and no change to Granite Switch:
 | `head_row` | The slot's row in its type's weight bank. Each type numbers its own bank; compose assigns them |
 | `adapter` | Optional: an adapter slot (by name) that runs at the marker before the head reads. Omitted means the base model |
 | `output.mode` | `select` or `merge` (below) |
-| `output.token_ids` | The tokens the scores land on, one per score |
-| `output.weight` | The scale for `merge` (default 1.0) |
-| `settings` | Anything type-specific; the type's `check` validates it |
+| `output.token_ids` | The tokens the scores land on, one per score, each token once |
+| `output.weight` | The scale for `merge`, a finite number (default 1.0) |
+| `settings` | A dict of anything type-specific; the type's `check` validates it |
 
 An adapter slot's entry is just `{"type": "lora"}`: its control token, substitute token and
 template placement stay in the `adapter_*` config fields.

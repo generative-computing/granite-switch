@@ -253,6 +253,23 @@ class TestStreamEntries:
             ({**_probe(0), "read_layer": True}, "read_layer must be a decoder layer"),
             ({**_probe(0), "read_layer": "1"}, "read_layer must be a decoder layer"),
             ({**_probe(0), "adapter": 3}, "adapter must be"),
+            (
+                {**_probe(0), "output": {"token_ids": [7, 7]}},
+                "token_ids must be distinct",
+            ),
+            (
+                {**_probe(0), "output": {"token_ids": [1], "weight": "2"}},
+                "weight must be a finite number",
+            ),
+            (
+                {**_probe(0), "output": {"token_ids": [1], "weight": True}},
+                "weight must be a finite number",
+            ),
+            (
+                {**_probe(0), "output": {"token_ids": [1], "weight": float("inf")}},
+                "weight must be a finite number",
+            ),
+            ({**_probe(0), "settings": [1]}, "settings must be a dict or null"),
         ],
     )
     def test_rejects_bad_entries(self, entry, message):
