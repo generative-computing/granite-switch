@@ -95,7 +95,8 @@ def adapter_lut(config) -> torch.Tensor:
     """
     lut = torch.zeros(config.num_adapters + 1, dtype=torch.long)
     names = config.adapter_names or []
-    for s in stream_specs(config):
+    specs = stream_specs(config)
+    for s in specs:
         if not s.is_head:
             lut[s.slot] = s.slot
         elif s.adapter is not None:
@@ -106,7 +107,7 @@ def adapter_lut(config) -> torch.Tensor:
             # adapter goes (the chat template places it), for the head to read
             # the state the adapter computes.
             target = names.index(s.adapter) + 1 if s.adapter in names else 0
-            if target == 0 or stream_specs(config)[target - 1].is_head:
+            if target == 0 or specs[target - 1].is_head:
                 raise ValueError(
                     f"stream slot {s.slot} names adapter {s.adapter!r}, which is not "
                     f"an adapter slot of this checkpoint ({names})."
@@ -167,3 +168,8 @@ def read_groups(config) -> dict:
         if s.is_head:
             groups.setdefault(s.read_layer, {}).setdefault(s.type, []).append(s.slot)
     return groups
+
+
+def read_slots(config, read_layer, type_name: str) -> list[int]:
+    """The slots of head type ``type_name`` that read ``read_layer``."""
+    return read_groups(config).get(read_layer, {}).get(type_name, [])
