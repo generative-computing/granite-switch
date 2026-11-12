@@ -191,7 +191,7 @@ def _compose_sr_probe(path: Path, read_layers=(None,)):
     the exact layer and normalization read without random margins.
     """
     from granite_switch.composer import GraniteSwitchComposer
-    from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
+    from granite_switch.streams.types.probe import PROBE_HEAD_FILE
 
     base, sr, probe = (path / name for name in ("base", "sr", "probe"))
     base.mkdir(parents=True)
@@ -261,14 +261,14 @@ def test_sr_and_probe_slots_select_separately(tmp_path, capsys, read_layer):
     probe_ids = torch.tensor([[10, 21, 20, CONTROL_TOKEN_ID + 1]])
     probe, base, _ = run(model, probe_ids)
     assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    assert model.model._last_head_indices.tolist() == [[0, 0, 0, 2]]
     torch.testing.assert_close(probe.logits[0, -1, labels], base)
     assert torch.isneginf(probe.logits[0, -1, non_labels]).all()
 
     sr_ids = torch.tensor([[10, CONTROL_TOKEN_ID, 20, 30]])
     sr, base, adapted = run(model, sr_ids)
     assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
-    assert not model.model._last_probe_indices.any()
+    assert not model.model._last_head_indices.any()
     assert not torch.allclose(adapted, base), "fixture must exercise SR adaptation"
     assert torch.isfinite(sr.logits[0, -1]).all()
 

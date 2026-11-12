@@ -32,6 +32,7 @@ import pytest
 from jinja2 import Environment
 
 from granite_switch.composer.tokenizer_setup import (
+    ANCHOR_MODE_HEAD,
     _wrap_message_loop_for_history_adapters,
     add_control_tokens,
     configure_audio_chat_template,
@@ -631,8 +632,8 @@ class TestHeadOnAnAdapter:
             tokenizer,
             [
                 (adapter, "base_adapter", technology),
-                (None, "tox", "probe"),
-                (None, "tox_on", "probe"),
+                (None, "tox", ANCHOR_MODE_HEAD),
+                (None, "tox_on", ANCHOR_MODE_HEAD),
             ],
             head_adapters=head_adapters,
         )
@@ -659,7 +660,10 @@ class TestHeadOnAnAdapter:
         )
         configure_chat_template(
             tokenizer,
-            [(self._CONTEXT_REL, "base_adapter", "alora"), (None, "tox_on", "probe")],
+            [
+                (self._CONTEXT_REL, "base_adapter", "alora"),
+                (None, "tox_on", ANCHOR_MODE_HEAD),
+            ],
             head_adapters={"tox_on": "base_adapter"},
         )
         messages = [{"role": "user", "content": "<context>docs</context>"}]
@@ -701,7 +705,7 @@ class TestHeadOnAnAdapter:
         tokenizer = _SRTokenizer(_GRANITE_TEMPLATE, {"<|end_of_role|>": [49153]})
         configure_chat_template(
             tokenizer,
-            [(self._SR, "base_adapter", "sr"), (None, "tox_on", "probe")],
+            [(self._SR, "base_adapter", "sr"), (None, "tox_on", ANCHOR_MODE_HEAD)],
             head_adapters={"tox_on": "base_adapter"},
         )
         paired = self._render(tokenizer, True, adapter_name="tox_on")

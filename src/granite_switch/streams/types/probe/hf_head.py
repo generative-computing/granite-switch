@@ -1,16 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Switched activation probe heads for Granite Switch.
+"""The probe type's HF module: linear heads in one bank, ``scores = W h + b``.
 
-An activation probe head, a linear head over a hidden state, is an optional
-substitute for a LoRA adapter: an adapter slot is either a LoRA adapter or a
-probe head, selected by the same control token and adapter index. Where a probe
-is selected, the LoRA path no-ops.
-The model supplies the configured layer's hidden states (the final normalized
-state by default), and the head produces per-label scores.
-
-Probe positions are expected to be sparse, and the weight bank is replicated
-on every rank at this point; revisit if probes ever cover most tokens or
-num_labels grows large.
+One bank row per probe slot. The model calls the module at the layer a probe
+reads (the final normalized state by default), on the marker rows only, and
+the head produces one score per label.
 """
 
 import torch
@@ -18,17 +11,17 @@ import torch.nn as nn
 
 
 class SwitchedProbeHead(nn.Module):
-    """Per-token probe heads selected by probe indices.
+    """Linear probe heads in one bank, selected per token by bank row.
 
-    Stacked weight bank indexed by ``(index - 1)``, like ``SwitchedLoRALinear``.
-    Index ``0`` = no probe (base); ``1+`` selects that slot's head.
+    Stacked weight bank indexed by ``(row - 1)``. Row ``0`` = no probe here;
+    ``1+`` selects that bank row's head (``1 + head_row`` of the slot).
     Positions not selected are left at zero.
 
     Args:
         hidden_size: Input feature dimension (the model hidden size).
-        num_probe_slots: ``num_adapters`` (the full index space), so
-            ``index - 1`` addresses the bank directly like the LoRA bank. Slots
-            that are not probes simply never get selected.
+        num_rows: Bank rows: ``1 + max(head_row)`` over the probe slots, or
+            ``num_adapters`` for a checkpoint composed before streams, which
+            kept one row per slot.
         max_num_labels: Padded label width of the bank — ``max`` over the
             per-slot label counts. Slots with fewer labels leave their extra
             rows zero. The verdict exit slices each slot back to its real label
@@ -38,36 +31,33 @@ class SwitchedProbeHead(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        num_probe_slots: int,
+        num_rows: int,
         max_num_labels: int,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.num_probe_slots = num_probe_slots
+        self.num_rows = num_rows
         self.num_labels = max_num_labels
 
-        # Slot s (0-based) serves adapter index s + 1, matching the LoRA bank's
-        # tensor_idx = adapter_idx - 1.
+        # Row r (0-based) is selected by head index r + 1.
         #
         # A frozen inference bank whose real values are copied in from a trained
         # head at compose time. Zero value for both an unloaded slot's row and a
         # loaded slot's pad rows (label counts below max_num_labels).
-        self.weight = nn.Parameter(
-            torch.zeros(num_probe_slots, max_num_labels, hidden_size)
-        )
-        self.bias = nn.Parameter(torch.zeros(num_probe_slots, max_num_labels))
+        self.weight = nn.Parameter(torch.zeros(num_rows, max_num_labels, hidden_size))
+        self.bias = nn.Parameter(torch.zeros(num_rows, max_num_labels))
 
     def forward(
         self,
         x: torch.Tensor,
-        probe_indices: torch.Tensor,
+        head_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Compute per-token probe logits for selected positions.
 
         Args:
             x: Input tensor [batch, seq_len, hidden_size] or [num_tokens, hidden_size].
-            probe_indices: Per-token probe selection [batch, seq_len]
-                or [num_tokens]; 0 = no probe, 1+ = slot index.
+            head_indices: Per-token bank row + 1 [batch, seq_len] or
+                [num_tokens]; 0 = no probe here.
 
         Returns:
             Logits with the selected slot's head applied per token:
@@ -84,7 +74,7 @@ class SwitchedProbeHead(nn.Module):
 
         logits_flat = x_flat.new_zeros((x_flat.shape[0], self.num_labels))
 
-        idx_flat = probe_indices.reshape(-1)
+        idx_flat = head_indices.reshape(-1)
 
         # Per-token gather/scatter loop (same as SwitchedLoRALinear.forward)
         mask = idx_flat > 0

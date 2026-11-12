@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Activation-probe slot routing helpers, shared by both backends' switches.
+"""The split of the switch's index stream into adapter and head streams.
 
-An adapter slot is either a generation adapter or an activation probe head,
-selected by the same control token and adapter index. These helpers split the
-switch's single per-token index stream so that probe positions no-op the LoRA
-path and feed the probe head instead.
+A slot is either an adapter stream or a head stream (any type other than
+``lora``), selected by the same control token and adapter index. These helpers,
+shared by both backends' switches, split the switch's single per-token index
+stream so that head positions leave the adapters' path (unless a head names an
+adapter, which the models route separately) and feed the head streams.
 
 Backend-neutral on purpose: the table is a pure function of
 ``config.adapter_kinds``, so both switch engines (HF and vLLM MultiSwitch)
@@ -14,7 +15,7 @@ build the identical table.
 import torch
 
 
-def build_adapter_kind_lut(config) -> torch.Tensor | None:
+def build_head_slot_lut(config) -> torch.Tensor | None:
     """Bool LUT over adapter indices marking which slots are head streams.
 
     ``[num_adapters + 1]``, indexed by ADAPTER INDEX: entry ``i`` is True when
@@ -34,26 +35,26 @@ def build_adapter_kind_lut(config) -> torch.Tensor | None:
     return lut
 
 
-def split_adapter_indices(
+def split_head_indices(
     kind_lut: torch.Tensor | None, adapter_indices: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Split a per-token index stream into LoRA and probe streams.
+    """Split a per-token index stream into LoRA and head streams.
 
     Shapes are preserved (``[batch, seq_len]`` on HF, ``[total_tokens]`` on
     vLLM), so this serves both backends:
 
-      - ``lora_indices``: probe positions zeroed, so the LoRA path no-ops
-        there.
-      - ``probe_indices``: the adapter index at probe positions, else 0.
+      - ``lora_indices``: head positions zeroed, so the LoRA path no-ops
+        there (a head that names an adapter is routed back by the models).
+      - ``head_indices``: the adapter index at head positions, else 0.
 
-    With ``kind_lut`` None (no probe slots) the LoRA stream passes through
-    and the probe stream is all zeros.
+    With ``kind_lut`` None (no head slots) the LoRA stream passes through
+    and the head stream is all zeros.
     """
     if kind_lut is None:
         return adapter_indices, torch.zeros_like(adapter_indices)
-    is_probe = kind_lut[adapter_indices]
+    is_head = kind_lut[adapter_indices]
     zeros = torch.zeros_like(adapter_indices)
     return (
-        torch.where(is_probe, zeros, adapter_indices),
-        torch.where(is_probe, adapter_indices, zeros),
+        torch.where(is_head, zeros, adapter_indices),
+        torch.where(is_head, adapter_indices, zeros),
     )

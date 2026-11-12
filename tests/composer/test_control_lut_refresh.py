@@ -166,5 +166,5 @@ def test_probe_routing_survives_audio_resize_and_strict_reload(tmp_path):
     with torch.no_grad():
         out = loaded(input_ids=torch.tensor([[1, 2, 3, _CTRL_IDS[1]]]), use_cache=False)
     assert loaded.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert loaded.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    assert loaded.model._last_head_indices.tolist() == [[0, 0, 0, 2]]
     assert int(out.logits[0, -1].argmax()) == 11

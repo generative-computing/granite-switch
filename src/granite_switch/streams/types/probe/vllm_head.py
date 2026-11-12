@@ -1,16 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Switched activation probe heads for Granite Switch (vLLM backend).
+"""The probe type's vLLM module: linear heads in one bank, ``scores = W h + b``.
 
-An activation probe head, a linear head over a hidden state, is an optional
-substitute for a LoRA adapter: an adapter slot is either a LoRA adapter or a
-probe head, selected by the same control token and adapter index. Where a probe
-is selected, the LoRA path no-ops.
-The model supplies the configured layer's hidden states (the final normalized
-state by default), and the head produces per-label scores.
-
-Probe positions are expected to be sparse, and the weight bank is replicated
-on every rank at this point; revisit if probes ever cover most tokens or
-num_labels grows large.
+One bank row per probe slot. The model calls the module at the layer a probe
+reads (the final normalized state by default), on every token of the step
+(branch-free, so it runs inside CUDA graphs); tokens that are not probe markers
+carry row 0. The bank is replicated on every tensor-parallel rank.
 """
 
 import torch
@@ -18,20 +12,19 @@ import torch.nn as nn
 
 
 class SwitchedProbeHead(nn.Module):
-    """Per-token probe heads selected by probe indices (vLLM).
+    """Linear probe heads in one bank, selected per token by bank row (vLLM).
 
     Compile-safe, on the flat ``[total_tokens, hidden_size]`` layout vLLM's
-    scheduler produces. Index ``0`` = no probe (base -> zero logits);
-    ``1+`` selects that slot's head.
+    scheduler produces. Row ``0`` = no probe here (zero scores); ``1+``
+    selects that bank row's head (``1 + head_row`` of the slot).
 
-    The weight bank is stacked ``[num_slots, ...]`` and indexed by
-    ``(index - 1)``, matching ``SwitchedLoRALinear``.
+    The weight bank is stacked ``[num_rows, ...]`` and indexed by ``(row - 1)``.
 
     Args:
         hidden_size: Input feature dimension (the model hidden size).
-        num_probe_slots: ``num_adapters`` (the full index space). Slot ``s``
-            (0-based) serves adapter index ``s + 1``. Slots that are not
-            probes simply never get selected.
+        num_rows: Bank rows: ``1 + max(head_row)`` over the probe slots, or
+            ``num_adapters`` for a checkpoint composed before streams, which
+            kept one row per slot.
         max_num_labels: Padded label width of the bank (``max`` over the per-slot
             label counts). Keeping this uniform is what lets every slot's head
             run as one matmul. Slots with fewer labels leave their extra
@@ -42,30 +35,28 @@ class SwitchedProbeHead(nn.Module):
     def __init__(
         self,
         hidden_size: int,
-        num_probe_slots: int,
+        num_rows: int,
         max_num_labels: int,
     ):
         super().__init__()
         self.hidden_size = hidden_size
-        self.num_probe_slots = num_probe_slots
+        self.num_rows = num_rows
         self.num_labels = max_num_labels
 
-        # Stacked bank indexed by (adapter_idx - 1), like the LoRA bank
-        #   weight: [num_slots, max_num_labels, hidden_size]
-        #   bias:   [num_slots, max_num_labels]
+        # Stacked bank indexed by (row - 1)
+        #   weight: [num_rows, max_num_labels, hidden_size]
+        #   bias:   [num_rows, max_num_labels]
         #
         # A frozen inference bank whose real values are copied in from a trained
         # head at compose time. Zero value for both an unloaded slot's row and a
         # loaded slot's pad rows (label counts below max_num_labels).
-        self.weight = nn.Parameter(
-            torch.zeros(num_probe_slots, max_num_labels, hidden_size)
-        )
-        self.bias = nn.Parameter(torch.zeros(num_probe_slots, max_num_labels))
+        self.weight = nn.Parameter(torch.zeros(num_rows, max_num_labels, hidden_size))
+        self.bias = nn.Parameter(torch.zeros(num_rows, max_num_labels))
 
     def forward(
         self,
         x: torch.Tensor,
-        probe_indices: torch.Tensor,
+        head_indices: torch.Tensor,
     ) -> torch.Tensor:
         """Compute per-token probe logits for selected positions.
 
@@ -74,14 +65,13 @@ class SwitchedProbeHead(nn.Module):
 
         Args:
             x: Input tensor [total_tokens, hidden_size].
-            probe_indices: [total_tokens]; 0 = no probe, 1+ = slot
-                index (the un-offset adapter index).
+            head_indices: [total_tokens] bank row + 1; 0 = no probe here.
 
         Returns:
             Logits [total_tokens, num_labels]. Positions with index 0 are zero.
         """
-        is_probe = probe_indices > 0  # [total_tokens]
-        slot = (probe_indices - 1).clamp_min(0)  # [total_tokens]; base -> row 0
+        is_probe = head_indices > 0  # [total_tokens]
+        slot = (head_indices - 1).clamp_min(0)  # [total_tokens]; base -> row 0
 
         # Every slot's head on every token as one matmul ([T, H] x [H, S*L]),
         # then each token keeps its own slot's L scores. The bank is a few

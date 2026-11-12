@@ -260,7 +260,7 @@ def test_probe_checkpoint_loads_strictly_and_routes(probe_checkpoint):
     assert input_ids[0, -1].item() == marker
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=False)
-    assert model.model._last_probe_indices[0, -1].item() == 2
+    assert model.model._last_head_indices[0, -1].item() == 2
     assert not model.model._last_lora_indices.any()
     label_ids = model.config.probe_label_token_ids[1]
     assert int(out.logits[0, -1].argmax()) == label_ids[1]

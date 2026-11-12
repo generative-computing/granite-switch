@@ -43,17 +43,25 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
     substitution.
 
     Args:
-        num_adapters (int): Number of adapter slots available (LoRA and
-            probe). Default: 0. Index 0 always means "base / no adapter".
+        num_adapters (int): Number of slots: adapters and head streams.
+            Default: 0. Index 0 always means "base / no adapter".
         adapter_token_ids (List[int]): Token IDs for adapter control.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
             token). Must be unique. adapter_token_ids[i] activates slot i+1
-            (1-indexed output), a LoRA adapter or a probe head.
+            (1-indexed output), an adapter or a head stream.
             Output 0 = base.
         adapter_substitute_token_ids (List[int]): Token IDs whose embeddings
             replace the control-token embeddings before the decoder runs.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
             token). Required when num_adapters > 0.
+        streams (List[dict]): One stream entry per slot, saying what it runs:
+            ``{"type": "lora"}`` for an adapter, or a head type's entry (read
+            layer, bank row, output, optional adapter, settings). See
+            ``granite_switch.streams`` and docs/STREAM_API.md. None for a
+            checkpoint composed before streams: its entries are rebuilt from
+            ``adapter_kinds``, ``probe_label_token_ids`` and
+            ``probe_read_layers``, which a streams checkpoint also keeps,
+            derived from its entries, for older versions to read.
 
         Switch attention parameters:
             control_token_gain (float): Attention gain for control/non-control separation. Default: 15.0.
@@ -525,9 +533,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     )
         self.probe_read_layers = probe_read_layers
 
-        # Derived: per-slot label counts (0 on LoRA slots) and the padded bank
-        # width the probe head is built with. A streams checkpoint takes them
-        # from its probe entries' output token ids.
+        # Derived, for older versions: a streams checkpoint also writes the
+        # pre-streams probe fields, from its probe entries. This version reads
+        # the entries; the copies are never read back.
         if streams is not None:
             probe_label_token_ids = [
                 list((e.get("output") or {}).get("token_ids") or [])

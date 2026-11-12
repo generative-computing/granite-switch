@@ -183,8 +183,8 @@ class GraniteSwitchComposer:
             )
 
         # adapter_ranks/adapter_alphas stay full external width (one entry per
-        # slot, probes included) so config.adapter_ranks is length
-        # num_adapters. A probe slot itself has no LoRA weights.
+        # slot, heads included) so config.adapter_ranks is length
+        # num_adapters. A head slot itself has no LoRA weights.
         if lora_adapter_paths:
             lora_rank, _lora_alpha, lora_ranks, lora_alphas = detect_lora_config(
                 lora_adapter_paths
@@ -195,10 +195,6 @@ class GraniteSwitchComposer:
                 adapter_names=lora_adapter_names,
             )
 
-            # LoRAs lead, probes follow, so the full lists are a concat:
-            # detected LoRA values, then a placeholder per probe slot. The
-            # placeholder is the detected max rank, keeping max(adapter_ranks) ==
-            # max_lora_rank.
             # Scatter the detected values back to slot positions; a head slot
             # gets the detected max rank as a placeholder (it has no LoRA row in
             # a streams compose), keeping max(adapter_ranks) == max_lora_rank.
@@ -220,7 +216,7 @@ class GraniteSwitchComposer:
                 )
                 lora_rank = max(lora_rank, built_in_lora_rank)
         elif head_adapter_paths or num_built_in > 0:
-            # No LoRA slots but the model still has slots (probe and/or
+            # No LoRA slots but the model still has slots (heads and/or
             # built-in). Give every slot a placeholder LoRA rank so the
             # (unused) LoRA bank is well-formed and config validation passes.
             lora_rank = built_in_lora_rank

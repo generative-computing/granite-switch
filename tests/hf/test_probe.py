@@ -62,7 +62,7 @@ def test_probe_head_built_only_when_slot_present():
     assert m_clf.model.probe_head is not None
     # The bank holds the slot's head row: a pre-streams config (no
     # ``streams``) keeps the old layout, one row per slot.
-    assert m_clf.model.probe_head.num_probe_slots == 2
+    assert m_clf.model.probe_head.num_rows == 2
     assert m_clf.model.probe_head.num_labels == 2
 
 
@@ -107,7 +107,7 @@ def test_lora_and_probe_slots_select_separately():
     with torch.no_grad():
         model(input_ids=torch.tensor([[10, 250, 20, 30]]))
     assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
-    assert not model.model._last_probe_indices.any()
+    assert not model.model._last_head_indices.any()
     assert model.model._last_head_scores is None
 
     # The probe marker selects slot 2 and routes out of the LoRA stream.
@@ -116,7 +116,7 @@ def test_lora_and_probe_slots_select_separately():
         output = model(input_ids=input_ids)
 
     assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    assert model.model._last_head_indices.tolist() == [[0, 0, 0, 2]]
     label_ids = config.probe_label_token_ids[1]
     last_logits = output.logits[0, -1]
     assert torch.isfinite(last_logits[torch.tensor(label_ids)]).all()
@@ -138,7 +138,7 @@ def test_non_probe_request_logits_untouched():
     with torch.no_grad():
         out = model(input_ids=input_ids)
 
-    assert (model.model._last_probe_indices == 0).all()
+    assert (model.model._last_head_indices == 0).all()
     # Full finite vocab row — nothing blanked.
     assert torch.isfinite(out.logits[0, -1, :]).all()
 
@@ -337,7 +337,7 @@ def test_intermediate_layer_probe_scores_that_layers_output():
         )
 
     assert model.model._last_lora_indices[0, -1].item() == 0
-    assert model.model._last_probe_indices[0, -1].item() == 2
+    assert model.model._last_head_indices[0, -1].item() == 2
     rows, pos, verdict, slots, _ = model.model._last_head_scores
     expected = model.model.probe_head(out.hidden_states[1][rows, pos], slots)
     final = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)

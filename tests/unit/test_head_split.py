@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Probe-slot routing: the kind LUT and the LoRA/probe index split."""
+"""Head-slot routing: the head-slot LUT and the LoRA/head index split."""
 
 import torch
 
 from granite_switch.config import GraniteSwitchConfig
-from granite_switch.probe_routing import (
-    build_adapter_kind_lut,
-    split_adapter_indices,
-)
 from granite_switch.streams.routing import head_control_token_ids
+from granite_switch.streams.split import (
+    build_head_slot_lut,
+    split_head_indices,
+)
 
 
 def _config(adapter_kinds, label_ids, base_reset=False):
@@ -36,38 +36,38 @@ def _config(adapter_kinds, label_ids, base_reset=False):
 
 class TestAdapterKindLut:
     def test_none_without_probe_slots(self):
-        assert build_adapter_kind_lut(_config(["lora", "lora"], None)) is None
+        assert build_head_slot_lut(_config(["lora", "lora"], None)) is None
 
     def test_marks_probe_adapter_indices(self):
         cfg = _config(["lora", "probe", "probe"], [None, [100], [101, 102]])
-        assert build_adapter_kind_lut(cfg).tolist() == [False, False, True, True]
+        assert build_head_slot_lut(cfg).tolist() == [False, False, True, True]
 
     def test_base_reset_token_does_not_shift_slots(self):
         """The LUT is indexed by adapter index, not by control-token position."""
         cfg = _config(["lora", "probe"], [None, [100, 101]], base_reset=True)
-        assert build_adapter_kind_lut(cfg).tolist() == [False, False, True]
+        assert build_head_slot_lut(cfg).tolist() == [False, False, True]
         assert head_control_token_ids(cfg) == [501]
 
 
 class TestSplitAdapterIndices:
     def test_probe_positions_leave_the_lora_stream(self):
         cfg = _config(["lora", "probe"], [None, [100, 101]])
-        lora, probe = split_adapter_indices(
-            build_adapter_kind_lut(cfg), torch.tensor([0, 1, 1, 0, 2])
+        lora, probe = split_head_indices(
+            build_head_slot_lut(cfg), torch.tensor([0, 1, 1, 0, 2])
         )
         assert lora.tolist() == [0, 1, 1, 0, 0]
         assert probe.tolist() == [0, 0, 0, 0, 2]
 
     def test_preserves_batched_shape(self):
         cfg = _config(["probe", "lora"], [[100, 101], None])
-        lora, probe = split_adapter_indices(
-            build_adapter_kind_lut(cfg), torch.tensor([[0, 2, 1], [1, 1, 0]])
+        lora, probe = split_head_indices(
+            build_head_slot_lut(cfg), torch.tensor([[0, 2, 1], [1, 1, 0]])
         )
         assert lora.tolist() == [[0, 2, 0], [0, 0, 0]]
         assert probe.tolist() == [[0, 0, 1], [1, 1, 0]]
 
     def test_no_probe_slots_pass_through(self):
         indices = torch.tensor([0, 1, 2])
-        lora, probe = split_adapter_indices(None, indices)
+        lora, probe = split_head_indices(None, indices)
         assert lora is indices
         assert not probe.any()

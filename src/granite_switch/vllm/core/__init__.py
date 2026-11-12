@@ -10,11 +10,9 @@ tiers — not LoRA-specific despite the historical ``lora`` naming:
 
 from .lora import SwitchedLoRALinear
 from .lora_kernel_meta import FusedLoRAKernelMeta, LoRAContext
-from .probe import SwitchedProbeHead
 
 __all__ = [
     "FusedLoRAKernelMeta",
     "LoRAContext",
     "SwitchedLoRALinear",
-    "SwitchedProbeHead",
 ]

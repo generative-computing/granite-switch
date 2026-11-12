@@ -112,21 +112,24 @@ def discover_adapters_from_yaml(
     """Discover adapters from a YAML manifest file.
 
     Reads a YAML manifest that maps adapter names to their paths and types.
-    An entry can also mark itself a **probe** slot with these extra keys:
+    An entry can also make its slot a **head stream** (``granite_switch.streams``)
+    with these extra keys:
 
     .. code-block:: yaml
 
         hallucination:
           path: /path/to/head
-          type: lora                # lora/alora technology (token placement)
-          kind: probe               # default "lora" when omitted
+          kind: probe               # the stream type; "lora" when omitted
           labels: [faithful, hallucinated]
-          layer: 12                 # optional decoder layer; omit for the final layer
+          layer: 12                 # optional decoder layer; omit for the final norm
+          adapter: answerability    # optional: an adapter run at the marker
+          output: {mode: merge, weight: 0.5}   # optional; select by default
+          settings: {}              # optional, type-specific
 
-    ``type`` and ``kind`` are independent axes: ``type`` is the LoRA technology
-    (lora vs alora, which drives token placement), ``kind`` is whether the slot
-    is a real LoRA or a probe head. ``kind`` and ``labels`` are optional;
-    without them an entry is a plain LoRA adapter. The label words become token
+    ``type`` and ``kind`` are independent axes: ``type`` is an adapter's LoRA
+    technology (lora vs alora, which drives token placement) and is not used for
+    a head, whose marker always goes last; ``kind`` is the stream type. Without
+    any of these keys an entry is a plain adapter. The label words become token
     ids at compose time (see :func:`tokenizer_setup.resolve_label_token_ids`).
 
     ``layer: K`` reads the residual stream after zero-based decoder layer ``K``
@@ -136,12 +139,12 @@ def discover_adapters_from_yaml(
         manifest_path: Path to the YAML manifest file.
 
     Returns:
-        ``(found, probe_meta)``. ``found`` is:
+        ``(found, head_meta)``. ``found`` is:
         List of ``(adapter_path, adapter_name, technology, source)`` tuples.
         The source is set to the manifest path for traceability.
-        ``probe_meta`` maps name ->
-        ``{"kind", "labels", "layer"}`` for each entry that set any of them;
-        names not in it are plain LoRA slots.
+        ``head_meta`` maps name -> ``{"kind", "labels", "layer", "adapter",
+        "output", "settings"}`` for each entry that set any of them; names not
+        in it are plain adapter slots.
     """
     import yaml
 
@@ -149,7 +152,7 @@ def discover_adapters_from_yaml(
     print(f"  Loading adapters manifest: {path.name}")
 
     found = []
-    probe_meta: dict[str, dict] = {}
+    head_meta: dict[str, dict] = {}
     if path.is_file() and path.suffix in (".yaml", ".yml"):
         with open(path) as f:
             adapters_config = yaml.safe_load(f)
@@ -172,7 +175,7 @@ def discover_adapters_from_yaml(
                     "settings",
                 )
                 if any(info.get(k) is not None for k in stream_keys):
-                    probe_meta[name] = {
+                    head_meta[name] = {
                         "kind": info.get("kind") or "lora",
                         "labels": info.get("labels"),
                         "layer": info.get("layer"),
@@ -181,7 +184,7 @@ def discover_adapters_from_yaml(
                         "settings": info.get("settings"),
                     }
 
-    return found, probe_meta
+    return found, head_meta
 
 
 def _report_module_contributions(

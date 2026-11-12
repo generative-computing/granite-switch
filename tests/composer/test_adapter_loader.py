@@ -537,9 +537,9 @@ class TestAdapterLoadingFromYAML:
             yaml.dump(manifest_data, f)
 
         input_path = str(manifest_file)
-        yaml_adapters, probe_meta = discover_adapters_from_yaml(input_path)
+        yaml_adapters, head_meta = discover_adapters_from_yaml(input_path)
         # No entry declared kind/labels, so no probe metadata.
-        assert probe_meta == {}
+        assert head_meta == {}
 
         # Verification of Parity: compare (path, name, technology) - source differs by design
         # discover_adapters returns source=None, discover_adapters_from_yaml returns source=manifest_path
@@ -569,13 +569,13 @@ class TestManifestProbeMetadata:
             manifest.open("w"),
         )
 
-        found, probe_meta = discover_adapters_from_yaml(str(manifest))
+        found, head_meta = discover_adapters_from_yaml(str(manifest))
 
         # The adapter tuples are unchanged (still 4-wide).
         assert {(n) for _, n, _, _ in found} == {"rag", "hallucination"}
         # Only the probe entry appears in the metadata dict, with every head
         # stream key (unset ones as None).
-        assert probe_meta == {
+        assert head_meta == {
             "hallucination": {
                 "kind": "probe",
                 "labels": ["faithful", "hallucinated"],
@@ -586,9 +586,9 @@ class TestManifestProbeMetadata:
             }
         }
 
-    def test_plain_manifest_has_no_probe_metadata(self, tmp_path):
+    def test_plain_manifest_has_no_head_metadata(self, tmp_path):
         manifest = tmp_path / "manifest.yaml"
         yaml.dump({"rag": {"path": "/p/rag", "type": "lora"}}, manifest.open("w"))
 
-        _found, probe_meta = discover_adapters_from_yaml(str(manifest))
-        assert probe_meta == {}
+        _found, head_meta = discover_adapters_from_yaml(str(manifest))
+        assert head_meta == {}

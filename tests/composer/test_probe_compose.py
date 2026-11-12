@@ -41,7 +41,7 @@ import torch
 
 import granite_switch.hf  # noqa: F401 — registers AutoModel/AutoConfig
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
-from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
+from granite_switch.streams.types.probe import PROBE_HEAD_FILE
 
 BASE_MODEL = "ibm-granite/granite-4.0-micro"
 # The mixed test embeds a real LoRA, which must match its base. The RAG library
@@ -296,7 +296,7 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     emitted = int(out.logits[0, -1].argmax().item())
     assert emitted == label_ids[winner]
     assert model.model._last_lora_indices[0, -1].item() == 0
-    assert model.model._last_probe_indices[0, -1].item() == 2
+    assert model.model._last_head_indices[0, -1].item() == 2
 
     # The LoRA slot is selected on its own and leaves the LM logits intact.
     lora_ids = torch.cat(
@@ -430,12 +430,13 @@ def test_probe_drops_generation_prompt(base):
     template forces it off instead of relying on the caller.
     """
     from granite_switch.composer.tokenizer_setup import (
+        ANCHOR_MODE_HEAD,
         add_control_tokens,
         configure_chat_template,
     )
 
     tokenizer = _tokenizer(base)
-    discovered = [(None, "safety", "probe", None)]
+    discovered = [(None, "safety", ANCHOR_MODE_HEAD, None)]
     add_control_tokens(tokenizer, discovered)
     configure_chat_template(tokenizer, discovered)
     messages = [{"role": "user", "content": "Is this text safe?"}]
@@ -465,12 +466,13 @@ def test_probe_marker_is_last_token(base):
     generation prompt, so the decoder sees exactly the base transcript.
     """
     from granite_switch.composer.tokenizer_setup import (
+        ANCHOR_MODE_HEAD,
         add_control_tokens,
         configure_chat_template,
     )
 
     tokenizer = _tokenizer(base)
-    discovered = [(None, "safety", "probe", None)]
+    discovered = [(None, "safety", ANCHOR_MODE_HEAD, None)]
     (control_id,), _ = add_control_tokens(tokenizer, discovered)
     configure_chat_template(tokenizer, discovered)
     messages = [
@@ -505,9 +507,10 @@ def test_probe_substitute_is_the_bases_role_open_marker(base, role_open):
     from granite_switch.composer.compose_granite_switch import (
         build_control_token_lists,
     )
+    from granite_switch.composer.tokenizer_setup import ANCHOR_MODE_HEAD
 
     tokenizer = _tokenizer(base)
-    discovered = [(None, "safety", "probe", None)]
+    discovered = [(None, "safety", ANCHOR_MODE_HEAD, None)]
     _, _, substitutes = build_control_token_lists(
         tokenizer, discovered, base_reset=False
     )
