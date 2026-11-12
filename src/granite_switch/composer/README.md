@@ -71,9 +71,26 @@ context_relevance:
   type: "lora"
 ```
 
-Each top-level key is the adapter name. Required fields per adapter:
+Each top-level key is the slot name. Required fields per adapter:
 - **`path`** -- absolute path to the adapter directory (must contain `adapter_model.safetensors` and `adapter_config.json`)
 - **`type`** -- adapter technology: `"alora"` or `"lora"`
+
+A manifest entry can instead make its slot a **head stream**, such as an activation probe, with
+these keys (`type` is not used for a head: its control token always goes last):
+
+```yaml
+safety:
+  path: "/path/to/safety-head"     # holds the head type's weights file (probe_head.safetensors)
+  kind: "probe"                    # the stream type
+  labels: ["safe", "unsafe"]       # output words, each a single token
+  layer: 20                        # optional read layer; omit for the final norm
+  adapter: "answerability"         # optional: run this adapter at the head's marker
+  output: {mode: "select"}         # optional: select (default) or merge, with weight
+  settings: {}                     # optional, checked by the head type
+```
+
+See [The Stream API](../../../docs/STREAM_API.md) and the
+[activation probe guide](../../../tutorials/guides/activation_probe_slots.md).
 
 ## Selecting Adapters
 

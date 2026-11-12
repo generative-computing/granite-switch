@@ -23,6 +23,15 @@ granite-switch/
 │       ├── conversation.py              # Conversation: multi-turn, per-turn adapter, KV-history policy
 │       ├── token_exchange.py            # Control-token -> substitute-id LUT (shared by both backends)
 │       │
+│       ├── streams/                     # Stream API: what each slot runs (adapter or head stream)
+│       │   ├── __init__.py              # HeadType, register_head_type, stream_specs
+│       │   ├── spec.py                  # Stream entries: parsing, refusals, pre-streams rebuild
+│       │   ├── registry.py              # HeadType contract + `granite_switch.streams` entry points
+│       │   ├── routing.py               # Load-time tables: bank rows, LoRA rows, markers, read layers
+│       │   ├── outputs.py               # Output modes (select, merge) applied to the logits
+│       │   ├── split.py                 # Split the switch's index stream into LoRA and head streams
+│       │   └── types/probe/             # Built-in probe type + its HF and vLLM modules
+│       │
 │       ├── composer/                    # Compose system (requires [compose] extra)
 │       │   ├── __init__.py
 │       │   ├── adapter_discovery.py     # Adapter discovery and resolution
@@ -475,6 +484,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
+- `docs/STREAM_API.md` - Stream entries, head streams (probes, plugins), heads on adapters
 - `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
 - `docs/AUDIO.md` - Audio input (ASR cascade)
 - `docs/CICD.md` - Pre-commit hooks and CI setup
