@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Subprocess worker: run ONE vLLM engine and emit teacher-forced prompt logprobs.
 
+One engine may score several prompts: booting it (torch.compile + CUDA-graph
+capture) costs far more than scoring, so a caller with several prompts for the
+same model passes them all at once.
+
 Invoked as a fresh process per engine so the **pytest process never creates a
 CUDA context**::
 
@@ -20,12 +24,19 @@ called HERE -- in the process that legitimately holds the context -- rather than
 the pytest process.
 
 Contract:
-- ``inputs.json``: ``{"input_ids": [int, ...], "vocab_size": int,
-  "llm_kwargs": {...}}``. ``llm_kwargs`` is forwarded verbatim to ``LLM(...)`` and
-  carries exactly what the caller passed (e.g. ``max_model_len``, ``enforce_eager``,
+- ``inputs.json``: ``{"prompts": [[int, ...], ...], "vocab_size": int,
+  "llm_kwargs": {...}}``, or the single-prompt form ``{"input_ids": [int, ...],
+  ...}``. ``llm_kwargs`` is forwarded verbatim to ``LLM(...)`` and carries exactly
+  what the caller passed (e.g. ``max_model_len``, ``enforce_eager``,
   ``enable_prefix_caching``, ``gpu_memory_utilization``).
 - ``--out``: a ``torch.save`` of the dense ``[seq_len-1, vocab_size]`` CPU logprob
-  tensor, loadable back in the pytest process without CUDA.
+  tensor, or a list of them (one per prompt, in order) for ``prompts``, loadable
+  back in the pytest process without CUDA.
+
+Each prompt gets its own ``generate`` call rather than one batched call. The
+equivalence suites gate at ~1e-5, and batching can change padding and kernel
+choice enough to move logprobs on its own, so every prompt is scored exactly as
+it would be alone; only the engine is shared.
 """
 
 import argparse
@@ -93,7 +104,7 @@ def _pin_single_visible_device():
 
 
 def cmd_run(args):
-    """Build one vLLM engine, capture dense prompt logprobs, save to --out."""
+    """Build one vLLM engine, capture dense prompt logprobs for each prompt, save."""
     # Pin to one GPU BEFORE importing torch/vllm (see _pin_single_visible_device).
     _pin_single_visible_device()
     # vLLM v1 forks a subprocess for EngineCore; spawn avoids inheriting any CUDA
@@ -112,7 +123,8 @@ def cmd_run(args):
 
     with open(args.inputs) as f:
         spec = json.load(f)
-    input_ids_list = spec["input_ids"]
+    batched = "prompts" in spec
+    prompts = spec["prompts"] if batched else [spec["input_ids"]]
     vocab_size = spec["vocab_size"]
     llm_kwargs = dict(spec.get("llm_kwargs") or {})
 
@@ -142,12 +154,18 @@ def cmd_run(args):
         temperature=0.0,
         prompt_logprobs=vocab_size,
     )
-    prompt = TokensPrompt(prompt_token_ids=input_ids_list)
-    outputs = llm.generate(prompt, sampling_params=sampling_params)
-
-    logprobs_tensor = extract_logprobs_tensor(outputs, vocab_size)
-    torch.save(logprobs_tensor, args.out)
-    print(f"  saved logprobs {tuple(logprobs_tensor.shape)} to {args.out}")
+    # One generate per prompt (see the module docstring): the engine is shared,
+    # the scoring is not.
+    tensors = []
+    for input_ids_list in prompts:
+        prompt = TokensPrompt(prompt_token_ids=input_ids_list)
+        outputs = llm.generate(prompt, sampling_params=sampling_params)
+        tensors.append(extract_logprobs_tensor(outputs, vocab_size))
+    torch.save(tensors if batched else tensors[0], args.out)
+    print(
+        f"  saved logprobs for {len(tensors)} prompt(s) "
+        f"{[tuple(t.shape) for t in tensors]} to {args.out}"
+    )
 
     # Synchronous shutdown + device/memory reclaim, in the process that owns the
     # context. The process then exits, which under Exclusive_Process is what
@@ -164,7 +182,9 @@ def main():
     p_run = sub.add_parser("run", help="Run one engine, emit dense prompt logprobs")
     p_run.add_argument("--model", required=True, help="Model dir or HF name to load")
     p_run.add_argument(
-        "--inputs", required=True, help="JSON: {input_ids, vocab_size, llm_kwargs}"
+        "--inputs",
+        required=True,
+        help="JSON: {prompts | input_ids, vocab_size, llm_kwargs}",
     )
     p_run.add_argument("--out", required=True, help="Path to torch.save the tensor to")
 

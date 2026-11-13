@@ -32,6 +32,9 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.requires_model,
     pytest.mark.gpu,
+    # Compatibility with the quantization libraries on a real checkpoint; the
+    # release suite sets GRANITE_SWITCH_E2E_MODELS=1 so the gate below opens.
+    pytest.mark.release,
     pytest.mark.skipif(
         os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
         reason="composes a real ~3B mixed checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",

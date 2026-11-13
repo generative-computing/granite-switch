@@ -5,9 +5,9 @@ The probe derives the LoRA substitute token from the tokenizer's chat
 template rather than hardcoding a Granite-4.x-specific token string. These
 tests verify:
 
-1. On real Granite tokenizers, the probe returns <|start_of_role|> (id
-   100264) — the token the LoRA prefix insertion places immediately after
-   the control token in the rendered prompt.
+1. On the Granite tokenizers, the probe returns the role marker the LoRA prefix
+   insertion places immediately after the control token in the rendered prompt:
+   <|start_of_role|> (id 100264) on 4.0/4.1, <|im_start|> (id 100256) on 4.2.
 2. On a synthetic tokenizer with a different template, the probe returns
    whatever that template emits first for a user turn.
 3. The probe raises a clear error when the template is missing, fails to
@@ -22,46 +22,36 @@ import pytest
 from granite_switch.composer.compose_granite_switch import (
     _probe_lora_substitute_token_id,
 )
+from tests.shared import model_sources
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 
 
-class TestOnRealGraniteTokenizer:
-    """Exercise the probe on actual Granite tokenizers. Network-dependent;
-    skips cleanly if the model can't be fetched."""
+class TestOnGraniteTokenizer:
+    """The probe on each Granite base's tokenizer and chat template.
 
-    def _tok(self, name):
+    ``fake`` (every PR run) is the captured tokenizer config and template on a tiny
+    vocabulary, whose special tokens keep their real ids; ``real`` (release tier)
+    is the published tokenizer. Same assertions on both.
+    """
+
+    @pytest.mark.parametrize("source", model_sources.sources())
+    @pytest.mark.parametrize(
+        "base_name, token, token_id",
+        [
+            ("granite-4.0-micro", "<|start_of_role|>", 100264),
+            ("granite-4.1-3b", "<|start_of_role|>", 100264),
+            # ChatML: the role marker is <|im_start|>.
+            ("granite-4.2-3b", "<|im_start|>", 100256),
+        ],
+    )
+    def test_probe_returns_the_role_marker(self, source, base_name, token, token_id):
         from transformers import AutoTokenizer
 
-        try:
-            return AutoTokenizer.from_pretrained(name)
-        except Exception as e:
-            pytest.skip(f"could not fetch tokenizer {name!r}: {e}")
-
-    def test_granite_4_1_3b(self):
-        tok = self._tok("ibm-granite/granite-4.1-3b")
+        tok = AutoTokenizer.from_pretrained(model_sources.base_model(source, base_name))
         sub_id = _probe_lora_substitute_token_id(tok)
-        assert sub_id == 100264
-        assert tok.convert_ids_to_tokens([sub_id])[0] == "<|start_of_role|>"
-
-    def test_granite_4_0_micro(self):
-        tok = self._tok("ibm-granite/granite-4.0-micro")
-        sub_id = _probe_lora_substitute_token_id(tok)
-        assert sub_id == 100264
-        assert tok.convert_ids_to_tokens([sub_id])[0] == "<|start_of_role|>"
-
-    def test_granite_4_2_chatml(self):
-        """Granite 4.2 (ChatML): the probe returns <|im_start|> (id 100256).
-
-        The 4.2 base ships on a local path (env GRANITE_4_2_BASE), not the Hub;
-        skips when unavailable so the suite still runs locally.
-        """
-        path = os.environ.get("GRANITE_4_2_BASE")
-        if not path or not os.path.exists(path):
-            pytest.skip("GRANITE_4_2_BASE not set / path missing")
-        tok = self._tok(path)
-        sub_id = _probe_lora_substitute_token_id(tok)
-        assert tok.convert_ids_to_tokens([sub_id])[0] == "<|im_start|>"
+        assert sub_id == token_id
+        assert tok.convert_ids_to_tokens([sub_id])[0] == token
 
 
 class TestChatMLMultiShapeConstancy:
@@ -70,8 +60,8 @@ class TestChatMLMultiShapeConstancy:
     the granite-format one (thinking on/off, system/no-system, tools/no-tools).
 
     Uses the ChatML fixture with a minimal fake tokenizer that records the
-    first token of each rendered shape and asserts they all agree. On Vela the
-    real-tokenizer test above pins the concrete id (<|im_start|>)."""
+    first token of each rendered shape and asserts they all agree.
+    TestOnGraniteTokenizer above pins the concrete id (<|im_start|>)."""
 
     def test_input_ids_0_constant_across_chatml_shapes(self):
         from jinja2 import Environment

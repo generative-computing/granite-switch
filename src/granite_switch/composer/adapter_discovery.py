@@ -499,7 +499,7 @@ def resolve_repo_path(
 
     Args:
         path_or_repo: Either a local directory path or a HuggingFace repo ID
-            (e.g., ``"ibm-granite/granite-lib-rag-r1.0"``).
+            (e.g., ``"ibm-granite/granitelib-rag-r1.0"``).
         target_model_name: Target model name to filter by (e.g.,
             ``"granite-4.1-3b"``).
         include_adapters: Only download adapters matching these fnmatch

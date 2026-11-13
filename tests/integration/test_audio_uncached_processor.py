@@ -20,9 +20,15 @@ Startup profiling passes a *string* prompt, so on the uncached path the engine
 fails before it can serve anything — booting at all is a large part of the guard.
 
 Assertions here are structural (request completes, marker was replaced), never
-transcript content: ASR output is not deterministic enough to assert on.
+transcript content: ASR output is not deterministic enough to assert on. The
+ASR is the tiny local model from ``tests/shared/tiny_asr.py``, bundled into the
+checkpoint, so nothing is downloaded for it.
 
-Opt in explicitly: `pytest -m "slow and requires_model and gpu"`.
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, a tiny
+granite-4.0-micro and adapter library built from captured copies of the real
+ones; ``real``, the published ones, in the release tier.
+
+Opt in explicitly: `pytest -m "slow and gpu"`.
 """
 
 import importlib.util
@@ -33,17 +39,17 @@ import pytest
 pytestmark = [
     pytest.mark.audio,
     pytest.mark.slow,
-    pytest.mark.requires_model,
     pytest.mark.gpu,
 ]
 
 if importlib.util.find_spec("vllm") is None:
     pytest.skip("requires vLLM installed", allow_module_level=True)
 
+from tests.shared import model_sources
 
 # One small model: this covers a *configuration* dimension, not a model matrix,
 # and each engine boot here is expensive.
-_BASE_MODEL = "ibm-granite/granite-4.0-micro"
+_BASE_NAME = "granite-4.0-micro"
 _ADAPTER_LIBRARY = "ibm-granite/granitelib-core-r1.0"
 
 COMPOSE_TIMEOUT_S = 1800  # matches the sibling E2E fixtures
@@ -92,22 +98,32 @@ def _cache_disabled_state(llm):
     return None
 
 
-@pytest.fixture(scope="module")
-def audio_checkpoint(tmp_path_factory):
+@pytest.fixture(scope="module", params=model_sources.sources())
+def audio_checkpoint(request, tmp_path_factory):
     """Compose one audio-enabled checkpoint through the compose CLI."""
     import subprocess
     import sys
 
-    save_dir = tmp_path_factory.mktemp(_BASE_MODEL.rsplit("/", 1)[-1]) / "model"
+    from tests.shared.tiny_asr import build_tiny_asr
+
+    source = request.param
+    base_model = model_sources.base_model(source, _BASE_NAME)
+    adapter_library = model_sources.adapter_library(
+        source, _ADAPTER_LIBRARY, _BASE_NAME
+    )
+    save_dir = tmp_path_factory.mktemp(f"{_BASE_NAME}-{source}") / "model"
+    tiny_asr = build_tiny_asr(tmp_path_factory.mktemp("tiny-asr") / "asr")
     cmd = [
         sys.executable,
         "-m",
         "granite_switch.composer.compose_granite_switch",
         "--base-model",
-        _BASE_MODEL,
+        base_model,
         "--adapters",
-        _ADAPTER_LIBRARY,
-        "--enable-audio",
+        adapter_library,
+        "--bundle-asr",
+        "--asr-model",
+        str(tiny_asr),
         "--output",
         str(save_dir),
     ]
@@ -116,7 +132,7 @@ def audio_checkpoint(tmp_path_factory):
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"compose failed for base={_BASE_MODEL} adapter={_ADAPTER_LIBRARY}\n"
+            f"compose failed for base={base_model} adapter={adapter_library}\n"
             f"--- STDOUT ---\n{result.stdout}\n--- STDERR ---\n{result.stderr}"
         )
     return save_dir

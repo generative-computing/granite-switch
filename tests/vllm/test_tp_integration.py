@@ -11,10 +11,13 @@ Each step (build, run@TP=1, run@TP=2) runs in a separate subprocess to avoid
 CUDA fork issues — follows the same pattern as test_generation_equivalence.py.
 
 Test cases:
-  1. granite-4.0-micro with real adapters from ibm-granite/granitelib-rag-r1.0
-  2. the same, with the coded MultiSwitch engine
-  3. a synthetic pure sparse MoE (``granitemoe``) base, plain LoRA and Shadow
+  1. granite-4.0-micro with adapters from ibm-granite/granitelib-rag-r1.0: a fake
+     on every PR run, the published model in the release tier
+  2. a synthetic pure sparse MoE (``granitemoe``) base, plain LoRA and Shadow
      Residual — the only committed coverage of expert sharding
+  3. the sensitivity guard: the fake case again with a sharding bug injected at
+     TP=2, which the comparison MUST reject. Without it, "TP=1 agrees with TP=2"
+     could be true merely because the sharded layers do not reach the output.
 
 Skip automatically if fewer than 2 GPUs or vLLM is not installed.
 """
@@ -28,6 +31,9 @@ from pathlib import Path
 
 import pytest
 import torch
+
+from tests.shared import model_sources
+from tests.shared.fake_bases import LIVE_LAYERS, TP_DIMS
 
 _VLLM_AVAILABLE = importlib.util.find_spec("vllm") is not None
 _NUM_GPUS = torch.cuda.device_count() if torch.cuda.is_available() else 0
@@ -143,6 +149,21 @@ def _build_and_compare(
 
     Not an exact-text check — see comment above TOPK_OVERLAP_MIN for why.
     """
+    records_tp1, records_tp2 = _build_and_run(
+        work_dir, build_args, label, intrinsic_name, token_prompts
+    )
+    for i, (r1, r2) in enumerate(zip(records_tp1, records_tp2)):
+        _compare_topk(label, i, r1, r2)
+
+
+def _build_and_run(
+    work_dir, build_args, label, intrinsic_name=None, token_prompts=False, fault=None
+):
+    """Build a model, generate at TP=1 and TP=2, return both runs' records.
+
+    ``fault`` (see _tp_integration_worker.FAULTS) is injected into the TP=2 run
+    only; it acts on one rank's shard, so TP=1 is unaffected either way.
+    """
     model_dir = os.path.join(work_dir, "switch-model")
     _run_step(f"build ({label})", *build_args, "--output-dir", model_dir)
 
@@ -150,8 +171,9 @@ def _build_and_compare(
     tp2_out = os.path.join(work_dir, "tp2.json")
 
     run_extra = []
-    if intrinsic_name:
-        run_extra = ["--intrinsic-name", intrinsic_name]
+    names = [intrinsic_name] if isinstance(intrinsic_name, str) else intrinsic_name
+    for name in names or []:
+        run_extra = [*run_extra, "--intrinsic-name", name]
     if token_prompts:
         run_extra = [*run_extra, "--token-prompts"]
 
@@ -167,7 +189,7 @@ def _build_and_compare(
         *run_extra,
     )
     _run_step(
-        f"generate TP=2 ({label})",
+        f"generate TP=2 ({label}{f', fault={fault}' if fault else ''})",
         "run",
         "--model-path",
         model_dir,
@@ -176,6 +198,7 @@ def _build_and_compare(
         "--output-path",
         tp2_out,
         *run_extra,
+        *(["--fault", fault] if fault else []),
     )
 
     with open(tp1_out) as f:
@@ -186,13 +209,11 @@ def _build_and_compare(
     assert len(records_tp1) == len(records_tp2), (
         f"[{label}] prompt count differs: tp1={len(records_tp1)} tp2={len(records_tp2)}"
     )
-
-    for i, (r1, r2) in enumerate(zip(records_tp1, records_tp2)):
-        _compare_topk(label, i, r1, r2)
+    return records_tp1, records_tp2
 
 
 class TestTPRealAdapters:
-    """TP=1 vs TP=2 with real adapters from granite-lib-rag (granite-4.0-micro).
+    """TP=1 vs TP=2 with adapters from granitelib-rag (granite-4.0-micro).
 
     Exercises the coded MultiSwitch engine (the only engine), which owns TWO
     extra attention layers with their own KV cache slots (counting + memory) --
@@ -200,50 +221,108 @@ class TestTPRealAdapters:
     chat-template prompt that activates the answerability adapter via
     intrinsic_name, so adapter control-token placement is exercised under
     sharding too. TP=1 and TP=2 logprobs must agree.
+
+    (A former TestTPMultiSwitch built the identical checkpoint: it was the
+    MultiSwitch twin of a SingleSwitch case, and SingleSwitch is gone.)
     """
 
-    def test_tp_logprobs_agree(self, tmp_path):
+    @pytest.mark.parametrize("source", model_sources.sources())
+    def test_tp_logprobs_agree(self, tmp_path, source):
         _build_and_compare(
             str(tmp_path),
-            build_args=[
-                "build-compose",
-                "--base-model",
-                "ibm-granite/granite-4.0-micro",
-                "--adapter-repos",
-                "ibm-granite/granitelib-rag-r1.0",
-            ],
-            label="granite-4.0-micro-rag",
-            intrinsic_name="answerability",
+            build_args=_rag_build_args(source),
+            label=f"granite-4.0-micro-rag-{source}",
+            intrinsic_name=_ADAPTER_PROMPTS,
         )
 
 
-class TestTPMultiSwitch:
-    """TP=1 vs TP=2 for the coded MultiSwitch engine.
+_BASE_NAME = "granite-4.0-micro"
+_RAG_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
 
-    MultiSwitch owns TWO extra attention layers with their own KV cache slots
-    (counting + memory) where SingleSwitch owns one. Those slots are the obvious
-    thing tensor-parallel sharding can get wrong, and nothing covered it: the
-    worker hardcoded switch_type='single', so every TP assertion to date was about
-    SingleSwitch only. Real serving of a 3B+ checkpoint commonly uses TP>=2, so
-    this is a deployment shape with no coverage.
+#: The fake for these tests (tests/shared/fake_bases.py). LIVE_LAYERS because on
+#: the default REALISTIC preset the decoder layers barely reach the output, so a
+#: sharding bug inside them would leave TP=2 agreeing with TP=1 anyway. TP_DIMS
+#: (8 query / 4 KV heads) so each rank holds several KV heads, which is where GQA
+#: sharding bugs show; the default geometry leaves each rank one.
+_FAKE_KW = {"preset": LIVE_LAYERS, "dims": TP_DIMS}
 
-    Same comparison as the SingleSwitch case above -- TP=1 and TP=2 logprobs must
-    agree -- and it also goes through a chat-template prompt via intrinsic_name, so
-    control-token placement is exercised under sharding too.
+#: One chat prompt per adapter, chosen so the adapter path is sharded in BOTH
+#: directions. answerability adapts only q/k/v (column-parallel: LoRA-B is split
+#: by output rows). hallucination_detection also adapts o_proj (row-parallel:
+#: LoRA-A is split by input columns). With answerability alone a wrong LoRA-A
+#: shard went undetected, because no prompt ever reached a row-parallel LoRA.
+_ADAPTER_PROMPTS = ["answerability", "hallucination_detection"]
+
+
+def _rag_build_args(source):
+    """Compose args for 4.0-micro + the RAG library, per source.
+
+    ``fake`` (every PR run) is a tiny base and library built from captured copies
+    of the real ones (tests/shared/model_sources.py), with :data:`_FAKE_KW`.
+    ``real`` runs in the release tier.
+    """
+    kw = _FAKE_KW if source == model_sources.FAKE else {}
+    return [
+        "build-compose",
+        "--base-model",
+        model_sources.base_model(source, _BASE_NAME, **kw),
+        "--adapter-repos",
+        model_sources.adapter_library(source, _RAG_LIBRARY, _BASE_NAME, **kw),
+    ]
+
+
+def _comparison_fails(label, records_tp1, records_tp2):
+    """Why the TP comparison rejects these runs, or None if it accepts them."""
+    failures = []
+    for i, (r1, r2) in enumerate(zip(records_tp1, records_tp2)):
+        try:
+            _compare_topk(label, i, r1, r2)
+        except AssertionError as e:
+            failures.append(f"prompt {i}: {str(e).splitlines()[0]}")
+    return failures or None
+
+
+class TestTPDetectsShardingBugs:
+    """The TP comparison must REJECT a TP=2 run with a sharding bug in it.
+
+    Agreement between TP=1 and TP=2 only means something if a broken shard would
+    break it. Each case injects one realistic bug into the TP=2 run of the fake
+    case above (_tp_integration_worker.FAULTS; it acts on one rank's shard, so
+    TP=1 is unaffected) and requires the same _compare_topk gate that the
+    passing case uses to reject at least one prompt. If a faulted run still
+    passes, the TP tests are vacuous for that class of bug, and this fails with
+    that message.
+
+    Covers both LoRA (adapter path) and base-weight sharding; the base fault
+    bites with no adapter active, so it also proves the sharded layers reach the
+    output at all.
     """
 
-    def test_tp_logprobs_agree_multi(self, tmp_path):
-        _build_and_compare(
+    @pytest.mark.parametrize(
+        "fault",
+        [
+            "lora_b_wrong_shard",
+            "lora_a_wrong_shard",
+            "skip_row_reduce",
+            "base_o_proj_shard",
+        ],
+    )
+    def test_injected_fault_is_detected(self, tmp_path, fault):
+        label = f"granite-4.0-micro-rag-fake-fault-{fault}"
+        records_tp1, records_tp2 = _build_and_run(
             str(tmp_path),
-            build_args=[
-                "build-compose",
-                "--base-model",
-                "ibm-granite/granite-4.0-micro",
-                "--adapter-repos",
-                "ibm-granite/granitelib-rag-r1.0",
-            ],
-            label="granite-4.0-micro-rag-multi",
-            intrinsic_name="answerability",
+            build_args=_rag_build_args(model_sources.FAKE),
+            label=label,
+            intrinsic_name=_ADAPTER_PROMPTS,
+            fault=fault,
+        )
+        failures = _comparison_fails(label, records_tp1, records_tp2)
+        print(f"\n  [{label}] rejected prompts: {failures}")
+        assert failures, (
+            f"TP comparison is VACUOUS for {fault!r}: a TP=2 run with this sharding "
+            f"bug injected still agreed with TP=1 on every prompt, so "
+            f"test_tp_logprobs_agree cannot catch it. Make the sharded path reach "
+            f"the output (fake preset/geometry) or tighten the gate."
         )
 
 
