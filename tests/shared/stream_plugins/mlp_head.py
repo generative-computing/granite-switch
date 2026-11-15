@@ -54,6 +54,11 @@ class MLPHeadType(HeadType):
     weights_file = MLP_HEAD_FILE
 
     def check(self, spec, config):
+        unknown = set(spec.settings) - {"width"}
+        if unknown:
+            raise ValueError(
+                f"mlp_head slot {spec.slot} has unknown settings: {sorted(unknown)}."
+            )
         width = spec.settings.get("width")
         if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
             raise ValueError(
@@ -84,6 +89,5 @@ class MLPHeadType(HeadType):
                 f"{MLP_HEAD_FILE}: w1 {tuple(w1.shape)} / w2 {tuple(w2.shape)} do not "
                 f"match width {width}, hidden {module.hidden_size}, {n} outputs."
             )
-        with torch.no_grad():
-            module.w1[row, :width].copy_(w1.to(module.w1))
-            module.w2[row, :n, :width].copy_(w2.to(module.w2))
+        module.w1[row, :width].copy_(w1.to(module.w1))
+        module.w2[row, :n, :width].copy_(w2.to(module.w2))

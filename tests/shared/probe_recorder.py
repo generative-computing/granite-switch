@@ -9,6 +9,7 @@ module scope. Each worker owns its records; the driver reads them through RPC.
 def install_probe_recorder(model):
     """Record after compute_logits, outside the compiled/captured forward."""
     from granite_switch.streams import stream_specs
+    from granite_switch.streams.transport import unpack_slots
     from granite_switch.vllm.granite_switch_model import GraniteSwitchForCausalLM
 
     target = next(m for m in model.modules() if isinstance(m, GraniteSwitchForCausalLM))
@@ -16,6 +17,7 @@ def install_probe_recorder(model):
     target._probe_test_records = records
     original = target.compute_logits
     config = target.config
+    h = config.hidden_size
     # Only the probe's bank is read back below; a checkpoint may have none.
     head = getattr(target.model, "probe_head", None)
     specs = {s.slot: s for s in stream_specs(config)}
@@ -24,12 +26,11 @@ def install_probe_recorder(model):
         logits = original(hidden_states)
         if logits is None:  # a tensor-parallel rank that gathers no logits
             return logits
-        slots = hidden_states[:, -1].round().long()
+        slots = unpack_slots(hidden_states[:, h + target.model._head_width :])
         for row in (slots > 0).nonzero(as_tuple=True)[0].tolist():
             spec = specs[int(slots[row])]
             labels = list(spec.token_ids)
             n = len(labels)
-            h = config.hidden_size
             record = {
                 "slot": spec.slot,
                 "packed_scores": hidden_states[row, h : h + n].float().cpu(),

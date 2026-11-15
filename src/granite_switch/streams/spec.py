@@ -100,6 +100,8 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
     Type-specific settings are checked by the head type (see the registry);
     this checks only what every stream shares.
     """
+    if not isinstance(entries, list):
+        raise ValueError(f"streams must be a list of entries; got {entries!r}.")
     if len(entries) != num_adapters:
         raise ValueError(
             f"streams length ({len(entries)}) must equal num_adapters "
@@ -111,6 +113,10 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
             raise ValueError(
                 f"streams[{slot - 1}] must be a dict with a type; got {e!r}."
             )
+        if not isinstance(e["type"], str) or not e["type"].isidentifier():
+            raise ValueError(
+                f"streams[{slot - 1}].type must be a non-empty identifier; got {e['type']!r}."
+            )
         if e["type"] == LORA:
             extra = set(e) - {"type"}
             if extra:
@@ -120,7 +126,9 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
             specs.append(StreamSpec(slot=slot, type=LORA))
             continue
         _refuse_unknown(f"streams[{slot - 1}]", e, HEAD_FIELDS)
-        out = e.get("output") or {}
+        out = e.get("output")
+        if not isinstance(out, dict):
+            raise ValueError(f"streams[{slot - 1}].output must be a dict; got {out!r}.")
         _refuse_unknown(f"streams[{slot - 1}].output", out, OUTPUT_FIELDS)
         mode = out.get("mode", "select")
         if mode not in OUTPUT_MODES:
@@ -128,7 +136,12 @@ def parse_entries(entries: list[dict], num_adapters: int) -> list[StreamSpec]:
                 f"streams[{slot - 1}].output.mode must be one of {OUTPUT_MODES}; "
                 f"got {mode!r}."
             )
-        token_ids = tuple(out.get("token_ids") or ())
+        raw_ids = out.get("token_ids")
+        if not isinstance(raw_ids, (list, tuple)):
+            raise ValueError(
+                f"streams[{slot - 1}].output.token_ids must be a list of token ids; got {raw_ids!r}."
+            )
+        token_ids = tuple(raw_ids)
         if not token_ids or any(
             not isinstance(t, int) or isinstance(t, bool) or t < 0 for t in token_ids
         ):
@@ -229,7 +242,13 @@ def stream_specs(config) -> list[StreamSpec]:
     records are not cached on the config, so they are never saved with it.
     """
     entries = config.streams if config.streams is not None else _legacy_entries(config)
-    specs = parse_entries(entries, config.num_adapters) if config.num_adapters else []
+    specs = parse_entries(entries, config.num_adapters)
     check_rows(specs)
     check_read_layers(specs, config)
+    for s in specs:
+        if any(t >= config.vocab_size for t in s.token_ids):
+            raise ValueError(
+                f"streams[{s.slot - 1}].output.token_ids must be below vocab_size "
+                f"({config.vocab_size}); got {list(s.token_ids)}."
+            )
     return specs

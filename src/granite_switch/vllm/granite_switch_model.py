@@ -46,7 +46,8 @@ from vllm.sequence import IntermediateTensors
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.streams import routing as stream_routing
-from granite_switch.streams.outputs import apply_head_scores
+from granite_switch.streams.outputs import apply_head_scores, fit_head_scores
+from granite_switch.streams.transport import pack_slots, unpack_slots
 from granite_switch.token_exchange import apply_token_exchange
 
 from .audio.processor import (
@@ -177,20 +178,6 @@ class GraniteSwitchModel(nn.Module):
             self.lora_meta = None
             self.lora_ctx = None
 
-        # Streams (granite_switch.streams): the routing tables forward reads and
-        # one module per head type. A head slot shares the adapter index/token
-        # machinery; the switch's split_indices() routes its positions out of
-        # the LoRA stream (so LoRA no-ops there) and into the head stream. Each
-        # head scores its slots at their read layer (the final post-norm state
-        # by default).
-        self._init_streams(config)
-        if self._head_types:
-            # Packed scores assume the ordinary sampler's row selection.
-            if vllm_config.speculative_config is not None:
-                raise ValueError("Head streams do not support speculative decoding.")
-            if vllm_config.parallel_config.use_ubatching:
-                raise ValueError("Head streams do not support microbatching.")
-
         # 3. Base transformer layers with custom LoRA
         #
         # When adapters are present, config.num_hidden_layers includes placeholder
@@ -231,6 +218,14 @@ class GraniteSwitchModel(nn.Module):
 
         # 4. RMS Layer norm
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # Attach heads after core attributes exist, so no plugin can replace them.
+        self._init_streams(config)
+        if self._head_types:
+            # Packed scores assume the ordinary sampler's row selection.
+            if vllm_config.speculative_config is not None:
+                raise ValueError("Head streams do not support speculative decoding.")
+            if vllm_config.parallel_config.use_ubatching:
+                raise ValueError("Head streams do not support microbatching.")
 
     def _init_streams(self, config) -> None:
         """Build the stream routing tables forward reads, and the head modules.
@@ -248,8 +243,11 @@ class GraniteSwitchModel(nn.Module):
             )
         heads = stream_routing.build_head_modules(config, "vllm")
         self._head_types = list(heads)
-        for name, module in heads.items():
-            setattr(self, stream_routing.module_attr(name), module)
+        self._head_min_widths = {
+            stream_routing.module_attr(name): max(s.num_outputs for s in specs)
+            for name, specs in stream_routing.head_specs(config).items()
+        }
+        self._head_slot_columns = max(1, (config.num_adapters.bit_length() + 7) // 8)
         self._head_layer_groups: dict[int, list[tuple[str, str, str]]] = {}
         self._head_final_groups: list[tuple[str, str, str]] = []
         self._head_width = stream_routing.max_head_outputs(config)
@@ -302,6 +300,7 @@ class GraniteSwitchModel(nn.Module):
                     self._head_final_groups.append(group)
                 else:
                     self._head_layer_groups.setdefault(layer, []).append(group)
+        stream_routing.attach_head_modules(self, heads)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -529,7 +528,13 @@ class GraniteSwitchModel(nn.Module):
                     hidden_states, head_indices, head_scores
                 )
                 hidden_states = torch.cat(
-                    [hidden_states, head_scores, head_slot.unsqueeze(-1)],
+                    [
+                        hidden_states,
+                        head_scores,
+                        pack_slots(
+                            head_slot, self._head_slot_columns, hidden_states.dtype
+                        ),
+                    ],
                     dim=-1,
                 )
 
@@ -568,11 +573,14 @@ class GraniteSwitchModel(nn.Module):
         module_name, slots_name, rows_name = group
         in_group = torch.isin(head_indices, getattr(self, slots_name))
         rows = getattr(self, rows_name)[head_indices]
-        width = head_scores.shape[-1]
-        scores = getattr(self, module_name)(hidden, rows)[:, :width]
-        scores = scores.to(head_scores.dtype)
-        if scores.shape[-1] < width:
-            scores = torch.nn.functional.pad(scores, (0, width - scores.shape[-1]))
+        rows = torch.where(in_group, rows, torch.zeros_like(rows))
+        scores = fit_head_scores(
+            getattr(self, module_name)(hidden, rows),
+            hidden.shape[0],
+            self._head_min_widths[module_name],
+            head_scores,
+            module_name,
+        )
         return torch.where(in_group.unsqueeze(-1), scores, head_scores)
 
     def _compute_head_outputs(
@@ -589,12 +597,11 @@ class GraniteSwitchModel(nn.Module):
         duplicate markers are not rejected (request-boundary validation is
         deferred).
         """
-        head_slot = head_indices.to(final_hidden_states.dtype)
         for group in self._head_final_groups:
             head_scores = self._score_group(
                 group, final_hidden_states, head_indices, head_scores
             )
-        return head_scores, head_slot
+        return head_scores, head_indices
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -811,8 +818,9 @@ class GraniteSwitchForCausalLM(
         if self.model._head_types:
             hidden_size = self.config.hidden_size
             real_hidden = hidden_states[:, :hidden_size]
-            head_scores = hidden_states[:, hidden_size:-1]
-            slot = hidden_states[:, -1]
+            score_end = hidden_size + self.model._head_width
+            head_scores = hidden_states[:, hidden_size:score_end]
+            slot = unpack_slots(hidden_states[:, score_end:])
         else:
             real_hidden = hidden_states
             head_scores = slot = None

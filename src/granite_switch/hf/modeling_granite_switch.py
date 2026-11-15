@@ -29,7 +29,7 @@ from transformers.utils import logging
 
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.streams import routing as stream_routing
-from granite_switch.streams.outputs import apply_head_scores
+from granite_switch.streams.outputs import apply_head_scores, fit_head_scores
 
 from .core.lora import (
     GraniteLoRAEmbeddedAttention,
@@ -427,9 +427,11 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # head stream. Each head reads its slot's layer (the final post-norm
         # state by default) at the slot's marker, the request's last token.
         heads = stream_routing.build_head_modules(config, "hf")
-        for name, module in heads.items():
-            setattr(self, stream_routing.module_attr(name), module)
         self._head_types = list(heads)
+        self._head_min_widths = {
+            name: max(s.num_outputs for s in specs)
+            for name, specs in stream_routing.head_specs(config).items()
+        }
         # Read from the config once: the score-row width, and per read layer
         # (None = final) the head types that read it, with their modules'
         # attributes.
@@ -476,6 +478,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             self.rotary_emb = None
 
         self.gradient_checkpointing = False
+        self._stream_tables = {}
+        self._last_head_scores = None
+        stream_routing.attach_head_modules(self, heads)
 
         # Initialize weights
         self.post_init()
@@ -566,8 +571,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             idx = sel.nonzero(as_tuple=True)[0]
             lut = self._stream_table(stream_routing.row_lut, slots.device, name)
             out = getattr(self, attr)(hidden[rows[idx], pos[idx]], lut[slots[idx]])
-            out = out[:, : scores.shape[-1]]
-            scores[idx, : out.shape[-1]] = out.to(scores.dtype)
+            scores[idx] = fit_head_scores(
+                out, idx.shape[0], self._head_min_widths[name], scores, name
+            )
 
     def forward(
         self,

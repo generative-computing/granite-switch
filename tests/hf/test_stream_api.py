@@ -607,6 +607,102 @@ def test_plugin_type_survives_save_and_reload(tmp_path):
     torch.testing.assert_close(_last_row(loaded, ids), before)
 
 
+@pytest.mark.parametrize("token_id", [300, 999])
+def test_output_ids_are_checked_before_model_execution(token_id):
+    with pytest.raises(ValueError, match="token_ids must be below vocab_size"):
+        stream_specs(_config([_probe(0, labels=[token_id])]))
+
+
+@pytest.mark.parametrize("entry", ["probe", {}, {"type": None}, {"type": []}])
+def test_config_errors_name_the_stream_entry(entry):
+    with pytest.raises(ValueError, match=r"streams\[0\]"):
+        _config([entry])
+
+
+def test_probe_rejects_unknown_settings(tmp_path):
+    with pytest.raises(ValueError, match="probe slot 1 accepts no settings"):
+        _compose(
+            tmp_path,
+            [("probe", _verdict_probe(tmp_path / "head", 0))],
+            [_probe(0, settings={"normalize": True})],
+        )
+
+
+@pytest.mark.parametrize("attr", ["norm", "switch", "layers", "forward", "config"])
+def test_head_cannot_replace_model_attributes(tmp_path, monkeypatch, attr):
+    class CollisionType(_WideType):
+        name = "test_collision"
+        module_name = attr
+
+    monkeypatch.setitem(_REGISTRY, CollisionType.name, CollisionType)
+    folder = tmp_path / "head"
+    folder.mkdir()
+    with pytest.raises(ValueError, match="already a model attribute"):
+        _compose(
+            tmp_path, [("head", folder)], [{**_probe(0), "type": CollisionType.name}]
+        )
+
+
+@pytest.mark.parametrize(
+    "shape,dtype",
+    [((1, 1), torch.float32), ((1, 2), torch.long), ((2, 2), torch.float32)],
+)
+def test_bad_plugin_output_fails_with_its_name(tmp_path, monkeypatch, shape, dtype):
+    model = _compose(
+        tmp_path, [("probe", _verdict_probe(tmp_path / "head", 0))], [_probe(0)]
+    )
+    monkeypatch.setattr(
+        model.model.probe_head,
+        "forward",
+        lambda h, rows: torch.zeros(shape, dtype=dtype),
+    )
+    with pytest.raises(ValueError, match="Head 'probe'.*at least 2 columns"):
+        _last_row(model, [10, CONTROL_TOKEN_ID])
+
+
+def test_head_buffers_and_plain_weight_copies_survive_checkpoint_loading(tmp_path):
+    from granite_switch.hf import load_model
+    from granite_switch.streams.checkpoint import HeadWeightLoader
+    from tests.shared.stream_plugins.buffered_head import BufferedHeadType
+
+    folder = tmp_path / "head"
+    folder.mkdir()
+    save_file(
+        {"weight": torch.zeros(2, HIDDEN), "bias": torch.tensor([2.0, -3.0])},
+        str(folder / "head.safetensors"),
+    )
+    model = _compose(
+        tmp_path, [("head", folder)], [{**_probe(0), "type": BufferedHeadType.name}]
+    )
+    ids = [10, CONTROL_TOKEN_ID]
+    expected = _last_row(model, ids)
+    torch.testing.assert_close(expected[LABELS], torch.tensor([2.0, -3.0]))
+    model.save_pretrained(tmp_path / "checkpoint")
+    loaded = load_model(str(tmp_path / "checkpoint")).eval()
+    torch.testing.assert_close(_last_row(loaded, ids), expected)
+
+    loader = HeadWeightLoader(model.model)
+    saved = {key: tensor.clone() for key, tensor in loader.tensors.items()}
+    with torch.no_grad():
+        for tensor in loader.tensors.values():
+            tensor.zero_()
+    for key, tensor in saved.items():
+        assert loader.load(key, tensor)
+    assert loader.finish() == set(saved)
+    torch.testing.assert_close(_last_row(model, ids), expected)
+
+    incomplete = HeadWeightLoader(model.model)
+    incomplete.load(
+        "model.stream_test_buffered.weight", saved["model.stream_test_buffered.weight"]
+    )
+    with pytest.raises(ValueError, match="Missing head.*adapter_token_ids"):
+        incomplete.finish()
+    with pytest.raises(ValueError, match="Unexpected head"):
+        loader.load("model.stream_test_buffered.typo", torch.ones(1))
+    with pytest.raises(ValueError, match="has shape"):
+        loader.load("model.stream_test_buffered.weight", torch.ones(1))
+
+
 def test_plugin_checks_its_settings(tmp_path):
     head = _mlp_head_folder(
         tmp_path / "nudge", torch.zeros(WIDTH, HIDDEN), torch.zeros(2, WIDTH)

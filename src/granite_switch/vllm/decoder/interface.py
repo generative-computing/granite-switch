@@ -36,6 +36,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
+from granite_switch.streams.checkpoint import HeadWeightLoader
+
 from ..core import (
     FusedLoRAKernelMeta,
     LoRAContext,
@@ -358,6 +360,7 @@ class LoRADecoderInterface(DecoderInterface):
         """
         params_dict = dict(model.named_parameters())
         loaded_params: set = set()
+        heads = HeadWeightLoader(model.model)
 
         def _load_direct(name, loaded_weight):
             """Load a weight directly by name."""
@@ -376,6 +379,8 @@ class LoRADecoderInterface(DecoderInterface):
                 loaded_params.add(name)
 
         for name, loaded_weight in weights:
+            if heads.load(name, loaded_weight):
+                continue
             # ── HF stacked MoE → vLLM FusedMoE (shared with the SR loader) ──
             if _try_load_stacked_moe(
                 name, loaded_weight, params_dict, loaded_params, model
@@ -385,6 +390,7 @@ class LoRADecoderInterface(DecoderInterface):
             # ── Direct load (built checkpoints + all non-MoE weights) ──
             _load_direct(name, loaded_weight)
 
+        loaded_params.update(heads.finish())
         _audit_loaded(params_dict, loaded_params, model, label="LoRA weight load")
 
         # Finalize fused LoRA weights (build w_ext from loaded lora_A + base weights)
@@ -505,6 +511,7 @@ class SRDecoderInterface(DecoderInterface):
         """
         params = dict(model.named_parameters())
         loaded: set = set()
+        heads = HeadWeightLoader(model.model)
 
         def _load(pname: str, w) -> bool:
             if pname not in params:
@@ -519,6 +526,8 @@ class SRDecoderInterface(DecoderInterface):
             return True
 
         for name, w in weights:
+            if heads.load(name, w):
+                continue
             if any(s in name for s in _SR_SKIP_SUBSTRINGS):
                 continue
             if name.endswith(".bias") and name not in params:
@@ -539,6 +548,7 @@ class SRDecoderInterface(DecoderInterface):
             ):
                 loaded.add(pname)
 
+        loaded.update(heads.finish())
         _audit_loaded(params, loaded, model, label="SR weight load")
 
         self.finalize_modules(model, model.config)

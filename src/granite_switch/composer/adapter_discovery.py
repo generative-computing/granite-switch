@@ -159,6 +159,7 @@ def discover_adapters_from_yaml(
 
         if adapters_config:
             for name, info in adapters_config.items():
+                _validate_manifest_entry(name, info)
                 adapter_path = info.get("path")
                 tech = info.get("type")
                 # Use manifest path as source for traceability
@@ -185,6 +186,48 @@ def discover_adapters_from_yaml(
                     }
 
     return found, head_meta
+
+
+def _validate_manifest_entry(name: str, info: dict) -> None:
+    """Reject ambiguous head declarations before discovery drops any fields."""
+    if not isinstance(info, dict):
+        raise ValueError(f"Manifest entry {name!r} must be a mapping.")
+    head_keys = {"labels", "layer", "adapter", "output", "settings"}
+    kind = info.get("kind", "lora")
+    if not isinstance(kind, str) or not kind.isidentifier():
+        raise ValueError(
+            f"Manifest entry {name!r}: kind must be a head type name or 'lora'."
+        )
+    present = head_keys.intersection(info)
+    if kind == "lora":
+        if present:
+            raise ValueError(
+                f"Manifest entry {name!r} has head fields {sorted(present)} but no "
+                "head kind. Set kind to a registered head type (e.g. probe)."
+            )
+        return
+    unknown = set(info) - head_keys - {"path", "type", "kind"}
+    if unknown:
+        raise ValueError(f"Head entry {name!r} has unknown fields: {sorted(unknown)}.")
+    for field in ("output", "settings"):
+        value = info.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise ValueError(f"Head entry {name!r}: {field} must be a mapping or null.")
+    labels = info.get("labels")
+    if labels is not None:
+        if (
+            not isinstance(labels, list)
+            or not labels
+            or any(not isinstance(label, str) or not label for label in labels)
+        ):
+            raise ValueError(
+                f"Head entry {name!r}: labels must be a non-empty list of strings; "
+                "quote YAML words such as 'yes' and 'no'."
+            )
+        if "token_ids" in (info.get("output") or {}):
+            raise ValueError(
+                f"Head entry {name!r}: give labels or output.token_ids, not both."
+            )
 
 
 def _report_module_contributions(

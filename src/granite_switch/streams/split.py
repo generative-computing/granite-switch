@@ -7,12 +7,13 @@ shared by both backends' switches, split the switch's single per-token index
 stream so that head positions leave the adapters' path (unless a head names an
 adapter, which the models route separately) and feed the head streams.
 
-Backend-neutral on purpose: the table is a pure function of
-``config.adapter_kinds``, so both switch engines (HF and vLLM MultiSwitch)
-build the identical table.
+Both switch engines use the shared stream routing table.
 """
 
 import torch
+
+from .routing import head_slot_mask
+from .spec import stream_specs
 
 
 def build_head_slot_lut(config) -> torch.Tensor | None:
@@ -22,17 +23,13 @@ def build_head_slot_lut(config) -> torch.Tensor | None:
     adapter index ``i`` is a head slot -- any stream type other than ``lora``
     (a probe, or a registered head type; see :mod:`granite_switch.streams`).
     Index 0, base, is always False. ``None`` when no slot is a head, which lets
-    the switch skip the split entirely. Built from ``config.adapter_kinds``, so
-    both backends' switches agree on the table by construction.
+    the switch skip the split entirely.
     """
-    kinds = getattr(config, "adapter_kinds", None) if config is not None else None
-    if kinds is None or not any(k != "lora" for k in kinds):
+    if config is None or getattr(config, "adapter_kinds", None) is None:
         return None
-    lut = torch.zeros(len(kinds) + 1, dtype=torch.bool)
-    for slot, kind in enumerate(kinds):  # slot is the 0-based adapter position
-        if kind != "lora":
-            lut[slot + 1] = True  # adapter index is slot + 1
-    return lut
+    if not any(s.is_head for s in stream_specs(config)):
+        return None
+    return head_slot_mask(config)
 
 
 def split_head_indices(

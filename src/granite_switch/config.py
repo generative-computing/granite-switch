@@ -61,7 +61,8 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             checkpoint composed before streams: its entries are rebuilt from
             ``adapter_kinds``, ``probe_label_token_ids`` and
             ``probe_read_layers``, which a streams checkpoint also keeps,
-            derived from its entries, for older versions to read.
+            derived from its entries, for metadata consumers. This does not
+            make compact banks or custom head types readable by older runtimes.
 
         Switch attention parameters:
             control_token_gain (float): Attention gain for control/non-control separation. Default: 15.0.
@@ -435,14 +436,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # entries are rebuilt from them (streams.spec._legacy_entries).
         self.streams = streams
         if streams is not None:
-            if len(streams) != num_adapters:
-                raise ValueError(
-                    f"streams length ({len(streams)}) must equal num_adapters "
-                    f"({num_adapters}): one entry per slot."
-                )
-            kinds_from_streams = [
-                e.get("type") if isinstance(e, dict) else None for e in streams
-            ]
+            from .streams.spec import parse_entries
+
+            kinds_from_streams = [s.type for s in parse_entries(streams, num_adapters)]
             if adapter_kinds is not None and list(adapter_kinds) != kinds_from_streams:
                 raise ValueError(
                     f"adapter_kinds {adapter_kinds} disagree with the streams' "
@@ -533,7 +529,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     )
         self.probe_read_layers = probe_read_layers
 
-        # Derived, for older versions: a streams checkpoint also writes the
+        # Derived metadata: a streams checkpoint also writes the
         # pre-streams probe fields, from its probe entries. This version reads
         # the entries; the copies are never read back.
         if streams is not None:

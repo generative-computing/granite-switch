@@ -88,8 +88,16 @@ class GraniteSwitchComposer:
         # other (registered) type for head streams. With ``streams`` given, a
         # slot's kind is its stream's type.
         streams = kwargs.get("streams")
+        if streams is not None:
+            from granite_switch.streams.spec import parse_entries
+
+            specs = parse_entries(streams, num_total)
+            if any(s.is_head for s in specs[num_external:]):
+                raise ValueError(
+                    "Built-in slots are empty LoRA adapters, not head streams."
+                )
         ext_kinds = (
-            [e["type"] for e in streams]
+            [s.type for s in specs]
             if streams is not None
             else kwargs.get("adapter_kinds")
         )

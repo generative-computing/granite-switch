@@ -3,7 +3,8 @@
 Inner file — run by test_model_forward.py in subprocess.
 
 Tests the full model wiring: switch -> adapter_indices -> decoder layers.
-All tests run on a single CUDA GPU with random weights (no pretrained checkpoint needed).
+All tests run on one CUDA GPU with synthetic weights (no Hub checkpoint needed).
+Stream API tests compose real checkpoint layouts before loading them into vLLM.
 
 Requires CUDA GPU and vLLM installed. All tests are skipped otherwise.
 """
@@ -193,10 +194,11 @@ class _VLLMModelTestBase:
     """Base class providing model creation and full forward pass machinery."""
 
     @pytest.fixture(autouse=True)
-    def setup_model(self):
+    def setup_model(self, tmp_path):
         _ensure_distributed()
 
         self.device = torch.device("cuda")
+        self._test_dir = tmp_path
         self.config = self._make_config()
 
         old_dtype = torch.get_default_dtype()
@@ -218,9 +220,12 @@ class _VLLMModelTestBase:
         finally:
             torch.set_default_dtype(old_dtype)
 
-        torch.manual_seed(SEED)
-        _init_model_weights(self.model)  # base weights
-        _set_nonzero_lora(self.model)  # adapter weights — set BEFORE finalize
+        if hasattr(self, "_composed_model"):
+            self.model.load_weights(self._composed_model.state_dict().items())
+        else:
+            torch.manual_seed(SEED)
+            _init_model_weights(self.model)  # base weights
+            _set_nonzero_lora(self.model)  # adapter weights — set BEFORE finalize
 
         # The fused design bakes LoRA weights into w_ext at finalize time, so
         # finalize must run AFTER the weights are set — exactly as vLLM's
@@ -229,9 +234,10 @@ class _VLLMModelTestBase:
         # #83 moved this off the model: each DecoderInterface owns the post-load
         # step and load_weights() ends by calling finalize_modules(). Go through
         # the interface so this harness exercises the same path as a real load.
-        self.model.model.decoder_interface.finalize_modules(
-            self.model, self.model.config
-        )
+        if not hasattr(self, "_composed_model"):
+            self.model.model.decoder_interface.finalize_modules(
+                self.model, self.model.config
+            )
 
         self.model_config = self.model.config
         self._setup_kv_caches()
@@ -532,11 +538,21 @@ def _non_labels(vocab_size):
     return [i for i in range(vocab_size) if i not in _HEAD_LABELS]
 
 
-class TestStreamCompactRows(_VLLMModelTestBase):
+class _StreamModelTestBase(_VLLMModelTestBase):
+    def _compose_config(self, streams, dual_stream=False):
+        from tests.shared.stream_models import compose_stream_model
+
+        self._composed_model = compose_stream_model(
+            self._test_dir, streams, dual_stream=dual_stream
+        )
+        return self._composed_model.config
+
+
+class TestStreamCompactRows(_StreamModelTestBase):
     """[probe, lora, probe]: one LoRA row, a two-row probe bank, any slot order."""
 
     def _make_config(self):
-        return _tiny_vllm_config(
+        return self._compose_config(
             streams=[_probe_entry(0), {"type": "lora"}, _probe_entry(1)]
         )
 
@@ -564,11 +580,11 @@ class TestStreamCompactRows(_VLLMModelTestBase):
         assert not torch.allclose(plain[2:], adapted[2:])
 
 
-class TestStreamHeadsOnly(_VLLMModelTestBase):
+class TestStreamHeadsOnly(_StreamModelTestBase):
     """Every slot a head: no LoRA layers and no kernel metadata at all."""
 
     def _make_config(self):
-        return _tiny_vllm_config(streams=[_probe_entry(0), _probe_entry(1)])
+        return self._compose_config(streams=[_probe_entry(0), _probe_entry(1)])
 
     def test_heads_only_serves_the_verdict(self):
         self.model.eval()
@@ -581,13 +597,13 @@ class TestStreamHeadsOnly(_VLLMModelTestBase):
         assert int(logits[-1].argmax()) == _HEAD_LABELS[0]
 
 
-class TestStreamPluginMerge(_VLLMModelTestBase):
+class TestStreamPluginMerge(_StreamModelTestBase):
     """The example plugin type, with ``merge``: the LM row plus its scores."""
 
     def _make_config(self):
         import tests.shared.stream_plugins.mlp_head  # noqa: F401 (registers it)
 
-        return _tiny_vllm_config(
+        return self._compose_config(
             streams=[
                 {"type": "lora"},
                 {
@@ -624,7 +640,7 @@ class TestStreamPluginMerge(_VLLMModelTestBase):
         assert not torch.allclose(merged[_HEAD_LABELS], plain[_HEAD_LABELS])
 
 
-class TestStreamHeadOutputFit(_VLLMModelTestBase):
+class TestStreamHeadOutputFit(_StreamModelTestBase):
     """A head module may return extra columns, in another float dtype.
 
     Here the module returns fp32 (the model runs bf16) and two columns more
@@ -633,7 +649,7 @@ class TestStreamHeadOutputFit(_VLLMModelTestBase):
     """
 
     def _make_config(self):
-        return _tiny_vllm_config(streams=[{"type": "lora"}, _probe_entry(0)])
+        return self._compose_config(streams=[{"type": "lora"}, _probe_entry(0)])
 
     def test_wide_fp32_scores_fit_the_row(self, monkeypatch):
         self.model.eval()
@@ -650,7 +666,7 @@ class TestStreamHeadOutputFit(_VLLMModelTestBase):
         assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
 
 
-class TestStreamHeadOnAdapter(_VLLMModelTestBase):
+class TestStreamHeadOnAdapter(_StreamModelTestBase):
     """A probe that names an adapter runs it at its marker (Shadow Residual).
 
     The adapter writes no K/V, so the marker alone gives the adapter's state:
@@ -659,14 +675,13 @@ class TestStreamHeadOnAdapter(_VLLMModelTestBase):
     """
 
     def _make_config(self):
-        return _tiny_vllm_config(
+        return self._compose_config(
             streams=[
                 {"type": "lora"},
                 _probe_entry(0),
                 _probe_entry(1, adapter="adapter_1"),
             ],
             dual_stream=True,
-            cross_stream_rank=16,
         )
 
     def test_marker_routes_through_the_named_adapter(self):
@@ -684,7 +699,7 @@ class TestStreamHeadOnAdapter(_VLLMModelTestBase):
         assert not torch.allclose(on_base[_HEAD_LABELS], on_adapter[_HEAD_LABELS])
 
 
-class TestStreamHeadOnLoRAAdapter(_VLLMModelTestBase):
+class TestStreamHeadOnLoRAAdapter(_StreamModelTestBase):
     """A probe on a single-stream LoRA adapter, with the adapter's own token.
 
     The prompt carries the adapter's token first (as the chat template places
@@ -694,7 +709,7 @@ class TestStreamHeadOnLoRAAdapter(_VLLMModelTestBase):
     """
 
     def _make_config(self):
-        return _tiny_vllm_config(
+        return self._compose_config(
             streams=[
                 {"type": "lora"},
                 _probe_entry(0),
@@ -724,6 +739,46 @@ class TestStreamHeadOnLoRAAdapter(_VLLMModelTestBase):
         assert not torch.allclose(
             paired[_HEAD_LABELS].float(), marker_only[_HEAD_LABELS].float(), atol=0.05
         )
+
+
+class TestStreamHighSlot(_StreamModelTestBase):
+    def _make_config(self):
+        return self._compose_config([_probe_entry(i) for i in range(257)])
+
+    def test_slot_257_keeps_its_own_output_in_bf16(self):
+        with torch.no_grad():
+            self.model.model.probe_head.bias[255] = torch.tensor([5.0, -5.0])
+            self.model.model.probe_head.bias[256] = torch.tensor([-5.0, 5.0])
+            logits = self._run_forward_and_logits([10, 20, 506])
+        assert int(logits[-1].argmax()) == _HEAD_LABELS[1]
+
+
+class TestStreamPersistentBuffers(_StreamModelTestBase):
+    dual_stream = False
+
+    def _make_config(self):
+        from tests.shared.stream_plugins.buffered_head import BufferedHeadType
+
+        config = self._compose_config(
+            [{"type": "lora"}, {**_probe_entry(0), "type": BufferedHeadType.name}],
+            dual_stream=self.dual_stream,
+        )
+        with torch.no_grad():
+            self._composed_model.model.stream_test_buffered.adapter_token_ids[0] = (
+                torch.tensor([3.0, -2.0])
+            )
+        return config
+
+    def test_persistent_buffer_survives_decoder_loading(self):
+        # This name resembles a base buffer the SR loader normally skips.
+        torch.testing.assert_close(
+            self.model.model.stream_test_buffered.adapter_token_ids.float().cpu(),
+            torch.tensor([[3.0, -2.0]]),
+        )
+
+
+class TestStreamPersistentBuffersSR(TestStreamPersistentBuffers):
+    dual_stream = True
 
 
 # ════════════════════════════════════════════════════════════════════

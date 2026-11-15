@@ -101,7 +101,7 @@ class HeadType:
         state: dict[str, torch.Tensor],
         spec: "StreamSpec",
     ) -> None:
-        """Copy one slot's trained weights into ``module``; compose calls this.
+        """Copy one slot's trained weights into ``module`` under ``torch.no_grad()``.
 
         Args:
             module: this type's module, as :meth:`hf_module` built it.
@@ -127,6 +127,11 @@ def register_head_type(cls: type[HeadType]) -> type[HeadType]:
         raise TypeError(f"{cls!r} is not a HeadType subclass.")
     if not cls.name:
         raise ValueError(f"{cls.__name__} has no name.")
+    if not isinstance(cls.name, str) or not cls.name.isidentifier():
+        raise ValueError(f"Head type name must be an identifier; got {cls.name!r}.")
+    attr = cls.module_name if cls.module_name is not None else f"stream_{cls.name}"
+    if not isinstance(attr, str) or not attr.isidentifier() or attr.startswith("_"):
+        raise ValueError(f"Head module_name must be a public identifier; got {attr!r}.")
     if cls.name == "lora":
         raise ValueError("'lora' is the built-in adapter stream, not a head type.")
     taken = _REGISTRY.get(cls.name)
@@ -135,6 +140,13 @@ def register_head_type(cls: type[HeadType]) -> type[HeadType]:
             f"Head type {cls.name!r} is already registered by {_qualname(taken)}; "
             f"{_qualname(cls)} can't take its name."
         )
+    for name, registered in _REGISTRY.items():
+        other_attr = registered.module_name or f"stream_{name}"
+        if name != cls.name and attr == other_attr:
+            raise ValueError(
+                f"Head module_name {attr!r} is already used by head type {name!r}; "
+                f"{cls.name!r} must use a different attribute."
+            )
     _REGISTRY[cls.name] = cls
     return cls
 

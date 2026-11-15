@@ -23,6 +23,35 @@ import torch
 OUTPUT_MODES = ("select", "merge")
 
 
+def fit_head_scores(
+    scores: torch.Tensor,
+    num_tokens: int,
+    min_width: int,
+    target: torch.Tensor,
+    name: str,
+) -> torch.Tensor:
+    """Validate a module's output, then fit it to the shared score buffer.
+
+    Only tensor metadata is inspected, so these checks are safe during graph
+    capture. Missing scores are an error; padding is only for wider *other*
+    head types in the checkpoint.
+    """
+    if (
+        not isinstance(scores, torch.Tensor)
+        or not scores.is_floating_point()
+        or scores.ndim != 2
+        or scores.shape[0] != num_tokens
+        or scores.shape[1] < min_width
+    ):
+        raise ValueError(
+            f"Head {name!r} must return a floating tensor [tokens, width] with "
+            f"{num_tokens} rows and at least {min_width} columns."
+        )
+    width = target.shape[-1]
+    scores = scores[:, :width].to(target.dtype)
+    return torch.nn.functional.pad(scores, (0, width - scores.shape[-1]))
+
+
 def output_tables(specs, num_slots: int) -> dict:
     """Per 1-based slot (row 0 and non-head slots unused), from the stream specs.
 

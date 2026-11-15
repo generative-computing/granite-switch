@@ -13,6 +13,8 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
+from granite_switch.streams import routing as stream_routing
+
 from .arch import ArchDescriptor
 
 # ---------------------------------------------------------------------------
@@ -100,7 +102,7 @@ def transfer_base_weights(
 
     # Record target params (excluding LoRA, buffers and head banks)
     exclude_keywords = arch.lora_keywords + arch.buffer_keywords
-    head_prefixes = _head_module_prefixes(switch_config)
+    head_prefixes = stream_routing.head_param_prefixes(switch_config)
     mapping_record["target_params"] = [
         name
         for name in switch_state_dict.keys()
@@ -187,7 +189,7 @@ def transfer_base_weights(
         fused_collections,
         lora_target_modules,
         arch,
-        head_prefixes=_head_module_prefixes(switch_config),
+        head_prefixes=head_prefixes,
     )
 
     # Free base state dict
@@ -298,17 +300,6 @@ def _classify_base_weights(
         base_to_switch[base_name] = base_name
 
     return fused_collections, base_to_switch
-
-
-def _head_module_prefixes(config) -> tuple[str, ...]:
-    """State-dict prefixes of the config's head modules (``granite_switch.streams``).
-
-    A head's weights come from its own folder (``transfer_head_weights``), never
-    from the base model, whatever its type is called.
-    """
-    from granite_switch.streams.routing import head_param_prefixes
-
-    return head_param_prefixes(config)
 
 
 def _validate_base_transfer(
@@ -871,6 +862,10 @@ def transfer_head_weights(head_paths: list[str], slots: list[int], model) -> Non
     from granite_switch.streams.routing import module_attr
 
     specs = {s.slot: s for s in stream_specs(model.config)}
+    if len(head_paths) != len(slots) or len(slots) != len(set(slots)):
+        raise ValueError("Each head path must have one distinct slot index.")
+    if any(slot not in specs or not specs[slot].is_head for slot in slots):
+        raise ValueError(f"Head weights must target head slots; got {slots}.")
     print(f"Loading {len(head_paths)} trained head(s)...")
     for path, slot in zip(head_paths, slots):
         spec = specs[slot]
@@ -882,6 +877,7 @@ def transfer_head_weights(head_paths: list[str], slots: list[int], model) -> Non
                 f"weights '{head_type.weights_file}'."
             )
         module = getattr(model.model, module_attr(spec.type))
-        head_type.load_weights(module, spec.head_row, load_file(str(weights)), spec)
+        with torch.no_grad():
+            head_type.load_weights(module, spec.head_row, load_file(str(weights)), spec)
         print(f"  {spec.type}: {path} -> {module_attr(spec.type)}[{spec.head_row}]")
     print(f"Loaded {len(head_paths)} head(s)")

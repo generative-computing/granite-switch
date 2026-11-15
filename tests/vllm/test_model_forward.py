@@ -97,3 +97,13 @@ class TestStreamHeadOnAdapter:
 class TestStreamHeadOnLoRAAdapter:
     def test_suite(self):
         _run_inner_class("TestStreamHeadOnLoRAAdapter")
+
+
+class TestStreamHighSlot:
+    def test_suite(self):
+        _run_inner_class("TestStreamHighSlot")
+
+
+class TestStreamPersistentBuffers:
+    def test_suite(self):
+        _run_inner_class("TestStreamPersistentBuffers")

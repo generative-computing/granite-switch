@@ -27,6 +27,12 @@ class ProbeType(HeadType):
     #: The model's attribute for this type's module: kept for checkpoint names.
     module_name = "probe_head"
 
+    def check(self, spec, config):
+        if spec.settings:
+            raise ValueError(
+                f"probe slot {spec.slot} accepts no settings; got {sorted(spec.settings)}."
+            )
+
     @staticmethod
     def _shape(specs, config):
         rows = 1 + max(s.head_row for s in specs)

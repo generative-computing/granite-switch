@@ -595,3 +595,35 @@ class TestManifestProbeMetadata:
 
         _found, head_meta = discover_adapters_from_yaml(str(manifest))
         assert head_meta == {}
+
+    @pytest.mark.parametrize(
+        "key", ["labels", "layer", "adapter", "output", "settings"]
+    )
+    @pytest.mark.parametrize("kind", [None, "lora"])
+    def test_head_fields_require_a_head_kind(self, tmp_path, key, kind):
+        entry = {"path": "/head", key: None}
+        if kind is not None:
+            entry["kind"] = kind
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(yaml.safe_dump({"head": entry}))
+        with pytest.raises(ValueError, match="head fields.*no head kind"):
+            discover_adapters_from_yaml(str(manifest))
+
+    @pytest.mark.parametrize(
+        "fields,match",
+        [
+            ({"labels": [True, False]}, "quote YAML"),
+            ({"labels": "yes"}, "list of strings"),
+            ({"settings": []}, "settings must be a mapping"),
+            ({"output": []}, "output must be a mapping"),
+            ({"labels": ["yes"], "output": {"token_ids": [1]}}, "not both"),
+            ({"read_layer": 3}, "unknown fields"),
+        ],
+    )
+    def test_bad_head_manifest_fails_during_discovery(self, tmp_path, fields, match):
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(
+            yaml.safe_dump({"head": {"path": "/head", "kind": "probe", **fields}})
+        )
+        with pytest.raises(ValueError, match=match):
+            discover_adapters_from_yaml(str(manifest))

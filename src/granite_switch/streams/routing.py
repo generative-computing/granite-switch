@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Routing tables a model builds from its streams, shared by both backends.
 
-From ``config.streams`` (via :func:`~.spec.stream_specs`) each backend builds,
-once at load time:
+From ``config.streams`` (via :func:`~.spec.stream_specs`) each backend builds
+routing tables at load time, or on first use in HF's device cache:
 
 * the head slots' control-token ids (to find marker positions);
 * ``row_lut`` -- per slot index, ``1 + head_row`` in that slot's type bank, or 0
@@ -17,6 +17,7 @@ Nothing here depends on a particular head type.
 """
 
 import torch
+from torch import nn
 
 from .outputs import output_tables
 from .registry import get_head_type
@@ -44,7 +45,23 @@ def build_head_modules(config, backend: str) -> dict:
             if backend == "vllm"
             else head_type.hf_module(specs, config)
         )
+        if not isinstance(modules[name], nn.Module):
+            raise TypeError(
+                f"Head type {name!r} must build an nn.Module for {backend}."
+            )
     return modules
+
+
+def attach_head_modules(model: nn.Module, modules: dict[str, nn.Module]) -> None:
+    """Attach heads after the model's own attributes exist; never replace one."""
+    for name, module in modules.items():
+        attr = module_attr(name)
+        if hasattr(model, attr):
+            raise ValueError(
+                f"Head type {name!r} uses module_name {attr!r}, which is already "
+                "a model attribute. Choose another module_name."
+            )
+        setattr(model, attr, module)
 
 
 def module_attr(name: str) -> str:

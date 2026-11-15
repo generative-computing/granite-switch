@@ -74,9 +74,13 @@ class _Model(torch.nn.Module):
 
     _score_group = GraniteSwitchModel._score_group
 
-    def __init__(self, slot_of_marker, read_layers=None, kinds=None):
+    def __init__(self, slot_of_marker, read_layers=None, kinds=None, streams=None):
         super().__init__()
         self.config = _config(max(slot_of_marker.values()), read_layers, kinds)
+        if streams is not None:
+            self.config = GraniteSwitchConfig.from_dict(
+                {**self.config.to_dict(), "streams": streams}
+            )
         GraniteSwitchModel._init_streams(self, self.config)
         self.probe_head = _StubProbeHead()
 
@@ -208,7 +212,6 @@ def test_head_output_rewrite_is_sync_free_and_exact():
 
     wrapper = GraniteSwitchForCausalLM.__new__(GraniteSwitchForCausalLM)
     torch.nn.Module.__init__(wrapper)
-    model = _Model({90: 2, 91: 4}, kinds=["lora", "probe", "lora", "probe"])
     streams = [
         {"type": "lora"},
         {"type": "probe", "head_row": 0, "output": {"token_ids": [7, 9]}},
@@ -219,10 +222,9 @@ def test_head_output_rewrite_is_sync_free_and_exact():
             "output": {"mode": "merge", "token_ids": [11, 3, 5], "weight": 0.5},
         },
     ]
-    model.config = GraniteSwitchConfig.from_dict(
-        {**model.config.to_dict(), "streams": streams}
+    model = _Model(
+        {90: 2, 91: 4}, kinds=["lora", "probe", "lora", "probe"], streams=streams
     )
-    GraniteSwitchModel._init_streams(model, model.config)
     wrapper.model, wrapper.config = model, model.config
     outputs = {2: ("select", [7, 9], 1.0), 4: ("merge", [11, 3, 5], 0.5)}
     assert stream_routing.head_outputs(model.config)["ids"].shape == (5, 3)

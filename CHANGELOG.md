@@ -50,6 +50,12 @@ This project uses [semantic versioning](https://semver.org/).
 
 ### Fixed
 
+- Head plugins reject out-of-vocabulary output IDs, colliding module names,
+  ambiguous manifest entries, and malformed score tensors before they can
+  silently change results. The built-in probe rejects unsupported settings.
+- Compose loads plugin weights under `torch.no_grad()`. vLLM loads head
+  parameters and persistent buffers strictly, before decoder-specific mappings.
+- vLLM carries head slot IDs exactly in bf16, including slots above 256.
 - `Conversation` handles head turns: a head reads only its own turn (under
   `PRESERVE_MIXED_HISTORY`, a prompt whose kept history holds control tokens is
   rendered from text), and a recorded head turn joins the transcript as text, so

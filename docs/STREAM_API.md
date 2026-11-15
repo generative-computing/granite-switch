@@ -64,10 +64,16 @@ mode it doesn't have, or a field in an entry (or in its `output`) that it doesn'
 `read_layer` outside the model's layers is refused too. So an entry written by a newer version
 fails loudly instead of running as something else.
 
+Output IDs must be distinct integers inside the model's vocabulary. The built-in probe accepts
+no settings. A custom type must validate every setting it accepts in `check` and reject unknown
+keys, so typos do not silently change its behavior.
+
 **Older checkpoints.** A checkpoint without `streams` loads as before: its entries are rebuilt from
 the older fields (`adapter_kinds`, `probe_label_token_ids`, `probe_read_layers`), in the layout it
-was written in. A streams checkpoint also keeps those fields, derived from the entries, for older
-versions to read; the entries are what this version uses.
+was written in. A streams checkpoint also keeps those fields, derived from the entries, for
+metadata consumers; this version uses the stream entries. These fields do not guarantee that
+an older runtime can serve the checkpoint: custom types and compact banks require a runtime
+that understands streams. Deploy the runtime and plugin versions used to validate the checkpoint.
 
 ## Writing a head type
 
@@ -102,9 +108,18 @@ class MLPHeadType(HeadType):
 | `check(spec, config)` | no | Validates one slot's `settings`; raise `ValueError` |
 | `vllm_module(specs, config)` | no | The vLLM module. Defaults to the HF module, which must then follow the vLLM rules below |
 
-A complete example, about 60 lines, is
+A complete example is
 [`tests/shared/stream_plugins/mlp_head.py`](../tests/shared/stream_plugins/mlp_head.py): a small
 two-layer MLP per slot, in `merge` mode.
+
+Type names must be valid identifiers. Module names must also be public (no leading underscore),
+unique across head types, and must not replace a model attribute such as `norm` or `layers`.
+Usually leave `module_name` unset.
+
+Compose calls `load_weights` under `torch.no_grad()`, so ordinary `copy_` operations on parameters
+are sufficient. Validate the artifact's keys and shapes before copying. Both backend modules must
+use the same state-dict keys and shapes, including persistent buffers. vLLM loads head state
+strictly: missing, unexpected, or misshaped head tensors fail at startup.
 
 ### The module's one call
 
@@ -116,7 +131,10 @@ scores = module(hidden, rows)
 |---|---|---|
 | `hidden` | `[n, hidden_size]` | The read layer's hidden state, one row per token passed in |
 | `rows` | `[n]` | Which slot's weights each token uses: the slot's `head_row` + 1. A 0 means "no slot of this type here" |
-| returns | `[n, width]` | One score per output token of the slot, in the order of its `token_ids`, in any float dtype; `width` is at least the slot's number of outputs, and extra columns are ignored. Values on rows with 0 are ignored |
+| returns | `[n, width]` | One score per output token, in the order of its `token_ids`, in any float dtype; `width` must cover the largest output count among this type's slots. Extra columns are ignored. Values on rows with 0 are ignored |
+
+The core checks the output's rank, row count, floating dtype and minimum width. A missing score
+is an error; zero padding only aligns different types with the checkpoint's shared score buffer.
 
 Granite Switch decides where the module runs and on what: the layer, the tokens and the rows. The
 module only does the math. It never sees control tokens, positions or logits.
@@ -167,6 +185,15 @@ mlp_head = "my_streams.mlp_head:MLPHeadType"
 The entry point is what makes the type visible to every process: compose, HF, and vLLM's engine and
 worker processes, which import nothing from the caller.
 
+Install the plugin package in every environment that composes or serves the checkpoint, including
+vLLM workers (`pip install /path/to/my_streams`). An in-process decorator registration is enough
+for experimentation, but a saved checkpoint does not contain the plugin's Python code. Verify
+discovery from a fresh process before serving:
+
+```bash
+python -c "from granite_switch.streams import get_head_type; print(type(get_head_type('mlp_head')))"
+```
+
 - **Name the entry point after the type:** its name must be the class's `name`.
 - **Only the named entry point is imported,** so a plugin that fails to import affects only the
   checkpoints that use it.
@@ -184,18 +211,18 @@ answerability:
 tox:                        # a probe on the base model
   path: ./tox               # holds probe_head.safetensors
   kind: probe               # the stream type
-  labels: [yes, no]         # the output words; each must be a single token
+  labels: ["yes", "no"]     # quote YAML labels; each must be a single token
   layer: 20                 # the read layer; omit for the final norm
 tox_rag:                    # the same kind of head, on the answerability adapter
   path: ./tox_rag
   kind: probe
-  labels: [yes, no]
+  labels: ["yes", "no"]
   layer: 20
   adapter: answerability
 nudge:                      # a plugin type, in merge mode
   path: ./nudge             # holds mlp_head.safetensors
   kind: mlp_head
-  labels: [yes, no]
+  labels: ["yes", "no"]
   output: {mode: merge, weight: 0.5}
   settings: {width: 32}
 ```
@@ -208,6 +235,11 @@ nudge:                      # a plugin type, in merge mode
 | `adapter` | An adapter slot of the same checkpoint that runs at the marker |
 | `output` | `mode`, `weight`, or explicit `token_ids` |
 | `settings` | Passed to the type, which checks it |
+
+Head fields require an explicit head `kind`; omitting it is an error rather than an adapter
+with ignored head settings. Give either `labels` or `output.token_ids`, not both. Labels must
+be non-empty strings; quote YAML words such as `"yes"` and `"no"` to keep them from becoming
+booleans. Unknown head fields are rejected.
 
 A head entry's `type` is not used: a head's marker always goes last. For each head slot, compose
 looks up the type, turns the labels into token ids, gives the slot the next row of its type's bank,
