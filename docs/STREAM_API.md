@@ -295,9 +295,29 @@ several adapters.
 
 ## Limits
 
-- **A marker must be the prompt's last token.** The chat template and `Conversation` always place
-  it there. A prompt built by hand can do otherwise: HF raises; vLLM doesn't check, so the verdict
-  is lost and the request goes on as normal text.
+- **A marker must be the prompt's last token.** See the known vLLM validation gap below.
 - **One head per request.** A head reads at its marker, the prompt's last token, so two verdicts
   on one prompt take two requests.
 - **Speculative decoding and microbatching** are refused with head streams on vLLM.
+
+### Known gap: vLLM head-marker validation (deferred)
+
+vLLM does not check that a complete request contains at most one head marker and that it is
+the final prompt token. For example, `[text, head_marker, more_text]` can silently produce
+ordinary text instead of the head's verdict: the head changes the marker's logits, but the
+sampler uses the final prompt position. Repeated markers, including markers for different
+heads, are also not rejected. HF rejects misplaced markers in its input, including earlier
+occurrences of a repeated marker.
+
+This affects every head type and output mode, whether the head reads the base model or is
+paired with **LoRA, aLoRA or Shadow Residual**. Ordinary adapter-only requests are not subject
+to this head-marker restriction: their control tokens intentionally affect later tokens.
+
+Use the composed chat template or `Conversation`, which place the head marker last. When
+building token prompts manually, include exactly one head marker at the end of a head request
+and do not retain head markers from earlier turns. For a paired LoRA/aLoRA head, also preserve
+the adapter token placement described in [Heads on adapters](#heads-on-adapters).
+
+**Status, 2026-11-15:** validation is intentionally deferred; this branch does not implement a
+fix. A future fix should validate the complete tokenized request before scheduling, with
+serving tests for misplaced and repeated markers. GPU results alone will not close this gap.

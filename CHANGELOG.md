@@ -68,6 +68,15 @@ This project uses [semantic versioning](https://semver.org/).
 - GPU ASR tests no longer assert transcript text, which is model quality, not
   something these tests own.
 
+### Known limitations
+
+- vLLM does not reject misplaced or repeated head markers in manually built
+  prompts; a marker that is not last can silently lose the head's verdict.
+  This affects heads on base, LoRA, aLoRA and Shadow Residual, not ordinary
+  adapter-only requests. Use the composed template or `Conversation`.
+  Request validation is intentionally deferred; see
+  [the stream API limitation](docs/STREAM_API.md#known-gap-vllm-head-marker-validation-deferred).
+
 ## [0.1.0] — MVP
 
 Initial MVP release. API is not yet stable.

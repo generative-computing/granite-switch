@@ -61,11 +61,16 @@ the supported dependency environment are still release gates.
    Python 3.11, torch 2.11.0 and transformers 5.8.0. The project declares
    transformers 5.16 through 5.17.0. Passing tests here cannot establish support
    for the declared environment.
-3. **Set the raw-prompt serving contract.** HF rejects a misplaced or duplicate
-   marker. vLLM does not validate request boundaries; a misplaced marker can
-   silently lose the verdict. Templates and `Conversation` produce the intended
-   layout. Before supporting arbitrary raw prompts, add host-side request
-   validation and serving tests. This is a correctness gap for that interface.
+3. **Raw-prompt validation is intentionally deferred (2026-11-15).** vLLM can
+   silently lose the verdict when a head marker is not last, and it does not
+   reject repeated markers. This applies to heads on base, LoRA, aLoRA and
+   Shadow Residual, not ordinary adapter-only requests. Use the composed
+   template or `Conversation`; manual head prompts must contain one head marker
+   at the end. No validation fix is included in this branch. Before supporting
+   arbitrary raw prompts, add host-side validation and serving tests. Passing
+   GPU tests alone will not close this known gap. See the
+   [API limitation](STREAM_API.md#known-gap-vllm-head-marker-validation-deferred)
+   for examples and the supported workaround.
 4. **Confirm compatibility claims.** Compare a real adapter-only checkpoint with
    the pre-stream implementation. Exercise old probe checkpoints on the new
    reader. Avoid promising that old readers support every new stream checkpoint:
