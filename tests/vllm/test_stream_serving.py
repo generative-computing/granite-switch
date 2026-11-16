@@ -6,15 +6,14 @@ every head on the base model. This one serves the stream API's layout through
 the engine, eager and under FULL CUDA graphs, and on two GPUs:
 
 * compact LoRA rows: the heads take no LoRA rows;
-* a head on an adapter (option B): ``tox_sr`` runs the Shadow Residual adapter
-  at its marker, so it must read a different state than ``tox`` on the base;
+* read layers: ``tox_l0`` reads decoder layer 0, ``tox`` the final norm;
 * a plugin head type, found only through its ``granite_switch.streams`` entry
   point, in merge mode: the example ``mlp_head``.
 
-Identity probes expose the state they read: their packed scores must be the
-served hidden state, and their rewritten label logits the scores. Every head is
-compared with the HF fp32 reference against the gap a routing bug would leave:
-``tox`` and ``tox_sr`` differ only by the adapter at the marker, and ``nudge``
+Identity probes expose the state they read: ``tox``'s packed scores must be the
+served hidden state, and every probe's rewritten label logits its scores. Every
+head is compared with the HF fp32 reference against the gap a routing bug would
+leave: ``tox`` and ``tox_l0`` differ only by the read layer, and ``nudge``
 merged differs from its LM row only by the head.
 
 Requires GPU + vLLM; the two-GPU cases need two GPUs.
@@ -34,7 +33,7 @@ pytestmark = pytest.mark.skipif(
 
 WORKER = os.path.join(os.path.dirname(__file__), "_stream_serving_worker.py")
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(WORKER)))
-HEADS = ("tox", "tox_sr", "nudge")
+HEADS = ("tox", "tox_l0", "nudge")
 
 
 @pytest.fixture(scope="module")
@@ -108,11 +107,11 @@ def _dist(a, b):
 
 def _check(served, composed):
     ref = composed["reference"]
-    # The gaps a routing bug would leave: the adapter missing at tox_sr's
-    # marker reads tox's state; a missing merge leaves the LM row.
-    gap_pair = _dist(ref["tox_sr"], ref["tox"])
+    # The gaps a routing bug would leave: the wrong read layer reads the other
+    # probe's state; a missing merge leaves the LM row.
+    gap_layer = _dist(ref["tox_l0"], ref["tox"])
     gap_merge = _dist(ref["nudge"], ref["nudge_lm"])
-    assert gap_pair > 0.1 and gap_merge > 0.1, (gap_pair, gap_merge)
+    assert gap_layer > 0.1 and gap_merge > 0.1, (gap_layer, gap_merge)
 
     seq = served["sequential"]
     by_slot = {}
@@ -122,15 +121,17 @@ def _check(served, composed):
         assert replay["records"] == first["records"]
         record, output = first["records"][0], first["outputs"][0]
         by_slot[slot] = record
-        if name in ("tox", "tox_sr"):
-            # Identity probe: the scores are the state it read, exactly.
-            assert record["packed_scores"] == record["served_hidden"]
+        if name in ("tox", "tox_l0"):
+            # Identity probe: the scores are the state it read, exactly; tox
+            # reads the final state, which is also the served hidden state.
+            if name == "tox":
+                assert record["packed_scores"] == record["served_hidden"]
             assert record["rewritten_label_logits"] == record["packed_scores"]
             scores = record["packed_scores"]
             assert output["token_id"] == 100 + scores.index(max(scores))
             assert not output["has_non_label_support"]
             err = _dist(scores, ref[name])
-            assert err < gap_pair / 3, (name, err, gap_pair)
+            assert err < gap_layer / 3, (name, err, gap_layer)
         else:
             err = _dist(record["rewritten_label_logits"], ref["nudge"])
             assert err < gap_merge / 3, (err, gap_merge)
@@ -145,7 +146,7 @@ def _check(served, composed):
     assert sorted(r["slot"] for r in mixed["records"]) == [2, 3, 4]
     for record in mixed["records"]:
         alone = by_slot[record["slot"]]
-        gap = gap_merge if record["slot"] == 4 else gap_pair
+        gap = gap_merge if record["slot"] == 4 else gap_layer
         assert (
             _dist(record["rewritten_label_logits"], alone["rewritten_label_logits"])
             < gap / 3

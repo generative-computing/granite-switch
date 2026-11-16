@@ -23,21 +23,16 @@ from granite_switch import Conversation, KVHistoryPolicy
 from granite_switch.composer.tokenizer_setup import ANCHOR_MODE_HEAD
 from tests.shared.conversation_stubs import StubConfig, make_stub_tokenizer
 
-AL, TOX, PAIR = "uncertainty", "tox", "tox_on_uncertainty"
-# An aLoRA invoked inside the user message, a head on the base model, and the
-# same kind of head on the aLoRA (option B).
-ADAPTERS = [
-    (AL, "alora", "<certainty>"),
-    (TOX, ANCHOR_MODE_HEAD, None),
-    (PAIR, ANCHOR_MODE_HEAD, None),
-]
+AL, TOX = "uncertainty", "tox"
+# An aLoRA invoked inside the user message, and a head on the base model.
+ADAPTERS = [(AL, "alora", "<certainty>"), (TOX, ANCHOR_MODE_HEAD, None)]
 PRESERVE = KVHistoryPolicy.PRESERVE_MIXED_HISTORY
 RE_PREFILL = KVHistoryPolicy.RE_PREFILL
 
 
 @pytest.fixture
 def tok():
-    return make_stub_tokenizer(ADAPTERS, head_adapters={PAIR: AL})
+    return make_stub_tokenizer(ADAPTERS)
 
 
 @pytest.fixture
@@ -46,7 +41,7 @@ def config(tok):
     return StubConfig(
         [tok.token_id(f"<|{name}|>") for name in names],
         adapter_names=names,
-        adapter_kinds=["lora", "probe", "probe"],
+        adapter_kinds=["lora", "probe"],
     )
 
 
@@ -156,32 +151,6 @@ class TestRecordingAHeadTurn:
         ids = list(conv.build_prompt(adapter=AL))
         assert _token(tok, TOX) not in ids
         assert ids == _scratch(conv, AL)
-
-
-class TestHeadOnAnAdapter:
-    def test_pair_on_an_in_message_alora_appends_with_both_tokens(self, tok, config):
-        """Option B: the aLoRA's token inside the message, the pair's marker last."""
-        conv = Conversation(tok, policy=PRESERVE, config=config)
-        conv.user("Hello.")
-        conv.build_prompt()
-        conv.record_answer("Hi.")
-        kept = conv.sent_token_ids
-
-        conv.user("Is it answerable? <certainty>")
-        ids = list(conv.build_prompt(adapter=PAIR))
-        assert ids[: len(kept)] == kept
-        assert _controls(ids[len(kept) :], config) == [
-            _token(tok, AL),
-            _token(tok, PAIR),
-        ]
-        assert ids[-1] == _token(tok, PAIR)
-
-    def test_pair_after_kept_control_tokens_renders_from_text(self, tok, config):
-        conv = _after_an_alora_turn(tok, config, PRESERVE)
-        conv.user("Is it answerable? <certainty>")
-        ids = list(conv.build_prompt(adapter=PAIR))
-        assert ids == _scratch(conv, PAIR)
-        assert _controls(ids, config) == [_token(tok, AL), _token(tok, PAIR)]
 
 
 class TestCompletionPayload:

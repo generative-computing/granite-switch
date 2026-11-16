@@ -4,8 +4,8 @@
 A slot is either an adapter stream or a head stream (any type other than
 ``lora``), selected by the same control token and adapter index. These helpers,
 shared by both backends' switches, split the switch's single per-token index
-stream so that head positions leave the adapters' path (unless a head names an
-adapter, which the models route separately) and feed the head streams.
+stream so that head positions leave the adapters' path and feed the head
+streams.
 
 Both switch engines use the shared stream routing table.
 """
@@ -41,7 +41,7 @@ def split_head_indices(
     vLLM), so this serves both backends:
 
       - ``lora_indices``: head positions zeroed, so the LoRA path no-ops
-        there (a head that names an adapter is routed back by the models).
+        there.
       - ``head_indices``: the adapter index at head positions, else 0.
 
     With ``kind_lut`` None (no head slots) the LoRA stream passes through

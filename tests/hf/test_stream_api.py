@@ -11,9 +11,7 @@ CPU, tiny models composed by the real composer. Covers:
 * an example plugin type (``tests/shared/stream_plugins/mlp_head.py``) run end
   to end, with ``merge``;
 * a head module's wider, other-dtype output fitted to its score row;
-* a head that names an adapter: its marker runs that adapter, so the head
-  reads the adapter's state (Shadow Residual from the marker alone;
-  single-stream LoRA with the adapter's own token in the prompt too);
+* a head reads the base model, even after a Shadow Residual adapter's token;
 * compact LoRA rows: head slots take no row in the LoRA tensors;
 * the pre-streams checkpoint layout, unchanged.
 """
@@ -222,18 +220,13 @@ class TestStreamEntries:
         specs = parse_entries(
             [
                 {"type": "lora"},
-                _probe(0, read_layer=1, adapter="s1", settings={"k": 2}),
+                _probe(0, read_layer=1, settings={"k": 2}),
             ],
             2,
         )
         assert [s.is_head for s in specs] == [False, True]
         head = specs[1]
-        assert (head.slot, head.read_layer, head.head_row, head.adapter) == (
-            2,
-            1,
-            0,
-            "s1",
-        )
+        assert (head.slot, head.read_layer, head.head_row) == (2, 1, 0)
         assert (head.mode, head.token_ids, head.weight) == ("select", (100, 200), 1.0)
         assert head.settings == {"k": 2}
 
@@ -252,7 +245,6 @@ class TestStreamEntries:
             ({**_probe(0), "read_layer": -1}, "read_layer must be a decoder layer"),
             ({**_probe(0), "read_layer": True}, "read_layer must be a decoder layer"),
             ({**_probe(0), "read_layer": "1"}, "read_layer must be a decoder layer"),
-            ({**_probe(0), "adapter": 3}, "adapter must be"),
             (
                 {**_probe(0), "output": {"token_ids": [7, 7]}},
                 "token_ids must be distinct",
@@ -280,6 +272,8 @@ class TestStreamEntries:
         "entry, field",
         [
             ({**_probe(0), "read_layr": 3}, "read_layr"),
+            # A head on an adapter was a field once; this version refuses it.
+            ({**_probe(0), "adapter": "ad"}, "adapter"),
             ({**_probe(0), "output": {"token_ids": [1], "scale": 2.0}}, "scale"),
         ],
     )
@@ -762,95 +756,26 @@ def test_a_head_may_return_extra_columns_in_any_float_dtype(tmp_path, monkeypatc
 
 
 # --------------------------------------------------------------------------- #
-# A head on an adapter
+# A head reads the base model
 # --------------------------------------------------------------------------- #
-def _identity_probe_model(tmp_path, adapter):
-    """[adapter "ad", a probe on the base, a probe on "ad"], identity heads.
-
-    An identity head returns the state it read, so its label scores ARE that
-    state. ``adapter`` writes the adapter's folder (:func:`_sr` or
-    :func:`_lora`).
-    """
-    probe = _probe_folder(tmp_path / "probe", torch.eye(HIDDEN))
-    return _compose(
+def test_head_reads_the_base_model_after_an_sr_adapter(tmp_path):
+    """Shadow Residual writes no K/V, so an adapter's tokens leave the base model
+    as it was: an identity head reads the same state with or without them."""
+    model = _compose(
         tmp_path,
-        [("ad", adapter(tmp_path / "ad")), ("probe", probe), ("probe_on_ad", probe)],
         [
-            {"type": "lora"},
-            _probe(0, labels=IDENTITY_LABELS),
-            _probe(1, labels=IDENTITY_LABELS, adapter="ad"),
+            ("ad", _sr(tmp_path / "ad")),
+            ("probe", _probe_folder(tmp_path / "probe", torch.eye(HIDDEN))),
         ],
+        [{"type": "lora"}, _probe(0, labels=IDENTITY_LABELS)],
     )
-
-
-def test_head_on_an_adapter_reads_that_adapter(tmp_path):
-    """Shadow Residual: the marker alone runs the adapter, and the head reads it."""
-    model = _identity_probe_model(tmp_path, _sr)
-    states = []
-
-    def run(ids):
-        states.clear()
-        hook = model.model.layers[-1].register_forward_hook(
-            lambda m, i, o: states.append(o[0])
-        )
-        try:
-            row = _last_row(model, ids)[IDENTITY_LABELS]
-        finally:
-            hook.remove()
-        base, adapted = (model.model.norm(h)[0, -1] for h in states[0])
-        return row, base, adapted
-
-    prompt = [5, 17, 42, 99]
-    on_base, base, _ = run([*prompt, 251])
-    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0]]
-    torch.testing.assert_close(on_base, base, atol=1e-5, rtol=0)
-
-    on_adapter, base_again, adapted = run([*prompt, 252])
-    # The marker runs adapter slot 1 (its LoRA row), and only the marker.
-    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 1]]
-    torch.testing.assert_close(on_adapter, adapted, atol=1e-5, rtol=0)
-    assert not torch.allclose(on_adapter, base_again, atol=1e-3)
-    # Every token before the marker is the base model's, both times.
-    torch.testing.assert_close(base, base_again)
-
-
-def _final_state(model, ids):
-    with torch.no_grad():
-        out = model.model(input_ids=torch.tensor([ids]), use_cache=False)
-    return out.last_hidden_state[0, -1]
-
-
-def test_head_on_a_lora_adapter_reads_that_adapter_with_its_token(tmp_path):
-    """Single-stream LoRA: the adapter's own token makes the head's read exact.
-
-    The adapter writes the K/V of every token it runs on, so the marker alone
-    can't stand in for it. With the adapter's token first, as the chat
-    template places it, the head reads exactly the state the adapter computes
-    when it runs alone: the identity head's row IS that state.
-    """
-    model = _identity_probe_model(tmp_path, _lora)
     body = [5, 17, 42, 99]
-    # The reference: the adapter alone, then a plain token that embeds as the
-    # marker does (its substitute, id 1).
-    reference = _final_state(model, [250, *body, 1])
-    paired = _last_row(model, [250, *body, 252])[IDENTITY_LABELS]
-    assert model.model._last_lora_indices.tolist() == [[1, 1, 1, 1, 1, 1]]
-    torch.testing.assert_close(paired, reference, atol=1e-5, rtol=0)
-
-    # The marker alone runs the adapter on one token only: not the same state.
-    alone = _last_row(model, [1, *body, 252])[IDENTITY_LABELS]
-    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0, 1]]
-    assert not torch.allclose(alone, reference, atol=1e-2)
-
-
-def test_a_head_names_an_adapter_slot(tmp_path):
-    probe = _verdict_probe(tmp_path / "probe", 0)
-    with pytest.raises(ValueError, match="not an adapter slot"):
-        _compose(
-            tmp_path,
-            [("ad", _sr(tmp_path / "ad")), ("probe", probe), ("on_probe", probe)],
-            [{"type": "lora"}, _probe(0), _probe(1, adapter="probe")],
-        )
+    after_adapter = _last_row(model, [250, *body, 251])[IDENTITY_LABELS]
+    assert model.model._last_lora_indices.tolist() == [[1, 1, 1, 1, 1, 0]]
+    # Token 1 embeds as the adapter's control token does (its substitute).
+    plain = _last_row(model, [1, *body, 251])[IDENTITY_LABELS]
+    assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0, 0, 0]]
+    torch.testing.assert_close(after_adapter, plain, atol=1e-5, rtol=0)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,8 +1,9 @@
 # Stream API branch review
 
 Reviewed on 2026-11-15, resuming the second Claude review at `14d4548` on
-`feature/add-stream-api`. Scope: single-token head plugins, including heads on
-base, LoRA, aLoRA and Shadow Residual states. Block streams remain separate work.
+`feature/add-stream-api`. Scope: single-token head plugins. Since 2026-11-16 a
+head always reads the base model: heads on adapters were removed from the branch,
+to come back later in another form. Block streams remain separate work.
 
 ## Assessment
 
@@ -53,7 +54,8 @@ the supported dependency environment are still release gates.
 
 1. **Run this revision on GPUs.** On both supported vLLM lines, exercise eager
    and CUDA-graph serving, mixed batches, chunked prefill, prefix-cache reuse,
-   nonfinal read layers, select/merge outputs, and heads on each adapter kind.
+   nonfinal read layers, select/merge outputs, and heads beside each adapter
+   kind.
    Include the new slot-257 and persistent-buffer cases. Repeat TP=2 and PP=2;
    the packed output and loader changes must be checked at those boundaries.
    Earlier GPU successes belong to the previous revision, not this one.
@@ -63,8 +65,8 @@ the supported dependency environment are still release gates.
    for the declared environment.
 3. **Raw-prompt validation is intentionally deferred (2026-11-15).** vLLM can
    silently lose the verdict when a head marker is not last, and it does not
-   reject repeated markers. This applies to heads on base, LoRA, aLoRA and
-   Shadow Residual, not ordinary adapter-only requests. Use the composed
+   reject repeated markers. This applies to every head type, not ordinary
+   adapter-only requests. Use the composed
    template or `Conversation`; manual head prompts must contain one head marker
    at the end. No validation fix is included in this branch. Before supporting
    arbitrary raw prompts, add host-side validation and serving tests. Passing

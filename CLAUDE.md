@@ -484,7 +484,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/GIT_WORKFLOW.md` - Git branching strategy and commit guidelines
 - `docs/SUPPORTED_MODELS.md` - Model compatibility
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
-- `docs/STREAM_API.md` - Stream entries, head streams (probes, plugins), heads on adapters
+- `docs/STREAM_API.md` - Stream entries, head streams (probes, plugins), writing a head type
 - `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
 - `docs/AUDIO.md` - Audio input (ASR cascade)
 - `docs/CICD.md` - Pre-commit hooks and CI setup

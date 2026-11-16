@@ -10,8 +10,7 @@ request.
 An **activation probe slot** (probe for short) holds a small linear head instead of a LoRA. It
 uses the same control-token machinery (one `<|name|>` token, one adapter index) and reads the
 configured layer's activation to produce per-label logits. Probe and generation-adapter slots can
-coexist in one checkpoint; a request selects one slot. A probe reads the base model's state, or,
-with `adapter:`, the state one named adapter computes ([A probe on an adapter](#a-probe-on-an-adapter)).
+coexist in one checkpoint; a request selects one slot. A probe reads the base model's state.
 
 The probe is the first **head stream** type of Granite Switch's stream API. Other head types plug
 in the same way, with no change to Granite Switch; see [The Stream API](../../docs/STREAM_API.md).
@@ -57,9 +56,7 @@ Train the head however you like (a frozen base model plus a trainable linear lay
 hidden state is the usual recipe). At serving time the head reads the hidden state of the control
 token, which the model embeds as the base's role-open marker: `<|start_of_role|>` on Granite
 4.0/4.1, `<|im_start|>` on 4.2. So train on the chat-rendered prompt with no generation prompt,
-with that marker appended, and read the hidden state there. A probe on an adapter reads the state
-that adapter computes, so train it on that: the prompt the chat template renders for the pair (see
-[A probe on an adapter](#a-probe-on-an-adapter)), with the adapter loaded.
+with that marker appended, and read the hidden state there.
 
 By default that is the **final post-norm** hidden state (HF's `last_hidden_state`). A slot can
 instead read an intermediate decoder layer (see `layer` in Step 2); train it on that layer's output.
@@ -206,36 +203,6 @@ Path("./adapters.yaml").write_text(yaml.safe_dump(manifest, sort_keys=False))
 print("wrote ./adapters.yaml")
 ```
 
-### A probe on an adapter
-
-A probe entry may name an adapter slot of the same checkpoint. The probe then reads the state that
-adapter computes, not the base model's:
-
-```yaml
-answerability:
-  path: /path/to/answerability/granite-4.1-3b/lora
-  type: lora
-safety_rag:                  # the safety probe, on the answerability adapter
-  path: ./safety-rag-head/safety_rag/granite-4.1-3b/lora
-  kind: probe
-  labels: [safe, unsafe]
-  adapter: answerability
-```
-
-Each pair of a probe and an adapter is its own slot, with its own control token, fixed at compose
-time; a request still names one slot (`adapter_name="safety_rag"`). The chat template places what
-that adapter needs for the probe to read exactly the state it computes alone:
-
-| The adapter | What the template places |
-|---|---|
-| Shadow Residual | The probe's control token alone (the adapter writes no K/V) |
-| LoRA | The adapter's own token where it goes alone (the start), then the probe's token last |
-| aLoRA invoked inside the user message | The adapter's own token there, then the probe's token last |
-| aLoRA invoked at the assistant header | The probe's token alone: the adapter would start right there |
-
-Each pair costs a slot, a control token and a bank row, even when the same head is reused on
-several adapters.
-
 ## Step 3: Compose
 
 Pass the manifest to the compose CLI exactly like any other adapter source — a `.yaml`/`.yml` path is
@@ -262,8 +229,7 @@ Head streams:
   faithfulness (probe) → select over token ids [19045, 14176, 60668] @ final norm
 ```
 
-A slot with `layer: 20` prints `@ layer 20` instead, and a probe on an adapter prints
-`(probe on answerability)`.
+A slot with `layer: 20` prints `@ layer 20` instead.
 
 The resulting `config.json` holds one **stream entry** per slot, under `streams`, as plain
 lists/ints, so it round-trips through `save_pretrained`/`from_pretrained` with no custom code, and
@@ -279,11 +245,10 @@ both the HF and vLLM backends read it identically. A probe's entry:
 | `type` | `"probe"`; an adapter slot's entry is just `{"type": "lora"}` |
 | `read_layer` | the zero-based decoder layer the probe reads; `null` for the final post-norm state |
 | `head_row` | the slot's row in the probe bank |
-| `adapter` | only on a probe on an adapter: that adapter's slot name |
 | `output.token_ids` | the label token ids; `output.mode` is `select` for a probe |
 
 `config.json` also keeps the older probe fields (`adapter_kinds`, `probe_label_token_ids`,
-`probe_read_layers`), derived from the entries, so older versions of Granite Switch can read it. A
+`probe_read_layers`), derived from the entries, for tools that read those fields. A
 checkpoint composed before stream entries has only those fields and still loads: its entries are
 rebuilt from them. See [The Stream API](../../docs/STREAM_API.md) for every field.
 
@@ -330,8 +295,7 @@ two labels for a 2-label slot, three for a 3-label slot.
 
 Instead of placing `<|safety|>` by hand, you can let the composed model's chat template place it for
 you by passing `adapter_name` — a probe slot is activated exactly like any other adapter. The
-template appends the control token after the last turn, and for a probe on an adapter, also places
-that adapter's token:
+template appends the control token after the last turn:
 
 ```bash
 curl http://localhost:8000/v1/chat/completions \
@@ -366,8 +330,7 @@ channel.
 ## How it works (brief)
 
 - **Routing.** A probe control token selects its slot like any adapter; its position is routed
-  out of the LoRA stream (or, for a probe on an adapter, through that adapter's LoRA) and the head
-  reads the activation there.
+  out of the LoRA stream and the head reads the base model's activation there.
 - **Padded head bank.** All probes share one tensor, one row per probe slot, padded to the widest
   slot's label count, keeping the vLLM head one compile-safe matmul.
 - **Scoring.** Intermediate-layer slots are scored as that layer runs, final-layer slots after the
@@ -379,7 +342,7 @@ channel.
 
 ## Related
 
-- [The Stream API](../../docs/STREAM_API.md) — stream entries, heads on adapters, and how to write
-  a new head type.
+- [The Stream API](../../docs/STREAM_API.md) — stream entries, and how to write a new head
+  type.
 - [Bring Your Own Adapter](build_your_own_adapter.md) — train and compose a LoRA adapter.
 - [Composer README](../../src/granite_switch/composer/README.md) — full compose CLI reference.

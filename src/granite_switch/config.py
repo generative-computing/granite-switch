@@ -56,7 +56,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             token). Required when num_adapters > 0.
         streams (List[dict]): One stream entry per slot, saying what it runs:
             ``{"type": "lora"}`` for an adapter, or a head type's entry (read
-            layer, bank row, output, optional adapter, settings). See
+            layer, bank row, output, settings). See
             ``granite_switch.streams`` and docs/STREAM_API.md. None for a
             checkpoint composed before streams: its entries are rebuilt from
             ``adapter_kinds``, ``probe_label_token_ids`` and

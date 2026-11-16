@@ -36,14 +36,12 @@ This project uses [semantic versioning](https://semver.org/).
   as the activation probe. A new head type plugs in with a `HeadType`, its
   weights and a config entry, registered through the `granite_switch.streams`
   entry-point group, with no change to Granite Switch. Heads write their scores
-  into their marker's logits row (`select` or `merge`) and take no LoRA rows.
+  into their marker's logits row (`select` or `merge`), read the base model,
+  and take no LoRA rows.
   A stream entry with a type, mode or field this version doesn't know is refused.
   Checkpoints without `streams` load as before.
-- A head can run on an adapter: `adapter:` in the manifest (and in the stream
-  entry) names an adapter slot that runs at the head's marker, so the head reads
-  that adapter's state. The chat template places what each adapter kind needs.
-- Compose manifest keys for head streams: `kind`, `labels`, `layer`, `adapter`,
-  `output`, `settings`.
+- Compose manifest keys for head streams: `kind`, `labels`, `layer`, `output`,
+  `settings`.
 - `--bundle-asr` composes the ASR model's weights into the checkpoint (`asr/`)
   for airgapped serving with no Hub access; `asr_bundled_path` in the config.
 - `--asr-revision` and the `asr_model_revision` config field.
@@ -72,8 +70,8 @@ This project uses [semantic versioning](https://semver.org/).
 
 - vLLM does not reject misplaced or repeated head markers in manually built
   prompts; a marker that is not last can silently lose the head's verdict.
-  This affects heads on base, LoRA, aLoRA and Shadow Residual, not ordinary
-  adapter-only requests. Use the composed template or `Conversation`.
+  This affects every head type, not ordinary adapter-only requests. Use the
+  composed template or `Conversation`.
   Request validation is intentionally deferred; see
   [the stream API limitation](docs/STREAM_API.md#known-gap-vllm-head-marker-validation-deferred).
 

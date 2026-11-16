@@ -408,22 +408,22 @@ class Conversation:
         """
         if self.policy is KVHistoryPolicy.RE_PREFILL:
             return self._build_reprefill(adapter, **template_kwargs)
-        if not self._sent_ids or self._control_count(self._sent_ids):
-            return self._render_full(adapter, **template_kwargs)
-        prev = self._render(
-            self._messages[: self._sent_messages],
-            gen=False,
-            **self._sent_template_kwargs,
-        )
-        full = self._render(
-            self._messages, gen=True, adapter=adapter, **template_kwargs
-        )
-        if self._appendable(full, prev):
-            return self._sent_ids + self._encode(
-                self._delta(adapter, **template_kwargs)
+        if self._sent_ids and not self._control_count(self._sent_ids):
+            prev = self._render(
+                self._messages[: self._sent_messages],
+                gen=False,
+                **self._sent_template_kwargs,
             )
-        # A pair on a LoRA: the adapter's token sits at index 0, so no delta can
-        # carry it. Render from text; nothing kept changes.
+            full = self._render(
+                self._messages, gen=True, adapter=adapter, **template_kwargs
+            )
+            if self._appendable(full, prev):
+                return self._sent_ids + self._encode(
+                    self._delta(adapter, **template_kwargs)
+                )
+        # Nothing kept yet, a kept control token (its adapter would run over the
+        # history), or a template that rewrites earlier text: render from text.
+        # Nothing kept changes.
         return self._render_full(adapter, **template_kwargs)
 
     def _build_reprefill(self, adapter, **template_kwargs):
@@ -715,10 +715,8 @@ class Conversation:
     def _control_char_index(self, rendered):
         """Char offset of this turn's control token in ``rendered``, or -1.
 
-        A fresh render carries only this turn's control tokens: one, or two for
-        a head on an adapter (the adapter's token, then the marker last). The
-        earliest occurrence is therefore the one that decides where this turn's
-        routing starts.
+        A fresh render carries at most one control token, so the earliest
+        occurrence of any control string is this turn's.
         """
         idxs = [i for i in (rendered.find(t) for t in self._control_texts()) if i >= 0]
         return min(idxs, default=-1)

@@ -2,10 +2,9 @@
 """Head streams declared in a compose manifest, composed through the CLI.
 
 The other head tests compose through the Python API (``streams=``). This one
-runs the compose CLI on a YAML manifest that uses every head key:
+runs the compose CLI on a YAML manifest with two head entries:
 
 * ``tox``: a probe with no ``type`` key (a head's marker always goes last);
-* ``tox_lo``: the same kind of probe on the LoRA adapter (``adapter:``);
 * ``nudge``: the example plugin type, in merge mode, with ``settings``.
 
 The plugin is visible only through its ``granite_switch.streams`` entry point
@@ -83,13 +82,12 @@ def composed(tmp_path_factory):
     g = torch.Generator().manual_seed(0)
     probe = {"weight": torch.randn(2, hidden, generator=g), "bias": torch.zeros(2)}
     heads = {}
-    for name in ("tox", "tox_lo", "nudge"):
+    for name in ("tox", "nudge"):
         d = root / name / name / "tiny" / "lora"
         d.mkdir(parents=True)
         _io_yaml(d, name)
         heads[name] = str(d)
-    for name in ("tox", "tox_lo"):
-        save_file(probe, os.path.join(heads[name], "probe_head.safetensors"))
+    save_file(probe, os.path.join(heads["tox"], "probe_head.safetensors"))
     save_file(
         {
             "w1": torch.randn(WIDTH, hidden, generator=g),
@@ -100,12 +98,6 @@ def composed(tmp_path_factory):
     manifest = {
         "lo": {"path": str(lora), "type": "lora"},
         "tox": {"path": heads["tox"], "kind": "probe", "labels": ["yes", "no"]},
-        "tox_lo": {
-            "path": heads["tox_lo"],
-            "kind": "probe",
-            "labels": ["yes", "no"],
-            "adapter": "lo",
-        },
         "nudge": {
             "path": heads["nudge"],
             "kind": "mlp_head",
@@ -147,7 +139,7 @@ def composed(tmp_path_factory):
 def test_compose_writes_every_head_entry(composed):
     out, stdout, tok = composed
     config = json.loads((out / "config.json").read_text())
-    assert config["adapter_names"] == ["lo", "tox", "tox_lo", "nudge"]
+    assert config["adapter_names"] == ["lo", "tox", "nudge"]
     labels = [tok.encode(w, add_special_tokens=False)[0] for w in ("yes", "no")]
     assert config["streams"] == [
         {"type": "lora"},
@@ -158,13 +150,6 @@ def test_compose_writes_every_head_entry(composed):
             "output": {"mode": "select", "token_ids": labels},
         },
         {
-            "type": "probe",
-            "read_layer": None,
-            "head_row": 1,
-            "output": {"mode": "select", "token_ids": labels},
-            "adapter": "lo",
-        },
-        {
             "type": "mlp_head",
             "read_layer": None,
             "head_row": 0,
@@ -173,7 +158,7 @@ def test_compose_writes_every_head_entry(composed):
         },
     ]
     assert "Head streams:" in stdout
-    assert "tox_lo (probe on lo)" in stdout
+    assert "tox (probe) → select" in stdout
     assert "nudge (mlp_head) → merge" in stdout
 
 
@@ -191,40 +176,11 @@ def test_template_places_each_head(composed):
             )["input_ids"]
         )
 
-    tid = {n: tok.convert_tokens_to_ids(f"<|{n}|>") for n in ("lo", "tox", "tox_lo")}
+    tid = {n: tok.convert_tokens_to_ids(f"<|{n}|>") for n in ("lo", "tox")}
     plain = list(
         tok.apply_chat_template(
             msgs, tokenize=True, add_generation_prompt=False, return_dict=True
         )["input_ids"]
     )
     assert ids(adapter_name="tox") == [*plain, tid["tox"]]
-    pair = ids(adapter_name="tox_lo")
-    # The LoRA's own token where it goes alone (the start), the marker last.
-    assert pair[0] == tid["lo"] and pair[-1] == tid["tox_lo"]
-    assert pair.count(tid["lo"]) == 1
-
-
-def test_pair_marker_runs_its_adapter(composed):
-    out, _stdout, _tok = composed
-    from transformers import AutoTokenizer
-
-    import tests.shared.stream_plugins.mlp_head  # noqa: F401 -- registers the type
-    from granite_switch.hf import GraniteSwitchForCausalLM
-
-    tok = AutoTokenizer.from_pretrained(str(out))
-    model = GraniteSwitchForCausalLM.from_pretrained(
-        str(out), dtype=torch.float32
-    ).eval()
-    ids = tok.apply_chat_template(
-        [{"role": "user", "content": "Is this rude?"}],
-        adapter_name="tox_lo",
-        add_generation_prompt=True,
-        return_dict=True,
-        return_tensors="pt",
-    )["input_ids"]
-    with torch.no_grad():
-        model(input_ids=ids, use_cache=False)
-    lora_rows = model.model._last_lora_indices[0].tolist()
-    # The LoRA (slot 1) runs from its token, at the start, through the pair's marker.
-    assert set(lora_rows) == {1}
-    assert model.model._last_head_indices[0, -1].item() == 3
+    assert ids(adapter_name="lo")[0] == tid["lo"]

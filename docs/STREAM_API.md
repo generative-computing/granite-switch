@@ -10,9 +10,8 @@ Every slot in a Granite Switch checkpoint is a **stream**: its control token tur
 | What it emits | Text, through the LM head | One token: the head's scores go into the marker's logits row |
 | Where its control token goes | Where its adapter was trained (start, before the invocation, generation prompt) | Last in the prompt (the chat template puts it there) |
 
-A head's control token is its **marker**. The head reads the hidden state at the marker, and the
-model rewrites that one row of logits. A head can read the base model's state, or the state one
-named adapter computes (a *pair*, see [Heads on adapters](#heads-on-adapters)).
+A head's control token is its **marker**. The head reads the base model's hidden state at the
+marker, and the model rewrites that one row of logits.
 
 The probe ([activation probe slots](../tutorials/guides/activation_probe_slots.md)) is the first
 head type. A new type needs three things and no change to Granite Switch:
@@ -30,8 +29,6 @@ head type. A new type needs three things and no change to Granite Switch:
   {"type": "lora"},
   {"type": "probe", "read_layer": 20, "head_row": 0,
    "output": {"mode": "select", "token_ids": [9891, 2201]}},
-  {"type": "probe", "read_layer": 20, "head_row": 1, "adapter": "answerability",
-   "output": {"mode": "select", "token_ids": [9891, 2201]}},
   {"type": "mlp_head", "read_layer": null, "head_row": 0,
    "output": {"mode": "merge", "token_ids": [9891, 2201], "weight": 0.5},
    "settings": {"width": 32}}
@@ -43,7 +40,6 @@ head type. A new type needs three things and no change to Granite Switch:
 | `type` | `"lora"` for an adapter slot, or a registered head type's name |
 | `read_layer` | The decoder layer the head reads, from 0; `null` reads after the final norm |
 | `head_row` | The slot's row in its type's weight bank. Each type numbers its own bank; compose assigns them |
-| `adapter` | Optional: an adapter slot (by name) that runs at the marker before the head reads. Omitted means the base model |
 | `output.mode` | `select` or `merge` (below) |
 | `output.token_ids` | The tokens the scores land on, one per score, each token once |
 | `output.weight` | The scale for `merge`, a finite number (default 1.0) |
@@ -213,12 +209,6 @@ tox:                        # a probe on the base model
   kind: probe               # the stream type
   labels: ["yes", "no"]     # quote YAML labels; each must be a single token
   layer: 20                 # the read layer; omit for the final norm
-tox_rag:                    # the same kind of head, on the answerability adapter
-  path: ./tox_rag
-  kind: probe
-  labels: ["yes", "no"]
-  layer: 20
-  adapter: answerability
 nudge:                      # a plugin type, in merge mode
   path: ./nudge             # holds mlp_head.safetensors
   kind: mlp_head
@@ -232,7 +222,6 @@ nudge:                      # a plugin type, in merge mode
 | `kind` | The stream type. Omitted, or `lora`, means an adapter |
 | `labels` | The output words, turned into `output.token_ids` |
 | `layer` | The read layer (`read_layer`) |
-| `adapter` | An adapter slot of the same checkpoint that runs at the marker |
 | `output` | `mode`, `weight`, or explicit `token_ids` |
 | `settings` | Passed to the type, which checks it |
 
@@ -249,7 +238,6 @@ the marker last in the chat template. It prints one line per head:
 ```
 Head streams:
   tox (probe) → select over token ids [9891, 2201] @ layer 20
-  tox_rag (probe on answerability) → select over token ids [9891, 2201] @ layer 20
   nudge (mlp_head) → merge over token ids [9891, 2201] @ final norm
 ```
 
@@ -257,29 +245,13 @@ Head streams:
 `model.probe_head.*`, another type's is `model.stream_<type>.*`. Heads take no LoRA rows: the LoRA
 tensors hold rows for adapter slots only, and slots may come in any order.
 
-## Heads on adapters
+## A head reads the base model
 
-MultiSwitch gives every token one slot, and the latest control token wins. A head's marker is a
-control token too, so at the marker no adapter is active and a head reads the base model. A head
-whose entry names an `adapter` (a *pair*) runs that adapter's LoRA at its marker instead. Each pair
-is its own slot with its own control token, fixed at compose time; a request still names one slot.
-
-For the head to read exactly the state the adapter computes on its own, the chat template renders
-a pair like this:
-
-| The adapter | What the template places | Why |
-|---|---|---|
-| Shadow Residual | The marker alone | The adapter writes no K/V, so running it at one token gives the same state as running it on every token |
-| LoRA | The adapter's own token where it goes alone, then the marker last | A LoRA changes the K/V of every token it runs on, so it must run from its own token |
-| aLoRA invoked inside the user message | The same as a LoRA | The same reason |
-| aLoRA invoked at the assistant header | The marker alone | The adapter would start where the marker sits, on the same token: both stand for the role-open token |
-
-Measured on granite-4.1-3b with real adapters (HF, fp32): the pair's head reads exactly the state
-its adapter computes alone, for the answerability LoRA, the requirement-check aLoRA (invoked in the
-message) and the answerability aLoRA (invoked at the header).
-
-Each pair costs a slot, a control token and a bank row, even when the same head is reused on
-several adapters.
+At its marker no adapter runs: the marker is a control token too, and MultiSwitch's latest control
+token wins. On a Shadow Residual checkpoint an earlier adapter's tokens leave the base model's state
+as it was, since that adapter writes no K/V. A LoRA or aLoRA earlier in the same prompt changes the
+K/V the head attends to, so a head should get a prompt with no other control token: the chat
+template renders one, and `Conversation` does too (below).
 
 ## Multi-turn conversations
 
@@ -309,14 +281,12 @@ sampler uses the final prompt position. Repeated markers, including markers for 
 heads, are also not rejected. HF rejects misplaced markers in its input, including earlier
 occurrences of a repeated marker.
 
-This affects every head type and output mode, whether the head reads the base model or is
-paired with **LoRA, aLoRA or Shadow Residual**. Ordinary adapter-only requests are not subject
+This affects every head type and output mode. Ordinary adapter-only requests are not subject
 to this head-marker restriction: their control tokens intentionally affect later tokens.
 
 Use the composed chat template or `Conversation`, which place the head marker last. When
 building token prompts manually, include exactly one head marker at the end of a head request
-and do not retain head markers from earlier turns. For a paired LoRA/aLoRA head, also preserve
-the adapter token placement described in [Heads on adapters](#heads-on-adapters).
+and do not retain head markers from earlier turns.
 
 **Status, 2026-11-15:** validation is intentionally deferred; this branch does not implement a
 fix. A future fix should validate the complete tokenized request before scheduling, with

@@ -583,7 +583,6 @@ class TestManifestProbeMetadata:
                 "kind": "probe",
                 "labels": ["faithful", "hallucinated"],
                 "layer": None,
-                "adapter": None,
                 "output": None,
                 "settings": None,
             }
@@ -596,9 +595,7 @@ class TestManifestProbeMetadata:
         _found, head_meta = discover_adapters_from_yaml(str(manifest))
         assert head_meta == {}
 
-    @pytest.mark.parametrize(
-        "key", ["labels", "layer", "adapter", "output", "settings"]
-    )
+    @pytest.mark.parametrize("key", ["labels", "layer", "output", "settings"])
     @pytest.mark.parametrize("kind", [None, "lora"])
     def test_head_fields_require_a_head_kind(self, tmp_path, key, kind):
         entry = {"path": "/head", key: None}
@@ -618,6 +615,8 @@ class TestManifestProbeMetadata:
             ({"output": []}, "output must be a mapping"),
             ({"labels": ["yes"], "output": {"token_ids": [1]}}, "not both"),
             ({"read_layer": 3}, "unknown fields"),
+            # A head reads the base model; it can't name an adapter.
+            ({"adapter": "rag"}, "unknown fields"),
         ],
     )
     def test_bad_head_manifest_fails_during_discovery(self, tmp_path, fields, match):

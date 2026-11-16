@@ -84,7 +84,6 @@ safety:
   kind: "probe"                    # the stream type
   labels: ["safe", "unsafe"]       # output words, each a single token
   layer: 20                        # optional read layer; omit for the final norm
-  adapter: "answerability"         # optional: run this adapter at the head's marker
   output: {mode: "select"}         # optional: select (default) or merge, with weight
   settings: {}                     # optional, checked by the head type
 ```

@@ -14,7 +14,7 @@ The checkpoint is composed with ``streams=`` (compact LoRA rows), from a tiny
 base and one Shadow Residual adapter, with three heads:
 
 * ``tox``    -- an identity probe on the base model, read after the final norm;
-* ``tox_sr`` -- the same identity probe, on the SR adapter (option B);
+* ``tox_l0`` -- the same identity probe, read after decoder layer 0;
 * ``nudge``  -- the example ``mlp_head`` plugin, in merge mode.
 
 The plugin type is visible only through the ``granite_switch.streams`` entry
@@ -28,7 +28,7 @@ import sys
 import traceback
 from pathlib import Path
 
-HEADS = ("tox", "tox_sr", "nudge")
+HEADS = ("tox", "tox_l0", "nudge")
 PROMPT = [10, 21, 20]
 NUDGE_LABELS = [100, 101, 102, 103]
 MERGE_WEIGHT = 0.5
@@ -97,7 +97,7 @@ def compose(out_dir, out_path):
         {
             "type": "probe",
             "head_row": 1,
-            "adapter": "sr",
+            "read_layer": 0,
             "output": {"mode": "select", "token_ids": labels},
         },
         {
@@ -132,7 +132,7 @@ def compose(out_dir, out_path):
 
     requests = _requests()
     reference = {}
-    for name in ("tox", "tox_sr"):
+    for name in ("tox", "tox_l0"):
         reference[name] = last_row(requests[name])[labels].tolist()
     merged = last_row(requests["nudge"])
     with torch.no_grad():

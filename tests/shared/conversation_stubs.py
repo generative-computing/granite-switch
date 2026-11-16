@@ -126,7 +126,7 @@ class StubTokenizer:
         return ids
 
 
-def make_stub_tokenizer(adapters, chatml=False, head_adapters=None):
+def make_stub_tokenizer(adapters, chatml=False):
     """Build a StubTokenizer whose template knows ``adapters``.
 
     Args:
@@ -135,8 +135,6 @@ def make_stub_tokenizer(adapters, chatml=False, head_adapters=None):
             (``tokenizer_setup.ANCHOR_MODE_HEAD``); ``invocation_text`` is used
             for alora only.
         chatml: use the ChatML fixture instead of the role-marker one.
-        head_adapters: ``{head name: adapter name}`` for heads that run on an
-            adapter (passed through to ``configure_chat_template``).
     """
     name = "granite_chatml_template.jinja" if chatml else "granite_chat_template.jinja"
     with open(os.path.join(_FIXTURES, name)) as f:
@@ -155,7 +153,7 @@ def make_stub_tokenizer(adapters, chatml=False, head_adapters=None):
     invocations = [inv for _n, tech, inv in adapters if tech == "alora"]
     discovered = [(f"/path/{n}", n, tech, None) for n, tech, _inv in adapters]
     with patch(_PATCH_TARGET, side_effect=invocations):
-        configure_chat_template(tokenizer, discovered, head_adapters=head_adapters)
+        configure_chat_template(tokenizer, discovered)
 
     # Any <|...|> introduced by injection must also tokenize atomically.
     new_specials = sorted(

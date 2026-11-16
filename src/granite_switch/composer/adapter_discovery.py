@@ -122,7 +122,6 @@ def discover_adapters_from_yaml(
           kind: probe               # the stream type; "lora" when omitted
           labels: [faithful, hallucinated]
           layer: 12                 # optional decoder layer; omit for the final norm
-          adapter: answerability    # optional: an adapter run at the marker
           output: {mode: merge, weight: 0.5}   # optional; select by default
           settings: {}              # optional, type-specific
 
@@ -142,9 +141,9 @@ def discover_adapters_from_yaml(
         ``(found, head_meta)``. ``found`` is:
         List of ``(adapter_path, adapter_name, technology, source)`` tuples.
         The source is set to the manifest path for traceability.
-        ``head_meta`` maps name -> ``{"kind", "labels", "layer", "adapter",
-        "output", "settings"}`` for each entry that set any of them; names not
-        in it are plain adapter slots.
+        ``head_meta`` maps name -> ``{"kind", "labels", "layer", "output",
+        "settings"}`` for each entry that set any of them; names not in it are
+        plain adapter slots.
     """
     import yaml
 
@@ -167,20 +166,12 @@ def discover_adapters_from_yaml(
 
                 # Optional head streams (granite_switch.streams): kind is the
                 # stream type; the rest fills the slot's stream entry.
-                stream_keys = (
-                    "kind",
-                    "labels",
-                    "layer",
-                    "adapter",
-                    "output",
-                    "settings",
-                )
+                stream_keys = ("kind", "labels", "layer", "output", "settings")
                 if any(info.get(k) is not None for k in stream_keys):
                     head_meta[name] = {
                         "kind": info.get("kind") or "lora",
                         "labels": info.get("labels"),
                         "layer": info.get("layer"),
-                        "adapter": info.get("adapter"),
                         "output": info.get("output"),
                         "settings": info.get("settings"),
                     }
@@ -192,7 +183,7 @@ def _validate_manifest_entry(name: str, info: dict) -> None:
     """Reject ambiguous head declarations before discovery drops any fields."""
     if not isinstance(info, dict):
         raise ValueError(f"Manifest entry {name!r} must be a mapping.")
-    head_keys = {"labels", "layer", "adapter", "output", "settings"}
+    head_keys = {"labels", "layer", "output", "settings"}
     kind = info.get("kind", "lora")
     if not isinstance(kind, str) or not kind.isidentifier():
         raise ValueError(
