@@ -222,6 +222,13 @@ def _switch_lora_expand_kernel(
         return
 
     pid_n = tl.program_id(1)
+    # int64 index ranges: every pointer sum below includes one of these, so the
+    # whole offset is computed in 64 bits. The term that outgrows int32 in
+    # practice is the x_ext row offset m * stride_xe_m: on granite-4.1-30b the
+    # gate/up row width is ~65.5k, so a forward of ~32.8k tokens passes 2^31 and
+    # an int32 offset wraps to an illegal address. The packed lora_B offset
+    # (lb_off + a*N*r + n*r + k) only gets there with sum(NA_r * r) > 2^31 / N.
+    # The same casts are made in the swiglu and shrink-only kernels below.
     m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
     n_range = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
@@ -700,7 +707,8 @@ def _switch_lora_expand_swiglu_kernel(
     # Same by-design invariant as _switch_lora_expand_kernel: M (x_ext rows)
     # equals the token count behind AdapIdx/Bitmask, because routing is per token
     # and the decoder preserves token count. The unmasked Bitmask load relies on
-    # it.
+    # it. int64 ranges guard the m * stride_xe_m row offset against int32
+    # overflow (see _switch_lora_expand_kernel).
     m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
     h_range = (pid_h * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
@@ -918,6 +926,7 @@ def _switch_lora_shrink_expand_kernel(
         return
 
     pid_n = tl.program_id(1)
+    # int64 ranges: see the overflow note in _switch_lora_expand_kernel.
     m_range = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)).to(tl.int64)
     n_range = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)).to(tl.int64)
     mask_m = m_range < M
