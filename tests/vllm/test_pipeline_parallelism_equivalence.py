@@ -31,14 +31,8 @@ _REPO_ROOT = _WORKER.parents[2]
 
 # The published previews are legacy SingleSwitch checkpoints and no longer load;
 # compose a real MultiSwitch checkpoint on demand (warm-reused under
-# GRANITE_SWITCH_E2E_DIR), the same one test_multi_switch_mixed_tech builds. PP
+# GRANITE_SWITCH_E2E_DIR), the same one test_multi_switch_real_checkpoint builds. PP
 # only needs a loadable checkpoint with an active adapter — any MultiSwitch does.
-BASE_MODEL = "ibm-granite/granite-4.1-3b"
-ADAPTER_REPOS = [
-    "ibm-granite/granitelib-rag-r1.0",
-    "ibm-granite/granitelib-guardian-r1.0",
-]
-_E2E_ROOT = Path(os.environ.get("GRANITE_SWITCH_E2E_DIR", "/tmp/granite_switch_e2e"))
 _TIMEOUT = 1800  # compose (warm-reused) + 2× (vLLM load + generate)
 
 
@@ -77,6 +71,9 @@ pytestmark = [
         _visible_cuda_device_count() < 2,
         reason="requires at least 2 visible CUDA GPUs",
     ),
+    # Real composed checkpoint; the release suite sets GRANITE_SWITCH_E2E_MODELS=1
+    # so the gate below opens.
+    pytest.mark.release,
     pytest.mark.skipif(
         os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
         reason="composes a real ~3B checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",
@@ -87,30 +84,9 @@ pytestmark = [
 @pytest.fixture(scope="module")
 def model_path():
     """Compose (or warm-reuse) a mixed MultiSwitch checkpoint; return its dir."""
-    out_dir = _E2E_ROOT / "multi-mixed"
-    if (out_dir / "config.json").exists():
-        print(f"warm-reuse {out_dir}", file=sys.stderr)
-        return str(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    cmd = [
-        sys.executable,
-        "-m",
-        "granite_switch.composer.compose_granite_switch",
-        "--base-model",
-        BASE_MODEL,
-        *[arg for r in ADAPTER_REPOS for arg in ("--adapters", r)],
-        "--output",
-        str(out_dir),
-    ]
-    print("composing (mixed):", " ".join(cmd), file=sys.stderr)
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-    if r.returncode != 0:
-        pytest.fail(
-            f"mixed compose failed (exit {r.returncode})\n"
-            f"--- stdout ---\n{r.stdout[-3000:]}\n--- stderr ---\n{r.stderr[-3000:]}",
-            pytrace=False,
-        )
-    return str(out_dir)
+    from tests.hf.test_multi_switch_real_checkpoint import _compose
+
+    return str(_compose("multi-mixed"))
 
 
 def _subprocess_env():

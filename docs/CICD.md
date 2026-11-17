@@ -251,6 +251,16 @@ behind its Hub repo.
 - `tests/hf/test_quantization.py`: the quantization libraries on a real
   checkpoint. Its `GRANITE_SWITCH_E2E_MODELS=1` gate is opened by
   `tests/conftest.py` whenever `-m` selects `release`.
+- The MultiSwitch real-checkpoint tests, which compose a real `granite-4.1-3b`
+  with real adapter libraries and share the same gate:
+  `tests/hf/test_multi_switch_real_checkpoint.py`,
+  `tests/integration/test_multi_switch_vllm_generate.py`,
+  `tests/integration/test_multi_switch_serving_e2e.py`,
+  `tests/integration/test_multi_switch_alora_cache.py`,
+  `tests/integration/test_conversation_prefix_cache.py` and
+  `tests/vllm/test_pipeline_parallelism_equivalence.py` (2 GPUs).
+  `tests/integration/test_conversation_concurrency.py` stays out: it never
+  composes a checkpoint and needs one pre-built at `GRANITE_SWITCH_CONV_DIR`.
 
 **The rest of a breadth matrix** is release-only too: PR runs keep one
 representative case.

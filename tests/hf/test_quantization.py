@@ -17,7 +17,7 @@ Model: a real MultiSwitch checkpoint composed on demand from granitelib-rag, whi
 carries both an aLoRA intrinsic (``answerability``) and a LoRA one
 (``hallucination_detection``), warm-reused under ``GRANITE_SWITCH_E2E_DIR``. The
 published previews are legacy SingleSwitch checkpoints and no longer load, so the
-suite composes its own — same pattern as ``test_multi_switch_mixed_tech.py``.
+suite composes its own — same pattern as ``test_multi_switch_real_checkpoint.py``.
 """
 
 import os
