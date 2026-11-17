@@ -73,7 +73,7 @@ jobs:
           # are heavy enough to exhaust the GitHub Actions CPU-minutes quota and
           # get killed mid-run. All of that coverage runs on the GPU cluster.
           uv run pytest tests/unit/ \
-            -m "not requires_model and not gpu and not slow and not deep" \
+            -m "not requires_model and not gpu and not slow and not deep and not release" \
             -v -s --tb=short -x \
             --cov=granite_switch --cov-report=xml
 

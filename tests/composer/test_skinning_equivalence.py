@@ -17,7 +17,10 @@ vLLM tests come in two tiers:
   - Fast (requires_model only): single 64-token request per model.
   - Thorough (slow + requires_model): 8 requests, lengths 3–256 tokens.
 
-Markers: slow, requires_model (consistent with test_build_e2e.py).
+Markers: slow, requires_model (consistent with test_build_e2e.py), and release:
+the comparison is our model against upstream on the real weights, whose
+tolerances were calibrated on them. On random weights the same equivalence runs
+on every PR in tests/vllm/test_granite4_mini.py.
 """
 
 import os
@@ -27,6 +30,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
+
+pytestmark = pytest.mark.release
 
 HF_WORKER = Path(__file__).parent / "_skinning_equivalence_worker.py"
 VLLM_WORKER = Path(__file__).parent / "_skinning_equivalence_worker_vllm.py"

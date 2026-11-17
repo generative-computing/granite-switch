@@ -31,10 +31,13 @@ repos:
       - id: check-case-conflict
       - id: mixed-line-ending
         args: [--fix=lf]
+      # tests/shared/fixtures/ holds byte-for-byte copies of published Hub files
+      # (chat templates, configs): a fixed-up final newline changes what a
+      # template renders, so the captures must stay verbatim.
       - id: end-of-file-fixer
-        exclude: \.ipynb$
+        exclude: (\.ipynb$|^tests/shared/fixtures/)
       - id: trailing-whitespace
-        exclude: \.ipynb$
+        exclude: (\.ipynb$|^tests/shared/fixtures/)
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.0

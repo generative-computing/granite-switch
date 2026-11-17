@@ -269,6 +269,22 @@ def _is_transient_device_error(text: str) -> bool:
 def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, *, tmpdir, **llm_kwargs):
     """Run one vLLM engine in a subprocess, return its dense prompt logprobs.
 
+    A single-prompt :func:`run_vllm_logprobs_many`; see there.
+    """
+    return run_vllm_logprobs_many(
+        model_dir, [input_ids_list], vocab_size, tmpdir=tmpdir, **llm_kwargs
+    )[0]
+
+
+def run_vllm_logprobs_many(model_dir, prompts, vocab_size, *, tmpdir, **llm_kwargs):
+    """Run ONE vLLM engine in a subprocess, return dense logprobs for each prompt.
+
+    Booting an engine (torch.compile + CUDA-graph capture) costs far more than
+    scoring a prompt, so a caller with several prompts for the same model should
+    pass them together. Each prompt is still scored by its own ``generate`` call,
+    exactly as it would be alone (see _vllm_logprobs_worker.py), so sharing the
+    engine does not change the numbers the ~1e-5 equivalence gates compare.
+
     The engine is NOT built in this process. Under the GPU host's
     Exclusive_Process compute mode, if this (the pytest) process ever created a
     CUDA context -- which ``gpu_mem_util``/``shutdown_llm`` would, via
@@ -280,14 +296,15 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, *, tmpdir, **llm_kw
 
     Args:
         model_dir: path to saved HF model (config.json + model.safetensors)
-        input_ids_list: list of int token IDs
+        prompts: list of prompts, each a list of int token IDs
         vocab_size: vocab size for dense tensor allocation
         tmpdir: directory for the subprocess handoff files (the caller's tmp_path)
         **llm_kwargs: extra kwargs for LLM() constructor (e.g. max_model_len,
             enforce_eager), forwarded verbatim to the worker
 
     Returns:
-        [seq_len-1, vocab_size] float tensor of log-probabilities
+        list of [seq_len-1, vocab_size] float tensors of log-probabilities, one
+        per prompt, in order
     """
     # enable_prefix_caching: a SYMMETRIC-config default, applied here (no CUDA) so
     # both engines of a pair get it. upstream's GraniteMoeHybridForCausalLM declares
@@ -318,7 +335,7 @@ def run_vllm_logprobs(model_dir, input_ids_list, vocab_size, *, tmpdir, **llm_kw
     with open(spec_path, "w") as f:
         json.dump(
             {
-                "input_ids": list(input_ids_list),
+                "prompts": [list(p) for p in prompts],
                 "vocab_size": vocab_size,
                 "llm_kwargs": llm_kwargs,
             },

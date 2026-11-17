@@ -90,6 +90,9 @@ def _run_inner_class(class_name):
     assert result.returncode == 0, f"Inner tests failed (exit {result.returncode})"
 
 
+# Release tier: the same equivalence runs on every PR at small dimensions
+# (test_granite4_mini.py); full size adds only scale, at ~12 min a run.
+@pytest.mark.release
 @pytest.mark.skipif(not _VLLM_AVAILABLE, reason="requires vLLM installed")
 class TestGranite4FullSizeEquivalence:
     def test_suite(self):

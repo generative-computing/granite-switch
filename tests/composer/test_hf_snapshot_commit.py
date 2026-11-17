@@ -37,7 +37,7 @@ class TestExtractHfSnapshotCommit:
         cache = tmp_path / "hf_cache"
         adapter = (
             cache
-            / "models--ibm-granite--granite-lib-rag-r1.0"
+            / "models--ibm-granite--granitelib-rag-r1.0"
             / "snapshots"
             / VALID_SHA
             / "answerability"

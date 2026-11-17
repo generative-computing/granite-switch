@@ -270,6 +270,10 @@ class TestConfigureChatTemplate:
         assert modified == original
 
 
+# Release tier: the property is about how the real BPE vocabulary splits these
+# strings, which is exactly what the fake bases leave out (one token per byte), so
+# there is no fake counterpart that would test anything.
+@pytest.mark.release
 class TestInvocationFirstCharDropProperty:
     """Standalone property test on a real Granite tokenizer for the invariant
     the Pass-2 edit relies on: dropping the first *token's worth of characters*
@@ -297,12 +301,7 @@ class TestInvocationFirstCharDropProperty:
     def _get_tokenizer(self):
         from transformers import AutoTokenizer
 
-        try:
-            return AutoTokenizer.from_pretrained("ibm-granite/granite-4.1-3b")
-        except Exception as e:
-            import pytest
-
-            pytest.skip(f"could not fetch Granite tokenizer: {e}")
+        return AutoTokenizer.from_pretrained("ibm-granite/granite-4.1-3b")
 
     def test_token_char_drop_equals_first_token_drop(self):
         """Dropping ``len(decode(first_token))`` characters from the string must

@@ -11,6 +11,7 @@ from granite_switch.composer.adapter_discovery import (
     list_available_adapters,
 )
 from granite_switch.composer.arch import resolve_arch
+from tests.shared import model_sources
 
 # -- Fixtures ----------------------------------------------------------------
 
@@ -58,7 +59,9 @@ def _make_adapter_library(tmp_path, target_model, adapters):
 class TestTechnologyFilterAdapters:
     def test_test_prefer_alora(self, tmp_path):
         # Load base config early for arch resolution.
-        arch = resolve_arch("ibm-granite/granite-4.0-micro")
+        arch = resolve_arch(
+            model_sources.base_model(model_sources.FAKE, "granite-4.0-micro")
+        )
         root = _make_adapter_library(
             tmp_path,
             "granite-4.0-micro",
@@ -97,7 +100,9 @@ class TestTechnologyFilterAdapters:
         assert len([found for found in adapters if found[2] == "lora"]) == 1
 
     def test_filter_and_override(self, tmp_path):
-        arch = resolve_arch("ibm-granite/granite-4.0-micro")
+        arch = resolve_arch(
+            model_sources.base_model(model_sources.FAKE, "granite-4.0-micro")
+        )
         root = _make_adapter_library(
             tmp_path,
             "granite-4.0-micro",

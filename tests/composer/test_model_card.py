@@ -195,12 +195,12 @@ class TestRenderModelCard:
             adapter_index=_fake_adapter_index(),
             adapter_ranks=[8, 8, 8],
             adapter_sources=[
-                "ibm-granite/granite-lib-rag-r1.0",
-                "ibm-granite/granite-lib-rag-r1.0",
+                "ibm-granite/granitelib-rag-r1.0",
+                "ibm-granite/granitelib-rag-r1.0",
                 None,  # built-in
             ],
         )
-        assert "ibm-granite/granite-lib-rag-r1.0" in md
+        assert "ibm-granite/granitelib-rag-r1.0" in md
         assert "built-in" in md
 
     def test_no_adapters(self):
@@ -248,7 +248,7 @@ class TestRenderModelCard:
             adapter_index=_fake_adapter_index(),
             adapter_ranks=[8, 8, 8],
             adapter_commits_by_source={
-                "ibm-granite/granite-lib-rag-r1.0": "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf",
+                "ibm-granite/granitelib-rag-r1.0": "6e4a75e35f1cb272e8d15b4615fb0a123398d1cf",
             },
         )
         details = md[md.index("## Composition Details") :]

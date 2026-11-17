@@ -13,8 +13,8 @@ trained head weights from each probe directory's
 ``probe_head.safetensors`` into bank row ``slot = adapter_index - 1``.
 
 These tests build the model through :class:`GraniteSwitchComposer` (per CLAUDE.md
-rule #5 — never hand-assemble the config) against the real ``granite-4.0-micro``
-base, with a *synthetic* probe head whose weights make one label win
+rule #5 — never hand-assemble the config) against the ``granite-4.0-micro`` base,
+with a *synthetic* probe head whose weights make one label win
 deterministically, and assert:
 
 1. ``probe_head.weight[slot, :n_labels]`` / ``.bias[slot, :n_labels]`` exactly
@@ -28,11 +28,11 @@ deterministically, and assert:
 4. Two probe slots with DIFFERENT label counts (2 and 3) each land padded
    correctly and each emit a token id from their own label set.
 
-Marked slow + requires_model: composing the ~3B micro base is expensive, but it is
-the only sanctioned construction path.
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, tiny bases
+and a LoRA built from captured copies of the real ones; ``real``, the published
+ones, in the release tier.
 """
 
-import glob
 import json
 import os
 
@@ -42,36 +42,35 @@ import torch
 import granite_switch.hf  # noqa: F401 — registers AutoModel/AutoConfig
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
+from tests.shared import model_sources
 
-BASE_MODEL = "ibm-granite/granite-4.0-micro"
-# The mixed test embeds a real LoRA, which must match its base. The RAG library
-# ships granite-4.1-3b LoRAs, so the mixed case composes against that base.
-MIXED_BASE = "ibm-granite/granite-4.1-3b"
-MIXED_LORA_TARGET = "granite-4.1-3b"
-RAG_LIBRARY = "ibm-granite/granite-lib-rag-r1.0"
+BASE_NAME = "granite-4.0-micro"
+# The mixed test embeds a LoRA from the RAG library, which must match its base.
+MIXED_BASE_NAME = "granite-4.1-3b"
+RAG_LIBRARY = "ibm-granite/granitelib-rag-r1.0"
+MIXED_LORA = "citations"
 
-pytestmark = [pytest.mark.slow, pytest.mark.requires_model]
+pytestmark = [
+    pytest.mark.slow,
+    pytest.mark.parametrize("source", model_sources.sources()),
+]
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-def _tokenizer(model=BASE_MODEL):
+def _tokenizer(source, base=BASE_NAME):
     from transformers import AutoTokenizer
 
-    try:
-        return AutoTokenizer.from_pretrained(model)
-    except Exception as e:  # pragma: no cover - network/env dependent
-        pytest.skip(f"could not fetch tokenizer {model!r}: {e}")
+    return AutoTokenizer.from_pretrained(model_sources.base_model(source, base))
 
 
-def _hidden_size(model=BASE_MODEL):
+def _hidden_size(source, base=BASE_NAME):
     from transformers import AutoConfig
 
-    try:
-        return AutoConfig.from_pretrained(model).hidden_size
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"could not fetch config {model!r}: {e}")
+    return AutoConfig.from_pretrained(
+        model_sources.base_model(source, base)
+    ).hidden_size
 
 
 def _single_token_labels(tokenizer, candidates, count=2):
@@ -133,49 +132,13 @@ def _probe_prompt_ids(tokenizer, control_token_id):
     return torch.tensor([ids], dtype=torch.long)
 
 
-def _find_rag_lora_dir():
-    """Locate a real cached LoRA adapter dir for the mixed-case test.
-
-    Reads the local HF cache directly (via ``scan_cache_dir``) rather than
-    ``snapshot_download``: the RAG library is large and only partially cached
-    here, and ``snapshot_download(local_files_only=True)`` refuses an incomplete
-    snapshot even when the one adapter this test needs is present. Skip cleanly
-    if no matching adapter is cached.
-    """
-    from huggingface_hub import scan_cache_dir
-
-    snapshot_dirs = []
-    try:
-        for repo in scan_cache_dir().repos:
-            if repo.repo_id == RAG_LIBRARY:
-                snapshot_dirs.extend(str(rev.snapshot_path) for rev in repo.revisions)
-    except Exception as e:  # pragma: no cover
-        pytest.skip(f"could not scan HF cache for {RAG_LIBRARY!r}: {e}")
-
-    for root in snapshot_dirs:
-        hits = glob.glob(
-            os.path.join(
-                root, "**", MIXED_LORA_TARGET, "lora", "adapter_model.safetensors"
-            ),
-            recursive=True,
-        )
-        # Follow the cache symlink to the real blob; skip broken (missing) ones.
-        hits = [h for h in sorted(hits) if os.path.exists(os.path.realpath(h))]
-        if hits:
-            return os.path.dirname(hits[0])
-
-    pytest.skip(
-        f"no cached {MIXED_LORA_TARGET} LoRA adapter with weights in {RAG_LIBRARY!r}"
-    )
-
-
 # --------------------------------------------------------------------------- #
 # Tests
 # --------------------------------------------------------------------------- #
-def test_probe_only_compose_loads_trained_head(tmp_path):
+def test_probe_only_compose_loads_trained_head(source, tmp_path):
     """A single probe slot: weights land in the bank and the verdict fires."""
-    tokenizer = _tokenizer()
-    hidden = _hidden_size()
+    tokenizer = _tokenizer(source)
+    hidden = _hidden_size(source)
 
     label_names, label_ids = _single_token_labels(
         tokenizer, ["safe", "unsafe", "yes", "no", "true", "false"]
@@ -193,7 +156,7 @@ def test_probe_only_compose_loads_trained_head(tmp_path):
     control_id = tokenizer.vocab_size - 5
 
     model = GraniteSwitchComposer.from_base_and_adapters(
-        base_model_name_or_path=BASE_MODEL,
+        base_model_name_or_path=model_sources.base_model(source, BASE_NAME),
         adapter_paths=[clf_dir],
         adapter_token_ids=[control_id],
         adapter_substitute_token_ids=[control_id],  # inert for a probe slot
@@ -228,11 +191,13 @@ def test_probe_only_compose_loads_trained_head(tmp_path):
     )
 
 
-def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
+def test_mixed_lora_and_probe_preserves_slot_numbering(source, tmp_path):
     """[lora, probe]: LoRA slot 0 populated, probe slot 1 loaded."""
-    tokenizer = _tokenizer(MIXED_BASE)
-    hidden = _hidden_size(MIXED_BASE)
-    lora_dir = _find_rag_lora_dir()
+    tokenizer = _tokenizer(source, MIXED_BASE_NAME)
+    hidden = _hidden_size(source, MIXED_BASE_NAME)
+    lora_dir = model_sources.lora_adapter_dir(
+        source, RAG_LIBRARY, MIXED_BASE_NAME, MIXED_LORA
+    )
 
     label_names, label_ids = _single_token_labels(
         tokenizer, ["safe", "unsafe", "yes", "no", "true", "false"]
@@ -248,7 +213,7 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     clf_ctrl = tokenizer.vocab_size - 5
 
     model = GraniteSwitchComposer.from_base_and_adapters(
-        base_model_name_or_path=MIXED_BASE,
+        base_model_name_or_path=model_sources.base_model(source, MIXED_BASE_NAME),
         adapter_paths=[lora_dir, clf_dir],
         adapter_token_ids=[lora_ctrl, clf_ctrl],
         adapter_substitute_token_ids=[lora_ctrl, clf_ctrl],
@@ -309,7 +274,7 @@ def test_mixed_lora_and_probe_preserves_slot_numbering(tmp_path):
     assert torch.isfinite(out.logits[0, -1]).all()
 
 
-def test_ragged_label_counts_pad_and_fire_per_slot(tmp_path):
+def test_ragged_label_counts_pad_and_fire_per_slot(source, tmp_path):
     """Two probe slots with DIFFERENT label counts (2 and 3).
 
     Each head lands in the top rows of its (padded) bank row, the pad rows above
@@ -317,8 +282,8 @@ def test_ragged_label_counts_pad_and_fire_per_slot(tmp_path):
     token emits a token id from THAT slot's label set — proving the padded
     einsum/scatter never leaks a phantom (padded) label across slots.
     """
-    tokenizer = _tokenizer()
-    hidden = _hidden_size()
+    tokenizer = _tokenizer(source)
+    hidden = _hidden_size(source)
 
     # Slot A: 2 labels; slot B: 3 labels. Distinct token ids across both sets.
     names_a, ids_a = _single_token_labels(
@@ -345,7 +310,7 @@ def test_ragged_label_counts_pad_and_fire_per_slot(tmp_path):
     ctrl_b = tokenizer.vocab_size - 6
 
     model = GraniteSwitchComposer.from_base_and_adapters(
-        base_model_name_or_path=BASE_MODEL,
+        base_model_name_or_path=model_sources.base_model(source, BASE_NAME),
         adapter_paths=[dir_a, dir_b],
         adapter_token_ids=[ctrl_a, ctrl_b],
         adapter_substitute_token_ids=[ctrl_a, ctrl_b],
@@ -417,12 +382,12 @@ def _first_lora_b_tensor(model):
 @pytest.mark.parametrize(
     "base",
     [
-        "ibm-granite/granite-4.0-micro",
-        "ibm-granite/granite-4.1-3b",
-        "ibm-granite/granite-4.2-3b",  # ChatML family
+        "granite-4.0-micro",
+        "granite-4.1-3b",
+        "granite-4.2-3b",  # ChatML family
     ],
 )
-def test_probe_drops_generation_prompt(base):
+def test_probe_drops_generation_prompt(base, source):
     """A probe render ignores ``add_generation_prompt=True``.
 
     The verdict is read at the marker, so the assistant generation prompt must
@@ -434,7 +399,7 @@ def test_probe_drops_generation_prompt(base):
         configure_chat_template,
     )
 
-    tokenizer = _tokenizer(base)
+    tokenizer = _tokenizer(source, base)
     discovered = [(None, "safety", "probe", None)]
     add_control_tokens(tokenizer, discovered)
     configure_chat_template(tokenizer, discovered)
@@ -453,12 +418,12 @@ def test_probe_drops_generation_prompt(base):
 @pytest.mark.parametrize(
     "base",
     [
-        "ibm-granite/granite-4.0-micro",
-        "ibm-granite/granite-4.1-3b",
-        "ibm-granite/granite-4.2-3b",  # ChatML family
+        "granite-4.0-micro",
+        "granite-4.1-3b",
+        "granite-4.2-3b",  # ChatML family
     ],
 )
-def test_probe_marker_is_last_token(base):
+def test_probe_marker_is_last_token(base, source):
     """The marker is the very last token, after the last turn's close.
 
     Everything before it is byte-identical to a no-adapter render without a
@@ -469,7 +434,7 @@ def test_probe_marker_is_last_token(base):
         configure_chat_template,
     )
 
-    tokenizer = _tokenizer(base)
+    tokenizer = _tokenizer(source, base)
     discovered = [(None, "safety", "probe", None)]
     (control_id,), _ = add_control_tokens(tokenizer, discovered)
     configure_chat_template(tokenizer, discovered)
@@ -496,17 +461,17 @@ def test_probe_marker_is_last_token(base):
 @pytest.mark.parametrize(
     "base, role_open",
     [
-        ("ibm-granite/granite-4.0-micro", "<|start_of_role|>"),
-        ("ibm-granite/granite-4.1-3b", "<|start_of_role|>"),
-        ("ibm-granite/granite-4.2-3b", "<|im_start|>"),
+        ("granite-4.0-micro", "<|start_of_role|>"),
+        ("granite-4.1-3b", "<|start_of_role|>"),
+        ("granite-4.2-3b", "<|im_start|>"),
     ],
 )
-def test_probe_substitute_is_the_bases_role_open_marker(base, role_open):
+def test_probe_substitute_is_the_bases_role_open_marker(base, role_open, source):
     from granite_switch.composer.compose_granite_switch import (
         build_control_token_lists,
     )
 
-    tokenizer = _tokenizer(base)
+    tokenizer = _tokenizer(source, base)
     discovered = [(None, "safety", "probe", None)]
     _, _, substitutes = build_control_token_lists(
         tokenizer, discovered, base_reset=False

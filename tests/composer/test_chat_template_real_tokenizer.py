@@ -37,8 +37,12 @@ vLLM content format the template can actually honour, using a local
 reimplementation of vLLM's AST-based detector (and the real vLLM detector when
 it is importable).
 
-These require network / a warm HF cache for the two tokenizers; they skip if the
-tokenizer cannot be loaded offline.
+Two sources (tests/shared/model_sources.py): ``fake`` on every PR run, the
+captured tokenizer config and chat template of each base on a tiny vocabulary,
+whose special tokens keep their real ids and which renders exactly like the real
+tokenizer; ``real``, the published tokenizer, in the release tier. These tests
+render templates and compare strings, so the fake's byte-level vocabulary for
+ordinary words does not affect them.
 """
 
 from __future__ import annotations
@@ -55,6 +59,7 @@ from granite_switch.composer.tokenizer_setup import (
     configure_chat_template,
     detect_template_format,
 )
+from tests.shared import model_sources
 
 _FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
 _REPR_MARKER = "[{'type'"
@@ -66,34 +71,36 @@ _REPR_MARKER = "[{'type'"
 # fixtures can't be used here — their recorded anchor token id was built against
 # a tiny training tokenizer and the composer (correctly) rejects it against the
 # real base tokenizer's id.
+_BASES = [
+    ("granite-4.1-3b", "granite_format", "summarization_adapter", "summ", "lora"),
+    ("granite-4.2-3b", "chatml", "summarization_adapter", "summ", "lora"),
+]
+# Each base once per source. ``model_id`` is a (source, base) pair, resolved to
+# a path or Hub id only when a test loads it, so collection builds nothing; the
+# real case is release-marked.
 _MODELS = [
     pytest.param(
-        "ibm-granite/granite-4.1-3b",
-        "granite_format",
-        "summarization_adapter",
-        "summ",
-        "lora",
-        id="granite-4.1-3b",
-    ),
-    pytest.param(
-        "ibm-granite/granite-4.2-3b",
-        "chatml",
-        "summarization_adapter",
-        "summ",
-        "lora",
-        id="granite-4.2-3b",
-    ),
+        (src.values[0], base),
+        family,
+        adapter_dir,
+        name,
+        atype,
+        id=f"{base}-{src.id}",
+        marks=src.marks,
+    )
+    for base, family, adapter_dir, name, atype in _BASES
+    for src in model_sources.sources()
 ]
 
 
-def _load_tokenizer(model_id: str):
-    try:
-        return AutoTokenizer.from_pretrained(model_id)
-    except Exception as e:  # offline / not cached
-        pytest.skip(f"cannot load tokenizer {model_id}: {type(e).__name__}: {e}")
+def _load_tokenizer(model_id):
+    # No skip on a failed load: in the release tier a fetch failure should fail
+    # the run, not hide as a skip, and the fake is always available locally.
+    source, base = model_id
+    return AutoTokenizer.from_pretrained(model_sources.base_model(source, base))
 
 
-def _configure(model_id: str, adapter_dir: str, name: str, atype: str, *, audio=False):
+def _configure(model_id, adapter_dir: str, name: str, atype: str, *, audio=False):
     tok = _load_tokenizer(model_id)
     configure_chat_template(tok, [(os.path.join(_FIXTURES, adapter_dir), name, atype)])
     if audio:

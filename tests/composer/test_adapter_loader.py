@@ -20,6 +20,7 @@ from granite_switch.composer.adapter_loader import (
     load_adapter_target_modules,
 )
 from granite_switch.composer.arch import ArchDescriptor, ModuleDescriptor, resolve_arch
+from tests.shared import model_sources
 
 
 @pytest.fixture
@@ -517,7 +518,9 @@ class TestAdapterLoadingFromYAML:
         # --- ACTION: DISCOVERY MODE ---
         # input_path is the directory
         input_path = str(tmp_path)
-        arch = resolve_arch("ibm-granite/granite-4.0-micro")
+        arch = resolve_arch(
+            model_sources.base_model(model_sources.FAKE, "granite-4.0-micro")
+        )
         adapters = discover_adapters(  # default is to prefer alora
             input_path, "granite-4.0-micro", arch, technology_fallback="alora"
         )

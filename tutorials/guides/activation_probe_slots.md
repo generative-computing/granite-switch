@@ -185,7 +185,7 @@ from huggingface_hub import snapshot_download
 
 # 1. A real LoRA slot: download just the answerability adapter for granite-4.1-3b.
 snap = snapshot_download(
-    repo_id="ibm-granite/granite-lib-rag-r1.0",
+    repo_id="ibm-granite/granitelib-rag-r1.0",
     allow_patterns=["answerability/granite-4.1-3b/lora/**"],
 )
 lora_dir = str(Path(snap) / "answerability" / "granite-4.1-3b" / "lora")

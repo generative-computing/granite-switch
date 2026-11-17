@@ -43,6 +43,16 @@ def pytest_configure(config):
     # a newer toolkit in the image; this keeps the suites meaningful until then.
     os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
 
+    # ── release tier opens the real-checkpoint gate ───────────────
+    #
+    # Some release-tier tests (test_quantization.py) are also gated on
+    # GRANITE_SWITCH_E2E_MODELS=1, which the GPU pod has no way to set: the runner
+    # passes only pytest arguments. A run that selects the release marker has asked
+    # for exactly those tests, so it sets the gate itself. setdefault, so an explicit
+    # GRANITE_SWITCH_E2E_MODELS=0 still wins.
+    if "release" in (config.getoption("markexpr", "") or "").replace("not release", ""):
+        os.environ.setdefault("GRANITE_SWITCH_E2E_MODELS", "1")
+
     worker_id = os.environ.get("PYTEST_XDIST_WORKER")
     if worker_id is None:
         return  # not running under xdist
