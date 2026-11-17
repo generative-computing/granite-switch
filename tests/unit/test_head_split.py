@@ -38,6 +38,10 @@ class TestAdapterKindLut:
     def test_none_without_probe_slots(self):
         assert build_head_slot_lut(_config(["lora", "lora"], None)) is None
 
+    def test_none_without_a_config(self):
+        """A switch built without a model config has no head slots."""
+        assert build_head_slot_lut(None) is None
+
     def test_marks_probe_adapter_indices(self):
         cfg = _config(["lora", "probe", "probe"], [None, [100], [101, 102]])
         assert build_head_slot_lut(cfg).tolist() == [False, False, True, True]

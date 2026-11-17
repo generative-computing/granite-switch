@@ -150,6 +150,9 @@ omit = [
     "*/granite_switch/vllm/*",
     "*/granite_switch/composer/*",
     "*/granite_switch/tutorials/*",
+    # The probe head type's vLLM module: its forward needs CUDA (torch.mm with
+    # out_dtype has no CPU kernel), so like vllm/* it is covered on GPU.
+    "*/granite_switch/streams/types/probe/vllm_head.py",
 ]
 
 [tool.setuptools.packages.find]

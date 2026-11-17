@@ -148,9 +148,11 @@ make test-hf         # hf only
 CI runs tests with `pytest-cov` and uploads `coverage.xml` to [Codecov](https://codecov.io). Codecov posts a per-PR diff comment showing which lines added in the PR are covered.
 
 **Coverage is scoped** in `pyproject.toml` under `[tool.coverage.run]`: `source = ["granite_switch"]`
-with the `hf`, `vllm`, `composer`, and `tutorials` subpackages **omitted**. Those need a GPU, real
+with the `hf`, `vllm`, `composer`, and `tutorials` subpackages **omitted**, and the probe head
+type's vLLM module (`streams/types/probe/vllm_head.py`), whose forward needs CUDA. Those need a GPU, real
 model checkpoints, or dependencies CI doesn't install, and are covered on the GPU cluster instead
-(see [Manual: GPU Tests](#manual-gpu-tests)). Without the omit list the CI number would be diluted
+(see [Manual: GPU Tests](#manual-gpu-tests)). The rest of `streams/` is backend-free and tested
+in `tests/unit/`. Without the omit list the CI number would be diluted
 to ~1% by thousands of lines the unit suite can never reach; with it, the reported percentage
 reflects only the code the unit suite is actually responsible for.
 
