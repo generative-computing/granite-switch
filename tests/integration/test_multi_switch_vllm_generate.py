@@ -6,7 +6,7 @@ single HF ``forward`` and inspects ``_last_adapter_indices``:
 
   * ``tests/vllm/test_multi_switch.py`` drives the switch in a subprocess harness
     with a mock config -- no engine, no generation.
-  * ``tests/hf/test_multi_switch_e2e.py`` uses a real composed checkpoint but the
+  * ``tests/hf/test_multi_switch_real_checkpoint.py`` uses a real composed checkpoint but the
     HF backend.
 
 Nothing put a composed MultiSwitch checkpoint through ``llm.generate``. That
@@ -27,10 +27,10 @@ What these tests assert:
 adapter would emit identical text and (1)-(3) would still pass.
 
 Boots vLLM IN-PROCESS (this package, unlike ``tests/vllm/``, does not keep CUDA
-out of the parent process). Reuses the checkpoint composed by the HF e2e module
+out of the parent process). Reuses the checkpoint composed by the HF real-checkpoint module
 via ``GRANITE_SWITCH_E2E_DIR``, so it costs an engine boot, not a compose.
 
-Markers: slow + requires_model + gpu, and skipped unless
+Markers: slow + requires_model + gpu + release, and skipped unless
 ``GRANITE_SWITCH_E2E_MODELS=1``.
 """
 
@@ -43,6 +43,9 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.requires_model,
     pytest.mark.gpu,
+    # Real composed checkpoint; the release suite sets GRANITE_SWITCH_E2E_MODELS=1
+    # so the gate below opens.
+    pytest.mark.release,
     pytest.mark.skipif(
         os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
         reason="composes/loads a real ~3B checkpoint; set GRANITE_SWITCH_E2E_MODELS=1",
@@ -55,9 +58,9 @@ MAX_NEW_TOKENS = 16
 @pytest.fixture(scope="module")
 def multi_checkpoint():
     """Path to a composed ``--switch-type multi`` checkpoint (warm-reused)."""
-    # Reuse the HF e2e module's compose helper so both suites share one artifact
+    # Reuse the HF real-checkpoint module's compose helper so both suites share one artifact
     # rather than composing a second 3B model.
-    from tests.hf.test_multi_switch_e2e import _compose
+    from tests.hf.test_multi_switch_real_checkpoint import _compose
 
     out_dir = _compose("multi")
     assert (out_dir / "config.json").exists(), f"no checkpoint at {out_dir}"

@@ -33,7 +33,7 @@ output-level contamination is reported, because whether it is acceptable is a pr
 decision (an adapter's own earlier output arguably IS legitimate context), not a
 correctness question this test can settle.
 
-Markers: slow + requires_model + gpu, gated on ``GRANITE_SWITCH_E2E_MODELS=1``.
+Markers: slow + requires_model + gpu + release, gated on ``GRANITE_SWITCH_E2E_MODELS=1``.
 """
 
 import json
@@ -53,6 +53,9 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.requires_model,
     pytest.mark.gpu,
+    # Real composed checkpoint; the release suite sets GRANITE_SWITCH_E2E_MODELS=1
+    # so the gate below opens.
+    pytest.mark.release,
     pytest.mark.skipif(
         os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
         reason="composes and serves a real ~3B checkpoint; set "

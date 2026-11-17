@@ -371,7 +371,7 @@ class TestAttentionMaskDtypeIndependence:
 
         NOTE: on GPU, letting the memory head autocast to bf16 overflows its
         softmax to NaN and routes every token to base — this was a real bug caught
-        only by the GPU end-to-end test (tests/hf/test_multi_switch_e2e.py), NOT by
+        only by the GPU end-to-end test (tests/hf/test_multi_switch_real_checkpoint.py), NOT by
         CPU (CPU autocast does not reproduce the overflow). This CPU test documents
         the intended behavior and guards the no-NaN / correct-routing contract; the
         GPU e2e is the authoritative regression gate for the overflow itself."""
