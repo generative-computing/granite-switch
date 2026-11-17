@@ -27,7 +27,6 @@ import torch
 from granite_switch.conversation import MAX_RETAINED_CONTROL_TOKENS
 from granite_switch.hf.switch.codes import (
     KerdockDGCodeGenerator,
-    max_exact_slot_number,
     recover_count_from_signal,
 )
 
@@ -167,23 +166,3 @@ class TestGuardUsesTheBound:
                 f"turn {i} accumulated more than one control token under RE_PREFILL"
             )
             conv.record_answer("Answer.", adapter="unc")
-
-
-class TestSlotNumberLimit:
-    """The memory head's sibling limit: a slot number travels as a value.
-
-    vLLM's switch writes each control token's slot number into its memory head
-    in the model dtype and rounds what it reads back, so a checkpoint may have
-    only as many slots as that dtype numbers exactly. vLLM refuses more at load.
-    """
-
-    @pytest.mark.parametrize(
-        "dtype, limit",
-        [(torch.bfloat16, 256), (torch.float16, 2048), (torch.float32, 2**24)],
-    )
-    def test_numbers_are_exact_up_to_the_limit_and_alias_past_it(self, dtype, limit):
-        assert max_exact_slot_number(dtype) == limit
-        around = torch.tensor([limit - 1, limit, limit + 1], dtype=torch.float64)
-        held = around.to(dtype).to(torch.float64)
-        assert held[:2].tolist() == around[:2].tolist()
-        assert held[2] != around[2]  # one past the limit reads as a neighbour

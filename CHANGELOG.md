@@ -53,9 +53,6 @@ This project uses [semantic versioning](https://semver.org/).
   silently change results. The built-in probe rejects unsupported settings.
 - Compose loads plugin weights under `torch.no_grad()`. vLLM loads head
   parameters and persistent buffers strictly, before decoder-specific mappings.
-- vLLM's MultiSwitch numbers slots in the model dtype, exactly only up to 256 in
-  bf16. A checkpoint with more slots is now refused at load instead of running
-  slot 257 as slot 256 (fp16 holds 2,048).
 - `Conversation` handles head turns: a head reads only its own turn (under
   `PRESERVE_MIXED_HISTORY`, a prompt whose kept history holds control tokens is
   rendered from text), and a recorded head turn joins the transcript as text, so

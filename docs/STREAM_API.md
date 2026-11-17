@@ -271,9 +271,6 @@ template renders one, and `Conversation` does too (below).
 - **One head per request.** A head reads at its marker, the prompt's last token, so two verdicts
   on one prompt take two requests.
 - **Speculative decoding and microbatching** are refused with head streams on vLLM.
-- **At most 256 slots on vLLM in bf16**, adapters and heads together: MultiSwitch numbers slots in
-  the model dtype, and bf16 holds 257 as 256. A checkpoint with more slots is refused at load;
-  fp16 holds 2,048.
 
 ### Known gap: vLLM head-marker validation (deferred)
 

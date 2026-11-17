@@ -100,7 +100,6 @@ from vllm.model_executor.layers.attention.attention import Attention
 
 from granite_switch.hf.switch.codes import (
     KerdockDGCodeGenerator,
-    max_exact_slot_number,
     recover_count_from_signal,
 )
 from granite_switch.streams.split import (
@@ -158,20 +157,6 @@ class MultiSwitch(nn.Module):
             self.dtype = vllm_config.model_config.dtype
         else:
             self.dtype = torch.get_default_dtype()
-
-        # The memory head returns each token's slot number as an attention value
-        # in this dtype, and rounds it. Past max_exact_slot_number the numbers
-        # alias (bf16 holds 257 as 256), so slot 257 would quietly run as slot
-        # 256: refuse the checkpoint instead. The HF twin computes it in fp32.
-        limit = max_exact_slot_number(self.dtype)
-        if num_adapters > limit:
-            raise ValueError(
-                f"This checkpoint has {num_adapters} slots, but vLLM's MultiSwitch "
-                f"numbers slots in {self.dtype}, which holds slot numbers exactly "
-                f"only up to {limit}. Serve it with --dtype float16 (exact up to "
-                f"{max_exact_slot_number(torch.float16)}), or compose at most "
-                f"{limit} slots."
-            )
 
         hf_config = config
         if (

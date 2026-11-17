@@ -579,8 +579,6 @@ class GraniteSwitchModel(nn.Module):
         duplicate markers are not rejected (request-boundary validation is
         deferred).
         """
-        # The slot id rides in one column of this dtype, exactly: the switch
-        # refuses a checkpoint with more slots than the dtype numbers exactly.
         head_slot = head_indices.to(final_hidden_states.dtype)
         for group in self._head_final_groups:
             head_scores = self._score_group(

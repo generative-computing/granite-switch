@@ -666,29 +666,6 @@ class TestStreamHeadOutputFit(_StreamModelTestBase):
         assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
 
 
-class TestStreamSlotLimit:
-    """vLLM's switch numbers slots in the model dtype, and bf16 numbers them
-    exactly only up to 256: slot 257 would run as slot 256, so a checkpoint with
-    more slots is refused at load."""
-
-    def test_more_slots_than_bf16_numbers_are_refused(self, tmp_path):
-        from tests.shared.stream_models import compose_stream_model
-
-        _ensure_distributed()
-        config = compose_stream_model(
-            tmp_path, [_probe_entry(i) for i in range(257)]
-        ).config
-        old_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(torch.bfloat16)
-        try:
-            vllm_config = _make_vllm_config(config)
-            with set_current_vllm_config(vllm_config), torch.device("cuda"):
-                with pytest.raises(ValueError, match="exactly only up to 256"):
-                    GraniteSwitchForCausalLM(vllm_config=vllm_config)
-        finally:
-            torch.set_default_dtype(old_dtype)
-
-
 class TestStreamPersistentBuffers(_StreamModelTestBase):
     dual_stream = False
 

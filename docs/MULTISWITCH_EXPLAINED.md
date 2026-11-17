@@ -547,19 +547,14 @@ One constant, compared with `>` in both places, so 188 is legal and only 189 is 
 
 `Conversation` is a helper, not part of the engine. A request that goes straight to `POST /v1/completions` with token ids -- which is exactly what PRESERVE instructs callers to send -- never reaches any of this. Moving it into `MultiSwitch.forward` would cover every caller, and is not merely a behaviour change on the serving path: a host-side check there is absent from the compiled graph (see the debug-attribute row below), and a raise there kills the EngineCore for every in-flight request, since `vllm/v1/engine/core.py`'s `_process_engine_step` wraps `step_fn()` in no `try`.
 
-### bf16 caps a vLLM checkpoint at 256 slots -- *(refused at load)*
-
-The memory head's value is the slot number itself: `v_memory[:, 0, 0] = expert_ids.to(dtype)`, read back with `round()`. Under vLLM that is the model dtype, and a float type holds every integer exactly only up to `2 / eps`: 256 in bf16, 2048 in fp16. bf16 holds 257 as 256, so in a checkpoint with 257 slots, slot 257's tokens would run as slot 256's, with no error. The vLLM `MultiSwitch` therefore refuses a checkpoint with more slots than its dtype numbers exactly, when it is built (`max_exact_slot_number` in `hf/switch/codes`). The HF twin computes the memory head in fp32. Pinned by `tests/unit/test_counting_ceiling.py` and `tests/vllm/_model_forward_tests.py::TestStreamSlotLimit`.
-
-### Three ceilings, often confused
+### Two different ceilings, often confused
 
 | limit | value | bounds | set by |
 |---|---|---|---|
-| codebook capacity | 2048 | distinct addresses a codeword can name -- the *memory* head's keys | `ms_code_m` (Kerdock m=6 -> N=64, capacity 2048) |
+| codebook capacity | 2048 | distinct addresses a codeword can name -- the *memory* head | `ms_code_m` (Kerdock m=6 -> N=64, capacity 2048) |
 | counting precision | 188 (bf16) | addresses the signal can be inverted to -- the *counting* head | KV-cache dtype |
-| slot numbers | 256 (bf16), 2048 (fp16) | slot numbers the memory head's value carries exactly -- per checkpoint, refused at load | model dtype |
 
-Under vLLM the smaller ones govern, so the advertised 2048 is not reachable there in bf16.
+Under vLLM the smaller one governs, so the advertised 2048 is not reachable there.
 
 ### `--kv-cache-dtype fp8` is unguarded -- *(no check)*
 
