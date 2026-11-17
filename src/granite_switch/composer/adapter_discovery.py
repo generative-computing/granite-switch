@@ -60,19 +60,23 @@ def discover_adapters(
         adapter_dir = io_yaml_path.parent
         tech = adapter_dir.name
 
-        if tech not in ("alora", "lora"):
+        if tech not in ("alora", "lora", "probe"):
             tech = technology_fallback
         if not tech or (technology_filter and tech != technology_filter):
             continue
 
         model_name = adapter_dir.parent.name
         adapter_name = adapter_dir.parent.parent.name
+        if tech == "probe":
+            adapter_name += "_probe"
 
         if model_name == target_model_name:
-            adapter_model = adapter_dir / "adapter_model.safetensors"
-            adapter_config_file = adapter_dir / "adapter_config.json"
+            if tech == "probe":
+                artifacts = ("probe_head.safetensors", "probe_config.json")
+            else:
+                artifacts = ("adapter_model.safetensors", "adapter_config.json")
 
-            if adapter_model.exists() and adapter_config_file.exists():
+            if all((adapter_dir / f).exists() for f in artifacts):
                 if adapter_name in discovered_by_name:
                     existing_tech = discovered_by_name[adapter_name][2]
                     if tech == "alora" and existing_tech == "lora":
@@ -101,7 +105,7 @@ def discover_adapters(
     print(f"\nDiscovery complete: {len(discovered)} adapter(s) found")
 
     # Report per-adapter module contributions
-    _report_module_contributions(discovered, arch)
+    _report_module_contributions([d for d in discovered if d[2] != "probe"], arch)
 
     return discovered
 
@@ -338,11 +342,11 @@ def _resolve_technology(
     repo_id: str,
     adapter_name: str,
     target_model_name: str,
-) -> str | None:
-    """Resolve preferred technology for an adapter via Hub metadata.
+) -> list[str]:
+    """Resolve the technologies to download for an adapter via Hub metadata.
 
-    Prefers ``alora`` over ``lora``. Returns ``None`` if neither exists
-    for this adapter/model combination.
+    Prefers ``alora`` over ``lora``, plus ``probe`` when present. Returns an
+    empty list if none exists for this adapter/model combination.
     """
     from huggingface_hub import list_repo_tree
     from huggingface_hub.errors import EntryNotFoundError
@@ -358,16 +362,15 @@ def _resolve_technology(
             item.path.split("/")[-1]
             for item in subtree
             if isinstance(item, RepoFolder)
-            and item.path.split("/")[-1] in ("alora", "lora")
+            and item.path.split("/")[-1] in ("alora", "lora", "probe")
         }
     except EntryNotFoundError:
-        return None
+        return []
 
-    if "alora" in technologies:
-        return "alora"
-    elif "lora" in technologies:
-        return "lora"
-    return None
+    resolved = [t for t in ("alora", "lora") if t in technologies][:1]
+    if "probe" in technologies:
+        resolved.append("probe")
+    return resolved
 
 
 def _build_allow_patterns(
@@ -418,10 +421,10 @@ def _build_allow_patterns(
                 # only that variant so discovery doesn't later skip the adapter.
                 patterns.append(f"{name}/{target_model_name}/{technology_filter}/**")
                 continue
-            tech = _resolve_technology(repo_id, name, target_model_name)
-            if tech:
+            techs = _resolve_technology(repo_id, name, target_model_name)
+            for tech in techs:
                 patterns.append(f"{name}/{target_model_name}/{tech}/**")
-            else:
+            if not techs:
                 # Model not found for this adapter — include anyway so
                 # discover_adapters can report it as missing downstream
                 patterns.append(f"{name}/{target_model_name}/**")
