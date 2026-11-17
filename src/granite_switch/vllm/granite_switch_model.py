@@ -47,7 +47,6 @@ from vllm.sequence import IntermediateTensors
 from granite_switch.config import GraniteSwitchConfig
 from granite_switch.streams import routing as stream_routing
 from granite_switch.streams.outputs import apply_head_scores, fit_head_scores
-from granite_switch.streams.transport import pack_slots, unpack_slots
 from granite_switch.token_exchange import apply_token_exchange
 
 from .audio.processor import (
@@ -247,7 +246,6 @@ class GraniteSwitchModel(nn.Module):
             stream_routing.module_attr(name): max(s.num_outputs for s in specs)
             for name, specs in stream_routing.head_specs(config).items()
         }
-        self._head_slot_columns = max(1, (config.num_adapters.bit_length() + 7) // 8)
         self._head_layer_groups: dict[int, list[tuple[str, str, str]]] = {}
         self._head_final_groups: list[tuple[str, str, str]] = []
         self._head_width = stream_routing.max_head_outputs(config)
@@ -518,13 +516,7 @@ class GraniteSwitchModel(nn.Module):
                     hidden_states, head_indices, head_scores
                 )
                 hidden_states = torch.cat(
-                    [
-                        hidden_states,
-                        head_scores,
-                        pack_slots(
-                            head_slot, self._head_slot_columns, hidden_states.dtype
-                        ),
-                    ],
+                    [hidden_states, head_scores, head_slot.unsqueeze(-1)],
                     dim=-1,
                 )
 
@@ -587,11 +579,14 @@ class GraniteSwitchModel(nn.Module):
         duplicate markers are not rejected (request-boundary validation is
         deferred).
         """
+        # The slot id rides in one column of this dtype, exactly: the switch
+        # refuses a checkpoint with more slots than the dtype numbers exactly.
+        head_slot = head_indices.to(final_hidden_states.dtype)
         for group in self._head_final_groups:
             head_scores = self._score_group(
                 group, final_hidden_states, head_indices, head_scores
             )
-        return head_scores, head_indices
+        return head_scores, head_slot
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -808,9 +803,8 @@ class GraniteSwitchForCausalLM(
         if self.model._head_types:
             hidden_size = self.config.hidden_size
             real_hidden = hidden_states[:, :hidden_size]
-            score_end = hidden_size + self.model._head_width
-            head_scores = hidden_states[:, hidden_size:score_end]
-            slot = unpack_slots(hidden_states[:, score_end:])
+            head_scores = hidden_states[:, hidden_size:-1]
+            slot = hidden_states[:, -1]
         else:
             real_hidden = hidden_states
             head_scores = slot = None
