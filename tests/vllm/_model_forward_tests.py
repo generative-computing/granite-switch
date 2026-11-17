@@ -666,16 +666,27 @@ class TestStreamHeadOutputFit(_StreamModelTestBase):
         assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
 
 
-class TestStreamHighSlot(_StreamModelTestBase):
-    def _make_config(self):
-        return self._compose_config([_probe_entry(i) for i in range(257)])
+class TestStreamSlotLimit:
+    """vLLM's switch numbers slots in the model dtype, and bf16 numbers them
+    exactly only up to 256: slot 257 would run as slot 256, so a checkpoint with
+    more slots is refused at load."""
 
-    def test_slot_257_keeps_its_own_output_in_bf16(self):
-        with torch.no_grad():
-            self.model.model.probe_head.bias[255] = torch.tensor([5.0, -5.0])
-            self.model.model.probe_head.bias[256] = torch.tensor([-5.0, 5.0])
-            logits = self._run_forward_and_logits([10, 20, 506])
-        assert int(logits[-1].argmax()) == _HEAD_LABELS[1]
+    def test_more_slots_than_bf16_numbers_are_refused(self, tmp_path):
+        from tests.shared.stream_models import compose_stream_model
+
+        _ensure_distributed()
+        config = compose_stream_model(
+            tmp_path, [_probe_entry(i) for i in range(257)]
+        ).config
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            vllm_config = _make_vllm_config(config)
+            with set_current_vllm_config(vllm_config), torch.device("cuda"):
+                with pytest.raises(ValueError, match="exactly only up to 256"):
+                    GraniteSwitchForCausalLM(vllm_config=vllm_config)
+        finally:
+            torch.set_default_dtype(old_dtype)
 
 
 class TestStreamPersistentBuffers(_StreamModelTestBase):

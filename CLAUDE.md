@@ -437,7 +437,9 @@ exactly only up to `n = 188` (189 aliases). This is a different limit from the c
 re-prefills the turn, resetting the count to one and losing history's adapter attribution (logged;
 counted in `Conversation.reprefills`). A raw `/v1/completions` request still bypasses this entirely.
 `--kv-cache-dtype fp8` is also unguarded and would saturate `_NEG_INF` and `code(n) * 28`.
-See section 8 of [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md).
+The memory head has a sibling limit: it carries each slot number as a value in the model dtype,
+exact only up to 256 in bf16, so the vLLM switch refuses a checkpoint with more slots at load
+(fp16 holds 2,048). See section 8 of [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md).
 
 ### 11. `MultiSwitch`'s Debug Attributes Exist Only Under `enforce_eager`
 

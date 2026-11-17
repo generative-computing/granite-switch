@@ -89,9 +89,9 @@ class TestStreamHeadOutputFit:
         _run_inner_class("TestStreamHeadOutputFit")
 
 
-class TestStreamHighSlot:
+class TestStreamSlotLimit:
     def test_suite(self):
-        _run_inner_class("TestStreamHighSlot")
+        _run_inner_class("TestStreamSlotLimit")
 
 
 class TestStreamPersistentBuffers:

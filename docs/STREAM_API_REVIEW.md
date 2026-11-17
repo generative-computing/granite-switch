@@ -26,7 +26,7 @@ the supported dependency environment are still release gates.
 | Plugin module names overwrite each other or model attributes | Fixed: registration validates names and uniqueness; attachment checks existing model attributes after core initialization. |
 | Composer calls plugin weight copies with gradients enabled | Fixed: the core owns `torch.no_grad()` around each plugin loader. |
 | Head manifest fields without a head kind are silently ignored | Fixed: discovery rejects these entries and reports the required `kind`. |
-| bf16 rounds slot IDs above 256 | Fixed: IDs travel as exact byte-valued columns, then decode to integers at the logits boundary. CPU round trips and full-graph tracing pass; CUDA validation is pending. |
+| bf16 rounds slot IDs above 256 | Fixed in the transport: IDs travel as exact byte-valued columns, then decode to integers at the logits boundary. On GPU (17 Nov) the slot-257 test then showed that vLLM's MultiSwitch itself numbers slots in the model dtype, which bf16 holds exactly only up to 256. vLLM now refuses a checkpoint with more slots at load (fp16 holds 2,048). |
 | Probe accepts arbitrary settings | Fixed: the built-in type rejects all settings; the MLP example also rejects unknown keys. |
 | Malformed streams produce an unrelated adapter-kind error | Fixed: config and composer parse entries before deriving kinds or indexing them. |
 | Duplicate implementations of the head-slot mask | Fixed: the switch helper uses the shared routing table, retaining the no-head path for standalone switch configs. |
@@ -52,17 +52,14 @@ the supported dependency environment are still release gates.
 
 ## Remaining release gates
 
-1. **Run this revision on GPUs.** On both supported vLLM lines, exercise eager
-   and CUDA-graph serving, mixed batches, chunked prefill, prefix-cache reuse,
-   nonfinal read layers, select/merge outputs, and heads beside each adapter
-   kind.
-   Include the new slot-257 and persistent-buffer cases. Repeat TP=2 and PP=2;
-   the packed output and loader changes must be checked at those boundaries.
-   Earlier GPU successes belong to the previous revision, not this one.
-2. **Run CPU suites with the declared dependencies.** Local validation uses
-   Python 3.11, torch 2.11.0 and transformers 5.8.0. The project declares
-   transformers 5.16 through 5.17.0. Passing tests here cannot establish support
-   for the declared environment.
+1. **Run this revision on GPUs.** Done on 17 Nov, on `ce0bb03`: on vLLM 0.32
+   and 0.26 every GPU test file passes, and on two GPUs (vLLM 0.32) the tensor-
+   and pipeline-parallel tests pass. The one failure, the slot-257 test, found
+   the switch's slot limit above; the test now checks that such a checkpoint is
+   refused. The real-model plugin check passes on both lines. The refusal itself
+   needs one more GPU run.
+2. **Run CPU suites with the declared dependencies.** Done on 17 Nov: the CPU
+   test files pass with the locked versions (transformers 5.17.0), on Vela.
 3. **Raw-prompt validation is intentionally deferred (2026-11-15).** vLLM can
    silently lose the verdict when a head marker is not last, and it does not
    reject repeated markers. This applies to every head type, not ordinary

@@ -20,4 +20,20 @@ def recover_count_from_signal(
     return torch.clamp(torch.round(count).long(), 0, capacity - 1)
 
 
-__all__ = ["KerdockDGCodeGenerator", "recover_count_from_signal", "verify_coherence"]
+def max_exact_slot_number(dtype: torch.dtype) -> int:
+    """The largest slot number ``dtype`` holds exactly, every smaller one too.
+
+    The memory head returns a token's slot number as an attention value and
+    rounds it. A float type holds every integer exactly only up to ``2 / eps``:
+    256 in bf16, 2048 in fp16, 2**24 in fp32. Past that, numbers alias their
+    neighbours: bf16 holds 257 as 256.
+    """
+    return int(2 / torch.finfo(dtype).eps)
+
+
+__all__ = [
+    "KerdockDGCodeGenerator",
+    "max_exact_slot_number",
+    "recover_count_from_signal",
+    "verify_coherence",
+]
