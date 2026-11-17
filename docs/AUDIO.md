@@ -326,7 +326,7 @@ Compose from the instruct-tuned sibling, or supply a template first. (A template
 that *is* present but whose family cannot be identified does raise.)
 
 The ChatML template consumes `message.content` as a string
-(`{%- set content = message.content | string %}`), so a multimodal parts *list*
+(`set content = message.content | string`), so a multimodal parts *list*
 would otherwise render as that list's Python repr — audio payload included —
 rather than as a marker. Compose rebuilds `content` from the parts instead. Part
 order is preserved, so each transcript is spliced in where its clip sat relative
