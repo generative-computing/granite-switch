@@ -63,8 +63,80 @@ Or via pip: `pip install uv`
    > must be installed explicitly. With them in place your sign-off is added automatically — see
    > [Sign off your commits (DCO)](#sign-off-your-commits-dco) below.
 4. Create a feature branch and make your changes
-5. Run tests: `uv run pytest tests/ -v`
+5. Run tests: `uv run pytest tests/ -v` (see [Tests that need a model](#tests-that-need-a-model) before writing one)
 6. Submit a pull request
+
+## Tests that need a model
+
+PR runs download no real model. A test that needs a Granite base or an adapter
+library runs on a **fake** on every PR, and on the **real** model only in the
+release tier (`/gpu-test-release`). The fakes keep the real config, chat template,
+special-token ids and repo layout, with tiny random weights. The full design is in
+[docs/CICD.md, "Release test tier"](docs/CICD.md#release-test-tier).
+
+**Get models from `tests/shared/model_sources.py`, never from a Hub id:**
+
+```python
+from tests.shared import model_sources
+
+@pytest.mark.parametrize("source", model_sources.sources())   # [fake] on PRs, [real] in release
+def test_something(source):
+    base = model_sources.base_model(source, "granite-4.1-3b")
+    library = model_sources.adapter_library(
+        source, "ibm-granite/granitelib-rag-r1.0", "granite-4.1-3b"
+    )
+```
+
+`sources()` puts the `release` marker on the real case. For a parameter list of
+your own, use `pytest.param(..., marks=pytest.mark.release)` on the real cases.
+
+**Rules:**
+
+- **Resolve the model inside the test or fixture, not at collection.** Calling
+  `base_model()` or `adapter_library()` at import time builds fakes on every
+  collection, including for tests that are deselected, and anything loaded from
+  the returned real id at import time downloads on PR runs.
+- **Fail, don't skip, when the model doesn't load.** A skip on a load error turns
+  a broken fake or a missing capture into a silent pass.
+- **Pick the fake's weights by what you assert** (`preset=` from
+  `tests/shared/fake_bases.py`):
+  - `REALISTIC` (the default): hidden states stay at realistic scale, so exact
+    score and logit tolerances hold, but adapters barely move the output.
+  - `LIVE_LAYERS`: every layer and adapter changes the output. Use it when a test
+    asserts that adapters differ or that a sublayer matters.
+  - `dims=TP_DIMS`: more attention heads, for tensor-parallel tests that need
+    several KV heads per rank.
+- **Don't assert on what a fake can't provide:** generated-text quality, trained
+  behaviour, or real token counts. The fake tokenizer splits ordinary words into
+  one token per byte, so a prompt is several times longer in tokens. Put such
+  assertions only in the real case, or make the test release-only.
+- **Release-only tests are the exception.** Mark a test `release` with no fake
+  case only when a fake can't stand in (real weights, the real vocabulary, the live
+  Hub), and add it to the list in [docs/CICD.md](docs/CICD.md#release-test-tier).
+- **A new base or adapter library** needs its files captured: add it to `BASES` in
+  `tests/shared/fake_bases.py` or `LIBRARIES` in
+  `tests/shared/fake_adapter_libraries.py`, then run
+  `python -m tests.shared.fake_bases --capture` or
+  `python -m tests.shared.fake_adapter_libraries --capture`, and commit the files
+  under `tests/shared/fixtures/`.
+
+**Running a subset with `-m`:** `pyproject.toml` sets `addopts` to
+`-m "not deep and not release"`. A `-m` on the command line **replaces** that
+filter instead of adding to it, so add the exclusions back yourself:
+
+```bash
+pytest -m "audio and not deep and not release" tests/   # not: pytest -m audio
+pytest -m release tests/                                  # the release tier only
+```
+
+Without them, a run silently includes every release test and downloads real
+models. Every `-m` in the CI workflows carries these exclusions for the same
+reason.
+
+**Older end-to-end tests** gated on `GRANITE_SWITCH_E2E_MODELS=1` (for example
+`tests/hf/test_multi_switch_e2e.py`) still name real models directly and skip
+unless the variable is set. They predate this scheme; don't copy them as a
+template.
 
 ## Sign off your commits (DCO)
 

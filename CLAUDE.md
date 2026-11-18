@@ -225,6 +225,12 @@ pytest tests/integration/ -v -s --tb=short -x
 
 # Run a specific test pattern when debugging
 pytest tests/ -k "pattern" -v -s --tb=short -x
+
+# Select by marker: -m replaces addopts, so keep the exclusions (see gotcha 5a)
+pytest tests/ -m "audio and not deep and not release" -v -s --tb=short -x
+
+# The release tier (real models from the Hub) only
+pytest tests/ -m release -v -s --tb=short -x
 ```
 
 ### vLLM Deployment
@@ -383,6 +389,24 @@ No test should manually assemble `GraniteSwitchConfig` or call `transfer_base_we
 directly.  All model construction must go through `GraniteSwitchComposer` so that the
 compose pipeline itself is what's being tested.  If the composer can't handle a use case
 (e.g., zero-adapter skinning), extend the composer — don't work around it in tests.
+
+### 5a. Tests Get Models From `model_sources`: Fake on PRs, Real in Release
+
+PR runs download no real model. A test that needs a base or an adapter library takes
+it from `tests/shared/model_sources.py` (`base_model`, `adapter_library`,
+`lora_adapter_dir`) and parametrizes over `model_sources.sources()`, never naming a
+Hub id: the `[fake]` case runs on every PR, the `[real]` case carries the `release`
+marker and runs only in `/gpu-test-release`. Resolve the source inside the test or
+fixture, never at import time; fail rather than skip when a model doesn't load. Pick
+the fake's `preset` by what you assert: the default `REALISTIC` keeps exact
+tolerances but adapters barely move its output, `LIVE_LAYERS` makes every adapter and
+sublayer matter. Don't assert text quality or real token counts on a fake (its
+tokenizer is byte-level). A `-m` on the command line **replaces** `addopts`'s
+`-m "not deep and not release"`, so any hand-written `-m` must add
+`and not deep and not release` back, or the run silently includes the whole release
+tier. The rules are in [CONTRIBUTING.md](CONTRIBUTING.md#tests-that-need-a-model), the
+design in [docs/CICD.md](docs/CICD.md#release-test-tier). The older
+`GRANITE_SWITCH_E2E_MODELS`-gated tests predate this; don't copy them.
 
 ### 6. HF Attention Backends and Causal Masking
 

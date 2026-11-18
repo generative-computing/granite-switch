@@ -198,10 +198,13 @@ While in pre-1.0, increment `MINOR` for new features and `PATCH` for bug fixes. 
 
 ### Release test tier
 
-**PR runs download no real model.** Every test that needs a Granite base or an
+**PR runs download no real model.** A test that needs a Granite base or an
 adapter library runs twice: once on a fake on every PR run, and once on the real
-model in the release tier, marked `release`. Release tests are excluded from every
-other scope (`addopts` and each `-m` filter carry `not release`) and run with the
+model in the release tier, marked `release`. (The exception is the older tests
+gated on `GRANITE_SWITCH_E2E_MODELS=1`, which still name real models and skip
+unless it is set.) Release tests are excluded from every other scope (`addopts`
+and each `-m` filter carry `not release`, because a `-m` on the command line
+replaces `addopts` instead of adding to it) and run with the
 `release` GPU suite (`/gpu-test-release`), on a 2-GPU pod like `multi`: the
 real-model TP=2 cases in `tests/vllm/test_tp_integration.py` skip below 2 GPUs,
 and `multi` excludes them as release tests, so no other suite would run them.
@@ -219,7 +222,9 @@ the fakes. What the fakes leave out is weights and the BPE vocabulary: ordinary
 words tokenize to one token per byte.
 
 **Writing a test that needs a model:** take it from `tests/shared/model_sources.py`
-rather than naming a Hub id, and parametrize over `model_sources.sources()`:
+rather than naming a Hub id, and parametrize over `model_sources.sources()`. The
+rules (which weight preset to use, what a fake can't assert, how to add a base) are
+in [CONTRIBUTING.md](../CONTRIBUTING.md#tests-that-need-a-model).
 
 ```python
 @pytest.mark.parametrize("source", model_sources.sources())
