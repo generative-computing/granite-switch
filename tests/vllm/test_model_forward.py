@@ -59,6 +59,36 @@ class TestAdapterIndicesWiring:
         _run_inner_class("TestAdapterIndicesWiring")
 
 
+class TestProbeSlotRouting:
+    def test_suite(self):
+        _run_inner_class("TestProbeSlotRouting")
+
+
 class TestKVVisibility:
     def test_suite(self):
         _run_inner_class("TestKVVisibility")
+
+
+class TestStreamCompactRows:
+    def test_suite(self):
+        _run_inner_class("TestStreamCompactRows")
+
+
+class TestStreamHeadsOnly:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadsOnly")
+
+
+class TestStreamPluginMerge:
+    def test_suite(self):
+        _run_inner_class("TestStreamPluginMerge")
+
+
+class TestStreamHeadOutputFit:
+    def test_suite(self):
+        _run_inner_class("TestStreamHeadOutputFit")
+
+
+class TestStreamPersistentBuffers:
+    def test_suite(self):
+        _run_inner_class("TestStreamPersistentBuffers")

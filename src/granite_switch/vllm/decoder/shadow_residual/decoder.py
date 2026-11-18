@@ -98,7 +98,7 @@ class ShadowResidualAttention(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
 
-        num_adapters = config.num_adapters
+        num_adapters = config.num_lora_rows  # one row per LoRA slot
         max_lora_rank = _max_lora_rank(config)
 
         self.hidden_size = config.hidden_size
@@ -242,7 +242,7 @@ class ShadowResidualDecoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
 
-        num_adapters = config.num_adapters
+        num_adapters = config.num_lora_rows  # one row per LoRA slot
         cross_rank = int(getattr(config, "cross_stream_rank", 0) or 0)
         hidden = config.hidden_size
         self.residual_multiplier = config.residual_multiplier

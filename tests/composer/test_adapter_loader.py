@@ -540,9 +540,9 @@ class TestAdapterLoadingFromYAML:
             yaml.dump(manifest_data, f)
 
         input_path = str(manifest_file)
-        yaml_adapters, probe_meta = discover_adapters_from_yaml(input_path)
+        yaml_adapters, head_meta = discover_adapters_from_yaml(input_path)
         # No entry declared kind/labels, so no probe metadata.
-        assert probe_meta == {}
+        assert head_meta == {}
 
         # Verification of Parity: compare (path, name, technology) - source differs by design
         # discover_adapters returns source=None, discover_adapters_from_yaml returns source=manifest_path
@@ -572,22 +572,57 @@ class TestManifestProbeMetadata:
             manifest.open("w"),
         )
 
-        found, probe_meta = discover_adapters_from_yaml(str(manifest))
+        found, head_meta = discover_adapters_from_yaml(str(manifest))
 
         # The adapter tuples are unchanged (still 4-wide).
         assert {(n) for _, n, _, _ in found} == {"rag", "hallucination"}
-        # Only the probe entry appears in the metadata dict.
-        assert probe_meta == {
+        # Only the probe entry appears in the metadata dict, with every head
+        # stream key (unset ones as None).
+        assert head_meta == {
             "hallucination": {
                 "kind": "probe",
                 "labels": ["faithful", "hallucinated"],
                 "layer": None,
+                "output": None,
+                "settings": None,
             }
         }
 
-    def test_plain_manifest_has_no_probe_metadata(self, tmp_path):
+    def test_plain_manifest_has_no_head_metadata(self, tmp_path):
         manifest = tmp_path / "manifest.yaml"
         yaml.dump({"rag": {"path": "/p/rag", "type": "lora"}}, manifest.open("w"))
 
-        _found, probe_meta = discover_adapters_from_yaml(str(manifest))
-        assert probe_meta == {}
+        _found, head_meta = discover_adapters_from_yaml(str(manifest))
+        assert head_meta == {}
+
+    @pytest.mark.parametrize("key", ["labels", "layer", "output", "settings"])
+    @pytest.mark.parametrize("kind", [None, "lora"])
+    def test_head_fields_require_a_head_kind(self, tmp_path, key, kind):
+        entry = {"path": "/head", key: None}
+        if kind is not None:
+            entry["kind"] = kind
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(yaml.safe_dump({"head": entry}))
+        with pytest.raises(ValueError, match="head fields.*no head kind"):
+            discover_adapters_from_yaml(str(manifest))
+
+    @pytest.mark.parametrize(
+        "fields,match",
+        [
+            ({"labels": [True, False]}, "quote YAML"),
+            ({"labels": "yes"}, "list of strings"),
+            ({"settings": []}, "settings must be a mapping"),
+            ({"output": []}, "output must be a mapping"),
+            ({"labels": ["yes"], "output": {"token_ids": [1]}}, "not both"),
+            ({"read_layer": 3}, "unknown fields"),
+            # A head reads the base model; it can't name an adapter.
+            ({"adapter": "rag"}, "unknown fields"),
+        ],
+    )
+    def test_bad_head_manifest_fails_during_discovery(self, tmp_path, fields, match):
+        manifest = tmp_path / "manifest.yaml"
+        manifest.write_text(
+            yaml.safe_dump({"head": {"path": "/head", "kind": "probe", **fields}})
+        )
+        with pytest.raises(ValueError, match=match):
+            discover_adapters_from_yaml(str(manifest))

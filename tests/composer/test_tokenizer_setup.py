@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from granite_switch.composer.tokenizer_setup import (
+    ANCHOR_MODE_HEAD,
     _decode_alora_invocation_text,
     add_audio_token,
     add_control_tokens,
@@ -344,19 +345,22 @@ class TestBuildSubstituteTokenIds:
 
         assert subs == [42]
 
-    def test_probe_uses_its_own_substitute(self):
-        adapters = [("/b", "code", "lora", None), (None, "safety", "probe", None)]
+    def test_head_uses_its_own_substitute(self):
+        adapters = [
+            ("/b", "code", "lora", None),
+            (None, "safety", ANCHOR_MODE_HEAD, None),
+        ]
 
         subs = build_substitute_token_ids(
-            adapters, lora_substitute_id=42, probe_slot_substitute_id=9
+            adapters, lora_substitute_id=42, head_substitute_id=9
         )
 
         assert subs == [42, 9]
 
-    def test_probe_without_its_substitute_raises(self):
-        adapters = [(None, "safety", "probe", None)]
+    def test_head_without_its_substitute_raises(self):
+        adapters = [(None, "safety", ANCHOR_MODE_HEAD, None)]
 
-        with pytest.raises(ValueError, match="probe_slot_substitute_id"):
+        with pytest.raises(ValueError, match="head_substitute_id"):
             build_substitute_token_ids(adapters, lora_substitute_id=42)
 
 

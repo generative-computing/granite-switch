@@ -36,6 +36,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import is_pp_missing_parameter
 
+from granite_switch.streams.checkpoint import HeadWeightLoader
+
 from ..core import (
     FusedLoRAKernelMeta,
     LoRAContext,
@@ -358,6 +360,7 @@ class LoRADecoderInterface(DecoderInterface):
         """
         params_dict = dict(model.named_parameters())
         loaded_params: set = set()
+        heads = HeadWeightLoader(model.model)
 
         def _load_direct(name, loaded_weight):
             """Load a weight directly by name."""
@@ -376,6 +379,8 @@ class LoRADecoderInterface(DecoderInterface):
                 loaded_params.add(name)
 
         for name, loaded_weight in weights:
+            if heads.load(name, loaded_weight):
+                continue
             # ── HF stacked MoE → vLLM FusedMoE (shared with the SR loader) ──
             if _try_load_stacked_moe(
                 name, loaded_weight, params_dict, loaded_params, model
@@ -385,6 +390,7 @@ class LoRADecoderInterface(DecoderInterface):
             # ── Direct load (built checkpoints + all non-MoE weights) ──
             _load_direct(name, loaded_weight)
 
+        loaded_params.update(heads.finish())
         _audit_loaded(params_dict, loaded_params, model, label="LoRA weight load")
 
         # Finalize fused LoRA weights (build w_ext from loaded lora_A + base weights)
@@ -392,9 +398,10 @@ class LoRADecoderInterface(DecoderInterface):
         return loaded_params
 
     def finalize_modules(self, model, config) -> None:
-        if not hasattr(config, "adapter_ranks") or config.adapter_ranks is None:
+        # One rank per LoRA row (the LoRA tensors' first dim), not per slot.
+        adapter_ranks = getattr(config, "lora_row_ranks", None)
+        if adapter_ranks is None:
             return
-        adapter_ranks = config.adapter_ranks
         for module in model.modules():
             if isinstance(module, SwitchedLoRALinear):
                 module.finalize_weights(adapter_ranks)
@@ -504,6 +511,7 @@ class SRDecoderInterface(DecoderInterface):
         """
         params = dict(model.named_parameters())
         loaded: set = set()
+        heads = HeadWeightLoader(model.model)
 
         def _load(pname: str, w) -> bool:
             if pname not in params:
@@ -518,6 +526,8 @@ class SRDecoderInterface(DecoderInterface):
             return True
 
         for name, w in weights:
+            if heads.load(name, w):
+                continue
             if any(s in name for s in _SR_SKIP_SUBSTRINGS):
                 continue
             if name.endswith(".bias") and name not in params:
@@ -538,17 +548,19 @@ class SRDecoderInterface(DecoderInterface):
             ):
                 loaded.add(pname)
 
+        loaded.update(heads.finish())
         _audit_loaded(params, loaded, model, label="SR weight load")
 
         self.finalize_modules(model, model.config)
         return loaded
 
     def finalize_modules(self, model, config) -> None:
-        adapter_ranks = getattr(config, "adapter_ranks", None)
+        # One rank per LoRA row (the LoRA tensors' first dim), not per slot.
+        adapter_ranks = getattr(config, "lora_row_ranks", None)
         if adapter_ranks is None:
             return
         cross_rank = int(getattr(config, "cross_stream_rank", 0) or 0)
-        cross_ranks = [cross_rank] * config.num_adapters
+        cross_ranks = [cross_rank] * config.num_lora_rows
 
         sll = [m for m in model.modules() if isinstance(m, SwitchedLoRALinear)]
         for m in sll:
@@ -596,7 +608,7 @@ class SRDecoderInterface(DecoderInterface):
         hs = state.hs
         m = adapter_indices.shape[0]
         # Read after the layer's cross-stream shunt: adapter-active tokens use
-        # the adapted stream, the rest (including probe markers, whose LoRA
+        # the adapted stream, the rest (including head markers, whose LoRA
         # stream is zeroed) use the base stream.
         select = (adapter_indices > 0).unsqueeze(1)  # [M, 1]
         return torch.where(select, hs[m:], hs[:m])

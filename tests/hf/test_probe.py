@@ -58,10 +58,11 @@ def _probe_config(
 def test_probe_head_built_only_when_slot_present():
     m_lora = GraniteSwitchForCausalLM(_probe_config(["lora", "lora"]))
     m_clf = GraniteSwitchForCausalLM(_probe_config(["lora", "probe"]))
-    assert m_lora.model.probe_head is None
+    assert not hasattr(m_lora.model, "probe_head")
     assert m_clf.model.probe_head is not None
-    # Bank sized to the full index space so slot = index - 1 addresses it.
-    assert m_clf.model.probe_head.num_probe_slots == 2
+    # The bank holds the slot's head row: a pre-streams config (no
+    # ``streams``) keeps the old layout, one row per slot.
+    assert m_clf.model.probe_head.num_rows == 2
     assert m_clf.model.probe_head.num_labels == 2
 
 
@@ -91,7 +92,7 @@ def test_probe_rewrites_last_logit_row_to_label_word():
     assert torch.isfinite(last_row[torch.tensor(label_ids)]).all()
     # The label-id scores equal the probe head's per-label verdict, sliced
     # to this slot's real label count (padded columns are never scattered).
-    verdict = model.model._last_probe_verdict[2][0, :n]  # [n_labels]
+    verdict = model.model._last_head_scores[2][0, :n]  # [n_labels]
     assert torch.allclose(last_row[torch.tensor(label_ids)], verdict.to(last_row.dtype))
     # The argmax (emitted token) is one of the label ids.
     assert int(last_row.argmax()) in label_ids
@@ -106,8 +107,8 @@ def test_lora_and_probe_slots_select_separately():
     with torch.no_grad():
         model(input_ids=torch.tensor([[10, 250, 20, 30]]))
     assert model.model._last_lora_indices.tolist() == [[0, 1, 1, 1]]
-    assert not model.model._last_probe_indices.any()
-    assert model.model._last_probe_verdict is None
+    assert not model.model._last_head_indices.any()
+    assert model.model._last_head_scores is None
 
     # The probe marker selects slot 2 and routes out of the LoRA stream.
     input_ids = torch.tensor([[10, 20, 30, 251]])
@@ -115,7 +116,7 @@ def test_lora_and_probe_slots_select_separately():
         output = model(input_ids=input_ids)
 
     assert model.model._last_lora_indices.tolist() == [[0, 0, 0, 0]]
-    assert model.model._last_probe_indices.tolist() == [[0, 0, 0, 2]]
+    assert model.model._last_head_indices.tolist() == [[0, 0, 0, 2]]
     label_ids = config.probe_label_token_ids[1]
     last_logits = output.logits[0, -1]
     assert torch.isfinite(last_logits[torch.tensor(label_ids)]).all()
@@ -137,7 +138,7 @@ def test_non_probe_request_logits_untouched():
     with torch.no_grad():
         out = model(input_ids=input_ids)
 
-    assert (model.model._last_probe_indices == 0).all()
+    assert (model.model._last_head_indices == 0).all()
     # Full finite vocab row — nothing blanked.
     assert torch.isfinite(out.logits[0, -1, :]).all()
 
@@ -179,7 +180,7 @@ def test_decode_step_after_verdict_is_plain_lm():
     input_ids = torch.tensor([[10, 20, 30, 251]])
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=True)
-    assert model.model._last_probe_verdict is not None
+    assert model.model._last_head_scores is not None
 
     with torch.no_grad():
         step = model(
@@ -187,7 +188,7 @@ def test_decode_step_after_verdict_is_plain_lm():
             past_key_values=out.past_key_values,
             use_cache=True,
         )
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(step.logits).all()
 
 
@@ -227,8 +228,8 @@ def test_lora_only_path_unaffected():
     with torch.no_grad():
         out = model(input_ids=input_ids)
 
-    assert model.model.probe_head is None
-    assert model.model._last_probe_verdict is None
+    assert not hasattr(model.model, "probe_head")
+    assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits).all()
     assert out.logits.shape == (1, 6, config.vocab_size)
 
@@ -248,7 +249,7 @@ def test_lora_generation_on_mixed_model_decodes():
     with torch.no_grad():
         out = model(input_ids=input_ids, use_cache=True)
     # No probe fired -> no verdict, full finite vocab row.
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
     assert torch.isfinite(out.logits).all()
 
     # Cached decode step of the same (LoRA) request yields finite logits.
@@ -260,7 +261,7 @@ def test_lora_generation_on_mixed_model_decodes():
         )
     assert step.logits.shape == (1, 1, config.vocab_size)
     assert torch.isfinite(step.logits).all()
-    assert model.model._last_probe_verdict is None
+    assert model.model._last_head_scores is None
 
 
 @pytest.mark.parametrize(
@@ -275,17 +276,27 @@ def test_lora_generation_on_mixed_model_decodes():
     ],
     ids=["content-after", "two-slots", "repeated"],
 )
-def test_marker_that_is_not_the_last_token_raises(kinds, input_ids):
-    """The verdict is read at the last token, so any other marker would be
-    ignored silently; it raises instead."""
+def test_a_marker_anywhere_rewrites_only_its_own_row(kinds, input_ids):
+    """Where a marker goes is the caller's choice: nothing is rejected. Each
+    marker is scored at its own position, and every other row keeps its LM
+    logits, so only a marker that is last decides what generation emits."""
     config = _probe_config(kinds, label_token_ids=(100, 200))
     model = GraniteSwitchForCausalLM(config)
     _set_adapter_token_ids(model, config.adapter_token_ids)
     model.eval()
 
-    with pytest.raises(RuntimeError, match="not their last token"):
-        with torch.no_grad():
-            model(input_ids=torch.tensor(input_ids))
+    with torch.no_grad():
+        logits = model(input_ids=torch.tensor(input_ids)).logits[0]
+
+    markers = {
+        tid for tid, kind in zip(config.adapter_token_ids, kinds) if kind == "probe"
+    }
+    non_label = [t for t in range(config.vocab_size) if t not in (100, 200)]
+    for position, token in enumerate(input_ids[0]):
+        if token in markers:
+            assert torch.isinf(logits[position, non_label]).all()
+        else:
+            assert torch.isfinite(logits[position]).all()
 
 
 def test_right_padded_row_rewrites_the_marker_column():
@@ -307,10 +318,14 @@ def test_right_padded_row_rewrites_the_marker_column():
     assert torch.isfinite(out.logits[0, -1, :]).all()  # padding untouched
     assert torch.isinf(out.logits[1, -1, non_label]).all()
 
-    # Keeping only the last position drops row 0's marker row: fail loud.
-    with pytest.raises(RuntimeError, match="logits_to_keep"):
-        with torch.no_grad():
-            model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=1)
+    # Keeping only the last position drops row 0's marker row, and with it
+    # that verdict; row 1's marker is last, so its verdict is kept.
+    with torch.no_grad():
+        kept = model(
+            input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=1
+        ).logits
+    assert torch.isfinite(kept[0, -1]).all()
+    assert torch.isinf(kept[1, -1, non_label]).all()
 
 
 def _randomize_probe_head(model):
@@ -336,8 +351,8 @@ def test_intermediate_layer_probe_scores_that_layers_output():
         )
 
     assert model.model._last_lora_indices[0, -1].item() == 0
-    assert model.model._last_probe_indices[0, -1].item() == 2
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    assert model.model._last_head_indices[0, -1].item() == 2
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     expected = model.model.probe_head(out.hidden_states[1][rows, pos], slots)
     final = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
     torch.testing.assert_close(verdict, expected)
@@ -365,7 +380,7 @@ def test_final_decoder_layer_read_uses_pre_norm_output():
     finally:
         hook.remove()
 
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     expected = model.model.probe_head(captured[0][rows, pos], slots)
     final_norm = model.model.probe_head(out.hidden_states[-1][rows, pos], slots)
     torch.testing.assert_close(verdict, expected)
@@ -384,7 +399,7 @@ def test_batch_slots_score_at_their_own_read_layers():
             output_hidden_states=True,
         )
 
-    rows, pos, verdict, slots, _ = model.model._last_probe_verdict
+    rows, pos, verdict, slots, _ = model.model._last_head_scores
     assert slots.tolist() == [1, 2]
     final_score = model.model.probe_head(
         out.hidden_states[-1][rows[:1], pos[:1]], slots[:1]

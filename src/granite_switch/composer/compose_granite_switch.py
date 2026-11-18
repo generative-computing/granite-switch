@@ -70,7 +70,7 @@ from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
-    ANCHOR_MODE_PROBE,
+    ANCHOR_MODE_HEAD,
     ANCHOR_MODE_SR,
     add_audio_token,
     add_control_tokens,
@@ -128,12 +128,12 @@ def build_control_token_lists(tokenizer, all_discovered, base_reset):
         all_discovered,
         _probe_lora_substitute_token_id(tokenizer),
         base_reset=base_reset,
-        probe_slot_substitute_id=_probe_slot_substitute_token_id(tokenizer),
+        head_substitute_id=_head_substitute_token_id(tokenizer),
     )
     return adapter_token_ids, special_tokens, adapter_substitute_token_ids
 
 
-def _probe_slot_substitute_token_id(tokenizer) -> int:
+def _head_substitute_token_id(tokenizer) -> int:
     """The base's role-open marker id, which follows the last turn's close."""
     fmt = detect_template_format(tokenizer.chat_template)
     if fmt is None:
@@ -1151,7 +1151,7 @@ def build():
     step_start = time.time()
 
     discovered_adapters = []
-    probe_meta: dict[str, dict] = {}
+    head_meta: dict[str, dict] = {}
     if args.adapters:
         print("\n" + "=" * 80)
         print("Processing adapters")
@@ -1193,9 +1193,9 @@ def build():
                     print(msg)
                 discovered_adapters.extend(found)
             elif (path := Path(entry)).is_file() and path.suffix in (".yaml", ".yml"):
-                found, manifest_probe_meta = discover_adapters_from_yaml(entry)
+                found, manifest_head_meta = discover_adapters_from_yaml(entry)
                 discovered_adapters.extend(found)
-                probe_meta.update(manifest_probe_meta)
+                head_meta.update(manifest_head_meta)
             else:
                 # Single adapter directory
                 resolved = Path(resolved_path)
@@ -1237,11 +1237,11 @@ def build():
     # token lands, and SR has exactly one usable activation point — the anchor at
     # the end of the generation prompt — so a mislabelled SR checkpoint must not
     # be able to fall through to aLoRA or sequence-start placement.
-    # A probe slot is labelled here for the same reason: its control token is
-    # an end-locator, which is a placement mode, not a weight format, and the
+    # A head slot is labelled here for the same reason: its marker is an
+    # end-locator, which is a placement mode, not a weight format, and the
     # manifest's ``kind`` decides it. An adapter satisfies at most one test -- an SR
-    # adapter carries ``cross_stream`` weights, a probe slot carries a
-    # probe head instead -- and SR goes first because it is read from the
+    # adapter carries ``cross_stream`` weights, a head slot carries a head's
+    # weights instead -- and SR goes first because it is read from the
     # artifact rather than from a label.
     external_discovered = [
         (
@@ -1249,8 +1249,8 @@ def build():
             name,
             ANCHOR_MODE_SR
             if path and is_shadow_residual_adapter(path)
-            else ANCHOR_MODE_PROBE
-            if probe_meta.get(name, {}).get("kind") == "probe"
+            else ANCHOR_MODE_HEAD
+            if head_meta.get(name, {}).get("kind", "lora") != "lora"
             else tech,
             source,
         )
@@ -1261,9 +1261,12 @@ def build():
     ]
     all_discovered = external_discovered + built_in_discovered
 
-    # Order LoRA slots first, probe slots last (Python sorts False before True)
+    # LoRA slots first, then head slots, each in manifest order (a stable sort;
+    # False sorts before True). The composer takes any order when the config
+    # has stream entries; this keeps the slot layout of checkpoints composed
+    # before streams.
     all_discovered.sort(
-        key=lambda t: probe_meta.get(t[1], {}).get("kind", "lora") == "probe"
+        key=lambda t: head_meta.get(t[1], {}).get("kind", "lora") != "lora"
     )
 
     has_external = len(external_discovered) > 0
@@ -1418,60 +1421,52 @@ def build():
                 _anchor_text, _sub, _mode = load_activation_anchor(_path, tokenizer)
             adapter_substitute_token_ids[_sub_offset + _i] = _sub
 
-    # adapter_kinds marks which slots are probes (same control token as a
-    # LoRA); resolve each slot's label words to token ids for the vLLM verdict.
-    if probe_meta:
-        adapter_kinds = [
-            probe_meta.get(name, {}).get("kind", "lora") for name in adapter_names
-        ]
-        probe_names = [
-            name
-            for name in adapter_names
-            if probe_meta.get(name, {}).get("kind") == "probe"
-        ]
-
-        if probe_names:
-            # Full width (length num_adapters, indexed by adapter_index - 1): each
-            # probe slot's label token ids. The config derives the per-slot
-            # counts and the padded bank width from this.
-            per_slot_label_names: list[list[str] | None] = []
-            per_slot_label_token_ids: list[list[int] | None] = []
-            # Full width too: each probe slot's read layer (None = final).
-            per_slot_read_layer: list[int | None] = []
-            for name, kind in zip(adapter_names, adapter_kinds):
-                if kind != "probe":
-                    per_slot_label_names.append(None)
-                    per_slot_label_token_ids.append(None)
-                    per_slot_read_layer.append(None)
-                    continue
-                labels = probe_meta[name].get("labels")
-                if not labels:
-                    raise ValueError(
-                        f"Adapter '{name}' is declared kind=probe but has no "
-                        f"'labels' in the manifest. Probe slots need label "
-                        f"words (e.g. labels: [safe, unsafe]) so the verdict exit "
-                        f"can emit them."
-                    )
-                label_names = list(labels)
-                per_slot_label_names.append(label_names)
-                per_slot_label_token_ids.append(
-                    resolve_label_token_ids(tokenizer, label_names)
+    # Head streams: one stream entry per slot (granite_switch.streams). A head
+    # slot's type is its manifest ``kind``; its label words become the output
+    # token ids, ``layer`` its read layer. Every head type goes through the
+    # same code; the type itself checks its settings when the model is built.
+    if any(m.get("kind", "lora") != "lora" for m in head_meta.values()):
+        streams = []
+        head_rows: dict[str, int] = {}
+        print("\nHead streams:")
+        for name in adapter_names:
+            meta = head_meta.get(name, {})
+            kind = meta.get("kind", "lora")
+            if kind == "lora":
+                streams.append({"type": "lora"})
+                continue
+            output = dict(meta.get("output") or {})
+            labels = meta.get("labels")
+            if labels:
+                output["token_ids"] = resolve_label_token_ids(tokenizer, list(labels))
+            if not output.get("token_ids"):
+                raise ValueError(
+                    f"Adapter '{name}' is declared kind={kind} but has no output "
+                    f"tokens. Give 'labels' (words, e.g. labels: [safe, unsafe]) or "
+                    f"'output: {{token_ids: [...]}}' so its scores have tokens to land on."
                 )
-                per_slot_read_layer.append(probe_meta[name].get("layer"))
-
-            optional_kwargs["adapter_kinds"] = adapter_kinds
-            optional_kwargs["probe_label_token_ids"] = per_slot_label_token_ids
-            optional_kwargs["probe_read_layers"] = per_slot_read_layer
-            print("\nProbe slots:")
-            for name, words, ids, layer in zip(
-                adapter_names,
-                per_slot_label_names,
-                per_slot_label_token_ids,
-                per_slot_read_layer,
-            ):
-                if ids is not None:
-                    where = "final norm" if layer is None else f"layer {layer}"
-                    print(f"  {name} → labels {words} → token ids {ids} @ {where}")
+            output.setdefault("mode", "select")
+            row = head_rows.get(kind, 0)
+            head_rows[kind] = row + 1
+            entry = {
+                "type": kind,
+                "read_layer": meta.get("layer"),
+                "head_row": row,
+                "output": output,
+            }
+            if meta.get("settings"):
+                entry["settings"] = dict(meta["settings"])
+            streams.append(entry)
+            where = (
+                "final norm"
+                if entry["read_layer"] is None
+                else f"layer {entry['read_layer']}"
+            )
+            print(
+                f"  {name} ({kind}) → {output['mode']} over token ids "
+                f"{output['token_ids']} @ {where}"
+            )
+        optional_kwargs["streams"] = streams
 
     model = GraniteSwitchComposer.from_base_and_adapters(
         base_model_name_or_path=base_model_local_path,
@@ -1541,15 +1536,24 @@ def build():
     print("Generating compose report...")
     print("=" * 80)
     if hasattr(model, "_build_mappings"):
+        # The report analyzes LoRA weights, so it gets the LoRA slots only, in
+        # slot order (their row order): a head folder carries a head, not
+        # adapter_model.safetensors.
+        lora_report = [
+            (path, name)
+            for path, name, _tech, _src in all_discovered
+            if path is not None
+            and head_meta.get(name, {}).get("kind", "lora") == "lora"
+        ]
         generate_compose_report(
             base_mapping=model._build_mappings["base"],
             adapter_mapping=model._build_mappings["adapter"],
             output_path=args.output,
             model=model,
-            adapter_paths=adapter_paths,
-            adapter_names=adapter_names,
+            adapter_paths=[path for path, _ in lora_report],
+            adapter_names=[name for _, name in lora_report],
             arch=arch,
-            source_analysis=model._build_mappings.get("source_analysis"),
+            source_analysis=model._build_mappings.get("source_analysis") or None,
         )
         print(f"Compose report saved to {args.output}/compose_report.json")
 

@@ -11,6 +11,8 @@ from collections import defaultdict
 
 import torch
 
+from granite_switch.streams import routing as stream_routing
+
 from .arch import ArchDescriptor
 
 
@@ -84,11 +86,14 @@ def validate_cross_stream_population(model):
         # lora_B is the gate: lora_A is kaiming-initialized even for unpopulated
         # slots in a freshly built model, but lora_B decides whether the branch
         # contributes anything.
-        for adapter_idx in range(param.shape[0]):
-            if model.config.adapter_kinds[adapter_idx] == "probe":
+        # The tensor's rows are LoRA rows, not slots: a streams checkpoint
+        # keeps one per adapter slot, in row order (a pre-streams one has a row
+        # per slot, and a head slot's row never receives weights).
+        for row, slot in enumerate(stream_routing.lora_rows(model.config)):
+            if model.config.adapter_kinds[slot - 1] != "lora":
                 continue
-            if bool(torch.all(param[adapter_idx] == 0)):
-                empty.append(f"{name}[{adapter_idx}]")
+            if bool(torch.all(param[row] == 0)):
+                empty.append(f"{name}[{row}]")
 
     if empty:
         # Not fatal — an SR adapter may legitimately skip cross_stream on some
@@ -140,9 +145,17 @@ def validate_all_parameters(
 
     switch_to_peft = arch.switch_to_peft
 
+    # Head banks are filled from each head's folder, and a bank row a slot does
+    # not use stays zero, so they are not base weights to validate here.
+    config = getattr(model, "config", None)
+    head_prefixes = (
+        stream_routing.head_param_prefixes(config) if config is not None else ()
+    )
     for name, param in model.named_parameters():
-        # Skip config buffers
-        if any(kw in name for kw in arch.buffer_keywords):
+        # Skip config buffers and head banks
+        if any(kw in name for kw in arch.buffer_keywords) or name.startswith(
+            head_prefixes
+        ):
             continue
 
         is_all_zero = torch.all(param == 0)

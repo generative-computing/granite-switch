@@ -151,7 +151,7 @@ def _fixed_head(seed, num_labels, hidden_size, scale=0.5):
 def _write_head(slot_dir, weight, bias, labels):
     from safetensors.torch import save_file
 
-    from granite_switch.composer.weight_transfer import PROBE_HEAD_FILE
+    from granite_switch.streams.types.probe import PROBE_HEAD_FILE
 
     os.makedirs(slot_dir, exist_ok=True)
     save_file(
@@ -384,11 +384,12 @@ def run_sr_probe(ckpt, out_path, *, eager, pp_size=1):
     from vllm import LLM, SamplingParams
     from vllm.inputs import TokensPrompt
 
+    from granite_switch.streams.routing import head_control_token_ids
     from tests.composer.test_sr_compose_e2e import CONTROL_TOKEN_ID, HIDDEN
 
     labels = list(range(100, 100 + HIDDEN))
     config = AutoConfig.from_pretrained(ckpt)
-    markers = config.probe_control_token_ids
+    markers = head_control_token_ids(config)
     kw = dict(
         model=ckpt,
         skip_tokenizer_init=True,

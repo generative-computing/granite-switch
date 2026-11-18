@@ -112,21 +112,23 @@ def discover_adapters_from_yaml(
     """Discover adapters from a YAML manifest file.
 
     Reads a YAML manifest that maps adapter names to their paths and types.
-    An entry can also mark itself a **probe** slot with these extra keys:
+    An entry can also make its slot a **head stream** (``granite_switch.streams``)
+    with these extra keys:
 
     .. code-block:: yaml
 
         hallucination:
           path: /path/to/head
-          type: lora                # lora/alora technology (token placement)
-          kind: probe               # default "lora" when omitted
+          kind: probe               # the stream type; "lora" when omitted
           labels: [faithful, hallucinated]
-          layer: 12                 # optional decoder layer; omit for the final layer
+          layer: 12                 # optional decoder layer; omit for the final norm
+          output: {mode: merge, weight: 0.5}   # optional; select by default
+          settings: {}              # optional, type-specific
 
-    ``type`` and ``kind`` are independent axes: ``type`` is the LoRA technology
-    (lora vs alora, which drives token placement), ``kind`` is whether the slot
-    is a real LoRA or a probe head. ``kind`` and ``labels`` are optional;
-    without them an entry is a plain LoRA adapter. The label words become token
+    ``type`` and ``kind`` are independent axes: ``type`` is an adapter's LoRA
+    technology (lora vs alora, which drives token placement) and is not used for
+    a head, whose marker always goes last; ``kind`` is the stream type. Without
+    any of these keys an entry is a plain adapter. The label words become token
     ids at compose time (see :func:`tokenizer_setup.resolve_label_token_ids`).
 
     ``layer: K`` reads the residual stream after zero-based decoder layer ``K``
@@ -136,12 +138,12 @@ def discover_adapters_from_yaml(
         manifest_path: Path to the YAML manifest file.
 
     Returns:
-        ``(found, probe_meta)``. ``found`` is:
+        ``(found, head_meta)``. ``found`` is:
         List of ``(adapter_path, adapter_name, technology, source)`` tuples.
         The source is set to the manifest path for traceability.
-        ``probe_meta`` maps name ->
-        ``{"kind", "labels", "layer"}`` for each entry that set any of them;
-        names not in it are plain LoRA slots.
+        ``head_meta`` maps name -> ``{"kind", "labels", "layer", "output",
+        "settings"}`` for each entry that set any of them; names not in it are
+        plain adapter slots.
     """
     import yaml
 
@@ -149,30 +151,74 @@ def discover_adapters_from_yaml(
     print(f"  Loading adapters manifest: {path.name}")
 
     found = []
-    probe_meta: dict[str, dict] = {}
+    head_meta: dict[str, dict] = {}
     if path.is_file() and path.suffix in (".yaml", ".yml"):
         with open(path) as f:
             adapters_config = yaml.safe_load(f)
 
         if adapters_config:
             for name, info in adapters_config.items():
+                _validate_manifest_entry(name, info)
                 adapter_path = info.get("path")
                 tech = info.get("type")
                 # Use manifest path as source for traceability
                 found.append((adapter_path, name, tech, manifest_path))
 
-                # Optional probe slots.
-                kind = info.get("kind")
-                labels = info.get("labels")
-                layer = info.get("layer")
-                if kind is not None or labels is not None or layer is not None:
-                    probe_meta[name] = {
-                        "kind": kind or "lora",
-                        "labels": labels,
-                        "layer": layer,
+                # Optional head streams (granite_switch.streams): kind is the
+                # stream type; the rest fills the slot's stream entry.
+                stream_keys = ("kind", "labels", "layer", "output", "settings")
+                if any(info.get(k) is not None for k in stream_keys):
+                    head_meta[name] = {
+                        "kind": info.get("kind") or "lora",
+                        "labels": info.get("labels"),
+                        "layer": info.get("layer"),
+                        "output": info.get("output"),
+                        "settings": info.get("settings"),
                     }
 
-    return found, probe_meta
+    return found, head_meta
+
+
+def _validate_manifest_entry(name: str, info: dict) -> None:
+    """Reject ambiguous head declarations before discovery drops any fields."""
+    if not isinstance(info, dict):
+        raise ValueError(f"Manifest entry {name!r} must be a mapping.")
+    head_keys = {"labels", "layer", "output", "settings"}
+    kind = info.get("kind", "lora")
+    if not isinstance(kind, str) or not kind.isidentifier():
+        raise ValueError(
+            f"Manifest entry {name!r}: kind must be a head type name or 'lora'."
+        )
+    present = head_keys.intersection(info)
+    if kind == "lora":
+        if present:
+            raise ValueError(
+                f"Manifest entry {name!r} has head fields {sorted(present)} but no "
+                "head kind. Set kind to a registered head type (e.g. probe)."
+            )
+        return
+    unknown = set(info) - head_keys - {"path", "type", "kind"}
+    if unknown:
+        raise ValueError(f"Head entry {name!r} has unknown fields: {sorted(unknown)}.")
+    for field in ("output", "settings"):
+        value = info.get(field)
+        if value is not None and not isinstance(value, dict):
+            raise ValueError(f"Head entry {name!r}: {field} must be a mapping or null.")
+    labels = info.get("labels")
+    if labels is not None:
+        if (
+            not isinstance(labels, list)
+            or not labels
+            or any(not isinstance(label, str) or not label for label in labels)
+        ):
+            raise ValueError(
+                f"Head entry {name!r}: labels must be a non-empty list of strings; "
+                "quote YAML words such as 'yes' and 'no'."
+            )
+        if "token_ids" in (info.get("output") or {}):
+            raise ValueError(
+                f"Head entry {name!r}: give labels or output.token_ids, not both."
+            )
 
 
 def _report_module_contributions(

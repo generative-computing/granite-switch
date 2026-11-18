@@ -28,13 +28,14 @@ from transformers.models.granitemoehybrid.modeling_granitemoehybrid import (
 from transformers.utils import logging
 
 from granite_switch.config import GraniteSwitchConfig
+from granite_switch.streams import routing as stream_routing
+from granite_switch.streams.outputs import apply_head_scores, fit_head_scores
 
 from .core.lora import (
     GraniteLoRAEmbeddedAttention,
     SwitchedLoRALinear,
     replace_shared_mlp_projections_with_lora,
 )
-from .core.probe import SwitchedProbeHead
 from .switch import create_switch
 
 logger = logging.get_logger(__name__)
@@ -252,7 +253,7 @@ class SRSwitchDecoderLayer(GraniteSwitchAttentionDecoderLayer):
         self.cross_stream = SwitchedLoRALinear(
             in_features=config.hidden_size,
             out_features=config.hidden_size,
-            num_adapters=config.num_adapters,
+            num_adapters=config.num_lora_rows,
             max_lora_rank=config.cross_stream_rank,
             bias=False,
         )
@@ -419,21 +420,26 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             self.switch = None
             self.adapter_token_ids = None
 
-        # Probe heads: optional alternative for LoRA adapters. A probe
-        # slot shares the adapter index/token machinery, but its index is tagged
-        # as "probe" (via the switch's adapter_kind_lut). The switch's
-        # split_indices() routes those positions out of the LoRA stream (so LoRA
-        # no-ops there) and into a probe stream. The head reads its
-        # configured layer (the final post-norm state by default), scoring
-        # intermediate layers as the decoder runs and keeping only marker rows.
-        if "probe" in getattr(config, "adapter_kinds", []):
-            self.probe_head = SwitchedProbeHead(
-                hidden_size=config.hidden_size,
-                num_probe_slots=config.num_adapters,
-                max_num_labels=config.max_probe_labels,
-            )
-        else:
-            self.probe_head = None
+        # Head streams (granite_switch.streams): one module per head type, each
+        # holding every slot of that type. A head slot shares the adapter
+        # index/token machinery; the switch's split_indices() routes its
+        # positions out of the LoRA stream (so LoRA no-ops there) and into the
+        # head stream. Each head reads its slot's layer (the final post-norm
+        # state by default) at the slot's marker.
+        heads = stream_routing.build_head_modules(config, "hf")
+        self._head_types = list(heads)
+        self._head_min_widths = {
+            name: max(s.num_outputs for s in specs)
+            for name, specs in stream_routing.head_specs(config).items()
+        }
+        # Read from the config once: the score-row width, and per read layer
+        # (None = final) the head types that read it, with their modules'
+        # attributes.
+        self._head_width = stream_routing.max_head_outputs(config)
+        self._head_reads = {
+            layer: [(name, stream_routing.module_attr(name)) for name in types]
+            for layer, types in stream_routing.read_groups(config).items()
+        }
 
         # Decoder layers
         if config.num_adapters > 0:
@@ -468,6 +474,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             self.rotary_emb = None
 
         self.gradient_checkpointing = False
+        self._stream_tables = {}
+        self._last_head_scores = None
+        stream_routing.attach_head_modules(self, heads)
 
         # Initialize weights
         self.post_init()
@@ -479,56 +488,76 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             for layer in self.layers:
                 nn.init.zeros_(layer.cross_stream.base_layer.weight)
 
-    def _locate_probe_markers(self, input_ids, probe_indices, attention_mask):
-        """``(rows, pos, slots, markers_by_layer)`` for this forward's markers.
+    def _stream_table(self, build, device, *args):
+        """``build(config, *args)`` on ``device``, cached: a routing table.
 
-        ``markers_by_layer`` maps each read layer (None = final) to the marker
-        indices that read it. ``None`` when there is no probe marker. Each
-        marker must be its row's last real token, since the verdict replaces
-        that position's logits.
+        ``build`` is a :mod:`granite_switch.streams.routing` function returning
+        a tensor, a dict of tensors, or a list of ids. The table is built
+        on first use rather than in ``__init__`` (from_pretrained builds the
+        model on the meta device), and kept off the state dict: an old
+        checkpoint has no such tensor to load.
         """
-        if self.probe_head is None:
+        cache = self.__dict__.setdefault("_stream_tables", {})
+        key = (build.__name__, args, device)
+        if key not in cache:
+            table = build(self.config, *args)
+            if isinstance(table, dict):
+                table = {k: t.to(device) for k, t in table.items()}
+            elif isinstance(table, list):
+                table = torch.tensor(table, dtype=torch.long, device=device)
+            else:
+                table = table.to(device)
+            cache[key] = table
+        return cache[key]
+
+    def _locate_head_markers(self, input_ids, head_indices):
+        """``(rows, pos, slots)`` of this forward's head-stream markers, or None.
+
+        A head slot fires at its control token and writes its output into that
+        position's logits. Placing the marker last is the caller's job (the chat
+        template and ``Conversation`` do): a marker anywhere else is scored at
+        its own position, which generation does not read.
+        """
+        if not self._head_types:
             return None
         if input_ids is None:
-            if bool((probe_indices > 0).any()):
-                raise RuntimeError("Probe requests need input_ids, not inputs_embeds.")
+            if bool((head_indices > 0).any()):
+                raise RuntimeError(
+                    "Head-stream requests need input_ids, not inputs_embeds."
+                )
             return None
-        marker_ids = torch.tensor(
-            self.config.probe_control_token_ids,
-            device=input_ids.device,
-            dtype=input_ids.dtype,
+        marker_ids = self._stream_table(
+            stream_routing.head_control_token_ids, input_ids.device
         )
         rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
         if rows.numel() == 0:
             return None
+        return rows, pos, head_indices[rows, pos]
 
-        batch_size, seq_length = input_ids.shape
-        if attention_mask is not None and attention_mask.dim() == 2:
-            real = attention_mask[:, -seq_length:].long()
-            cols = torch.arange(seq_length, device=real.device)
-            last = (real * cols).max(dim=1).values
-        else:
-            last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
-        misplaced = pos != last[rows]
-        if bool(misplaced.any()):
-            bad = sorted(set(rows[misplaced].tolist()))
-            raise RuntimeError(
-                f"Probe request(s) {bad}: control token is not their last token."
+    def _score_heads(self, layer, hidden, markers, scores):
+        """Run every head type that reads ``layer`` (None = final) on its markers.
+
+        ``scores[i]`` is filled for each marker ``i`` whose slot reads ``layer``.
+        A module may return any float dtype and extra columns: its scores are
+        cast to ``scores``' dtype and cut to its width.
+        """
+        reads = self._head_reads.get(layer)
+        if not reads:
+            return
+        rows, pos, slots = markers
+        for name, attr in reads:
+            type_slots = self._stream_table(
+                stream_routing.read_slots, slots.device, layer, name
             )
-
-        slots = probe_indices[rows, pos]
-        read_layers = self.config.probe_read_layers or [None] * len(
-            self.config.adapter_kinds
-        )
-        by_layer: dict[int | None, list[int]] = {}
-        for marker_idx, slot in enumerate(slots.tolist()):
-            layer = read_layers[slot - 1] if slot > 0 else None
-            by_layer.setdefault(layer, []).append(marker_idx)
-        markers_by_layer = {
-            layer: torch.tensor(indices, device=input_ids.device)
-            for layer, indices in by_layer.items()
-        }
-        return rows, pos, slots, markers_by_layer
+            sel = torch.isin(slots, type_slots)
+            if not bool(sel.any()):
+                continue
+            idx = sel.nonzero(as_tuple=True)[0]
+            lut = self._stream_table(stream_routing.row_lut, slots.device, name)
+            out = getattr(self, attr)(hidden[rows[idx], pos[idx]], lut[slots[idx]])
+            scores[idx] = fit_head_scores(
+                out, idx.shape[0], self._head_min_widths[name], scores, name
+            )
 
     def forward(
         self,
@@ -657,13 +686,19 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             )
 
         # Split the single adapter_indices stream into a LoRA stream and
-        # a probe stream. Probe positions are zeroed in lora_indices
+        # a head stream. Head positions are zeroed in lora_indices
         # (so the LoRA path no-ops there).
         if self.switch is not None:
-            lora_indices, probe_indices = self.switch.split_indices(adapter_indices)
+            lora_indices, head_indices = self.switch.split_indices(adapter_indices)
+            # The LoRA layers index their tensors by row, not by slot: a
+            # streams checkpoint keeps rows for adapter slots only.
+            lora_rows = self._stream_table(
+                stream_routing.lora_row_lut, lora_indices.device
+            )[lora_indices]
         else:
             lora_indices = adapter_indices
-            probe_indices = torch.zeros_like(adapter_indices)
+            head_indices = torch.zeros_like(adapter_indices)
+            lora_rows = lora_indices
 
         # Embed once, on the (possibly-rewritten) input_ids. The decoder is
         # token-exchange-agnostic — it just embeds whatever the switch
@@ -673,12 +708,12 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         inputs_embeds = inputs_embeds * self.embedding_multiplier
 
         # Expose adapter_indices for tests and debugging. _last_adapter_indices is
-        # the full stream (LoRA + probe); _last_lora_indices is what the
-        # decoder routes on; _last_probe_indices is the probe-only
-        # stream the verdict reads.
+        # the full stream (adapters + heads); _last_lora_indices is what the
+        # decoder routes on; _last_head_indices is the head-only stream the
+        # heads read.
         self._last_adapter_indices = adapter_indices
         self._last_lora_indices = lora_indices
-        self._last_probe_indices = probe_indices
+        self._last_head_indices = head_indices
 
         position_embeddings = None
         if self.rotary_emb is not None:
@@ -698,24 +733,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
 
-        # Resolve probe read positions before the decoder runs, so each read
-        # layer scores only its marker rows as it produces them.
-        markers = self._locate_probe_markers(input_ids, probe_indices, attention_mask)
-        self._last_probe_verdict = None
+        # Resolve head-stream markers before the decoder runs, so each read layer
+        # scores only its marker rows as it produces them.
+        markers = self._locate_head_markers(input_ids, head_indices)
+        self._last_head_scores = None
         if markers is not None:
-            probe_rows, probe_pos, probe_slots, markers_by_layer = markers
-            probe_verdict = inputs_embeds.new_zeros(
-                (probe_rows.numel(), self.config.max_probe_labels)
-            )
-
-        def score_markers(layer, hidden):
-            """Score the markers that read ``layer`` (None = final) from ``hidden``."""
-            if markers is None or layer not in markers_by_layer:
-                return
-            idx = markers_by_layer[layer]
-            probe_verdict[idx] = self.probe_head(
-                hidden[probe_rows[idx], probe_pos[idx]],
-                probe_slots[idx],
+            head_scores = inputs_embeds.new_zeros(
+                (markers[0].numel(), self._head_width)
             )
 
         for layer_idx, decoder_layer in enumerate(self.layers):
@@ -731,7 +755,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
                 use_cache=use_cache,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
-                adapter_indices=lora_indices,
+                adapter_indices=lora_rows,
                 **kwargs,
             )
 
@@ -740,7 +764,8 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             else:
                 hidden_states = layer_outputs[0]
 
-            score_markers(layer_idx, hidden_states)
+            if markers is not None:
+                self._score_heads(layer_idx, hidden_states, markers, head_scores)
 
             if output_attentions:
                 if layer_outputs[1] is not None:
@@ -752,14 +777,9 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             all_hidden_states += (hidden_states,)
 
         if markers is not None:
-            score_markers(None, hidden_states)
-            self._last_probe_verdict = (
-                probe_rows,
-                probe_pos,
-                probe_verdict,
-                probe_slots,
-                seq_length,
-            )
+            self._score_heads(None, hidden_states, markers, head_scores)
+            rows, pos, slots = markers
+            self._last_head_scores = (rows, pos, head_scores, slots, seq_length)
 
         if not return_dict:
             return tuple(
@@ -879,9 +899,9 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         logits = logits / self.config.logits_scaling
 
-        # Probe exit: a probe request reports its verdict as a
-        # generated label word (like a guardian LoRA).
-        logits = self._apply_probe_verdict(logits)
+        # Head-stream exit: each head marker's row takes the head's scores
+        # (select: they replace the row; merge: they are added to it).
+        logits = self._apply_head_scores(logits)
 
         loss = None
         if labels is not None:
@@ -900,32 +920,33 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
             attentions=outputs.attentions,
         )
 
-    def _apply_probe_verdict(self, logits: torch.Tensor) -> torch.Tensor:
-        """Rewrite each probe marker's logit row to emit its label word.
+    def _apply_head_scores(self, logits: torch.Tensor) -> torch.Tensor:
+        """Write each head marker's scores into its logits row.
 
-        The row is blanked to ``-inf`` and the slot's per-label verdict scores are
-        placed on its label token ids (``probe_label_token_ids``).
+        The output mode and token ids come from the slot's stream entry
+        (``config.streams``); see :mod:`granite_switch.streams.outputs`.
         """
-        pending = getattr(self.model, "_last_probe_verdict", None)
+        pending = getattr(self.model, "_last_head_scores", None)
         if pending is None:
             return logits
-        rows, pos, verdict, slots, seq_length = pending
+        rows, pos, scores, slots, seq_length = pending
 
-        # logits keeps the last logits.shape[1] positions (logits_to_keep).
+        # logits keeps the last logits.shape[1] positions (logits_to_keep). A
+        # marker before them, such as one that is not its prompt's last token
+        # in generate(), has no row to write.
         cols = pos - (seq_length - logits.shape[1])
-        if bool((cols < 0).any()):
-            raise RuntimeError(
-                "A probe marker's logits were not kept (logits_to_keep)."
+        kept = cols >= 0
+        if not bool(kept.all()):
+            rows, cols, scores, slots = (
+                rows[kept],
+                cols[kept],
+                scores[kept],
+                slots[kept],
             )
-
-        # Each marker writes only its own slot's label ids and only that slot's
-        # real label count (verdict[i, :n]); padded columns are never read.
-        per_slot_label_ids = self.config.probe_label_token_ids
-        logits[rows, cols, :] = float("-inf")
-        for i, (r, c, slot) in enumerate(
-            zip(rows.tolist(), cols.tolist(), slots.tolist())
-        ):
-            ids = per_slot_label_ids[slot - 1]
-            label_ids = torch.tensor(ids, dtype=torch.long, device=logits.device)
-            logits[r, c, label_ids] = verdict[i, : len(ids)].to(logits.dtype)
+        flat = logits.view(-1, logits.shape[-1])
+        index = rows * logits.shape[1] + cols
+        tables = self.model._stream_table(stream_routing.head_outputs, logits.device)
+        flat[index] = apply_head_scores(
+            flat[index], slots.to(torch.long), scores, tables
+        )
         return logits

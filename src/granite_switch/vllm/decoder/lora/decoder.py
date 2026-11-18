@@ -61,8 +61,9 @@ class GraniteLoRAEmbeddedAttention(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
-        # Extract adapter config from model config
-        num_adapters = config.num_adapters
+        # One LoRA row per LoRA slot (config.num_lora_rows); the model maps each
+        # token's slot to its row before the layers run.
+        num_adapters = config.num_lora_rows
         max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
 
         self.hidden_size = config.hidden_size
@@ -220,7 +221,7 @@ def replace_shared_mlp_projections_with_lora(mlp, config):
 
     Works on vLLM's GraniteMoeSharedMLP. Returns (has_input_lora, has_output_lora).
     """
-    num_adapters = config.num_adapters
+    num_adapters = config.num_lora_rows
     max_lora_rank = max(config.adapter_ranks) if config.adapter_ranks else 0
     has_input_lora = False
     has_output_lora = False

@@ -131,7 +131,9 @@ def make_stub_tokenizer(adapters, chatml=False):
 
     Args:
         adapters: list of ``(name, technology, invocation_text)``. ``technology``
-            is ``"alora"`` or ``"lora"``; ``invocation_text`` is ignored for lora.
+            is ``"alora"``, ``"lora"``, or the head placement
+            (``tokenizer_setup.ANCHOR_MODE_HEAD``); ``invocation_text`` is used
+            for alora only.
         chatml: use the ChatML fixture instead of the role-marker one.
     """
     name = "granite_chatml_template.jinja" if chatml else "granite_chat_template.jinja"
@@ -163,8 +165,22 @@ def make_stub_tokenizer(adapters, chatml=False):
 
 
 class StubConfig:
-    """Stand-in for GraniteSwitchConfig, for the guards."""
+    """Stand-in for GraniteSwitchConfig, for the guards.
 
-    def __init__(self, adapter_token_ids, switch_type="multi"):
+    ``adapter_names`` and ``adapter_kinds`` (one per slot, ``"lora"`` for an
+    adapter) tell ``Conversation`` which slots are heads.
+    """
+
+    def __init__(
+        self,
+        adapter_token_ids,
+        switch_type="multi",
+        adapter_names=None,
+        adapter_kinds=None,
+    ):
         self.adapter_token_ids = list(adapter_token_ids)
         self.switch_type = switch_type
+        if adapter_names is not None:
+            self.adapter_names = list(adapter_names)
+        if adapter_kinds is not None:
+            self.adapter_kinds = list(adapter_kinds)

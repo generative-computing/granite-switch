@@ -43,17 +43,26 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
     substitution.
 
     Args:
-        num_adapters (int): Number of adapter slots available (LoRA and
-            probe). Default: 0. Index 0 always means "base / no adapter".
+        num_adapters (int): Number of slots: adapters and head streams.
+            Default: 0. Index 0 always means "base / no adapter".
         adapter_token_ids (List[int]): Token IDs for adapter control.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
             token). Must be unique. adapter_token_ids[i] activates slot i+1
-            (1-indexed output), a LoRA adapter or a probe head.
+            (1-indexed output), an adapter or a head stream.
             Output 0 = base.
         adapter_substitute_token_ids (List[int]): Token IDs whose embeddings
             replace the control-token embeddings before the decoder runs.
             Length: num_adapters (or num_adapters + 1 with a leading base-reset
             token). Required when num_adapters > 0.
+        streams (List[dict]): One stream entry per slot, saying what it runs:
+            ``{"type": "lora"}`` for an adapter, or a head type's entry (read
+            layer, bank row, output, settings). See
+            ``granite_switch.streams`` and docs/STREAM_API.md. None for a
+            checkpoint composed before streams: its entries are rebuilt from
+            ``adapter_kinds``, ``probe_label_token_ids`` and
+            ``probe_read_layers``, which a streams checkpoint also keeps,
+            derived from its entries, for metadata consumers. This does not
+            make compact banks or custom head types readable by older runtimes.
 
         Switch attention parameters:
             control_token_gain (float): Attention gain for control/non-control separation. Default: 15.0.
@@ -211,7 +220,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         # Shadow Residual (SR) parameters
         cross_stream_rank: int | None = None,
         dual_stream: bool = False,
-        # Probe substitution parameters
+        # Streams: what each slot runs (see granite_switch.streams)
+        streams: list[dict] | None = None,
+        # Pre-streams probe fields, still read from older checkpoints
         adapter_kinds: list[str] | None = None,
         probe_label_token_ids: list[list[int] | None] | None = None,
         probe_read_layers: list[int | None] | None = None,
@@ -417,10 +428,23 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         self.max_lora_rank = max_lora_rank
         self.adapter_ranks = adapter_ranks
 
-        # Each adapter slot is either a LoRA adapter ("lora", the default) or
-        # a probe head ("probe"). A probe slot still uses a
-        # control token and adapter index; the switch's adapter_kind_lut routes
-        # its positions out of the LoRA stream and into the probe head.
+        # Each slot is a stream (granite_switch.streams): "lora" for a LoRA /
+        # aLoRA / Shadow Residual adapter, or a registered head type such as
+        # "probe". With ``streams`` given, a slot's kind is its stream type.
+        # Without it (every checkpoint composed before streams), adapter_kinds
+        # and the probe_* fields below say the same thing, and the stream
+        # entries are rebuilt from them (streams.spec._legacy_entries).
+        self.streams = streams
+        if streams is not None:
+            from .streams.spec import parse_entries
+
+            kinds_from_streams = [s.type for s in parse_entries(streams, num_adapters)]
+            if adapter_kinds is not None and list(adapter_kinds) != kinds_from_streams:
+                raise ValueError(
+                    f"adapter_kinds {adapter_kinds} disagree with the streams' "
+                    f"types {kinds_from_streams}."
+                )
+            adapter_kinds = kinds_from_streams
         _VALID_KINDS = ("lora", "probe")
         if adapter_kinds is None:
             adapter_kinds = ["lora"] * num_adapters
@@ -430,7 +454,13 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     f"adapter_kinds length ({len(adapter_kinds)}) must equal "
                     f"num_adapters ({num_adapters})."
                 )
-            invalid = [k for k in adapter_kinds if k not in _VALID_KINDS]
+            # A streams checkpoint may name any registered type; the registry
+            # checks it when the model is built. The legacy fields knew two.
+            invalid = [
+                k
+                for k in adapter_kinds
+                if not isinstance(k, str) or (streams is None and k not in _VALID_KINDS)
+            ]
             if invalid:
                 raise ValueError(
                     f"adapter_kinds values must be one of {_VALID_KINDS}; "
@@ -462,7 +492,7 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     raise ValueError(
                         f"non-probe slot {i} must have no label token ids; got {ids!r}."
                     )
-        elif any(k == "probe" for k in adapter_kinds):
+        elif streams is None and any(k == "probe" for k in adapter_kinds):
             raise ValueError(
                 "adapter_kinds declares a probe slot but "
                 "probe_label_token_ids is unset. The probe exit emits its "
@@ -499,22 +529,34 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
                     )
         self.probe_read_layers = probe_read_layers
 
-        # Derived: per-slot label counts (0 on LoRA slots) and the padded bank
-        # width the probe head is built with.
-        self.probe_num_labels_per_slot = [
-            len(ids) if ids else 0 for ids in (probe_label_token_ids or [])
-        ] or [0] * num_adapters
-        self.max_probe_labels = max(self.probe_num_labels_per_slot, default=0)
-
-        # Derived: the control-token ids that mark a probe slot. Both backends
-        # locate a verdict's read point by matching these in the original input_ids,
-        # so the id set is defined once here.
-        probe_token_offset = len(adapter_token_ids or []) - num_adapters
-        self.probe_control_token_ids = [
-            (adapter_token_ids or [])[i + probe_token_offset]
-            for i, kind in enumerate(adapter_kinds)
-            if kind == "probe" and adapter_token_ids is not None
-        ]
+        # Derived metadata: a streams checkpoint also writes the
+        # pre-streams probe fields, from its probe entries. This version reads
+        # the entries; the copies are never read back.
+        if streams is not None:
+            probe_label_token_ids = [
+                list((e.get("output") or {}).get("token_ids") or [])
+                if e.get("type") == "probe"
+                else None
+                for e in streams
+            ]
+            self.probe_label_token_ids = probe_label_token_ids
+            self.probe_read_layers = [
+                e.get("read_layer") if e.get("type") == "probe" else None
+                for e in streams
+            ]
+        # Derived: LoRA rows. A streams checkpoint keeps one row per adapter
+        # slot (heads take none); every older one has a row per slot, and the
+        # rank of a head slot's row is the placeholder compose wrote for it.
+        if streams is not None:
+            lora_slots = [i for i, k in enumerate(adapter_kinds) if k == "lora"]
+        else:
+            lora_slots = list(range(num_adapters))
+        self.num_lora_rows = len(lora_slots)
+        self.lora_row_ranks = (
+            [adapter_ranks[i] for i in lora_slots]
+            if adapter_ranks is not None
+            else None
+        )
 
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.
@@ -522,7 +564,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         if lora_target_modules is None:
             lora_target_modules = []
 
-            if self.num_adapters > 0:
+            # A streams checkpoint with heads only has no LoRA rows, so it gets
+            # no LoRA wrappers either: its layers are the base's plain linears.
+            if self.num_adapters > 0 and self.num_lora_rows > 0:
                 # Attention modules: the switch model is attention-only, so
                 # every layer has them.
                 lora_target_modules.extend(

@@ -3,7 +3,8 @@
 Inner file — run by test_model_forward.py in subprocess.
 
 Tests the full model wiring: switch -> adapter_indices -> decoder layers.
-All tests run on a single CUDA GPU with random weights (no pretrained checkpoint needed).
+All tests run on one CUDA GPU with synthetic weights (no Hub checkpoint needed).
+Stream API tests compose real checkpoint layouts before loading them into vLLM.
 
 Requires CUDA GPU and vLLM installed. All tests are skipped otherwise.
 """
@@ -62,8 +63,14 @@ SEED = 42
 def _tiny_vllm_config(
     adapter_kinds=None,
     probe_label_token_ids=None,
+    streams=None,
+    **extra,
 ):
-    """Minimal GraniteSwitchConfig for single-GPU vLLM tests."""
+    """Minimal GraniteSwitchConfig for single-GPU vLLM tests.
+
+    Two slots by default; ``streams`` (one entry per slot) sets the slot count.
+    """
+    n = len(streams) if streams is not None else 2
     return GraniteSwitchConfig(
         vocab_size=300,
         hidden_size=64,
@@ -71,16 +78,18 @@ def _tiny_vllm_config(
         num_hidden_layers=4,  # 2 MultiSwitch cache slots + 2 decoder
         num_attention_heads=2,
         num_key_value_heads=2,
-        num_adapters=2,
-        adapter_token_ids=[250, 251],
-        adapter_names=["adapter_1", "adapter_2"],
-        adapter_substitute_token_ids=[1, 1],
+        num_adapters=n,
+        adapter_token_ids=[250 + i for i in range(n)],
+        adapter_names=[f"adapter_{i + 1}" for i in range(n)],
+        adapter_substitute_token_ids=[1] * n,
         # Rank must be in the fused kernel's SUPPORTED_RANKS (16, 32, ...);
         # finalize_weights asserts this for applicable adapters.
         max_lora_rank=16,
-        adapter_ranks=[16, 16],
+        adapter_ranks=[16] * n,
         adapter_kinds=adapter_kinds,
         probe_label_token_ids=probe_label_token_ids,
+        streams=streams,
+        **extra,
         switch_head_dim=32,
         max_position_embeddings=512,
         attention_multiplier=1.0,
@@ -185,10 +194,11 @@ class _VLLMModelTestBase:
     """Base class providing model creation and full forward pass machinery."""
 
     @pytest.fixture(autouse=True)
-    def setup_model(self):
+    def setup_model(self, tmp_path):
         _ensure_distributed()
 
         self.device = torch.device("cuda")
+        self._test_dir = tmp_path
         self.config = self._make_config()
 
         old_dtype = torch.get_default_dtype()
@@ -210,9 +220,12 @@ class _VLLMModelTestBase:
         finally:
             torch.set_default_dtype(old_dtype)
 
-        torch.manual_seed(SEED)
-        _init_model_weights(self.model)  # base weights
-        _set_nonzero_lora(self.model)  # adapter weights — set BEFORE finalize
+        if hasattr(self, "_composed_model"):
+            self.model.load_weights(self._composed_model.state_dict().items())
+        else:
+            torch.manual_seed(SEED)
+            _init_model_weights(self.model)  # base weights
+            _set_nonzero_lora(self.model)  # adapter weights — set BEFORE finalize
 
         # The fused design bakes LoRA weights into w_ext at finalize time, so
         # finalize must run AFTER the weights are set — exactly as vLLM's
@@ -221,9 +234,10 @@ class _VLLMModelTestBase:
         # #83 moved this off the model: each DecoderInterface owns the post-load
         # step and load_weights() ends by calling finalize_modules(). Go through
         # the interface so this harness exercises the same path as a real load.
-        self.model.model.decoder_interface.finalize_modules(
-            self.model, self.model.config
-        )
+        if not hasattr(self, "_composed_model"):
+            self.model.model.decoder_interface.finalize_modules(
+                self.model, self.model.config
+            )
 
         self.model_config = self.model.config
         self._setup_kv_caches()
@@ -484,10 +498,10 @@ class TestProbeSlotRouting(_VLLMModelTestBase):
         original_split = switch.split_indices
 
         def record_split(adapter_indices):
-            lora_indices, probe_indices = original_split(adapter_indices)
+            lora_indices, head_indices = original_split(adapter_indices)
             seen["lora"] = lora_indices.detach().cpu()
-            seen["probe"] = probe_indices.detach().cpu()
-            return lora_indices, probe_indices
+            seen["probe"] = head_indices.detach().cpu()
+            return lora_indices, head_indices
 
         monkeypatch.setattr(switch, "split_indices", record_split)
 
@@ -502,6 +516,182 @@ class TestProbeSlotRouting(_VLLMModelTestBase):
             i for i in range(self.config.vocab_size) if i not in (100, 101)
         ]
         assert torch.isneginf(final_logits[non_label_ids]).all()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 4b. Stream API: head types on the generic hooks (granite_switch.streams)
+# ════════════════════════════════════════════════════════════════════
+
+_HEAD_LABELS = [100, 101]
+
+
+def _probe_entry(row, **extra):
+    return {
+        "type": "probe",
+        "head_row": row,
+        "output": {"mode": "select", "token_ids": list(_HEAD_LABELS)},
+        **extra,
+    }
+
+
+def _non_labels(vocab_size):
+    return [i for i in range(vocab_size) if i not in _HEAD_LABELS]
+
+
+class _StreamModelTestBase(_VLLMModelTestBase):
+    def _compose_config(self, streams, dual_stream=False):
+        from tests.shared.stream_models import compose_stream_model
+
+        self._composed_model = compose_stream_model(
+            self._test_dir, streams, dual_stream=dual_stream
+        )
+        return self._composed_model.config
+
+
+class TestStreamCompactRows(_StreamModelTestBase):
+    """[probe, lora, probe]: one LoRA row, a two-row probe bank, any slot order."""
+
+    def _make_config(self):
+        return self._compose_config(
+            streams=[_probe_entry(0), {"type": "lora"}, _probe_entry(1)]
+        )
+
+    def test_rows_and_routing(self):
+        self.model.eval()
+        assert self.model.model.probe_head.weight.shape[0] == 2
+        qkv = self.model.model.layers[0].self_attn.qkv_proj
+        assert qkv.num_adapters == 1  # LoRA tensors hold the adapter slot only
+        assert self.model.model.lora_row_lut_t.tolist() == [0, 0, 1, 0]
+
+        with torch.no_grad():
+            self.model.model.probe_head.bias[1, :2] = torch.tensor([-5.0, 5.0])
+            # The last probe slot (3) reads its own bank row (1).
+            logits = self._run_forward_and_logits([10, 20, 30, 252])
+        last = logits[-1]
+        assert int(last.argmax()) == _HEAD_LABELS[1]
+        assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
+
+        with torch.no_grad():
+            # The LoRA slot (2, in the middle) runs its LoRA row: it changes the
+            # post-control logits and leaves every row finite.
+            plain = self._run_forward_and_logits([10, 20, 30, 40])
+            adapted = self._run_forward_and_logits([10, 251, 30, 40])
+        assert torch.isfinite(adapted).all()
+        assert not torch.allclose(plain[2:], adapted[2:])
+
+
+class TestStreamHeadsOnly(_StreamModelTestBase):
+    """Every slot a head: no LoRA layers and no kernel metadata at all."""
+
+    def _make_config(self):
+        return self._compose_config(streams=[_probe_entry(0), _probe_entry(1)])
+
+    def test_heads_only_serves_the_verdict(self):
+        self.model.eval()
+        assert self.config.lora_target_modules == []
+        assert self.model.model.lora_meta is None
+        assert not [n for n, _ in self.model.named_parameters() if "lora_" in n]
+        with torch.no_grad():
+            self.model.model.probe_head.bias[0, :2] = torch.tensor([5.0, -5.0])
+            logits = self._run_forward_and_logits([10, 20, 30, 250])
+        assert int(logits[-1].argmax()) == _HEAD_LABELS[0]
+
+
+class TestStreamPluginMerge(_StreamModelTestBase):
+    """The example plugin type, with ``merge``: the LM row plus its scores."""
+
+    def _make_config(self):
+        import tests.shared.stream_plugins.mlp_head  # noqa: F401 (registers it)
+
+        return self._compose_config(
+            streams=[
+                {"type": "lora"},
+                {
+                    "type": "mlp_head",
+                    "head_row": 0,
+                    "output": {
+                        "mode": "merge",
+                        "token_ids": list(_HEAD_LABELS),
+                        "weight": 0.5,
+                    },
+                    "settings": {"width": 8},
+                },
+            ]
+        )
+
+    def test_merge_adds_the_head_scores(self):
+        self.model.eval()
+        module = self.model.model.stream_mlp_head
+        with torch.no_grad():
+            module.w1.normal_(0, 0.3)
+            module.w2.normal_(0, 1.0)
+            # The same prompt and marker, scored by the plugin, and a copy
+            # with the head zeroed: they may differ only on the label ids.
+            merged = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+            w1, w2 = module.w1.clone(), module.w2.clone()
+            module.w2.zero_()
+            plain = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+            module.w1.copy_(w1)
+            module.w2.copy_(w2)
+
+        others = _non_labels(self.config.vocab_size)
+        torch.testing.assert_close(merged[others], plain[others])
+        assert torch.isfinite(merged).all()
+        assert not torch.allclose(merged[_HEAD_LABELS], plain[_HEAD_LABELS])
+
+
+class TestStreamHeadOutputFit(_StreamModelTestBase):
+    """A head module may return extra columns, in another float dtype.
+
+    Here the module returns fp32 (the model runs bf16) and two columns more
+    than its outputs: the scores are fitted to the score row, column k landing
+    on token_ids[k].
+    """
+
+    def _make_config(self):
+        return self._compose_config(streams=[{"type": "lora"}, _probe_entry(0)])
+
+    def test_wide_fp32_scores_fit_the_row(self, monkeypatch):
+        self.model.eval()
+        n = len(_HEAD_LABELS)
+        wide = torch.arange(1.0, n + 3, device=self.device)
+
+        def forward(hidden, rows):
+            return wide.expand(hidden.shape[0], -1).float()
+
+        monkeypatch.setattr(self.model.model.probe_head, "forward", forward)
+        with torch.no_grad():
+            last = self._run_forward_and_logits([10, 20, 30, 251])[-1].float()
+        torch.testing.assert_close(last[_HEAD_LABELS], wide[:n])
+        assert torch.isneginf(last[_non_labels(self.config.vocab_size)]).all()
+
+
+class TestStreamPersistentBuffers(_StreamModelTestBase):
+    dual_stream = False
+
+    def _make_config(self):
+        from tests.shared.stream_plugins.buffered_head import BufferedHeadType
+
+        config = self._compose_config(
+            [{"type": "lora"}, {**_probe_entry(0), "type": BufferedHeadType.name}],
+            dual_stream=self.dual_stream,
+        )
+        with torch.no_grad():
+            self._composed_model.model.stream_test_buffered.adapter_token_ids[0] = (
+                torch.tensor([3.0, -2.0])
+            )
+        return config
+
+    def test_persistent_buffer_survives_decoder_loading(self):
+        # This name resembles a base buffer the SR loader normally skips.
+        torch.testing.assert_close(
+            self.model.model.stream_test_buffered.adapter_token_ids.float().cpu(),
+            torch.tensor([[3.0, -2.0]]),
+        )
+
+
+class TestStreamPersistentBuffersSR(TestStreamPersistentBuffers):
+    dual_stream = True
 
 
 # ════════════════════════════════════════════════════════════════════

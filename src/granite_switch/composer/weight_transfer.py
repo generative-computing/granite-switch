@@ -13,12 +13,9 @@ import torch
 from safetensors import safe_open
 from tqdm import tqdm
 
-from .arch import ArchDescriptor
+from granite_switch.streams import routing as stream_routing
 
-# Filename + keys of a trained probe-head artifact inside a probe
-# adapter directory.
-PROBE_HEAD_FILE = "probe_head.safetensors"
-PROBE_HEAD_KEYS = ("weight", "bias")
+from .arch import ArchDescriptor
 
 # ---------------------------------------------------------------------------
 # Base weight loading
@@ -103,12 +100,14 @@ def transfer_base_weights(
 
     switch_state_dict = model.state_dict()
 
-    # Record target params (excluding LoRA and buffers)
+    # Record target params (excluding LoRA, buffers and head banks)
     exclude_keywords = arch.lora_keywords + arch.buffer_keywords
+    head_prefixes = stream_routing.head_param_prefixes(switch_config)
     mapping_record["target_params"] = [
         name
         for name in switch_state_dict.keys()
         if not any(kw in name for kw in exclude_keywords)
+        and not name.startswith(head_prefixes)
     ]
 
     lora_target_modules = switch_config.lora_target_modules
@@ -190,6 +189,7 @@ def transfer_base_weights(
         fused_collections,
         lora_target_modules,
         arch,
+        head_prefixes=head_prefixes,
     )
 
     # Free base state dict
@@ -308,6 +308,7 @@ def _validate_base_transfer(
     fused_collections,
     lora_target_modules,
     arch: ArchDescriptor,
+    head_prefixes: tuple[str, ...] = (),
 ):
     """Validate that all expected base parameters were loaded.
 
@@ -335,8 +336,13 @@ def _validate_base_transfer(
     exclude_keywords = arch.lora_keywords + arch.buffer_keywords
 
     def _is_switch_owned(name: str) -> bool:
-        # Switch-module params/buffers are self-initialized, not base weights.
-        return name.startswith("switch.") or ".switch." in name
+        # Switch-module params/buffers are self-initialized, not base weights;
+        # so are head-stream banks, which compose fills from each head's folder.
+        return (
+            name.startswith("switch.")
+            or ".switch." in name
+            or name.startswith(head_prefixes)
+        )
 
     expected_switch_params = {
         name
@@ -680,9 +686,10 @@ def transfer_adapter_weights(
     stacked_adapters, adapter_mappings = stack_adapters(
         adapter_state_dicts=adapter_state_dicts,
         remapper=adapter_remapper,
-        num_adapters=model.config.num_adapters,
+        # One row per LoRA slot (config.num_lora_rows); path i fills row i.
+        num_adapters=model.config.num_lora_rows,
         max_lora_rank=model.config.max_lora_rank,
-        adapter_ranks=model.config.adapter_ranks[: len(adapter_paths)],
+        adapter_ranks=model.config.lora_row_ranks[: len(adapter_paths)],
         adapter_alphas=adapter_alphas,
         verbose=True,
         cross_stream_rank=cs_rank,
@@ -832,110 +839,45 @@ def validate_untied_lm_head_saved(output_path, expected_vocab_size, hidden_size)
 
 
 # ---------------------------------------------------------------------------
-# Probe head transfer
+# Head weights
 # ---------------------------------------------------------------------------
 
 
-def transfer_probe_weights(
-    probe_paths: list[str],
-    slot_indices: list[int],
-    model,
-    num_labels_per_slot: list[int],
-    hidden_size: int,
-) -> None:
-    """Load trained probe heads and transfer them into the switch model.
+def transfer_head_weights(head_paths: list[str], slots: list[int], model) -> None:
+    """Load each head slot's trained weights through its stream type.
 
-    A probe slot is the probe-head analog of a LoRA adapter: it shares
-    the same control-token / adapter-index space, so its head lives in bank row
-    ``slot = adapter_index - 1`` of ``model.model.probe_head``. Each
-    probe directory holds a ``probe_head.safetensors`` with a
-    ``weight`` ``[n_i, hidden]`` and a ``bias`` ``[n_i]`` where ``n_i`` is this
-    slot's own label count. The head bank is padded to ``max_probe_labels``.
+    A head slot's folder ships its type's ``weights_file``. The type's
+    ``load_weights`` checks it against the slot's stream entry and copies it into
+    the slot's ``head_row`` of that type's bank (``granite_switch.streams``). The
+    composer never needs to know a type's tensor names or shapes.
 
     Args:
-        probe_paths: Directories of the probe slots (probe-only).
-        slot_indices: Global bank row for each path (``adapter_index - 1``),
-            aligned with *probe_paths*. Probes are the non-zero-based
-            ``k+1..n`` suffix, so these are not ``range(len)`` and must be passed.
-        model: GraniteSwitch model whose ``probe_head`` is filled in place.
-        num_labels_per_slot: Full-width per-slot label counts
-            (``config.probe_num_labels_per_slot``, indexed by
-            ``adapter_index - 1``).
-        hidden_size: Expected hidden size (``config.hidden_size``).
+        head_paths: Folders of the head slots.
+        slots: The 1-based slot index of each folder, aligned with *head_paths*.
+        model: GraniteSwitch model whose head banks are filled in place.
     """
     from safetensors.torch import load_file
 
-    head = getattr(model.model, "probe_head", None)
-    if head is None:
-        raise ValueError(
-            "transfer_probe_weights was given probe paths "
-            f"{probe_paths} but the model built no probe_head. This "
-            "means adapter_kinds never reached the config (no slot is "
-            "kind=probe). Pass adapter_kinds with a 'probe' entry so "
-            "the head is constructed before loading trained weights."
-        )
+    from granite_switch.streams import get_head_type, stream_specs
+    from granite_switch.streams.routing import module_attr
 
-    # Two directories on one bank row, or a row outside the bank, would
-    # silently corrupt another slot's head.
-    if len(slot_indices) != len(set(slot_indices)):
-        raise ValueError(
-            f"Duplicate probe slot indices {slot_indices}; each probe "
-            "must map to a distinct bank row."
-        )
-    num_rows = head.weight.shape[0]
-    for slot in slot_indices:
-        if not (0 <= slot < num_rows):
-            raise ValueError(
-                f"Probe slot {slot} is out of range for a probe bank "
-                f"of {num_rows} rows (num_adapters)."
+    specs = {s.slot: s for s in stream_specs(model.config)}
+    if len(head_paths) != len(slots) or len(slots) != len(set(slots)):
+        raise ValueError("Each head path must have one distinct slot index.")
+    if any(slot not in specs or not specs[slot].is_head for slot in slots):
+        raise ValueError(f"Head weights must target head slots; got {slots}.")
+    print(f"Loading {len(head_paths)} trained head(s)...")
+    for path, slot in zip(head_paths, slots):
+        spec = specs[slot]
+        head_type = get_head_type(spec.type)
+        weights = Path(path) / head_type.weights_file
+        if not weights.exists():
+            raise FileNotFoundError(
+                f"Head slot '{path}' (type {spec.type}) is missing its trained "
+                f"weights '{head_type.weights_file}'."
             )
-
-    print(f"Loading {len(probe_paths)} trained probe head(s)...")
-    with torch.no_grad():
-        for path, slot in zip(probe_paths, slot_indices):
-            n_labels = num_labels_per_slot[slot]
-            head_file = Path(path) / PROBE_HEAD_FILE
-            if not head_file.exists():
-                raise FileNotFoundError(
-                    f"Probe slot '{path}' is missing its trained head "
-                    f"'{PROBE_HEAD_FILE}'. A probe directory must "
-                    f"contain {PROBE_HEAD_FILE} with keys "
-                    f"{PROBE_HEAD_KEYS} (weight [n_labels, hidden], "
-                    f"bias [n_labels]); it has no adapter_model.safetensors."
-                )
-
-            sd = load_file(str(head_file))
-            keys = set(sd.keys())
-            if keys != set(PROBE_HEAD_KEYS):
-                raise ValueError(
-                    f"{head_file} must contain exactly keys "
-                    f"{set(PROBE_HEAD_KEYS)}, got {keys}."
-                )
-
-            weight, bias = sd["weight"], sd["bias"]
-            if tuple(weight.shape) != (n_labels, hidden_size):
-                raise ValueError(
-                    f"{head_file}: weight shape {tuple(weight.shape)} does not "
-                    f"match this slot's expected (n_labels, hidden) = "
-                    f"({n_labels}, {hidden_size}). Check the head's label count "
-                    f"against probe_num_labels_per_slot[{slot}]={n_labels}."
-                )
-            if tuple(bias.shape) != (n_labels,):
-                raise ValueError(
-                    f"{head_file}: bias shape {tuple(bias.shape)} does not "
-                    f"match this slot's expected (n_labels,) = ({n_labels},)."
-                )
-
-            # Copy into the top n_labels rows of the padded bank row; the rest
-            # stay zero.
-            dst_w = head.weight[slot]
-            head.weight[slot, :n_labels, :].copy_(
-                weight.to(dtype=dst_w.dtype, device=dst_w.device)
-            )
-            head.bias[slot, :n_labels].copy_(
-                bias.to(dtype=dst_w.dtype, device=dst_w.device)
-            )
-
-            print(f"  Probe: {path} -> probe_head[{slot}, :{n_labels}]")
-
-    print(f"Loaded {len(probe_paths)} probe head(s)")
+        module = getattr(model.model, module_attr(spec.type))
+        with torch.no_grad():
+            head_type.load_weights(module, spec.head_row, load_file(str(weights)), spec)
+        print(f"  {spec.type}: {path} -> {module_attr(spec.type)}[{spec.head_row}]")
+    print(f"Loaded {len(head_paths)} head(s)")
