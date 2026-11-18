@@ -30,6 +30,14 @@ ASR_BUNDLE_DIR = "asr"
 # physical decoder-layer count.
 SWITCH_CACHE_LAYERS = 2
 
+# The architecture strings vLLM resolves to the one GraniteSwitchForCausalLM class
+# (LoRA/aLoRA, the SR name the composer writes, and an explicit SR alias).
+VLLM_ARCHITECTURES = (
+    "GraniteSwitchForCausalLM",
+    "SRSwitchForCausalLM",
+    "ShadowResidualForCausalLM",
+)
+
 
 class GraniteSwitchConfig(GraniteMoeHybridConfig):
     """Configuration class for GraniteSwitch model.
@@ -60,6 +68,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             switch_head_dim (int): Dimension of Q/K/V vectors in switch attention. Default: 32.
 
         adapter_names (List[str]): Ordered adapter names for name-to-index mapping.
+        decision_adapter (str): Default adapter vLLM's /v1/systemone reads. Default: None.
+        decision_specs (Dict[str, dict]): Per decision adapter, the prompt layout
+            resolved from its io.yaml ``decision:`` block (``granite_switch.decision_spec``).
         max_lora_rank (int): Maximum rank across all LoRA adapters (for allocation). Default: 8.
         adapter_ranks (List[int]): Per-adapter ranks. Must have length equal to num_adapters.
         lora_target_modules (List[str]): List of module GROUP names to apply LoRA to.
@@ -215,6 +226,9 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
         adapter_kinds: list[str] | None = None,
         probe_label_token_ids: list[list[int] | None] | None = None,
         probe_read_layers: list[int | None] | None = None,
+        # Decision adapters (resolved from io.yaml by the composer)
+        decision_adapter: str | None = None,
+        decision_specs: dict[str, dict] | None = None,
         # vLLM residual-norm convention (for bit-exact skinning equivalence)
         fused_add_norm: bool = False,
         # Parent class defaults (Granite 4 dense configuration)
@@ -515,6 +529,16 @@ class GraniteSwitchConfig(GraniteMoeHybridConfig):
             for i, kind in enumerate(adapter_kinds)
             if kind == "probe" and adapter_token_ids is not None
         ]
+
+        # Decision adapters: the adapters /v1/systemone may read, each with the
+        # prompt layout its io.yaml declares; decision_adapter is the default.
+        from granite_switch.decision_spec import validate_decision_fields
+
+        decision_adapter, decision_specs = validate_decision_fields(
+            adapter_names, decision_adapter, decision_specs, adapter_kinds
+        )
+        self.decision_adapter = decision_adapter
+        self.decision_specs = decision_specs or None
 
         # Default LoRA target module groups.
         # Dynamically determined based on model architecture.
