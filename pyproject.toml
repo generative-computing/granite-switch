@@ -28,7 +28,7 @@ hf = ["accelerate>=0.20.0"]
 # different signature, so `hasattr` alone reads 0.26-0.28 and 0.31+ as the same
 # thing (see src/granite_switch/vllm/audio/processor.py).
 # Pin a specific line with the per-line dependency groups below.
-vllm = ["vllm>=0.26.0,<0.33.0"]
+vllm = ["vllm==0.24.0"]
 compose = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]
 build = ["huggingface_hub", "pyyaml", "tqdm", "safetensors"]  # Backward compatibility alias for compose
 # Audio (ASR) decode + resample. Reuse vLLM's own audio deps (unversioned, so it
@@ -135,6 +135,15 @@ conflicts = [
     [{ group = "vllm26" },     { group = "dev-latest" }],
     [{ group = "dev" },        { group = "vllm32" }],
     [{ group = "dev" },        { group = "dev-latest" }],
+    # vllm extra pinned to 0.24 vs every group pinning another line
+    [{ extra = "vllm" },       { group = "vllm26" }],
+    [{ extra = "vllm" },       { group = "vllm32" }],
+    [{ extra = "vllm" },       { group = "dev" }],
+    [{ extra = "vllm" },       { group = "dev-latest" }],
+    [{ extra = "tutorials" },  { group = "vllm26" }],
+    [{ extra = "tutorials" },  { group = "vllm32" }],
+    [{ extra = "tutorials" },  { group = "dev" }],
+    [{ extra = "tutorials" },  { group = "dev-latest" }],
 ]
 
 [tool.coverage.run]
