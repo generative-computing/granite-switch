@@ -68,6 +68,7 @@ from granite_switch.composer.adapter_discovery import (
 from granite_switch.composer.adapter_loader import is_shadow_residual_adapter
 from granite_switch.composer.arch import resolve_arch
 from granite_switch.composer.compose_utils import GraniteSwitchComposer
+from granite_switch.composer.decision_config import resolve_decision_specs
 from granite_switch.composer.reporting import generate_compose_report, write_build_doc
 from granite_switch.composer.tokenizer_setup import (
     ANCHOR_MODE_PROBE,
@@ -955,6 +956,16 @@ Examples:
         ),
     )
     parser.add_argument(
+        "--decision-adapter",
+        dest="decision_adapters",
+        action="append",
+        default=None,
+        metavar="NAME",
+        help="Declare an adapter as a decision adapter for vLLM's /v1/systemone. Its "
+        "io.yaml must carry a 'decision:' block (see docs/DECISION_ADAPTERS.md). "
+        "Repeatable; the first is the default.",
+    )
+    parser.add_argument(
         "--enable-audio",
         action="store_true",
         default=False,
@@ -1362,6 +1373,13 @@ def build():
     else:
         print("  Skipping chat template configuration (non-Granite model)")
 
+    # Probed on the composed chat template, so it must follow configure_chat_template.
+    decision_kwargs = (
+        resolve_decision_specs(all_discovered, args.decision_adapters, tokenizer)
+        if args.decision_adapters
+        else {}
+    )
+
     new_vocab_size = len(tokenizer)
     print(f"\nStep 1 complete in {time.time() - step_start:.2f}s")
 
@@ -1381,7 +1399,7 @@ def build():
         print(f"        {label}")
     print()
 
-    optional_kwargs = {}
+    optional_kwargs = dict(decision_kwargs)
     if args.switch_head_dim is not None:
         optional_kwargs["switch_head_dim"] = args.switch_head_dim
     # Coded-engine (MultiSwitch) params. These flow through

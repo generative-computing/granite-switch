@@ -1,291 +1,318 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Unit tests for native vLLM structured-decisions support (Route C).
+"""The vLLM ``/v1/systemone`` decision strategy, on CPU, against a minimal fake of
+vLLM 0.32's structured-decisions modules (tests/shared/decision_fixtures.py).
 
-These cover the pure render/label-pool/escaping helpers and the registration callback — the
-string/token assertions from the implementation spec's §7. They do NOT need a GPU or a running
-engine; the pure helpers do not even need vLLM installed, so the module is imported by file path
-to avoid pulling in granite_switch.vllm.__init__ (which imports torch/transformers).
+A toy template stands in for the composed Granite one: it activates ``<|decision|>``
+on the last user turn holding the marker, else just before the assistant header. The
+strategy is the real class, so these tests pin what it adds over vLLM:
 
-The end-to-end accuracy / activation checks that need a real tokenizer + server live in the
-Vela job (scripts) and the systemone endpoint plugin's harnesses, per the spec's §6.
+- the decision config comes from ``hf_config`` (no env vars, no constants);
+- a declared adapter that does not activate stops the server (RuntimeError, which
+  vLLM's ``except ValueError`` around strategy construction does not swallow);
+- no declared adapter starts fine and refuses reads with a clear error;
+- the rendered prompt follows the spec, all caller text escaped, and every real
+  render is checked for exactly one control token;
+- a reordered (noul) question maps label probabilities back to the right options;
+- caller ``chat_template_kwargs`` are allowlisted; media is refused.
 """
 
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
+import logging
+from types import SimpleNamespace
 
 import pytest
 
-# Import the module by file path: the pure helpers must be testable without vLLM, and importing
-# granite_switch.vllm (the package __init__) would require torch + transformers + the full stack.
-_MODULE_PATH = (
-    Path(__file__).resolve().parents[2]
-    / "src"
-    / "granite_switch"
-    / "vllm"
-    / "structured_decisions.py"
+from granite_switch.config import VLLM_ARCHITECTURES
+from tests.shared.decision_fixtures import (
+    LABEL_READS,
+    MARKER,
+    STRATEGIES,
+    FakeStructuredDecisionError,
+    build_strategy,
+    install_fake_vllm,
+    load_strategy_module,
+    question,
+    reference_block,
+    run_read,
 )
-_spec = importlib.util.spec_from_file_location("gs_structured_decisions", _MODULE_PATH)
-sd = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sd)
+
+sd = load_strategy_module()
+
+CTL, CTL_ID, HEADER_ID, FILLER_ID = "<|decision|>", 500, 42, 7
 
 
-MARKER = "### DECISION"
+class ToyTokenizer:
+    """Words are tokens. Single letters get their own ids, ``<|decision|>`` is
+    added vocab, ``ASSISTANT`` is the generation prompt's last added token."""
 
+    unk_token_id = 0
 
-@pytest.fixture(autouse=True)
-def _marker_env(monkeypatch):
-    """The renderer requires DECISION_INVOCATION_MARKER; set it for every test."""
-    monkeypatch.setenv("DECISION_INVOCATION_MARKER", MARKER)
-    monkeypatch.delenv("DECISION_EXPERIMENTAL_SYSTEM_PROMPT", raising=False)
-    monkeypatch.delenv("DECISION_ADAPTER_NAME", raising=False)
-
-
-class FakeTokenizer:
-    """A minimal tokenizer: single letters and two-letter aliases are one token; added vocab
-    holds the control token and a role marker so escaping has something to break."""
-
-    def __init__(self, added=None):
-        self._added = added or {"<|decision|>": 500, "<|start_of_role|>": 501}
-
-    def __call__(self, text, add_special_tokens=False):
-        if text.isalpha() and 1 <= len(text) <= 2:
-            # deterministic distinct id per short alpha string
-            return {
-                "input_ids": [
-                    10_000 + sum(ord(c) * (i + 1) for i, c in enumerate(text))
-                ]
-            }
-        return {"input_ids": [1, 2, 3]}
+    def __init__(self, invocation_text=MARKER, double_activation=False):
+        self.invocation_text = invocation_text
+        self.double_activation = double_activation
+        self.rendered = []
 
     def get_added_vocab(self):
-        return dict(self._added)
+        return {CTL: CTL_ID, "ASSISTANT": HEADER_ID}
+
+    def convert_tokens_to_ids(self, token):
+        return self.get_added_vocab().get(token, self.unk_token_id)
+
+    def _word_ids(self, word):
+        if word in self.get_added_vocab():
+            return [self.get_added_vocab()[word]]
+        if len(word) == 1 and word.isalpha():
+            return [1000 + ord(word)]
+        return [FILLER_ID, FILLER_ID]
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [i for w in text.split() for i in self._word_ids(w)]}
+
+    def apply_chat_template(
+        self,
+        messages,
+        tokenize=False,
+        add_generation_prompt=False,
+        adapter_name=None,
+        **kw,
+    ):
+        contents = [m["content"] for m in messages]
+        fallback = False
+        if adapter_name == "decision":
+            hits = [
+                i
+                for i, m in enumerate(messages)
+                if m["role"] == "user" and self.invocation_text in m["content"]
+            ]
+            if hits:
+                i = hits[-1]
+                contents[i] = contents[i].replace(
+                    self.invocation_text, f"{CTL} {self.invocation_text}"
+                )
+            else:
+                fallback = add_generation_prompt
+        text = " ".join(f"ROLE {m['role']} {c}" for m, c in zip(messages, contents))
+        if fallback:
+            text += f" {CTL}"
+        if add_generation_prompt:
+            text += " ASSISTANT"
+        if self.double_activation and len(self.rendered) > 1:
+            text = f"{CTL} {text}"  # breaks only renders after the startup probe
+        self.rendered.append(text)
+        return self(text)["input_ids"] if tokenize else text
 
 
-# ── Label pool (letter-alias scheme, no digits) ────────────────────────────────────────────
+def _letter(c):
+    return 1000 + ord(c)
 
 
-def test_label_pool_letters_then_aliases():
-    tok = FakeTokenizer()
-    pool = sd.build_label_pool(tok, 28)
-    labels = [label for label, _ in pool]
-    assert labels[:26] == list(sd.PLAIN_LETTERS)
-    # 27th and 28th are two-letter aliases, never digits
-    assert labels[26] == "AA"
-    assert labels[27] == "AB"
-    assert all(not label.isdigit() for label in labels)
-
-
-def test_label_pool_token_ids_unique():
-    tok = FakeTokenizer()
-    pool = sd.build_label_pool(tok, 10)
-    ids = [tid for _, tid in pool]
-    assert len(set(ids)) == len(ids)
-
-
-def test_label_pool_raises_when_insufficient():
-    class OneTokenOnlyForA:
-        def __call__(self, text, add_special_tokens=False):
-            return {"input_ids": [7]} if text == "A" else {"input_ids": [1, 2]}
-
-        def get_added_vocab(self):
-            return {}
-
-    with pytest.raises(ValueError, match="could only build"):
-        sd.build_label_pool(OneTokenOnlyForA(), 3)
-
-
-# ── Escaping (U+2060 word joiner) ──────────────────────────────────────────────────────────
-
-
-def test_escape_breaks_marker():
-    escaped = sd.escape_special_tokens("before ### DECISION after", [MARKER])
-    assert sd.TOKEN_BREAK in escaped
-    # the first char is kept, then the joiner, then the rest — so the literal marker is gone
-    assert MARKER not in escaped
-
-
-def test_escape_breaks_added_special_tokens():
-    tok = FakeTokenizer()
-    specials = sd._specials(tok)
-    assert "<|decision|>" in specials
-    escaped = sd.escape_special_tokens("x <|decision|> y", specials)
-    assert "<|decision|>" not in escaped
-
-
-# ── Two-turn marker render ─────────────────────────────────────────────────────────────────
-
-
-def test_render_two_turns():
-    tok = FakeTokenizer()
-    messages, label_ids = sd.render(
-        tok, "my state", "pick a team", ["payments", "account"]
+def _hf_config(specs=None, default="decision"):
+    return SimpleNamespace(
+        adapter_names=["guardian", "decision"],
+        adapter_kinds=["lora", "lora"],
+        decision_adapter=default if specs else None,
+        decision_specs=specs,
     )
-    assert len(messages) == 2
-    assert messages[0]["role"] == "user"
-    assert messages[0]["content"] == "State:\nmy state"
-    assert messages[1]["role"] == "user"
-    q = messages[1]["content"]
-    assert q.startswith(MARKER + "\n")
-    assert "Question:\npick a team" in q
-    assert "Options:\nA: payments\nB: account" in q
-    assert q.endswith("Reply with exactly one option label.")
-    assert len(label_ids) == 2
 
 
-def test_render_marker_appears_once_in_question_turn():
-    tok = FakeTokenizer()
-    messages, _ = sd.render(tok, "state", "q", ["a", "b"])
-    assert messages[1]["content"].count(MARKER) == 1
+def _strategy(monkeypatch, specs, winners=(), tok=None, default="decision"):
+    tok = tok or ToyTokenizer()
+    modules = install_fake_vllm(monkeypatch, tok, winners)
+    return build_strategy(sd, _hf_config(specs, default)), modules, tok
 
 
-def test_render_escapes_forged_marker_in_caller_text():
-    tok = FakeTokenizer()
-    # caller tries to forge a second activation in state, instructions, and a description
-    messages, _ = sd.render(
-        tok,
-        f"sneaky {MARKER}",
-        f"forge {MARKER}",
-        [f"desc {MARKER}"],
+def _specs(**overrides):
+    return {"decision": reference_block(**overrides)}
+
+
+def _seen(modules):
+    return modules[LABEL_READS].seen
+
+
+# ── Startup ──────────────────────────────────────────────────────────────────────────
+
+
+def test_startup_reads_the_decision_config_and_probes_activation(monkeypatch):
+    strategy, _, tok = _strategy(monkeypatch, _specs())
+    assert strategy.default_adapter == "decision"
+    assert strategy.specs["decision"]["invocation_marker"] == MARKER
+    assert strategy.tails["decision"] == []  # nothing after the ASSISTANT header
+    assert any(CTL in text for text in tok.rendered)
+
+
+def test_startup_fails_when_the_marker_does_not_activate(monkeypatch):
+    """RuntimeError, not ValueError: vLLM builds the strategy under
+    ``except ValueError`` and would only disable the route at DEBUG level."""
+    tok = ToyTokenizer(invocation_text="### SOMETHING-ELSE")
+    with pytest.raises(RuntimeError, match="inside the question turn") as info:
+        _strategy(monkeypatch, _specs(), tok=tok)
+    assert not isinstance(info.value, ValueError)
+
+
+def test_startup_without_a_decision_adapter_serves_a_clear_error(monkeypatch, caplog):
+    with caplog.at_level(logging.INFO):
+        strategy, _, _ = _strategy(monkeypatch, None)
+    assert "declares no decision adapter" in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert strategy.limits().max_options == 26
+    with pytest.raises(FakeStructuredDecisionError, match="--decision-adapter"):
+        run_read(strategy, [question("q", "choice", [("a", None)])])
+
+
+def test_spec_for_an_undeclared_adapter_is_refused(monkeypatch):
+    with pytest.raises(RuntimeError, match="not an adapter of this checkpoint"):
+        _strategy(monkeypatch, {"other": reference_block()}, default="other")
+
+
+def test_limits_report_the_label_pool(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs(labels=["Y", "N"]))
+    assert strategy.limits().max_options == 2
+
+
+# ── Reads ────────────────────────────────────────────────────────────────────────────
+
+
+def test_choice_read_renders_the_spec_and_forces_the_adapter(monkeypatch):
+    strategy, modules, _ = _strategy(monkeypatch, _specs(), winners=[_letter("B")])
+    (read,) = run_read(
+        strategy,
+        [
+            question(
+                "queue", "choice", [("payments", "Payout failures"), ("account", None)]
+            )
+        ],
     )
-    full = "\n".join(m["content"] for m in messages)
-    # exactly one real marker — the legitimate one at the head of the question turn
-    assert full.count(MARKER) == 1
+    assert read.probs[1] > 0.9 and read.argmax_is_label
+    assert read.label_mass == pytest.approx(0.95)
+    (engine_input,) = _seen(modules)
+    assert engine_input["request"]["chat_template_kwargs"] == {
+        "adapter_name": "decision",
+        "enable_thinking": False,
+    }
+    question_turn = engine_input["messages"][1]["content"]
+    assert question_turn.startswith(MARKER + "\nQuestion:\npick one")
+    assert "A: Payout failures\nB: account" in question_turn
 
 
-def test_render_empty_state_becomes_placeholder():
-    tok = FakeTokenizer()
-    for empty in ("", None, {}, []):
-        messages, _ = sd.render(tok, empty, "q", ["a"])
-        assert messages[0]["content"] == "State:\n(empty)"
-
-
-def test_render_system_prompt_opt_in(monkeypatch):
-    monkeypatch.setenv("DECISION_EXPERIMENTAL_SYSTEM_PROMPT", "1")
-    tok = FakeTokenizer()
-    messages, _ = sd.render(tok, "s", "q", ["a"])
-    assert messages[0]["role"] == "system"
-    assert messages[0]["content"] == sd.SYSTEM_PROMPT
-
-
-def test_render_requires_marker(monkeypatch):
-    monkeypatch.delenv("DECISION_INVOCATION_MARKER", raising=False)
-    tok = FakeTokenizer()
-    with pytest.raises(RuntimeError, match="DECISION_INVOCATION_MARKER is not set"):
-        sd.render(tok, "s", "q", ["a"])
-
-
-# ── Adapter name resolution ────────────────────────────────────────────────────────────────
-
-
-def test_adapter_name_default():
-    assert sd._adapter_name() == "decision"
-
-
-def test_adapter_name_env_override(monkeypatch):
-    monkeypatch.setenv("DECISION_ADAPTER_NAME", "router")
-    assert sd._adapter_name() == "router"
-
-
-# ── Activation probe ───────────────────────────────────────────────────────────────────────
-
-
-def test_check_activation_passes_when_marker_emits_control_token():
-    """A chat template that emits exactly one <|decision|> inside the conversation passes."""
-
-    class TemplateTok(FakeTokenizer):
-        def convert_tokens_to_ids(self, token):
-            return 500 if token == "<|decision|>" else 999
-
-        unk_token_id = 0
-
-        def apply_chat_template(
-            self,
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-            adapter_name=None,
-        ):
-            # Emit the control token once inside the conversation; the generation prompt adds a
-            # trailing assistant-header marker but no further control token.
-            body = "CTL " + " ".join(m["content"] for m in messages)
-            return body + (" ASST" if add_generation_prompt else "")
-
-        def __call__(self, text, add_special_tokens=False):
-            # Letter labels (for build_label_pool) delegate to the base fake; the probe's
-            # rendered template text is tokenized with the control/header markers mapped to
-            # their ids and everything else to a filler id.
-            if "CTL" not in text and "ASST" not in text:
-                return super().__call__(text, add_special_tokens)
-            ids = []
-            for word in text.split():
-                ids.append(500 if word == "CTL" else (42 if word == "ASST" else 7))
-            return {"input_ids": ids}
-
-    sd.check_activation(TemplateTok(), "decision")  # must not raise
-
-
-def test_check_activation_raises_when_no_control_token():
-    class NoControlTok(FakeTokenizer):
-        def convert_tokens_to_ids(self, token):
-            return 500 if token == "<|decision|>" else 999
-
-        unk_token_id = 0
-
-        def apply_chat_template(
-            self,
-            messages,
-            tokenize=False,
-            add_generation_prompt=False,
-            adapter_name=None,
-        ):
-            # never emits the control token
-            return "PLAIN " + " ".join(m["content"] for m in messages)
-
-        def __call__(self, text, add_special_tokens=False):
-            if "PLAIN" not in text:
-                return super().__call__(text, add_special_tokens)  # letter labels
-            return {"input_ids": [7] * len(text.split())}
-
-    with pytest.raises(RuntimeError, match="exactly one"):
-        sd.check_activation(NoControlTok(), "decision")
-
-
-def test_check_activation_warns_without_chat_template(caplog):
-    class Plain:
-        def convert_tokens_to_ids(self, token):
-            return 0  # looks like unk → treated as "no control token"
-
-        unk_token_id = 0
-
-    # no apply_chat_template → early return (warning), no raise
-    sd.check_activation(Plain(), "decision")
-
-
-# ── Registration ───────────────────────────────────────────────────────────────────────────
-
-
-def test_register_is_noop_without_vllm(monkeypatch):
-    """On a vLLM line without the structured_decisions API, registration is a safe no-op."""
-    import builtins
-
-    real_import = builtins.__import__
-
-    def fake_import(name, *args, **kwargs):
-        if name.startswith("vllm.entrypoints.generate.structured_decisions"):
-            raise ImportError("no structured_decisions on this line")
-        return real_import(name, *args, **kwargs)
-
-    monkeypatch.setattr(builtins, "__import__", fake_import)
-    sd.register_structured_decisions()  # must not raise
-
-
-def test_granite_switch_archs_cover_all_registered_names():
-    """The strategy must register for every arch string the model plugin registers, so an SR
-    checkpoint (SRSwitchForCausalLM) is served too."""
-    assert sd.GRANITE_SWITCH_ARCHS == (
-        "GraniteSwitchForCausalLM",
-        "SRSwitchForCausalLM",
-        "ShadowResidualForCausalLM",
+def test_noul_read_maps_the_false_first_labels_back(monkeypatch):
+    # Rendered false-first: A = "no", B = "yes". The engine favours A.
+    strategy, modules, _ = _strategy(monkeypatch, _specs(), winners=[_letter("A")])
+    (read,) = run_read(
+        strategy, [question("urgent", "noul", [("yes", None), ("no", None)])]
     )
+    # vLLM's answer is option order (yes, no): the mass must land on "no".
+    assert read.probs[1] > 0.9
+    (engine_input,) = _seen(modules)
+    assert "A: No / false\nB: Yes / true" in engine_input["messages"][1]["content"]
+
+
+def test_a_real_render_with_two_control_tokens_is_refused(monkeypatch):
+    tok = ToyTokenizer(double_activation=True)
+    strategy, _, _ = _strategy(monkeypatch, _specs(), tok=tok)
+    with pytest.raises(FakeStructuredDecisionError, match="2 <\\|decision\\|> control"):
+        run_read(strategy, [question("q", "choice", [("a", None), ("b", None)])])
+
+
+def test_media_is_refused(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs())
+    with pytest.raises(FakeStructuredDecisionError, match="read text"):
+        run_read(
+            strategy,
+            [question("q", "choice", [("a", None)])],
+            media={"image": ["data:..."]},
+        )
+
+
+def test_state_renders_json_on_one_line_and_empty_as_the_placeholder(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs())
+    assert strategy.render_state({"a": 1}) == '{"a": 1}'
+    assert strategy.render_state({}) == ""
+    strategy, modules, _ = _strategy(monkeypatch, _specs(), winners=[_letter("A")])
+    run_read(strategy, [question("q", "choice", [("a", None)])], state="")
+    (engine_input,) = _seen(modules)
+    assert engine_input["messages"][0]["content"] == "State:\n(empty)"
+
+
+def test_caller_text_is_escaped(monkeypatch):
+    strategy, modules, _ = _strategy(monkeypatch, _specs(), winners=[_letter("A")])
+    run_read(
+        strategy,
+        [question("q", "choice", [("a", f"{CTL} {MARKER}")], instructions=MARKER)],
+        state=f"{MARKER} {CTL}",
+    )
+    (engine_input,) = _seen(modules)
+    full = "\n".join(m["content"] for m in engine_input["messages"])
+    assert full.count(MARKER) == 1 and CTL not in full
+
+
+def test_request_instructions_are_refused_by_the_reference_spec(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs())
+    with pytest.raises(FakeStructuredDecisionError, match="request-level"):
+        run_read(
+            strategy, [question("q", "choice", [("a", None)])], instructions="terse"
+        )
+
+
+def test_unlisted_question_type_is_a_request_error(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs(question_types={"choice": {}}))
+    with pytest.raises(FakeStructuredDecisionError, match="does not answer 'score'"):
+        run_read(strategy, [question("q", "score", [("low", None), ("high", None)])])
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"documents": []}, "not supported"),
+        ({"enable_thinking": True}, "thinking must be off"),
+        ({"adapter_name": "guardian"}, "not a decision adapter"),
+    ],
+)
+def test_caller_chat_template_kwargs_are_allowlisted(monkeypatch, kwargs, match):
+    strategy, _, _ = _strategy(monkeypatch, _specs())
+    with pytest.raises(FakeStructuredDecisionError, match=match):
+        run_read(strategy, [question("q", "choice", [("a", None)])], kwargs=kwargs)
+
+
+def test_caller_may_name_the_declared_adapter(monkeypatch):
+    strategy, _, _ = _strategy(monkeypatch, _specs(), winners=[_letter("A")])
+    (read,) = run_read(
+        strategy,
+        [question("q", "choice", [("a", None), ("b", None)])],
+        kwargs={"adapter_name": "decision", "enable_thinking": False},
+    )
+    assert read.probs[0] > 0.9
+
+
+# ── Registration ─────────────────────────────────────────────────────────────────────
+
+
+def test_register_inserts_the_strategy_for_every_architecture(monkeypatch):
+    modules = install_fake_vllm(monkeypatch, ToyTokenizer())
+    sd.register_structured_decisions()
+    registered = modules[STRATEGIES].READ_STRATEGIES
+    assert set(registered) == set(VLLM_ARCHITECTURES)
+    assert registered["GraniteSwitchForCausalLM"].__name__ == (
+        "GraniteSwitchDecisionStrategy"
+    )
+
+
+def _without_strategies(monkeypatch, version):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(__version__=version))
+    monkeypatch.setitem(sys.modules, STRATEGIES, None)  # import raises
+
+
+def test_register_is_a_quiet_noop_before_0_32(monkeypatch, caplog):
+    _without_strategies(monkeypatch, "0.30.1")
+    with caplog.at_level(logging.WARNING):
+        sd.register_structured_decisions()
+    assert "NOT registered" not in caplog.text
+
+
+def test_register_warns_when_a_newer_vllm_moved_the_api(monkeypatch, caplog):
+    _without_strategies(monkeypatch, "0.33.0")
+    with caplog.at_level(logging.WARNING):
+        sd.register_structured_decisions()
+    assert "NOT registered" in caplog.text
