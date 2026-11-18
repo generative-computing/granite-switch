@@ -40,6 +40,7 @@ pre-commit install --hook-type prepare-commit-msg   # auto-adds your DCO sign-of
 | `add-signoff` | Appends `Signed-off-by:` at the `prepare-commit-msg` stage | Yes (adds the trailer for you) |
 | `check-dco` | Validates commit message has `Signed-off-by: Name <email>` | No — blocks commit |
 | `validate-links` | Checks broken local links, stale labels, and broken first-party imports in `.ipynb`/`.md`/`.py` | No — blocks commit |
+| `check-liquid-syntax` | Rejects Liquid tag and expression delimiters (brace-percent, double brace) in `docs/` pages, which the GitHub Pages build renders with Liquid; see [`pages-build.yaml`](#pages-buildyaml--github-pages-build) | No — blocks commit |
 | `nbstripout` | Strips output cells from Jupyter notebooks | Yes |
 | `uv-lock` | Regenerates `uv.lock` when out of sync with `pyproject.toml` | Yes (regenerates, then blocks until staged) |
 
@@ -72,14 +73,14 @@ pre-commit run check-headers --all-files
 
 ## On Every PR: GitHub Actions
 
-Two workflows run automatically when a PR is opened against `main` or a commit is pushed.
+Three workflows run automatically when a PR is opened against `main` or a commit is pushed; `pages-build.yaml` only when the PR touches `docs/`.
 
 ### `ci.yaml` — Pre-commit + CPU tests + coverage
 
 **Trigger:** Pull request or push to `main`
 
 **Jobs:**
-1. `pre-commit` — runs `uvx pre-commit run --all-files`, executing the **exact same hooks** as the local pre-commit stage, pinned to the same versions in `.pre-commit-config.yaml`. This is the single source of truth: CI and local pre-commit can never drift, and any hook added or bumped in the config applies in CI automatically with no workflow edits. It covers ruff-format + ruff, `check-toml` / `check-yaml`, `validate-links` (broken local links / stale labels / broken first-party imports), `check-headers` (SPDX), the hygiene hooks (`end-of-file-fixer`, `trailing-whitespace`, `mixed-line-ending`, `check-merge-conflict`, `check-added-large-files`, `check-case-conflict`), `nbstripout`, and `uv-lock`. All are **blocking**: the tree is clean (see [Ruff rollout](#ruff-rollout-format-first-then-enforce)), so any new violation fails the build. Auto-fixing hooks (ruff, `end-of-file-fixer`, `check-headers`, `uv-lock`) modify files when something is wrong; pre-commit then reports failure and prints the diff (`--show-diff-on-failure`), telling the contributor to run pre-commit locally and re-commit. The DCO hooks (`add-signoff`, `check-dco`) run at the `prepare-commit-msg` / `commit-msg` stages, which `pre-commit run --all-files` does **not** execute — they are covered by `dco.yaml` instead. Hook environments are cached (`~/.cache/pre-commit`, keyed on the config file) so they don't reinstall every run.
+1. `pre-commit` — runs `uvx pre-commit run --all-files`, executing the **exact same hooks** as the local pre-commit stage, pinned to the same versions in `.pre-commit-config.yaml`. This is the single source of truth: CI and local pre-commit can never drift, and any hook added or bumped in the config applies in CI automatically with no workflow edits. It covers ruff-format + ruff, `check-toml` / `check-yaml`, `validate-links` (broken local links / stale labels / broken first-party imports), `check-liquid-syntax` (Liquid delimiters in `docs/` pages), `check-headers` (SPDX), the hygiene hooks (`end-of-file-fixer`, `trailing-whitespace`, `mixed-line-ending`, `check-merge-conflict`, `check-added-large-files`, `check-case-conflict`), `nbstripout`, and `uv-lock`. All are **blocking**: the tree is clean (see [Ruff rollout](#ruff-rollout-format-first-then-enforce)), so any new violation fails the build. Auto-fixing hooks (ruff, `end-of-file-fixer`, `check-headers`, `uv-lock`) modify files when something is wrong; pre-commit then reports failure and prints the diff (`--show-diff-on-failure`), telling the contributor to run pre-commit locally and re-commit. The DCO hooks (`add-signoff`, `check-dco`) run at the `prepare-commit-msg` / `commit-msg` stages, which `pre-commit run --all-files` does **not** execute — they are covered by `dco.yaml` instead. Hook environments are cached (`~/.cache/pre-commit`, keyed on the config file) so they don't reinstall every run.
 2. `test-cpu` (needs `pre-commit`) — runs `tests/unit/` on Python 3.11 and 3.12 in parallel, filtered with `-m "not requires_model and not gpu and not slow and not deep and not release"`. This is the **CI-safe set**: within `tests/unit/`, tests that download/compose real models (`requires_model`), need CUDA (`gpu`), hit the network or run long (`slow`), or are the expensive code-theory suite (`deep`) are still **excluded** by the marker filter. `tests/composer/` and `tests/hf/` are **not run in CI at all**: even filtered, they are heavy enough to exhaust the GitHub Actions CPU-minutes quota and get killed mid-run. All coverage beyond the unit suite — composer, HF, vLLM, and integration — runs on the GPU cluster instead (see [Manual: GPU Tests](#manual-gpu-tests))
 
 Coverage is uploaded to [Codecov](https://codecov.io) after each test run (see [Coverage](#coverage) below).
@@ -113,6 +114,19 @@ exactly as it does locally.
 **Trigger:** Pull request to `main`
 
 Checks that every non-merge commit in the PR has a `Signed-off-by:` line. Skips merge commits automatically.
+
+### `pages-build.yaml` — GitHub Pages build
+
+**Trigger:** Pull request to `main` that changes `docs/`
+
+The site at https://generative-computing.github.io/granite-switch/ is published from `docs/` on `main` by GitHub's own "pages build and deployment" run, so a page that breaks the build is only noticed after merge. This job runs the same builder (`actions/jekyll-build-pages`, the `github-pages` gem) on the PR without deploying, and fails the PR on any error Jekyll raises.
+
+Jekyll runs every Markdown page through Liquid, including fenced code, so Jinja quoted from a chat template is the usual cause:
+
+- an unknown Liquid tag, such as Jinja's `set` written with its brace-percent delimiters, **fails the build**, which this job catches;
+- a double-brace expression **renders silently as empty text** and the build passes, which only the `check-liquid-syntax` pre-commit hook catches.
+
+Quote Jinja without its delimiters, or wrap the passage in Liquid's `raw` / `endraw` tags (these show literally on github.com, so rewording is usually better).
 
 ---
 

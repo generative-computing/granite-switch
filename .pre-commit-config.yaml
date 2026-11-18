@@ -77,6 +77,12 @@ repos:
         always_run: true
         files: \.(ipynb|md|py)$
 
+      - id: check-liquid-syntax
+        name: Check docs for Liquid delimiters (GitHub Pages)
+        entry: python .pre-commit/check_liquid_syntax.py
+        language: system
+        files: ^docs/
+
   - repo: https://github.com/kynan/nbstripout
     rev: 0.8.1
     hooks:

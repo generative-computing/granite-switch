@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: Apache-2.0
+
+name: Pages build
+
+# The site is published by GitHub's own "pages build and deployment" run, which
+# builds docs/ on main with Jekyll -- after merge, when a broken page has already
+# landed. This job runs the same builder on the PR, without deploying, so an
+# error Jekyll would raise (e.g. a Liquid syntax error in a Markdown page) fails
+# the PR instead of the published site.
+#
+# It cannot catch Liquid that renders silently (a `{{ ... }}` becomes empty text
+# and the build still passes); the check-liquid-syntax pre-commit hook does.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/pages-build.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build GitHub Pages site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The action GitHub's Pages deployment uses itself (the github-pages gem,
+      # so the same Jekyll and plugin versions), pointed at the same source.
+      - uses: actions/jekyll-build-pages@v1
+        with:
+          source: ./docs
+          destination: ./_site
