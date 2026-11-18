@@ -425,7 +425,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         # index/token machinery; the switch's split_indices() routes its
         # positions out of the LoRA stream (so LoRA no-ops there) and into the
         # head stream. Each head reads its slot's layer (the final post-norm
-        # state by default) at the slot's marker, the request's last token.
+        # state by default) at the slot's marker.
         heads = stream_routing.build_head_modules(config, "hf")
         self._head_types = list(heads)
         self._head_min_widths = {
@@ -510,11 +510,13 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
             cache[key] = table
         return cache[key]
 
-    def _locate_head_markers(self, input_ids, head_indices, attention_mask):
+    def _locate_head_markers(self, input_ids, head_indices):
         """``(rows, pos, slots)`` of this forward's head-stream markers, or None.
 
-        A head slot fires at its control token, which must be its row's last
-        real token: the head's output replaces that position's logits.
+        A head slot fires at its control token and writes its output into that
+        position's logits. Placing the marker last is the caller's job (the chat
+        template and ``Conversation`` do): a marker anywhere else is scored at
+        its own position, which generation does not read.
         """
         if not self._head_types:
             return None
@@ -530,20 +532,6 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
         rows, pos = torch.isin(input_ids, marker_ids).nonzero(as_tuple=True)
         if rows.numel() == 0:
             return None
-
-        batch_size, seq_length = input_ids.shape
-        if attention_mask is not None and attention_mask.dim() == 2:
-            real = attention_mask[:, -seq_length:].long()
-            cols = torch.arange(seq_length, device=real.device)
-            last = (real * cols).max(dim=1).values
-        else:
-            last = torch.full((batch_size,), seq_length - 1, device=input_ids.device)
-        misplaced = pos != last[rows]
-        if bool(misplaced.any()):
-            bad = sorted(set(rows[misplaced].tolist()))
-            raise RuntimeError(
-                f"Head-stream request(s) {bad}: control token is not their last token."
-            )
         return rows, pos, head_indices[rows, pos]
 
     def _score_heads(self, layer, hidden, markers, scores):
@@ -747,7 +735,7 @@ class GraniteSwitchModel(GraniteSwitchPreTrainedModel):
 
         # Resolve head-stream markers before the decoder runs, so each read layer
         # scores only its marker rows as it produces them.
-        markers = self._locate_head_markers(input_ids, head_indices, attention_mask)
+        markers = self._locate_head_markers(input_ids, head_indices)
         self._last_head_scores = None
         if markers is not None:
             head_scores = inputs_embeds.new_zeros(
@@ -943,11 +931,17 @@ class GraniteSwitchForCausalLM(GraniteSwitchPreTrainedModel, GenerationMixin):
             return logits
         rows, pos, scores, slots, seq_length = pending
 
-        # logits keeps the last logits.shape[1] positions (logits_to_keep).
+        # logits keeps the last logits.shape[1] positions (logits_to_keep). A
+        # marker before them, such as one that is not its prompt's last token
+        # in generate(), has no row to write.
         cols = pos - (seq_length - logits.shape[1])
-        if bool((cols < 0).any()):
-            raise RuntimeError(
-                "A head-stream marker's logits were not kept (logits_to_keep)."
+        kept = cols >= 0
+        if not bool(kept.all()):
+            rows, cols, scores, slots = (
+                rows[kept],
+                cols[kept],
+                scores[kept],
+                slots[kept],
             )
         flat = logits.view(-1, logits.shape[-1])
         index = rows * logits.shape[1] + cols

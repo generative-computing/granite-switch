@@ -2,7 +2,7 @@
 """CPU method tests for token-aligned, score-at-layer probe verdicts.
 
 GPU capture/replay and packed-output transport are tested in
-``test_probe_chunked_prefill.py``. Request-boundary validation is deferred.
+``test_probe_chunked_prefill.py``.
 """
 
 from types import SimpleNamespace

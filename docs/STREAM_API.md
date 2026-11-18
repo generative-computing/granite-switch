@@ -267,27 +267,23 @@ template renders one, and `Conversation` does too (below).
 
 ## Limits
 
-- **A marker must be the prompt's last token.** See the known vLLM validation gap below.
+- **A marker must be the prompt's last token.** Neither backend checks this; see
+  [Where a marker goes](#where-a-marker-goes).
 - **One head per request.** A head reads at its marker, the prompt's last token, so two verdicts
   on one prompt take two requests.
 - **Speculative decoding and microbatching** are refused with head streams on vLLM.
 
-### Known gap: vLLM head-marker validation (deferred)
+### Where a marker goes
 
-vLLM does not check that a complete request contains at most one head marker and that it is
-the final prompt token. For example, `[text, head_marker, more_text]` can silently produce
-ordinary text instead of the head's verdict: the head changes the marker's logits, but the
-sampler uses the final prompt position. Repeated markers, including markers for different
-heads, are also not rejected. HF rejects misplaced markers in its input, including earlier
-occurrences of a repeated marker.
+Placing a head marker is the caller's job. The composed chat template and `Conversation` put
+it last, and neither backend checks a prompt built by hand. A head writes its scores into its
+marker's own logits row, and generation reads only the last one. So for
+`[text, head_marker, more_text]` the request runs as ordinary text, and the head's verdict is
+lost without an error. A repeated marker, or markers of different heads, are scored at each
+position the same way.
 
-This affects every head type and output mode. Ordinary adapter-only requests are not subject
-to this head-marker restriction: their control tokens intentionally affect later tokens.
+This holds for every head type and output mode. Adapter control tokens are different: they
+are meant to affect the tokens after them.
 
-Use the composed chat template or `Conversation`, which place the head marker last. When
-building token prompts manually, include exactly one head marker at the end of a head request
-and do not retain head markers from earlier turns.
-
-**Status, 2026-11-15:** validation is intentionally deferred; this branch does not implement a
-fix. A future fix should validate the complete tokenized request before scheduling, with
-serving tests for misplaced and repeated markers. GPU results alone will not close this gap.
+When building token prompts by hand, put exactly one head marker at the end of a head request,
+and keep no head markers from earlier turns.

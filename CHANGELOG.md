@@ -67,12 +67,11 @@ This project uses [semantic versioning](https://semver.org/).
 
 ### Known limitations
 
-- vLLM does not reject misplaced or repeated head markers in manually built
-  prompts; a marker that is not last can silently lose the head's verdict.
-  This affects every head type, not ordinary adapter-only requests. Use the
-  composed template or `Conversation`.
-  Request validation is intentionally deferred; see
-  [the stream API limitation](docs/STREAM_API.md#known-gap-vllm-head-marker-validation-deferred).
+- Neither backend checks where a head marker sits in a prompt built by hand:
+  a marker that is not last loses the head's verdict without an error. The
+  composed template and `Conversation` put it last. This affects every head
+  type, not ordinary adapter-only requests; see
+  [where a marker goes](docs/STREAM_API.md#where-a-marker-goes).
 
 ## [0.1.0] — MVP
 

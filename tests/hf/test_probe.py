@@ -276,17 +276,27 @@ def test_lora_generation_on_mixed_model_decodes():
     ],
     ids=["content-after", "two-slots", "repeated"],
 )
-def test_marker_that_is_not_the_last_token_raises(kinds, input_ids):
-    """The verdict is read at the last token, so any other marker would be
-    ignored silently; it raises instead."""
+def test_a_marker_anywhere_rewrites_only_its_own_row(kinds, input_ids):
+    """Where a marker goes is the caller's choice: nothing is rejected. Each
+    marker is scored at its own position, and every other row keeps its LM
+    logits, so only a marker that is last decides what generation emits."""
     config = _probe_config(kinds, label_token_ids=(100, 200))
     model = GraniteSwitchForCausalLM(config)
     _set_adapter_token_ids(model, config.adapter_token_ids)
     model.eval()
 
-    with pytest.raises(RuntimeError, match="not their last token"):
-        with torch.no_grad():
-            model(input_ids=torch.tensor(input_ids))
+    with torch.no_grad():
+        logits = model(input_ids=torch.tensor(input_ids)).logits[0]
+
+    markers = {
+        tid for tid, kind in zip(config.adapter_token_ids, kinds) if kind == "probe"
+    }
+    non_label = [t for t in range(config.vocab_size) if t not in (100, 200)]
+    for position, token in enumerate(input_ids[0]):
+        if token in markers:
+            assert torch.isinf(logits[position, non_label]).all()
+        else:
+            assert torch.isfinite(logits[position]).all()
 
 
 def test_right_padded_row_rewrites_the_marker_column():
@@ -308,10 +318,14 @@ def test_right_padded_row_rewrites_the_marker_column():
     assert torch.isfinite(out.logits[0, -1, :]).all()  # padding untouched
     assert torch.isinf(out.logits[1, -1, non_label]).all()
 
-    # Keeping only the last position drops row 0's marker row: fail loud.
-    with pytest.raises(RuntimeError, match="logits_to_keep"):
-        with torch.no_grad():
-            model(input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=1)
+    # Keeping only the last position drops row 0's marker row, and with it
+    # that verdict; row 1's marker is last, so its verdict is kept.
+    with torch.no_grad():
+        kept = model(
+            input_ids=input_ids, attention_mask=attention_mask, logits_to_keep=1
+        ).logits
+    assert torch.isfinite(kept[0, -1]).all()
+    assert torch.isinf(kept[1, -1, non_label]).all()
 
 
 def _randomize_probe_head(model):

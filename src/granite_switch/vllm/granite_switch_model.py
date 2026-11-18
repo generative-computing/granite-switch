@@ -575,9 +575,8 @@ class GraniteSwitchModel(nn.Module):
 
         ``head_indices`` is nonzero only at this forward's marker tokens,
         computed on the first PP rank and passed unchanged between stages.
-        Callers must place one head marker last in each request; misplaced or
-        duplicate markers are not rejected (request-boundary validation is
-        deferred).
+        A head marker belongs last in its request; one placed anywhere else is
+        not rejected, and its scores land on a row the sampler does not read.
         """
         head_slot = head_indices.to(final_hidden_states.dtype)
         for group in self._head_final_groups:
