@@ -152,8 +152,8 @@ rendered ("only N labels").
 Supporting more than 26 options takes three steps:
 
 1. **Move to vLLM 0.33.** Raise the `vllm` extra and the `dev-latest` group past
-   `<0.33`, and import the strategies from their new 0.33 location
-   (`vllm.entrypoints.openai.decisions`). Return `DecisionLimits(..., labeled=False)`
+   `<0.33`, and import the strategies from their new 0.33 location (see section 6).
+   Return `DecisionLimits(..., labeled=False)`
    from `limits()`: the strategy labels options itself, and that flag makes vLLM cap a
    question at `max_options` alone instead of at its own `label_set`.
 2. **Declare a wider label set the adapter was trained on.** Give the `decision:`
@@ -164,3 +164,43 @@ Supporting more than 26 options takes three steps:
    per request, so a question with more than 128 options must be read as several
    requests over the same prompt (sharing the prefix cache) and its label logprobs
    merged before the softmax.
+
+## 6. vLLM versions
+
+The decision strategy supports **vLLM 0.32 only**, the line the `vllm` extra's
+`<0.33` ceiling allows. `register_structured_decisions` runs in every Granite Switch
+vLLM server and behaves per line:
+
+| vLLM | Behaviour |
+|---|---|
+| < 0.32 | No structured-decisions API: registration is a silent no-op. |
+| 0.32 | The strategy registers for every Granite Switch architecture. |
+| ≥ 0.33 | The strategies module has moved, so the import fails. Registration logs a **warning** that the strategy is NOT registered, and `/v1/systemone` does not serve decision adapters. |
+
+On 0.33 the strategy warns and does not fail, on purpose. The plugin loads in every
+Granite Switch server, and most declare no decision adapter, so failing would break
+ordinary serving for an opt-in feature. At plugin load the model config does not
+exist yet, so the plugin cannot tell whether this checkpoint declares decision
+adapters. Only an install outside the `<0.33` pin (for example `--no-deps`) reaches
+this path, and the warning names it.
+
+0.33 support is deliberately not added ahead of the repo's own vLLM 0.33 bump.
+Importing the new path alone would claim support for a vLLM line on which neither
+this strategy nor the model backend has GPU evidence. The bump itself is small; this
+is what vLLM v0.33.0 changes for the strategy:
+
+- `strategies.py` and `question_types.py` move from
+  `vllm.entrypoints.generate.structured_decisions` to
+  `vllm.entrypoints.openai.decisions`. Import the 0.33 path first, then fall back to
+  the 0.32 one.
+- The API the strategy subclasses is unchanged. `NextTokenStrategy`'s `_tokenizer`,
+  `_read_request`, `_render`, `_read_input`, `_sampling_params` and `read` keep their
+  signatures. `ReadContext` keeps its fields and `prompt_tail` is identical.
+  `QuestionRead` gains only an optional `slot`. `LABELS`, `StructuredDecisionError`
+  and `label_softmax` stay in `question_types`.
+- `vllm.entrypoints.generate.label_reads.next_token_label_reads` does not move. It
+  gains only an optional `slots` keyword.
+- `DecisionLimits` gains `labeled: bool = True`, and `build_question` takes
+  `labeled`. With `labeled=False` a question is capped at `max_options` alone (see
+  section 5).
+- Run the request battery on 0.33 on a GPU before the `vllm` extra's ceiling moves.
