@@ -53,8 +53,13 @@ Quote `"yes"` and `"no"`: YAML reads them unquoted as booleans.
 | `messages` | The turns of one question, in order. Roles `user`/`assistant`; the last must be `user`. `{options}` exactly once; `{marker}` at most once, in a user turn (required for `marker` activation). Literal braces are `{{` / `}}`. |
 | `option_line` | `{label}` and `{text}`, once each. `{text}` is the option's description, else its `fallback_text`, else its name. |
 | `labels` | `letters` (A..Z), or a list of at least two single-token strings in the order the adapter was trained on. vLLM 0.32 caps a choice at 26 options and a score at 10 levels. |
-| `question_types.<type>.order` | `noul` only: the order its `"yes"`/`"no"` options are rendered in. |
-| `question_types.<type>.fallback_text` | Text for an option with no description, by option name. |
+| `question_types.<type>.order` | Optional, `noul` only: the order its `"yes"`/`"no"` options are rendered in. Default: vLLM's order (`yes` first). |
+| `question_types.<type>.fallback_text` | Optional. Text for an option with no description, by option name. An option it does not name, or every option when it is omitted, falls back to its name (a `noul` question then shows `yes` / `no`). Omitting it is never an error, so set it when the adapter was trained on other text, as the 4.1-8b one was (`No / false`, `Yes / true`). |
+
+Only `messages` and `question_types` are required. At compose time `activation` and
+`invocation_marker` come from the adapter (a stamp needs them, see section 3); every
+other key defaults to the value shown above. A `question_types` entry may be empty
+(`choice: {}`).
 
 All caller text (state, question instructions, option descriptions, request
 instructions) is escaped before it is placed: every added token and every decision
