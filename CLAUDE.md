@@ -480,7 +480,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
 - `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
 - `docs/AUDIO.md` - Audio input (ASR cascade)
-- `docs/DECISION_ADAPTERS.md` - Decision adapters on vLLM's `/v1/systemone` (io.yaml `decision:` block, compose, stamp)
+- `docs/DECISION_ADAPTERS.md` - Decision adapters on vLLM's (>=0.32) `/v1/systemone` (io.yaml `decision:` block, compose, stamp)
 - `docs/CICD.md` - Pre-commit hooks and CI setup
 
 ## Git Workflow
