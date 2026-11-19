@@ -22,6 +22,7 @@ granite-switch/
 │       ├── config.py                    # Unified GraniteSwitchConfig
 │       ├── conversation.py              # Conversation: multi-turn, per-turn adapter, KV-history policy
 │       ├── token_exchange.py            # Control-token -> substitute-id LUT (shared by both backends)
+│       ├── decision_spec.py             # io.yaml `decision:` block: validate, render, activation probe
 │       │
 │       ├── composer/                    # Compose system (requires [compose] extra)
 │       │   ├── __init__.py
@@ -30,6 +31,7 @@ granite-switch/
 │       │   ├── arch.py                  # Architecture definitions
 │       │   ├── compose_granite_switch.py  # Main compose script (CLI entry point)
 │       │   ├── compose_utils.py           # GraniteSwitchComposer class
+│       │   ├── decision_config.py       # --decision-adapter resolution + stamp CLI for composed checkpoints
 │       │   ├── tokenizer_setup.py       # Tokenizer configuration for control tokens
 │       │   ├── validator.py             # Compose validation checks
 │       │   ├── weight_remapper.py       # Adapter name remapping (AdapterRemapper)
@@ -59,6 +61,7 @@ granite-switch/
 │       └── vllm/                        # vLLM backend (requires [vllm] extra)
 │           ├── __init__.py              # register() for vLLM plugin system
 │           ├── granite_switch_model.py  # GraniteSwitch{Model,ForCausalLM}: LoRA + SR, TP/PP
+│           ├── structured_decisions.py  # /v1/systemone read strategy (vLLM >= 0.32 general plugin)
 │           ├── core/
 │           │   ├── __init__.py
 │           │   ├── lora.py              # SwitchedLoRALinear (SWITCH kernel backend)
@@ -477,6 +480,7 @@ This repo uses [pre-commit](https://pre-commit.com/) (ruff, hygiene hooks, SPDX-
 - `docs/SR_ARCHITECTURE.md` - Shadow Residual dual-stream architecture
 - `docs/MULTISWITCH_EXPLAINED.md` - MultiSwitch coded-memory routing engine and its limits
 - `docs/AUDIO.md` - Audio input (ASR cascade)
+- `docs/DECISION_ADAPTERS.md` - Decision adapters on vLLM's (>=0.32) `/v1/systemone` (io.yaml `decision:` block, compose, stamp)
 - `docs/CICD.md` - Pre-commit hooks and CI setup
 
 ## Git Workflow
