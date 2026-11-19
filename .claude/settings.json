@@ -2,5 +2,16 @@
   "attribution": {
     "commit": "",
     "pr": ""
+  },
+  "permissions": {
+    "allow": [
+      "WebFetch",
+      "WebSearch",
+      "Edit(~/.claude/skills/autopilot/SKILL.md)",
+      "Bash(mkdir:*)",
+      "Bash(oc:*)",
+      "Bash(git:*)",
+      "Bash(venv/bin/python *)"
+    ]
   }
 }

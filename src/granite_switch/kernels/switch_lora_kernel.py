@@ -43,6 +43,15 @@ get_switch_lora_expand_config()
 Supported rank tiers: 16, 32, 64, 128, 256, 512. Tiers absent from a
 deployment compile to dead code (``tl.static_range(0)`` emits no instructions).
 
+Shared A
+--------
+When every adapter of a module uses the same lora_A (or a rank prefix of one
+shared lora_A), w_ext holds that A once and the shrink width no longer grows
+with the adapter count. The expand and SwiGLU kernels take ``SHARED_A``: every
+adapter then reads the same shrink columns (``slice_col_r`` is equal across
+tiers), and a tier's shrink tile is loaded once per tile, not once per adapter.
+An adapter of rank r reads the first r columns of the shared block.
+
 Adapter index convention
 ------------------------
 The ``adapter_indices`` this kernel reads are **per-module, kernel-local**
@@ -164,13 +173,182 @@ def build_w_ext(
 
 
 # ---------------------------------------------------------------------------
+# Per-tier delta accumulation (shared by all three kernels)
+# ---------------------------------------------------------------------------
+
+
+@triton.jit
+def _tier_delta(
+    delta,
+    XExt,
+    stride_xe_m,
+    stride_xe_n,
+    LBPACK,
+    lb_off,
+    m_range,
+    mask_m,
+    adap_ids,
+    n_range,
+    mask_n,
+    bitmask,
+    col,
+    N,
+    R: tl.constexpr,
+    NA_R: tl.constexpr,
+    ID_OFF: tl.constexpr,
+    S: tl.constexpr,
+    SHARED_A: tl.constexpr,
+):
+    """Accumulate one rank tier's LoRA delta into ``delta`` [BLOCK_M, BLOCK_N].
+
+    Tier-local adapter ``a`` has kernel-local id ``ID_OFF + a + 1`` (also its
+    bit in ``bitmask``). Its lora_B block sits at ``lb_off + a * N * R`` in the
+    packed buffer. Its shrink columns start at ``col + a * S * R`` — or at
+    ``col`` for every adapter when ``SHARED_A`` (one shrink block serves them
+    all, so it is loaded once per tile instead of once per adapter).
+    """
+    rr = tl.arange(0, R)
+    if SHARED_A:
+        if NA_R > 0:
+            # Any of this tier's bits set? The left shift drops higher tiers' bits.
+            if ((bitmask >> ID_OFF) << (64 - NA_R)) != 0:
+                z = tl.load(
+                    XExt
+                    + m_range[:, None] * stride_xe_m
+                    + (col + rr[None, :]) * stride_xe_n,
+                    mask=mask_m[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                for a in tl.static_range(NA_R):
+                    if (bitmask >> (ID_OFF + a)) & 1:
+                        mask_a = adap_ids == (ID_OFF + a + 1)
+                        shrink = tl.where(mask_a[:, None], z, 0.0)
+                        lb = tl.load(
+                            LBPACK
+                            + lb_off
+                            + a * (N * R)
+                            + rr[:, None]
+                            + n_range[None, :] * R,
+                            mask=mask_n[None, :],
+                            other=0.0,
+                        ).to(tl.float32)
+                        delta += tl.dot(shrink, lb)
+    else:
+        for a in tl.static_range(NA_R):
+            if (bitmask >> (ID_OFF + a)) & 1:  # adapter present in this tile?
+                mask_a = (adap_ids == (ID_OFF + a + 1)) & mask_m  # rows selecting it
+                shrink = tl.load(
+                    XExt
+                    + m_range[:, None] * stride_xe_m
+                    + (col + a * S * R + rr[None, :]) * stride_xe_n,
+                    mask=mask_a[:, None],
+                    other=0.0,
+                ).to(tl.float32)
+                # lora_B tile [R, BLOCK_N]: rank contiguous, each out-col steps by R.
+                lb = tl.load(
+                    LBPACK + lb_off + a * (N * R) + rr[:, None] + n_range[None, :] * R,
+                    mask=mask_n[None, :],
+                    other=0.0,
+                ).to(tl.float32)
+                delta += tl.dot(shrink, lb)
+    return delta
+
+
+@triton.jit
+def _accum_slice_delta(
+    XExt,
+    stride_xe_m,
+    stride_xe_n,
+    LBPACK,
+    m_range,
+    mask_m,
+    adap_ids,
+    n_range,
+    mask_n,
+    bitmask,
+    col_16,
+    col_32,
+    col_64,
+    col_128,
+    col_256,
+    col_512,
+    N,
+    NA_16: tl.constexpr,
+    NA_32: tl.constexpr,
+    NA_64: tl.constexpr,
+    NA_128: tl.constexpr,
+    NA_256: tl.constexpr,
+    NA_512: tl.constexpr,
+    S: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    SHARED_A: tl.constexpr,
+):
+    """LoRA delta [BLOCK_M, BLOCK_N] for ONE output slice, over all six tiers.
+
+    ``col_<r>`` is the slice's first shrink column for tier r. Kernel-local ids
+    are numbered 1.. across tiers in ascending-rank order, and the packed lora_B
+    concatenates tiers in the same order, so both offsets are cumulative sums of
+    the lower tiers. Absent tiers (NA_r == 0) compile to nothing.
+    """
+    delta = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+
+    id_off_32 = NA_16
+    id_off_64 = id_off_32 + NA_32
+    id_off_128 = id_off_64 + NA_64
+    id_off_256 = id_off_128 + NA_128
+    id_off_512 = id_off_256 + NA_256
+
+    lb_off_32 = NA_16 * N * 16
+    lb_off_64 = lb_off_32 + NA_32 * N * 32
+    lb_off_128 = lb_off_64 + NA_64 * N * 64
+    lb_off_256 = lb_off_128 + NA_128 * N * 128
+    lb_off_512 = lb_off_256 + NA_256 * N * 256
+
+    # fmt: off
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, 0, m_range, mask_m,
+                        adap_ids, n_range, mask_n, bitmask, col_16, N,
+                        16, NA_16, 0, S, SHARED_A)
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, lb_off_32, m_range,
+                        mask_m, adap_ids, n_range, mask_n, bitmask, col_32, N,
+                        32, NA_32, id_off_32, S, SHARED_A)
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, lb_off_64, m_range,
+                        mask_m, adap_ids, n_range, mask_n, bitmask, col_64, N,
+                        64, NA_64, id_off_64, S, SHARED_A)
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, lb_off_128, m_range,
+                        mask_m, adap_ids, n_range, mask_n, bitmask, col_128, N,
+                        128, NA_128, id_off_128, S, SHARED_A)
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, lb_off_256, m_range,
+                        mask_m, adap_ids, n_range, mask_n, bitmask, col_256, N,
+                        256, NA_256, id_off_256, S, SHARED_A)
+    delta = _tier_delta(delta, XExt, stride_xe_m, stride_xe_n, LBPACK, lb_off_512, m_range,
+                        mask_m, adap_ids, n_range, mask_n, bitmask, col_512, N,
+                        512, NA_512, id_off_512, S, SHARED_A)
+    # fmt: on
+    return delta
+
+
+@triton.jit
+def _load_slice_cols(SliceColR, s_idx):
+    base = SliceColR + s_idx * 6
+    return (
+        tl.load(base + 0).to(tl.int32),
+        tl.load(base + 1).to(tl.int32),
+        tl.load(base + 2).to(tl.int32),
+        tl.load(base + 3).to(tl.int32),
+        tl.load(base + 4).to(tl.int32),
+        tl.load(base + 5).to(tl.int32),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Expand kernel
 # ---------------------------------------------------------------------------
 
 
 @triton.jit
 def _switch_lora_expand_kernel(
-    # x_ext  [M, N_total + sum_r(n_r * S * r)] — base output is cols [0, N).
+    # x_ext  [M, N_total + shrink cols] — base output is cols [0, N).
     # Single buffer: shrink cols (>= N) are read; base cols [0, N) are
     # accumulated into IN PLACE. Folding the output into x_ext (disjoint cols,
     # hazard-free) keeps the inductor graph glue-free (no clone + slice_scatter)
@@ -186,8 +364,7 @@ def _switch_lora_expand_kernel(
     Bitmask,
     stride_bm_t,
     # SINGLE packed lora_B: contiguous concat over present tiers of
-    # [NA_r, N_total, r] (row-major). Tier r block has strides (N*r, r, 1); its
-    # base element offset is cumsum_{r'<r}(NA_r' * N * r'), computed inline below.
+    # [NA_r, N_total, r] (row-major).
     LBPACK,
     M,
     N,
@@ -203,6 +380,7 @@ def _switch_lora_expand_kernel(
     S: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    SHARED_A: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
 
@@ -215,8 +393,7 @@ def _switch_lora_expand_kernel(
     # length; if a future change broke the per-token contract (M_fwd > M_prepare),
     # these would read out of bounds.
 
-    # One bit per adapter for this row-tile; bit a set iff adapter (a+1) is
-    # present somewhere in the tile. All-zero tile touches no adapter -> skip.
+    # All-zero tile touches no adapter -> skip.
     bitmask = tl.load(Bitmask + pid_m * stride_bm_t).to(tl.int64)
     if bitmask == 0:
         return
@@ -228,179 +405,19 @@ def _switch_lora_expand_kernel(
     mask_n = n_range < N
 
     # This output tile lives in exactly one slice (block_n divides every slice).
-    # SliceColR[s] gives, per tier, the first shrink column of that slice's
-    # adapters in x_ext — the per-adapter shrink block starts at col_<r> + a*S*r.
     s_idx = tl.load(TileSlice + pid_n).to(tl.int32)
-    col_16 = tl.load(SliceColR + s_idx * 6 + 0).to(tl.int32)
-    col_32 = tl.load(SliceColR + s_idx * 6 + 1).to(tl.int32)
-    col_64 = tl.load(SliceColR + s_idx * 6 + 2).to(tl.int32)
-    col_128 = tl.load(SliceColR + s_idx * 6 + 3).to(tl.int32)
-    col_256 = tl.load(SliceColR + s_idx * 6 + 4).to(tl.int32)
-    col_512 = tl.load(SliceColR + s_idx * 6 + 5).to(tl.int32)
+    c16, c32, c64, c128, c256, c512 = _load_slice_cols(SliceColR, s_idx)
 
     adap_ids = tl.load(AdapIdx + m_range, mask=mask_m, other=0).to(tl.int32)
-    delta = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     row_active = adap_ids != 0
 
-    # Kernel-local ids are numbered 1.. across tiers in ascending-rank order, so
-    # each tier's ids start after all lower tiers. These offsets convert a
-    # tier-local index a to the kernel-local id (and its bit in this module's
-    # bitmask).
-    id_off_32 = NA_16
-    id_off_64 = NA_16 + NA_32
-    id_off_128 = NA_16 + NA_32 + NA_64
-    id_off_256 = NA_16 + NA_32 + NA_64 + NA_128
-    id_off_512 = NA_16 + NA_32 + NA_64 + NA_128 + NA_256
-
-    # Element offset of each tier's block inside the single packed lora_B buffer
-    # (tiers concatenated in rank order): cumsum(NA_r * N * r).
-    lb_off_16 = 0
-    lb_off_32 = NA_16 * N * 16
-    lb_off_64 = lb_off_32 + NA_32 * N * 32
-    lb_off_128 = lb_off_64 + NA_64 * N * 64
-    lb_off_256 = lb_off_128 + NA_128 * N * 128
-    lb_off_512 = lb_off_256 + NA_256 * N * 256
-
-    # Per tier, loop over that tier's adapters; the bit test skips adapters not
-    # present in this tile. For each active adapter: load its r shrink values
-    # from x_ext, load its lora_B block, and accumulate shrink @ lora_B into the
-    # output delta. The static_range unrolls at compile time, so absent tiers
-    # (NA_r == 0) emit no code. Only the tier-16 loop is annotated; tiers 32..512
-    # are the identical pattern with r and the tier offsets substituted.
-    r16 = tl.arange(0, 16)
-    for a in tl.static_range(NA_16):
-        if (bitmask >> a) & 1:  # adapter (a+1) in this tile?
-            mask_a = (adap_ids == (a + 1)) & mask_m  # rows that select it
-            # shrink: this adapter's r shrink columns for the tile's rows.
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_16 + a * S * 16 + r16[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            # lb: this adapter's lora_B tile [r, BLOCK_N] (rank x out-col);
-            # rank is contiguous, each out-col steps by r (layout above).
-            lb = tl.load(
-                LBPACK
-                + lb_off_16
-                + a * (N * 16)
-                + r16[:, None]
-                + n_range[None, :] * 16,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r32 = tl.arange(0, 32)
-    for a in tl.static_range(NA_32):
-        if (bitmask >> (id_off_32 + a)) & 1:
-            mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_32 + a * S * 32 + r32[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_32
-                + a * (N * 32)
-                + r32[:, None]
-                + n_range[None, :] * 32,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r64 = tl.arange(0, 64)
-    for a in tl.static_range(NA_64):
-        if (bitmask >> (id_off_64 + a)) & 1:
-            mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_64 + a * S * 64 + r64[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_64
-                + a * (N * 64)
-                + r64[:, None]
-                + n_range[None, :] * 64,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r128 = tl.arange(0, 128)
-    for a in tl.static_range(NA_128):
-        if (bitmask >> (id_off_128 + a)) & 1:
-            mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_128 + a * S * 128 + r128[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_128
-                + a * (N * 128)
-                + r128[:, None]
-                + n_range[None, :] * 128,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r256 = tl.arange(0, 256)
-    for a in tl.static_range(NA_256):
-        if (bitmask >> (id_off_256 + a)) & 1:
-            mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_256 + a * S * 256 + r256[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_256
-                + a * (N * 256)
-                + r256[:, None]
-                + n_range[None, :] * 256,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r512 = tl.arange(0, 512)
-    for a in tl.static_range(NA_512):
-        if (bitmask >> (id_off_512 + a)) & 1:
-            mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_512 + a * S * 512 + r512[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_512
-                + a * (N * 512)
-                + r512[:, None]
-                + n_range[None, :] * 512,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
+    # fmt: off
+    delta = _accum_slice_delta(XExt, stride_xe_m, stride_xe_n, LBPACK, m_range, mask_m,
+                               adap_ids, n_range, mask_n, bitmask,
+                               c16, c32, c64, c128, c256, c512, N,
+                               NA_16, NA_32, NA_64, NA_128, NA_256, NA_512,
+                               S, BLOCK_M, BLOCK_N, SHARED_A)
+    # fmt: on
 
     # Fold the delta back into the base columns [0, N) of x_ext in place. Only
     # adapter rows are written (row_active); base-only rows already hold the
@@ -422,12 +439,14 @@ def switch_lora_expand(
     S: int,
     block_n: int,
     N: int,
+    shared_a: bool = False,
 ) -> None:
     """Accumulate the LoRA expand delta in place into ``x_ext[:, :N]``.
 
     Pure-Triton launcher with no torch.library/vLLM dependency, so other
     backends can call it directly. ``na`` is the 6-tuple of per-tier adapter
-    counts (n_16, n_32, n_64, n_128, n_256, n_512).
+    counts (n_16, n_32, n_64, n_128, n_256, n_512). ``shared_a`` means every
+    adapter reads the same shrink block (see ``_tier_delta``).
     """
     M = x_ext.shape[0]
     cfg = get_switch_lora_expand_config()
@@ -453,6 +472,7 @@ def switch_lora_expand(
         S=S,
         BLOCK_M=cfg["block_m"],
         BLOCK_N=block_n,
+        SHARED_A=shared_a,
         num_warps=cfg["num_warps"],
         num_stages=cfg["num_stages"],
     )
@@ -473,196 +493,6 @@ def switch_lora_expand(
 # non-issue; nothing downstream ever sees it. The bitmask gates only the LoRA
 # delta work — the silu(gate)*up store ALWAYS runs (base-only tiles still need
 # their activation written).
-
-
-@triton.jit
-def _accum_slice_delta(
-    XExt,
-    stride_xe_m,
-    stride_xe_n,
-    LBPACK,
-    m_range,
-    mask_m,
-    adap_ids,
-    n_range,
-    mask_n,
-    bitmask,
-    col_16,
-    col_32,
-    col_64,
-    col_128,
-    col_256,
-    col_512,
-    NA_16: tl.constexpr,
-    NA_32: tl.constexpr,
-    NA_64: tl.constexpr,
-    NA_128: tl.constexpr,
-    NA_256: tl.constexpr,
-    NA_512: tl.constexpr,
-    S: tl.constexpr,
-    N: tl.constexpr,
-    BLOCK_M: tl.constexpr,
-    BLOCK_N: tl.constexpr,
-):
-    """LoRA delta [BLOCK_M, BLOCK_N] for ONE output slice.
-
-    Same tier structure as the in-place expand kernel, parameterized by the
-    slice's shrink-column bases (col_*) and the output-column range (n_range),
-    so it is called once for the gate slice and once for the up slice. Caller
-    guarantees bitmask != 0.
-    """
-    delta = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
-
-    # Tier-local index -> kernel-local id / bit position (see expand kernel).
-    id_off_32 = NA_16
-    id_off_64 = NA_16 + NA_32
-    id_off_128 = NA_16 + NA_32 + NA_64
-    id_off_256 = NA_16 + NA_32 + NA_64 + NA_128
-    id_off_512 = NA_16 + NA_32 + NA_64 + NA_128 + NA_256
-
-    # Element offset of each tier's block in the packed lora_B buffer.
-    lb_off_16 = 0
-    lb_off_32 = NA_16 * N * 16
-    lb_off_64 = lb_off_32 + NA_32 * N * 32
-    lb_off_128 = lb_off_64 + NA_64 * N * 64
-    lb_off_256 = lb_off_128 + NA_128 * N * 128
-    lb_off_512 = lb_off_256 + NA_256 * N * 256
-
-    # Same per-tier accumulation as the in-place expand kernel; see there for the
-    # annotated tier-16 loop. Tiers 32..512 repeat the pattern.
-    r16 = tl.arange(0, 16)
-    for a in tl.static_range(NA_16):
-        if (bitmask >> a) & 1:
-            mask_a = (adap_ids == (a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_16 + a * S * 16 + r16[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_16
-                + a * (N * 16)
-                + r16[:, None]
-                + n_range[None, :] * 16,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r32 = tl.arange(0, 32)
-    for a in tl.static_range(NA_32):
-        if (bitmask >> (id_off_32 + a)) & 1:
-            mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_32 + a * S * 32 + r32[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_32
-                + a * (N * 32)
-                + r32[:, None]
-                + n_range[None, :] * 32,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r64 = tl.arange(0, 64)
-    for a in tl.static_range(NA_64):
-        if (bitmask >> (id_off_64 + a)) & 1:
-            mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_64 + a * S * 64 + r64[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_64
-                + a * (N * 64)
-                + r64[:, None]
-                + n_range[None, :] * 64,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r128 = tl.arange(0, 128)
-    for a in tl.static_range(NA_128):
-        if (bitmask >> (id_off_128 + a)) & 1:
-            mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_128 + a * S * 128 + r128[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_128
-                + a * (N * 128)
-                + r128[:, None]
-                + n_range[None, :] * 128,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r256 = tl.arange(0, 256)
-    for a in tl.static_range(NA_256):
-        if (bitmask >> (id_off_256 + a)) & 1:
-            mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_256 + a * S * 256 + r256[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_256
-                + a * (N * 256)
-                + r256[:, None]
-                + n_range[None, :] * 256,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r512 = tl.arange(0, 512)
-    for a in tl.static_range(NA_512):
-        if (bitmask >> (id_off_512 + a)) & 1:
-            mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_512 + a * S * 512 + r512[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_512
-                + a * (N * 512)
-                + r512[:, None]
-                + n_range[None, :] * 512,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    return delta
 
 
 @triton.jit
@@ -693,6 +523,7 @@ def _switch_lora_expand_swiglu_kernel(
     S: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    SHARED_A: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     pid_h = tl.program_id(1)
@@ -727,74 +558,20 @@ def _switch_lora_expand_swiglu_kernel(
     if bitmask != 0:
         adap_ids = tl.load(AdapIdx + m_range, mask=mask_m, other=0).to(tl.int32)
         # Per-tier shrink-column bases for each slice: row 0 = gate, row 1 = up.
-        g0 = tl.load(SliceColR + 0 * 6 + 0).to(tl.int32)
-        g1 = tl.load(SliceColR + 0 * 6 + 1).to(tl.int32)
-        g2 = tl.load(SliceColR + 0 * 6 + 2).to(tl.int32)
-        g3 = tl.load(SliceColR + 0 * 6 + 3).to(tl.int32)
-        g4 = tl.load(SliceColR + 0 * 6 + 4).to(tl.int32)
-        g5 = tl.load(SliceColR + 0 * 6 + 5).to(tl.int32)
-        u0 = tl.load(SliceColR + 1 * 6 + 0).to(tl.int32)
-        u1 = tl.load(SliceColR + 1 * 6 + 1).to(tl.int32)
-        u2 = tl.load(SliceColR + 1 * 6 + 2).to(tl.int32)
-        u3 = tl.load(SliceColR + 1 * 6 + 3).to(tl.int32)
-        u4 = tl.load(SliceColR + 1 * 6 + 4).to(tl.int32)
-        u5 = tl.load(SliceColR + 1 * 6 + 5).to(tl.int32)
-        gate += _accum_slice_delta(
-            XExt,
-            stride_xe_m,
-            stride_xe_n,
-            LBPACK,
-            m_range,
-            mask_m,
-            adap_ids,
-            gate_n,
-            mask_h,
-            bitmask,
-            g0,
-            g1,
-            g2,
-            g3,
-            g4,
-            g5,
-            NA_16,
-            NA_32,
-            NA_64,
-            NA_128,
-            NA_256,
-            NA_512,
-            S,
-            N,
-            BLOCK_M,
-            BLOCK_N,
-        )
-        up += _accum_slice_delta(
-            XExt,
-            stride_xe_m,
-            stride_xe_n,
-            LBPACK,
-            m_range,
-            mask_m,
-            adap_ids,
-            up_n,
-            mask_h,
-            bitmask,
-            u0,
-            u1,
-            u2,
-            u3,
-            u4,
-            u5,
-            NA_16,
-            NA_32,
-            NA_64,
-            NA_128,
-            NA_256,
-            NA_512,
-            S,
-            N,
-            BLOCK_M,
-            BLOCK_N,
-        )
+        g0, g1, g2, g3, g4, g5 = _load_slice_cols(SliceColR, 0)
+        u0, u1, u2, u3, u4, u5 = _load_slice_cols(SliceColR, 1)
+        # fmt: off
+        gate += _accum_slice_delta(XExt, stride_xe_m, stride_xe_n, LBPACK, m_range, mask_m,
+                                   adap_ids, gate_n, mask_h, bitmask,
+                                   g0, g1, g2, g3, g4, g5, N,
+                                   NA_16, NA_32, NA_64, NA_128, NA_256, NA_512,
+                                   S, BLOCK_M, BLOCK_N, SHARED_A)
+        up += _accum_slice_delta(XExt, stride_xe_m, stride_xe_n, LBPACK, m_range, mask_m,
+                                 adap_ids, up_n, mask_h, bitmask,
+                                 u0, u1, u2, u3, u4, u5, N,
+                                 NA_16, NA_32, NA_64, NA_128, NA_256, NA_512,
+                                 S, BLOCK_M, BLOCK_N, SHARED_A)
+        # fmt: on
 
     # SwiGLU epilogue: silu(gate) * up, written as a contiguous [M, H] tile so
     # nothing downstream sees x_ext's strided base columns.
@@ -818,6 +595,7 @@ def switch_lora_expand_swiglu(
     block_n: int,
     H: int,
     N: int,
+    shared_a: bool = False,
 ) -> None:
     """Fused gate/up LoRA expand + SwiGLU for the shared-MLP first projection.
 
@@ -852,6 +630,7 @@ def switch_lora_expand_swiglu(
         S=S,
         BLOCK_M=cfg["block_m"],
         BLOCK_N=block_n,
+        SHARED_A=shared_a,
         num_warps=cfg["num_warps"],
         num_stages=cfg["num_stages"],
     )
@@ -875,9 +654,6 @@ def switch_lora_expand_swiglu(
 #     loads are masked to zero), and the launcher pre-zeros ``out``, so a base
 #     token — and any tile the bitmask skips entirely — reads back exactly zero.
 #     This keeps the cross-stream injection off the base stream: the SR invariant.
-#
-# Structurally identical to _switch_lora_expand_kernel except for the extra
-# ``Out`` pointer and the store epilogue; the tier loops are copied verbatim.
 
 
 @triton.jit
@@ -923,164 +699,20 @@ def _switch_lora_shrink_expand_kernel(
     mask_m = m_range < M
     mask_n = n_range < N
 
-    # This output tile lives in exactly one slice (block_n divides every slice).
     # For the shunt (S == 1) there is a single slice; SliceColR bases start at 0
     # because w_ext_cross has no base region.
     s_idx = tl.load(TileSlice + pid_n).to(tl.int32)
-    col_16 = tl.load(SliceColR + s_idx * 6 + 0).to(tl.int32)
-    col_32 = tl.load(SliceColR + s_idx * 6 + 1).to(tl.int32)
-    col_64 = tl.load(SliceColR + s_idx * 6 + 2).to(tl.int32)
-    col_128 = tl.load(SliceColR + s_idx * 6 + 3).to(tl.int32)
-    col_256 = tl.load(SliceColR + s_idx * 6 + 4).to(tl.int32)
-    col_512 = tl.load(SliceColR + s_idx * 6 + 5).to(tl.int32)
+    c16, c32, c64, c128, c256, c512 = _load_slice_cols(SliceColR, s_idx)
 
     adap_ids = tl.load(AdapIdx + m_range, mask=mask_m, other=0).to(tl.int32)
-    delta = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    id_off_32 = NA_16
-    id_off_64 = NA_16 + NA_32
-    id_off_128 = NA_16 + NA_32 + NA_64
-    id_off_256 = NA_16 + NA_32 + NA_64 + NA_128
-    id_off_512 = NA_16 + NA_32 + NA_64 + NA_128 + NA_256
-
-    lb_off_16 = 0
-    lb_off_32 = NA_16 * N * 16
-    lb_off_64 = lb_off_32 + NA_32 * N * 32
-    lb_off_128 = lb_off_64 + NA_64 * N * 64
-    lb_off_256 = lb_off_128 + NA_128 * N * 128
-    lb_off_512 = lb_off_256 + NA_256 * N * 256
-
-    r16 = tl.arange(0, 16)
-    for a in tl.static_range(NA_16):
-        if (bitmask >> a) & 1:  # adapter (a+1) in this tile?
-            mask_a = (adap_ids == (a + 1)) & mask_m  # rows that select it
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_16 + a * S * 16 + r16[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_16
-                + a * (N * 16)
-                + r16[:, None]
-                + n_range[None, :] * 16,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r32 = tl.arange(0, 32)
-    for a in tl.static_range(NA_32):
-        if (bitmask >> (id_off_32 + a)) & 1:
-            mask_a = (adap_ids == (id_off_32 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_32 + a * S * 32 + r32[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_32
-                + a * (N * 32)
-                + r32[:, None]
-                + n_range[None, :] * 32,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r64 = tl.arange(0, 64)
-    for a in tl.static_range(NA_64):
-        if (bitmask >> (id_off_64 + a)) & 1:
-            mask_a = (adap_ids == (id_off_64 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_64 + a * S * 64 + r64[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_64
-                + a * (N * 64)
-                + r64[:, None]
-                + n_range[None, :] * 64,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r128 = tl.arange(0, 128)
-    for a in tl.static_range(NA_128):
-        if (bitmask >> (id_off_128 + a)) & 1:
-            mask_a = (adap_ids == (id_off_128 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_128 + a * S * 128 + r128[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_128
-                + a * (N * 128)
-                + r128[:, None]
-                + n_range[None, :] * 128,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r256 = tl.arange(0, 256)
-    for a in tl.static_range(NA_256):
-        if (bitmask >> (id_off_256 + a)) & 1:
-            mask_a = (adap_ids == (id_off_256 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_256 + a * S * 256 + r256[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_256
-                + a * (N * 256)
-                + r256[:, None]
-                + n_range[None, :] * 256,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
-
-    r512 = tl.arange(0, 512)
-    for a in tl.static_range(NA_512):
-        if (bitmask >> (id_off_512 + a)) & 1:
-            mask_a = (adap_ids == (id_off_512 + a + 1)) & mask_m
-            shrink = tl.load(
-                XExt
-                + m_range[:, None] * stride_xe_m
-                + (col_512 + a * S * 512 + r512[None, :]) * stride_xe_n,
-                mask=mask_a[:, None],
-                other=0.0,
-            ).to(tl.float32)
-            lb = tl.load(
-                LBPACK
-                + lb_off_512
-                + a * (N * 512)
-                + r512[:, None]
-                + n_range[None, :] * 512,
-                mask=mask_n[None, :],
-                other=0.0,
-            ).to(tl.float32)
-            delta += tl.dot(shrink, lb)
+    # fmt: off
+    delta = _accum_slice_delta(XExt, stride_xe_m, stride_xe_n, LBPACK, m_range, mask_m,
+                               adap_ids, n_range, mask_n, bitmask,
+                               c16, c32, c64, c128, c256, c512, N,
+                               NA_16, NA_32, NA_64, NA_128, NA_256, NA_512,
+                               S, BLOCK_M, BLOCK_N, False)
+    # fmt: on
 
     # Shrink-only: plain STORE of the delta into the fresh ``out`` buffer (no base
     # region to read-modify-write). Base rows have delta == 0 and ``out`` is

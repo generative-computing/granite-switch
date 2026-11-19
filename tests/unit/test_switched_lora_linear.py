@@ -1253,3 +1253,169 @@ class TestFusedSwiGLU:
         ref = _silu_mul(gateup, H)
         assert out.is_contiguous()
         torch.testing.assert_close(out.float(), ref, atol=0.02, rtol=0.02)
+
+
+# ════════════════════════════════════════════════════════════════════════
+# 6. Shared lora_A
+#
+# When every adapter's lora_A is the leading rows of one shared A, finalize
+# stores it once and the kernels read one shrink block for all adapters.
+# ════════════════════════════════════════════════════════════════════════
+
+SHARED_RANK_CONFIGS = [
+    ([16, 16, 16, 16], "uniform_16"),
+    ([16, 32, 32], "nested_16_32"),
+    ([8, 16, 64], "nested_8_16_64"),
+]
+
+
+def _fill_shared_lora_weights(layer, adapter_ranks, scale=0.1):
+    """Random lora_B per adapter; lora_A = the first r rows of one shared A."""
+    R = max(adapter_ranks)
+    K = layer.in_features
+    dev, dt = layer._device, layer._dtype
+    S = layer.num_slices
+    with torch.no_grad():
+        for s in range(S):
+            A_shared = torch.randn(R, K, dtype=dt, device=dev) * scale
+            A = layer.lora_A if S == 1 else layer.lora_A_slices[s]
+            B = layer.lora_B if S == 1 else layer.lora_B_slices[s]
+            N_s = layer.out_features if S == 1 else layer.output_slices[s]
+            for i, r in enumerate(adapter_ranks):
+                A.data[i, 0, :r, :] = A_shared[:r]
+                B.data[i, 0, :, :r] = torch.randn(N_s, r, dtype=dt, device=dev) * scale
+
+
+def _block_indices(M, NA, device):
+    adapter_indices = torch.zeros(M, dtype=torch.long, device=device)
+    block = M // (NA + 1)
+    for i in range(NA):
+        adapter_indices[(i + 1) * block : (i + 2) * block] = i + 1
+    return adapter_indices
+
+
+class TestSharedLoRAA:
+    def test_detected_and_stored_once(self):
+        device = torch.device("cuda")
+        K, output_slices = 2560, (2560, 512, 512)
+        adapter_ranks = [16, 32, 32]
+        layer = _make_multi_slice_layer(K, output_slices, 3, 32, device)
+        _fill_shared_lora_weights(layer, adapter_ranks)
+        layer.finalize_weights(adapter_ranks)
+
+        assert layer._shared_a
+        assert layer.w_ext.shape == (sum(output_slices) + 3 * 32, K)
+        N_total = sum(output_slices)
+        expected = [[N_total + s * 32] * 6 for s in range(3)]
+        assert layer.slice_col_r.tolist() == expected
+
+    def test_independent_A_not_shared(self):
+        device = torch.device("cuda")
+        layer = _make_single_slice_layer(2560, 2560, 2, 16, device)
+        _fill_lora_weights(layer, [16, 16])
+        layer.finalize_weights([16, 16])
+        assert not layer._shared_a
+        assert layer.w_ext.shape == (2560 + 32, 2560)
+
+    def test_single_adapter_keeps_unshared_layout(self):
+        device = torch.device("cuda")
+        layer = _make_single_slice_layer(2560, 2560, 1, 16, device)
+        _fill_shared_lora_weights(layer, [16])
+        layer.finalize_weights([16])
+        assert not layer._shared_a
+
+    def test_nonzero_padding_column_blocks_sharing(self):
+        """A rank-8 adapter promoted to 16 reads 8 extra shared shrink columns;
+        that is only exact if its lora_B columns 8..15 are zero."""
+        device = torch.device("cuda")
+        layer = _make_single_slice_layer(2560, 2560, 2, 16, device)
+        _fill_shared_lora_weights(layer, [8, 16])
+        with torch.no_grad():
+            layer.lora_B.data[0, 0, :, 8:16] = 0.1
+        layer.finalize_weights([8, 16])
+        assert not layer._shared_a
+
+    @pytest.mark.parametrize("K,N,label", FORWARD_SINGLE_GEOMETRIES)
+    @pytest.mark.parametrize("adapter_ranks,rank_label", SHARED_RANK_CONFIGS)
+    def test_single_slice_matches_reference(
+        self, K, N, label, adapter_ranks, rank_label
+    ):
+        device = torch.device("cuda")
+        NA = len(adapter_ranks)
+        M = 96
+        layer = _make_single_slice_layer(K, N, NA, max(adapter_ranks), device)
+        _fill_shared_lora_weights(layer, adapter_ranks)
+        torch.manual_seed(5)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=device) * 0.01
+        adapter_indices = _block_indices(M, NA, device)
+        ref = _reference_forward(layer, x, adapter_indices, adapter_ranks)
+
+        layer.finalize_weights(adapter_ranks)
+        assert layer._shared_a
+        _wire_single_module_ctx(layer, adapter_indices)
+        out, _ = layer.forward(x)
+        torch.testing.assert_close(out, ref, atol=0.25, rtol=0.05)
+
+    @pytest.mark.parametrize("K,output_slices,label", FORWARD_MULTI_GEOMETRIES)
+    @pytest.mark.parametrize("adapter_ranks,rank_label", SHARED_RANK_CONFIGS)
+    def test_multi_slice_matches_reference(
+        self, K, output_slices, label, adapter_ranks, rank_label
+    ):
+        device = torch.device("cuda")
+        NA = len(adapter_ranks)
+        M = 96
+        layer = _make_multi_slice_layer(
+            K, output_slices, NA, max(adapter_ranks), device
+        )
+        _fill_shared_lora_weights(layer, adapter_ranks)
+        torch.manual_seed(6)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=device) * 0.01
+        adapter_indices = _block_indices(M, NA, device)
+        ref = _reference_forward(layer, x, adapter_indices, adapter_ranks)
+
+        layer.finalize_weights(adapter_ranks)
+        assert layer._shared_a
+        _wire_single_module_ctx(layer, adapter_indices)
+        out, _ = layer.forward(x)
+        torch.testing.assert_close(out, ref, atol=0.25, rtol=0.05)
+
+    def test_mixed_adapters_in_one_tile(self):
+        """Every token of a 32-row tile picks a different adapter (decode shape)."""
+        device = torch.device("cuda")
+        K, N, NA = 2560, 2560, 8
+        adapter_ranks = [16, 16, 32, 32, 32, 64, 64, 64]
+        M = 32
+        layer = _make_single_slice_layer(K, N, NA, 64, device)
+        _fill_shared_lora_weights(layer, adapter_ranks)
+        torch.manual_seed(7)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=device) * 0.01
+        adapter_indices = (torch.arange(M, device=device) % (NA + 1)).long()
+        ref = _reference_forward(layer, x, adapter_indices, adapter_ranks)
+
+        layer.finalize_weights(adapter_ranks)
+        assert layer._shared_a
+        _wire_single_module_ctx(layer, adapter_indices)
+        out, _ = layer.forward(x)
+        torch.testing.assert_close(out, ref, atol=0.25, rtol=0.05)
+
+    @pytest.mark.parametrize("scenario", ["all_base", "mixed"])
+    def test_swiglu_matches_reference(self, scenario):
+        device = torch.device("cuda")
+        K, H = 256, 256
+        adapter_ranks = [16, 32, 32]
+        NA = len(adapter_ranks)
+        M = 64
+        layer = _make_swiglu_layer(K, H, NA, 32, device)
+        _fill_shared_lora_weights(layer, adapter_ranks)
+        torch.manual_seed(8)
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=device)
+        adapter_indices = torch.zeros(M, dtype=torch.long, device=device)
+        if scenario == "mixed":
+            adapter_indices = _block_indices(M, NA, device)
+        ref = _silu_mul(_reference_forward(layer, x, adapter_indices, adapter_ranks), H)
+
+        layer.finalize_weights(adapter_ranks)
+        assert layer._shared_a
+        _wire_single_module_ctx(layer, adapter_indices)
+        out, _ = layer.forward(x)
+        torch.testing.assert_close(out.float(), ref, atol=0.05, rtol=0.05)

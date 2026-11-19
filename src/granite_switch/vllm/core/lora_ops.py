@@ -43,6 +43,7 @@ def _switch_lora_expand(
     S: int,
     block_n: int,
     N: int,
+    shared_a: bool,
 ) -> None:
     """Accumulate the LoRA expand delta in place into ``x_ext[:, :N]``."""
     _switch_lora_expand_launch(
@@ -56,6 +57,7 @@ def _switch_lora_expand(
         S,
         block_n,
         N,
+        shared_a,
     )
 
 
@@ -75,6 +77,7 @@ def _switch_lora_expand_fake(
     S: int,
     block_n: int,
     N: int,
+    shared_a: bool,
 ) -> None:
     return
 
@@ -96,6 +99,7 @@ def _switch_lora_expand_swiglu(
     block_n: int,
     H: int,
     N: int,
+    shared_a: bool,
 ) -> None:
     """Fused gate/up LoRA expand + SwiGLU; writes silu(gate)*up into ``out``."""
     _switch_lora_expand_swiglu_launch(
@@ -110,6 +114,7 @@ def _switch_lora_expand_swiglu(
         block_n,
         H,
         N,
+        shared_a,
     )
 
 
@@ -130,6 +135,7 @@ def _switch_lora_expand_swiglu_fake(
     block_n: int,
     H: int,
     N: int,
+    shared_a: bool,
 ) -> None:
     return
 

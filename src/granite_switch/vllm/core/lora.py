@@ -37,6 +37,42 @@ from granite_switch.vllm.core.lora_ops import (
 logger = logging.getLogger(__name__)
 
 
+def _shared_lora_a_ref(
+    lora_A_all: list[torch.Tensor],
+    lora_B_all: list[torch.Tensor],
+    applicable: list[int],
+    true_ranks: list[int],
+    eff_ranks: list[int],
+) -> int | None:
+    """Return the adapter whose lora_A every applicable adapter shares, else None.
+
+    Adapter i shares the reference's A if its first ``true_ranks[i]`` rows equal
+    the reference's in every slice, and its lora_B columns between its true and
+    promoted rank are zero (so reading the reference's extra shrink columns adds
+    nothing). The reference is the adapter with the largest promoted rank.
+    One host sync for the whole check.
+    """
+    if len(applicable) < 2:
+        return None
+    ref = max(applicable, key=lambda i: eff_ranks[i])
+    R = eff_ranks[ref]
+    device = lora_A_all[0].device
+    idx = torch.tensor(applicable, device=device)
+    true_r = torch.tensor([true_ranks[i] for i in applicable], device=device)
+    eff_r = torch.tensor([eff_ranks[i] for i in applicable], device=device)
+    cols = torch.arange(R, device=device)[None, :]
+    in_true = cols < true_r[:, None]  # [n, R]
+    in_pad = ~in_true & (cols < eff_r[:, None])  # [n, R]
+    ok = torch.ones((), dtype=torch.bool, device=device)
+    for A, B in zip(lora_A_all, lora_B_all):
+        A = A[:, 0, :R, :]  # [NA, R, K]
+        rows_equal = (A[idx] == A[ref][None]).all(dim=-1)  # [n, R]
+        ok &= (rows_equal | ~in_true).all()
+        pad_nonzero = B[idx, 0, :, :R].ne(0).any(dim=1)  # [n, R]
+        ok &= ~(pad_nonzero & in_pad).any()
+    return ref if ok.item() else None
+
+
 class SwitchedLoRALinear(nn.Module):
     """Fused LoRA linear layer using the switch-LoRA kernel.
 
@@ -106,6 +142,11 @@ class SwitchedLoRALinear(nn.Module):
 
     For token m, adapter a (rank r, per-module tier position pos_a), slice s:
       shrink = x_ext[m, col_r + pos_a*S*r + s*r : col_r + pos_a*S*r + s*r + r]
+
+    Shared A: when every applicable adapter's lora_A equals the leading rows of
+    one reference adapter's (``_shared_lora_a_ref``), w_ext holds that block once
+    (S*R rows, R = the largest rank) and every adapter reads
+      shrink = x_ext[m, N_total + s*R : N_total + s*R + r]
 
     lora_B_merged  per rank tier:  [n_r_local,  N_total,  r]
     -------------------------------------------------------
@@ -387,6 +428,10 @@ class SwitchedLoRALinear(nn.Module):
             ]
             # lora_B is [NA, 1, N, max_rank] — pad the rank dim (last).
             lora_B_all = [torch.nn.functional.pad(b, (0, pad)) for b in lora_B_all]
+        shared_ref = _shared_lora_a_ref(
+            lora_A_all, lora_B_all, applicable_adapters, adapter_ranks, eff_ranks
+        )
+        self._shared_a = shared_ref is not None
         adapter_ranks = eff_ranks
 
         rank_order = sorted(applicable_adapters, key=lambda i: adapter_ranks[i])
@@ -415,6 +460,16 @@ class SwitchedLoRALinear(nn.Module):
                 )
                 A_list.append(slices)
             lora_A_by_rank[rank] = torch.stack(A_list, dim=0)  # [n_r, S, rank, K]
+        if self._shared_a:
+            # One [S, R] shrink block serves every adapter; rank-r adapters read
+            # its first r columns per slice.
+            shared_rank = adapter_ranks[shared_ref]
+            lora_A_by_rank = {
+                shared_rank: torch.stack(
+                    [lora_A_all[s][shared_ref, 0, :shared_rank, :] for s in range(S)],
+                    dim=0,
+                ).unsqueeze(0)
+            }
 
         # Build w_ext = [W_base | tier_r0_a0_s0, a0_s1..., a1_s0, a1_s1... | tier_r1 ...]
         W_base = self.base_layer.weight.data  # [N_total, K]
@@ -473,19 +528,24 @@ class SwitchedLoRALinear(nn.Module):
 
         # Build slice_col_r[S, 6]: for each (slice, tier), the effective base column
         # in x_ext for shrink reads.
-        # slice_col_r[s, t] = N_total + sum_{t'<t}(n_t' * S * r_t') + s * r_t
-        tier_col_bases = []
-        offset = N_total
-        for r in SUPPORTED_RANKS:
-            tier_col_bases.append(offset)
-            n_r = tier_info.get(r, 0)
-            offset += n_r * S * r
-
-        slice_col_r_data = torch.tensor(
-            [
+        # slice_col_r[s, t] = N_total + sum_{t'<t}(n_t' * S * r_t') + s * r_t,
+        # or N_total + s * R for every tier when one shared block serves all.
+        if self._shared_a:
+            slice_cols = [[N_total + s * shared_rank] * 6 for s in range(S)]
+        else:
+            tier_col_bases = []
+            offset = N_total
+            for r in SUPPORTED_RANKS:
+                tier_col_bases.append(offset)
+                n_r = tier_info.get(r, 0)
+                offset += n_r * S * r
+            slice_cols = [
                 [tier_col_bases[t] + s * SUPPORTED_RANKS[t] for t in range(6)]
                 for s in range(S)
-            ],
+            ]
+
+        slice_col_r_data = torch.tensor(
+            slice_cols,
             dtype=torch.int32,
             device=device,
         )  # [S, 6]
@@ -631,6 +691,7 @@ class SwitchedLoRALinear(nn.Module):
             self._block_n,
             H,
             self._N_total,
+            self._shared_a,
         )
         return out, self._output_bias
 
@@ -683,4 +744,5 @@ class SwitchedLoRALinear(nn.Module):
             self._S,
             self._block_n,
             self._N_total,
+            self._shared_a,
         )

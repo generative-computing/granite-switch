@@ -395,9 +395,16 @@ class LoRADecoderInterface(DecoderInterface):
         if not hasattr(config, "adapter_ranks") or config.adapter_ranks is None:
             return
         adapter_ranks = config.adapter_ranks
+        finalized = []
         for module in model.modules():
             if isinstance(module, SwitchedLoRALinear):
                 module.finalize_weights(adapter_ranks)
+                finalized.append(module)
+        logger.info(
+            "SWITCH: %d/%d LoRA modules use a shared lora_A",
+            sum(m._shared_a for m in finalized),
+            len(finalized),
+        )
 
         # Assign sequential indices to all SwitchedLoRALinear modules and register
         # their remap tables so lora_meta can compute exact per-module bitmasks at
