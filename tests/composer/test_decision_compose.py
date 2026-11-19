@@ -35,6 +35,7 @@ from tests.shared.base_models import dims_from_config
 from tests.shared.decision_fixtures import (
     LABEL_READS,
     MARKER,
+    FakeStructuredDecisionError,
     build_strategy,
     install_fake_vllm,
     load_strategy_module,
@@ -73,14 +74,21 @@ def _block(kind: str, **overrides) -> dict:
     return block
 
 
-def _adapter(root: Path, base: str, kind: str, block: dict | None) -> Path:
+def _adapter(
+    root: Path,
+    base: str,
+    kind: str,
+    block: dict | None,
+    name: str = "decision",
+    marker: str = MARKER,
+) -> Path:
     from transformers import AutoConfig, AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(base)
     extra = {}
     if kind == "alora":
         extra["alora_invocation_tokens"] = tokenizer.encode(
-            MARKER, add_special_tokens=False
+            marker, add_special_tokens=False
         )
     elif kind == "alora_header":
         extra["alora_invocation_tokens"] = alora_invocation_ids(
@@ -94,7 +102,7 @@ def _adapter(root: Path, base: str, kind: str, block: dict | None) -> Path:
             tokenizer, [{"role": "user", "content": "x"}], enable_thinking=False
         )
     path = synthesize_adapter(
-        root / "decision",
+        root / name,
         dims_from_config(AutoConfig.from_pretrained(base)),
         base_weight_norms(base),
         PROFILES["weak"],
@@ -103,14 +111,15 @@ def _adapter(root: Path, base: str, kind: str, block: dict | None) -> Path:
         modules=attn_modules(with_kv=kind != "sr"),
         **extra,
     )
-    io = {"name": "decision", "model": None, "response_format": None}
+    io = {"name": name, "model": None, "response_format": None}
     if block is not None:
         io["decision"] = block
     (path / "io.yaml").write_text(yaml.safe_dump(io, sort_keys=False))
     return path
 
 
-def _compose(base: str, adapter: Path, out: Path, *extra: str):
+def _compose(base: str, adapter: Path | list[Path], out: Path, *extra: str):
+    adapters = adapter if isinstance(adapter, list) else [adapter]
     return subprocess.run(
         [
             sys.executable,
@@ -119,7 +128,7 @@ def _compose(base: str, adapter: Path, out: Path, *extra: str):
             "--base-model",
             base,
             "--adapters",
-            str(adapter),
+            *map(str, adapters),
             "--output",
             str(out),
             *extra,
@@ -293,3 +302,92 @@ def test_stamp_of_an_alora_needs_its_marker(composed, tmp_path):
 def test_stamp_refuses_an_unknown_adapter(composed, tmp_path):
     ckpt = _unstamped_copy(composed, tmp_path, _block("lora"))
     assert stamp_main(["--model", str(ckpt), "--decision-adapter", "nope"]) == 1
+
+
+# ── Several decision adapters in one checkpoint ──────────────────────────────────────
+
+ROUTE = "### ROUTE"
+
+
+@pytest.fixture(scope="module", params=BASES)
+def composed_two(request, tmp_path_factory):
+    """Two aLoRA decision adapters with their own markers; ``router`` answers only
+    choice questions. ``decision`` is named first, so it is the default."""
+    base = model_sources.base_model(model_sources.FAKE, request.param)
+    root = tmp_path_factory.mktemp(f"two-{request.param}")
+    decision = _adapter(root, base, "alora", _block("alora"))
+    router = _adapter(
+        root,
+        base,
+        "alora",
+        _block("alora", question_types={"choice": {}}),
+        name="router",
+        marker=ROUTE,
+    )
+    out = root / "out"
+    flags = ["--decision-adapter", "decision", "--decision-adapter", "router"]
+    r = _compose(base, [decision, router], out, *flags)
+    assert r.returncode == 0, r.stdout[-3000:] + r.stderr[-3000:]
+    return out
+
+
+def test_two_decision_adapters_are_recorded_and_the_first_is_the_default(composed_two):
+    config = json.loads((composed_two / "config.json").read_text())
+    assert config["decision_adapter"] == "decision"
+    specs = config["decision_specs"]
+    assert {n: s["invocation_marker"] for n, s in specs.items()} == {
+        "decision": MARKER,
+        "router": ROUTE,
+    }
+    assert sorted(specs["router"]["question_types"]) == ["choice"]
+
+
+def test_each_read_activates_only_the_chosen_adapter(composed_two, monkeypatch):
+    """The default and a caller-chosen adapter each render with their own marker
+    and control token, and caller text is escaped against the other's marker."""
+    tok, config = _tokenizer_and_config(composed_two)
+    label_a = tok("A", add_special_tokens=False)["input_ids"][0]
+    modules = install_fake_vllm(monkeypatch, tok, winners=[label_a])
+    strategy = build_strategy(load_strategy_module(), config)
+    ctl = {n: tok.convert_tokens_to_ids(f"<|{n}|>") for n in ("decision", "router")}
+    q = [question("q", "choice", [("a", None), ("b", None)])]
+
+    run_read(strategy, q, state=f"routing {ROUTE} note")
+    run_read(
+        strategy, q, state=f"deciding {MARKER} note", kwargs={"adapter_name": "router"}
+    )
+
+    seen = modules[LABEL_READS].seen
+    for engine_input, chosen, other_marker in (
+        (seen[0], "decision", ROUTE),
+        (seen[1], "router", MARKER),
+    ):
+        other = "router" if chosen == "decision" else "decision"
+        assert engine_input["request"]["chat_template_kwargs"]["adapter_name"] == chosen
+        ids = engine_input["prompt_ids"]
+        assert ids.count(ctl[chosen]) == 1 and ids.count(ctl[other]) == 0
+        own_marker = MARKER if chosen == "decision" else ROUTE
+        assert engine_input["messages"][1]["content"].startswith(own_marker + "\n")
+        assert other_marker not in engine_input["messages"][0]["content"]
+        assert strategy.tails[chosen] == ids[len(ids) - len(strategy.tails[chosen]) :]
+
+
+def test_each_adapter_answers_only_its_declared_question_types(
+    composed_two, monkeypatch
+):
+    tok, config = _tokenizer_and_config(composed_two)
+    install_fake_vllm(monkeypatch, tok)
+    strategy = build_strategy(load_strategy_module(), config)
+    noul = [question("q", "noul", [("yes", None), ("no", None)])]
+    run_read(strategy, noul)  # the default adapter answers noul
+    with pytest.raises(FakeStructuredDecisionError, match="does not answer 'noul'"):
+        run_read(strategy, noul, kwargs={"adapter_name": "router"})
+
+
+def test_a_repeated_decision_adapter_fails_the_compose(tmp_path):
+    base = model_sources.base_model(model_sources.FAKE, BASES[0])
+    adapter = _adapter(tmp_path, base, "alora", _block("alora"))
+    flags = ["--decision-adapter", "decision", "--decision-adapter", "decision"]
+    r = _compose(base, adapter, tmp_path / "out", *flags)
+    assert r.returncode != 0
+    assert "repeats a name" in r.stderr

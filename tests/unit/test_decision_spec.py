@@ -131,6 +131,30 @@ def test_noul_criteria_text_replaces_the_fallback():
     assert order == [1, 0]
 
 
+def test_noul_without_order_or_fallback_text_shows_the_names_in_vllm_order():
+    """Both keys are optional: the option names, yes first (the documented default)."""
+    spec = _spec(question_types={"noul": {}})
+    messages, order = _render(spec, qtype="noul", options=[("yes", None), ("no", None)])
+    assert "A: yes\nB: no" in messages[1]["content"]
+    assert order == [0, 1]
+
+
+def test_fallback_text_covers_only_the_options_it_names():
+    spec = _spec(
+        question_types={
+            "noul": {"order": ["no", "yes"], "fallback_text": {"no": "No / false"}}
+        }
+    )
+    messages, _ = _render(spec, qtype="noul", options=[("yes", None), ("no", None)])
+    assert "A: No / false\nB: yes" in messages[1]["content"]
+
+
+def test_a_description_wins_over_both_the_fallback_text_and_the_name():
+    spec = _spec(question_types={"choice": {"fallback_text": {"a": "fallback"}}})
+    messages, _ = _render(spec, options=[("a", "described"), ("b", None)])
+    assert "A: described\nB: b" in messages[1]["content"]
+
+
 def test_noul_options_that_do_not_match_the_order_are_a_spec_error():
     with pytest.raises(DecisionSpecError, match="do not match"):
         _render(_spec(), qtype="noul", options=[("true", None), ("false", None)])
