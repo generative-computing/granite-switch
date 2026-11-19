@@ -170,6 +170,15 @@ def test_limits_report_the_label_pool(monkeypatch):
     assert strategy.limits().max_options == 2
 
 
+def test_limits_never_exceed_what_vllm_0_32_accepts(monkeypatch):
+    """vLLM 0.32 rejects more options than its own label set (A..Z), whatever the
+    strategy reports, so a wider label pool must not be advertised."""
+    wide = [*"ABCDEFGHIJKLMNOPQRSTUVWXYZ", "w", "x", "y", "z"]
+    strategy, _, _ = _strategy(monkeypatch, _specs(labels=wide))
+    assert len(strategy.label_pools["decision"]) == 30
+    assert strategy.limits().max_options == 26
+
+
 # ── Reads ────────────────────────────────────────────────────────────────────────────
 
 

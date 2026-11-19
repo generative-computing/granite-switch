@@ -76,6 +76,7 @@ def _build_strategy_class():
     """Build the class lazily: the base classes exist only on vLLM >= 0.32."""
     from vllm.entrypoints.generate.label_reads import next_token_label_reads
     from vllm.entrypoints.generate.structured_decisions.question_types import (
+        LABELS,
         StructuredDecisionError,
         label_softmax,
     )
@@ -135,9 +136,12 @@ def _build_strategy_class():
                 self.label_pools[name] = build_label_pool(tok, spec["labels"])
 
         def limits(self) -> DecisionLimits:
-            # vLLM also caps a question at its own label set (26 for choice on 0.32).
+            # vLLM 0.32's build_question caps a question at min(max_options, its own
+            # label set): A..Z for choice. A wider pool cannot be served, so it is not
+            # advertised (see docs/DECISION_ADAPTERS.md, "Limits").
             widest = max((len(p) for p in self.label_pools.values()), default=0)
-            return DecisionLimits(max_questions=64, max_options=widest or 26)
+            cap = len(LABELS)
+            return DecisionLimits(max_questions=64, max_options=min(widest or cap, cap))
 
         def render_state(self, state: Any) -> str:
             return "" if state in ("", None, {}, []) else text_of(state)

@@ -52,7 +52,7 @@ Quote `"yes"` and `"no"`: YAML reads them unquoted as booleans.
 | `activation` | `marker`, `start` or `generation` (see the comment above). The composer derives it from the adapter and refuses a block that disagrees. |
 | `messages` | The turns of one question, in order. Roles `user`/`assistant`; the last must be `user`. `{options}` exactly once; `{marker}` at most once, in a user turn (required for `marker` activation). Literal braces are `{{` / `}}`. |
 | `option_line` | `{label}` and `{text}`, once each. `{text}` is the option's description, else its `fallback_text`, else its name. |
-| `labels` | `letters` (A..Z), or a list of at least two single-token strings in the order the adapter was trained on. vLLM 0.32 caps a choice at 26 options and a score at 10 levels. |
+| `labels` | `letters` (A..Z), or a list of at least two single-token strings in the order the adapter was trained on. On vLLM 0.32 at most 26 of them are ever used (see section 5). |
 | `question_types.<type>.order` | Optional, `noul` only: the order its `"yes"`/`"no"` options are rendered in. Default: vLLM's order (`yes` first). |
 | `question_types.<type>.fallback_text` | Optional. Text for an option with no description, by option name. An option it does not name, or every option when it is omitted, falls back to its name (a `noul` question then shows `yes` / `no`). Omitting it is never an error, so set it when the adapter was trained on other text, as the 4.1-8b one was (`No / false`, `Yes / true`). |
 
@@ -129,3 +129,38 @@ startup.
 
 `diagnostics.<question>.label_mass` is the probability the model put on the option
 labels; near 1.0 means the adapter is active and the layout matches its training.
+
+## 5. Limits on vLLM 0.32
+
+vLLM checks every question before the strategy reads it. Its `build_question` caps a
+question at `min(max_options, len(label_set))`, where `max_options` comes from the
+strategy's `limits()` (read once at server start) and `label_set` is vLLM's own label
+set for the question type:
+
+| Type | vLLM 0.32 `label_set` | Most options a question can have |
+|---|---|---|
+| `choice` | A..Z | 26 |
+| `score` | digits 0..9 | 10 levels |
+| `noul` | `yes`, `no` | 2 |
+
+A larger question is refused with a 400 ("at most N options for this model"), whatever
+labels the adapter's spec declares. The strategy therefore reports
+`max_options = min(widest label set, 26)`, so it never advertises options vLLM 0.32
+cannot serve. A spec with fewer labels than that is enforced per question when it is
+rendered ("only N labels").
+
+Supporting more than 26 options takes three steps:
+
+1. **Move to vLLM 0.33.** Raise the `vllm` extra and the `dev-latest` group past
+   `<0.33`, and import the strategies from their new 0.33 location
+   (`vllm.entrypoints.openai.decisions`). Return `DecisionLimits(..., labeled=False)`
+   from `limits()`: the strategy labels options itself, and that flag makes vLLM cap a
+   question at `max_options` alone instead of at its own `label_set`.
+2. **Declare a wider label set the adapter was trained on.** Give the `decision:`
+   block an explicit `labels` list (or a new label scheme) with more than 26
+   single-token labels, in the adapter's trained order. Confirm with whoever trained
+   the adapter that it saw those labels; untrained labels give unreliable reads.
+3. **Read wide questions in chunks.** vLLM caps `logprob_token_ids` at 128 token ids
+   per request, so a question with more than 128 options must be read as several
+   requests over the same prompt (sharing the prefix cache) and its label logprobs
+   merged before the softmax.

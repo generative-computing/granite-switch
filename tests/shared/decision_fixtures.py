@@ -130,6 +130,7 @@ def install_fake_vllm(monkeypatch, tok, winners=()):
 
     question_types = types.ModuleType(QUESTION_TYPES)
     question_types.StructuredDecisionError = FakeStructuredDecisionError
+    question_types.LABELS = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")  # as in vLLM 0.32
 
     def label_softmax(logprobs):
         top = max(logprobs)
