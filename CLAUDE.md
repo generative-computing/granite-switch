@@ -427,7 +427,9 @@ exactly only up to `n = 188` (189 aliases). This is a different limit from the c
 `Conversation`, and by fallback rather than refusal: above `MAX_RETAINED_CONTROL_TOKENS = 188` it
 re-prefills the turn, resetting the count to one and losing history's adapter attribution (logged;
 counted in `Conversation.reprefills`). A raw `/v1/completions` request still bypasses this entirely.
-`--kv-cache-dtype fp8` is also unguarded and would saturate `_NEG_INF` and `code(n) * 28`.
+A float16 or fp8 KV cache (`--dtype float16`, `--kv-cache-dtype float16`/`fp8*`) is refused at
+startup by `check_switch_kv_dtype` (`vllm/switch/_kv_dtype.py`): float16 and fp8 e5m2 turn the
+`-1e9` mask into `-inf`, and fp8 e4m3 rounds adapter ids above 16.
 See section 8 of [docs/MULTISWITCH_EXPLAINED.md](docs/MULTISWITCH_EXPLAINED.md).
 
 ### 11. `MultiSwitch`'s Debug Attributes Exist Only Under `enforce_eager`
