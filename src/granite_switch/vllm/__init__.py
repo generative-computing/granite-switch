@@ -4,7 +4,11 @@
 __version__ = "0.1.0"
 
 # Export main classes
-from granite_switch.config import SWITCH_CACHE_LAYERS, GraniteSwitchConfig
+from granite_switch.config import (
+    SWITCH_CACHE_LAYERS,
+    VLLM_ARCHITECTURES,
+    GraniteSwitchConfig,
+)
 
 # Export core components (for advanced use)
 from .core import SwitchedLoRALinear
@@ -116,11 +120,7 @@ def register():
     #   - ShadowResidualForCausalLM : explicit alias for callers that force the arch.
     target = "granite_switch.vllm.granite_switch_model:GraniteSwitchForCausalLM"
     supported = ModelRegistry.get_supported_archs()
-    for arch in (
-        "GraniteSwitchForCausalLM",
-        "SRSwitchForCausalLM",
-        "ShadowResidualForCausalLM",
-    ):
+    for arch in VLLM_ARCHITECTURES:
         if arch not in supported:
             ModelRegistry.register_model(arch, target)
             print(f"✓ {arch} registered with vLLM")
