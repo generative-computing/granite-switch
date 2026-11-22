@@ -569,7 +569,7 @@ An fp8 cache would saturate the mask and collapse the codeword separation the ga
 
 ### One render emits one control token -- *(template limit, not engine)*
 
-The template keys off a single scalar `adapter_name`, so one `apply_chat_template` call yields one token for `single` and `multi` alike. Reaching MultiSwitch's actual shape -- several control tokens in one sequence -- means assembling token ids rather than rendering, which is what PRESERVE does and what `tests/hf/test_multi_switch_alora.py` does by concatenating two renders. So: *one token per render*, not one token per request.
+The template keys off a single scalar `adapter_name`, so one `apply_chat_template` call yields one token for `single` and `multi` alike. Reaching MultiSwitch's actual shape -- several control tokens in one sequence -- means assembling token ids rather than rendering, which is what PRESERVE does and what `tests/hf/test_multi_switch_real_checkpoint.py` does by concatenating two renders. So: *one token per render*, not one token per request.
 
 ### Control tokens are freely generatable -- *(by design)*
 
@@ -605,12 +605,9 @@ Test counts are `grep -c '^\s*def test_'` over the tree. Two files shrank in the
 | `tests/unit/test_conversation_lora_rule.py` | 8 | a LoRA turn falls back to a full render |
 | **HF backend -- CPU** |  |  |
 | `tests/hf/test_multi_switch.py` | 12 | the engine across attention backends; `TestReturnToBaseCoded` |
-| `tests/hf/test_multi_switch_alora.py` | 9 | two aLoRA adapters in *one* sequence |
 | `tests/hf/test_multi_switch_buffers.py` | 4 | the codebook and LUT surviving a save/load round trip |
-| `tests/hf/test_multi_switch_e2e.py` | 9 | compose -> load -> forward |
+| `tests/hf/test_multi_switch_real_checkpoint.py` | 31 | real LoRA / aLoRA / mixed checkpoints: compose -> load -> forward -> generate; template placement, multi-turn, long prompts, two aLoRAs in one sequence, re-save |
 | `tests/hf/test_multi_switch_generate.py` | 6 | the `kv_len` mask fix; a prefill-only control token routing every later decode step |
-| `tests/hf/test_multi_switch_mixed_tech.py` | 7 | LoRA + aLoRA in one checkpoint |
-| `tests/hf/test_multi_switch_realistic.py` | 7 | chat template, real multi-turn, long prompts |
 | `tests/hf/test_conversation_routing.py` | 4 | the policy's ids actually routing as claimed |
 | **composer** |  |  |
 | `tests/composer/test_base_reset_token.py` | 11 | the engine driven by exactly what compose emits |

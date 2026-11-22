@@ -45,9 +45,13 @@ ADAPTER_REPOS = ["ibm-granite/granitelib-rag-r1.0"]
 DEFAULT_PORT = 8137
 MAX_TOKENS = 24
 
+# Anchored on token/type/invocation_text and tolerant of trailing fields: an aLoRA
+# entry also carries ``'invocation_drop_chars': N`` (configure_chat_template), and
+# a regex that required ``}`` right after invocation_text matched no aLoRA entry.
 _ADAPTER_MAP_RE = re.compile(
     r"'(?P<name>[^']+)':\s*\{'token':\s*'(?P<token>[^']+)',\s*"
-    r"'type':\s*'(?P<type>[^']+)'(?:,\s*'invocation_text':\s*'(?P<inv>[^']*)')?\}"
+    r"'type':\s*'(?P<type>[^']+)'(?:,\s*'invocation_text':\s*'(?P<inv>[^']*)')?"
+    r"[^}]*\}"
 )
 
 

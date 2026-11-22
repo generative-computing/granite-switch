@@ -40,7 +40,7 @@ appears. That flag landed in ``0da1014``, so this is a gap in what is composed h
 rather than an unreachable path; the layout itself is covered against the engine by
 ``tests/vllm/test_multi_switch_serving.py::TestBaseResetLayout``.
 
-Markers: slow + requires_model + gpu, gated on ``GRANITE_SWITCH_E2E_MODELS=1``.
+Markers: slow + requires_model + gpu + release, gated on ``GRANITE_SWITCH_E2E_MODELS=1``.
 """
 
 import json
@@ -62,6 +62,9 @@ pytestmark = [
     pytest.mark.slow,
     pytest.mark.requires_model,
     pytest.mark.gpu,
+    # Real composed checkpoint; the release suite sets GRANITE_SWITCH_E2E_MODELS=1
+    # so the gate below opens.
+    pytest.mark.release,
     pytest.mark.skipif(
         os.environ.get("GRANITE_SWITCH_E2E_MODELS") != "1",
         reason="composes and serves a real ~3B checkpoint; set "
